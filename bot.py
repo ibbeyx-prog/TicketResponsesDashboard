@@ -68,6 +68,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -85,7 +86,8 @@ from telegram.ext import (
     filters,
 )
 
-load_dotenv()
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(_ENV_PATH, encoding="utf-8-sig")
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -96,7 +98,7 @@ log = logging.getLogger("ticket_bot")
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 PORT = int(os.getenv("PORT", "8000"))
 RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
@@ -106,9 +108,18 @@ TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets").strip()
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Missing SUPABASE_URL or SUPABASE_KEY")
+    missing = [k for k, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
+    raise ValueError(
+        f"Missing {', '.join(missing)}. "
+        f"Checked process env and {_ENV_PATH} (exists={_ENV_PATH.exists()}). "
+        "See .env.example for all supported keys."
+    )
 if not TELEGRAM_TOKEN:
-    raise ValueError("Missing TELEGRAM_TOKEN")
+    raise ValueError(
+        "Missing TELEGRAM_TOKEN. "
+        f"Checked process env and {_ENV_PATH} (exists={_ENV_PATH.exists()}). "
+        "See .env.example for all supported keys."
+    )
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -336,6 +347,54 @@ def _storage_upload_ticket_photo(ticket_number: str, image_bytes: bytes, content
     return _public_storage_object_url(TICKET_PHOTOS_BUCKET, object_path)
 
 
+_TICKETS_MISSING_COLUMNS: set[str] = set()
+
+
+def _strip_missing_ticket_columns(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _TICKETS_MISSING_COLUMNS:
+        return payload
+    return {k: v for k, v in payload.items() if k not in _TICKETS_MISSING_COLUMNS}
+
+
+def _parse_missing_column(message: str) -> str | None:
+    """Extract the column name from a PostgREST `42703` error string."""
+    m = re.search(r"column [\w\.]*?\.?(\w+) does not exist", message)
+    return m.group(1) if m else None
+
+
+def _execute_ticket_update(
+    payload: dict[str, Any], ticket_number: str
+) -> None:
+    """Run an UPDATE on tickets, retrying if optional columns are missing."""
+    attempt = _strip_missing_ticket_columns(payload)
+    last_err: Exception | None = None
+    for _ in range(4):
+        try:
+            supabase.table(TICKETS_TABLE).update(attempt).eq(
+                "ticket_number", ticket_number
+            ).execute()
+            return
+        except Exception as exc:
+            text = str(exc)
+            col = _parse_missing_column(text)
+            if not col or col not in attempt:
+                last_err = exc
+                break
+            _TICKETS_MISSING_COLUMNS.add(col)
+            log.warning(
+                "tickets table is missing column %r; dropping it from updates "
+                "for the rest of this process. Add it with:\n  alter table "
+                "public.%s add column if not exists %s timestamptz;",
+                col,
+                TICKETS_TABLE,
+                col,
+            )
+            attempt = {k: v for k, v in attempt.items() if k != col}
+            last_err = exc
+    if last_err is not None:
+        raise last_err
+
+
 def _db_complete_ticket_field_response(
     ticket_number: str,
     *,
@@ -352,7 +411,7 @@ def _db_complete_ticket_field_response(
     }
     if update_photo_url:
         updates["photo_url"] = photo_url
-    supabase.table(TICKETS_TABLE).update(updates).eq("ticket_number", ticket_number).execute()
+    _execute_ticket_update(updates, ticket_number)
 
 
 def _db_insert_assignment(ticket_number: str, assigned_to: str, task_category: str) -> None:
@@ -382,7 +441,7 @@ def _db_reassign_ticket(ticket_number: str, assigned_to: str, task_category: str
         "photo_url": None,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    supabase.table(TICKETS_TABLE).update(updates).eq("ticket_number", ticket_number).execute()
+    _execute_ticket_update(updates, ticket_number)
 
 
 async def _get_active_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:

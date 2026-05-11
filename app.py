@@ -4,13 +4,15 @@ Streamlit control room for ticket ops (reads ``tickets`` from Supabase).
 Run: ``streamlit run app.py``
 
 Requires the same env as the bot: ``SUPABASE_URL``, ``SUPABASE_KEY``,
-optional ``TICKETS_TABLE`` (default ``tickets``).
+optional ``TICKETS_TABLE`` (default ``tickets``). Copy ``.env.example`` to
+``.env`` in this folder (UTF-8).
 """
 
 from __future__ import annotations
 
 import os
 from datetime import timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -21,7 +23,8 @@ LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
 _TS_COLS: tuple[str, ...] = ("created_at", "updated_at", "responded_at")
 
-load_dotenv()
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(_ENV_PATH, encoding="utf-8-sig")
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
@@ -33,11 +36,32 @@ def _get_supabase_client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+_ORDER_COLUMN_CANDIDATES: tuple[str, ...] = ("updated_at", "responded_at", "created_at")
+
+
+@st.cache_resource(show_spinner=False)
+def _get_order_column() -> str:
+    """Pick the best existing timestamp column to sort by.
+
+    Cached so we only probe once per Streamlit session. Falls back to
+    ``created_at``, which is part of the documented DDL.
+    """
+    client = _get_supabase_client()
+    for col in _ORDER_COLUMN_CANDIDATES:
+        try:
+            client.table(TICKETS_TABLE).select(col).limit(1).execute()
+            return col
+        except Exception:
+            continue
+    return "created_at"
+
+
 def _fetch_tickets() -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
     client = _get_supabase_client()
-    res = client.table(TICKETS_TABLE).select("*").order("updated_at", desc=True).execute()
+    order_col = _get_order_column()
+    res = client.table(TICKETS_TABLE).select("*").order(order_col, desc=True).execute()
     rows = res.data or []
     if not rows:
         return pd.DataFrame()
@@ -105,7 +129,13 @@ def main() -> None:
     st.title("Ticket Control Room")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
-        st.error("Set `SUPABASE_URL` and `SUPABASE_KEY` in the environment or `.env`.")
+        missing = [k for k, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
+        st.error(
+            f"Missing {', '.join(missing)}. "
+            f"Checked process env and `{_ENV_PATH}` "
+            f"(exists={_ENV_PATH.exists()}). "
+            "Copy `.env.example` to `.env` and fill in values."
+        )
         return
 
     auto, interval_minutes = _sidebar_controls()
