@@ -18,5 +18,6 @@ __pycache__/
 .vscode/
 
 *.log
+*.err
 .DS_Store
 Thumbs.db
