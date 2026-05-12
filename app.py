@@ -16,11 +16,18 @@ For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
 
     SUPABASE_URL = "https://<project>.supabase.co"
     SUPABASE_KEY = "<service-role-or-anon-key>"
+    DASHBOARD_PASSWORD = "<pick a strong password>"
     # TICKETS_TABLE = "tickets"
+
+Authentication: a single shared password gates the dashboard. It is read from
+``DASHBOARD_PASSWORD`` (env / ``st.secrets``). If unset, the app refuses to
+render -- never serve this dashboard unauthenticated.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -57,6 +64,82 @@ def _read_setting(key: str, default: str = "") -> str:
 SUPABASE_URL = _read_setting("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY = _read_setting("SUPABASE_KEY")
 TICKETS_TABLE = _read_setting("TICKETS_TABLE", "tickets") or "tickets"
+
+# Session keys — namespaced so we never collide with other widgets / demos,
+# and so a stale boolean from an older app version cannot bypass the gate.
+_AUTH_OK_KEY = "_ticket_dashboard_auth_ok"
+_AUTH_PWD_VER_KEY = "_ticket_dashboard_auth_pwd_ver"
+
+
+def _password_fingerprint(secret: str) -> str:
+    """Opaque token derived from the configured password (not reversible).
+
+    Stored alongside the session flag so rotating ``DASHBOARD_PASSWORD``
+    invalidates existing browser sessions without needing server-side logout.
+    """
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def _read_dashboard_password() -> str:
+    """Read ``DASHBOARD_PASSWORD`` after Streamlit has started (env + secrets)."""
+    return _read_setting("DASHBOARD_PASSWORD")
+
+
+def _check_password() -> None:
+    """Block until the viewer has a valid password session.
+
+    ``main()`` must call ``st.set_page_config`` **before** this function so
+    Streamlit's "first command" rule is satisfied even when we read
+    ``st.session_state`` here.
+
+    The shared password is read from ``DASHBOARD_PASSWORD`` (env / ``st.secrets``).
+    If unset, the dashboard refuses to render — failing closed.
+    """
+    configured_pw = _read_dashboard_password()
+    if not configured_pw:
+        st.error("`DASHBOARD_PASSWORD` is not configured — the dashboard is locked.")
+        on_cloud = str(_ENV_PATH).startswith("/mount/src/")
+        if on_cloud:
+            st.info(
+                "Open *Manage app -> Settings -> Secrets* and add:\n\n"
+                "```toml\n"
+                'DASHBOARD_PASSWORD = "<pick a strong password>"\n'
+                "```\n"
+                "Save -- the app reboots automatically."
+            )
+        else:
+            st.info(
+                "Add `DASHBOARD_PASSWORD=<password>` to your `.env` "
+                "(or export it in your shell) and restart the dashboard."
+            )
+        st.stop()
+
+    fp = _password_fingerprint(configured_pw)
+    if (
+        st.session_state.get(_AUTH_OK_KEY) is True
+        and st.session_state.get(_AUTH_PWD_VER_KEY) == fp
+    ):
+        return
+
+    st.session_state.pop(_AUTH_OK_KEY, None)
+    st.session_state.pop(_AUTH_PWD_VER_KEY, None)
+
+    st.title("Ticket Control Room")
+    st.caption("Sign in to continue.")
+
+    with st.form("login_form", clear_on_submit=False):
+        pwd = st.text_input("Password", type="password", autocomplete="current-password")
+        submitted = st.form_submit_button("Sign in", use_container_width=True)
+
+    if submitted:
+        if hmac.compare_digest(pwd, configured_pw):
+            st.session_state[_AUTH_OK_KEY] = True
+            st.session_state[_AUTH_PWD_VER_KEY] = fp
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    st.stop()
 
 
 @st.cache_resource(show_spinner=False)
@@ -149,11 +232,20 @@ def _sidebar_controls() -> tuple[bool, int]:
         )
         if st.button("Refresh Data", use_container_width=True):
             st.rerun()
+        st.divider()
+        if st.button("Log out", use_container_width=True):
+            st.session_state.pop(_AUTH_OK_KEY, None)
+            st.session_state.pop(_AUTH_PWD_VER_KEY, None)
+            st.rerun()
     return auto, int(interval_minutes)
 
 
 def main() -> None:
+    # Must be the first Streamlit command every run (login + dashboard).
     st.set_page_config(page_title="Ticket Control Room", layout="wide")
+
+    _check_password()
+
     st.title("Ticket Control Room")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -324,5 +416,7 @@ def _render_dashboard(*, auto: bool, interval_minutes: int) -> None:
                             st.divider()
 
 
-if __name__ == "__main__":
-    main()
+# Streamlit executes this file as the app script; do not hide ``main()`` behind
+# ``if __name__ == "__main__"`` — some run modes leave ``__name__`` unset to
+# ``"__main__"``, which skips the gate entirely and looks like "no password".
+main()
