@@ -6,10 +6,10 @@ Database expectations
 
 1) ``ticket_responses`` — append-only log of operator replies (used by /respond).
 
-2) ``tickets`` — one row per ticket. Driven by the assignment-message flow
-   (``@user <Category> <ticket_number>``). Recommended DDL:
+2) ``tickets_active`` — one row per ticket (current state). Driven by the
+   assignment-message flow (``@user <Category> <ticket_number>``). DDL::
 
-       create table if not exists public.tickets (
+       create table if not exists public.tickets_active (
          ticket_number text primary key,
          assigned_to text,
          task_category text check (task_category in (
@@ -24,23 +24,25 @@ Database expectations
          field_response text,
          photo_url text,
          responded_at timestamptz,
+         last_assigned_at timestamptz default now(),
          created_at timestamptz default now(),
          updated_at timestamptz default now()
        );
 
-       alter table public.tickets enable row level security;
-       -- Service-role key bypasses RLS; tighten policies if using anon key.
+   See ``supabase/migrations/20260512_history_and_rename.sql`` for the full
+   set of changes (rename from ``tickets``, add ``last_assigned_at``, create
+   the history table, RLS policies for anon).
 
-   Existing deployments: ``alter table public.tickets add column if not exists
-   responded_at timestamptz;``
-
-   Set ``TICKETS_TABLE=tickets`` (default) to point the bot at a different name.
+   Override the table name with ``TICKETS_TABLE`` (default ``tickets_active``).
 
    Field engineers complete a task by **replying** to an assignment message with
    plain text and/or a photo. Photos are stored in the Storage bucket
-   ``ticket-photos`` (override with ``TICKET_PHOTOS_BUCKET``). Create the bucket
-   in the Supabase dashboard (or SQL) and grant the service role upload/read as
-   needed.
+   ``ticket-photos`` (override with ``TICKET_PHOTOS_BUCKET``).
+
+2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
+    one row (``action_type='Assignment'``); every field response writes one row
+    (``action_type='Response'`` with ``note`` + optional ``photo_url``). Override
+    with ``ATTENDANCE_LOGS_TABLE`` (default ``ticket_attendance_logs``).
 
 3) ``bot_sessions`` (optional) — durable /respond state across restarts:
 
@@ -104,7 +106,10 @@ RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 BOT_SESSIONS_TABLE = (os.getenv("BOT_SESSIONS_TABLE") or "bot_sessions").strip()
-TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets").strip()
+TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets_active").strip()
+ATTENDANCE_LOGS_TABLE = (
+    os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
+).strip()
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
 
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -211,6 +216,30 @@ def _telegram_user_id(update: Update) -> int | None:
 def _chat_id(update: Update) -> int | None:
     chat = update.effective_chat
     return int(chat.id) if chat else None
+
+
+def _is_group_chat(update: Update) -> bool:
+    """Return True for group/supergroup/channel chats.
+
+    The operator preference is for the bot to ingest data from group chats
+    silently — no replies, no usage hints — and only chat in private DMs.
+    """
+    chat = update.effective_chat
+    return bool(chat and chat.type in ("group", "supergroup", "channel"))
+
+
+async def _reply(update: Update, text: str, **kwargs) -> None:
+    """Send a reply, but stay silent in group chats to avoid noise.
+
+    Use this in every handler instead of ``update.message.reply_text`` so the
+    group-silent invariant lives in one place.
+    """
+    if _is_group_chat(update):
+        return
+    msg = update.message
+    if msg is None:
+        return
+    await _reply(update, text, **kwargs)
 
 
 def _disable_db_sessions(reason: str) -> None:
@@ -395,26 +424,76 @@ def _execute_ticket_update(
         raise last_err
 
 
+def _utc_now_iso() -> str:
+    """Single source of truth for ISO-8601 UTC timestamps stored in Supabase."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _db_insert_attendance_log(
+    *,
+    ticket_number: str,
+    member_username: str,
+    action_type: str,
+    note: str | None = None,
+    photo_url: str | None = None,
+) -> None:
+    """Append a row to ``ticket_attendance_logs``.
+
+    Logging is best-effort: a failure here MUST NOT break the user-visible
+    flow (assignment upsert or response capture), so exceptions are caught
+    and logged rather than re-raised. The active row is the source of truth
+    for current state; the log is the source of truth for history.
+    """
+    row = {
+        "ticket_number": ticket_number,
+        "member_username": member_username,
+        "action_type": action_type,
+        "note": note,
+        "photo_url": photo_url,
+        "timestamp": _utc_now_iso(),
+    }
+    try:
+        supabase.table(ATTENDANCE_LOGS_TABLE).insert(row).execute()
+    except Exception:
+        log.exception(
+            "Failed to insert attendance log (ticket=%s, member=%s, action=%s)",
+            ticket_number,
+            member_username,
+            action_type,
+        )
+
+
 def _db_complete_ticket_field_response(
     ticket_number: str,
     *,
     field_response: str | None,
     photo_url: str | None = None,
     update_photo_url: bool = False,
+    responder_username: str | None = None,
 ) -> None:
-    responded_at = datetime.now(timezone.utc).isoformat()
+    responded_at = _utc_now_iso()
     updates: dict[str, Any] = {
         "status": "Completed",
         "responded_at": responded_at,
         "field_response": field_response,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_at": responded_at,
     }
     if update_photo_url:
         updates["photo_url"] = photo_url
     _execute_ticket_update(updates, ticket_number)
 
+    if responder_username:
+        _db_insert_attendance_log(
+            ticket_number=ticket_number,
+            member_username=responder_username,
+            action_type="Response",
+            note=field_response,
+            photo_url=photo_url if update_photo_url else None,
+        )
+
 
 def _db_insert_assignment(ticket_number: str, assigned_to: str, task_category: str) -> None:
+    now_iso = _utc_now_iso()
     row = {
         "ticket_number": ticket_number,
         "assigned_to": assigned_to,
@@ -422,26 +501,53 @@ def _db_insert_assignment(ticket_number: str, assigned_to: str, task_category: s
         "status": "Pending",
         "field_response": None,
         "photo_url": None,
+        "last_assigned_at": now_iso,
     }
-    supabase.table(TICKETS_TABLE).insert(row).execute()
+    # `last_assigned_at` is a recent addition; if the column hasn't been
+    # migrated yet on a given environment, drop it and retry once.
+    try:
+        supabase.table(TICKETS_TABLE).insert(row).execute()
+    except Exception as exc:
+        col = _parse_missing_column(str(exc))
+        if col == "last_assigned_at":
+            _TICKETS_MISSING_COLUMNS.add(col)
+            row.pop("last_assigned_at", None)
+            supabase.table(TICKETS_TABLE).insert(row).execute()
+        else:
+            raise
+
+    _db_insert_attendance_log(
+        ticket_number=ticket_number,
+        member_username=assigned_to,
+        action_type="Assignment",
+    )
 
 
 def _db_reassign_ticket(ticket_number: str, assigned_to: str, task_category: str) -> None:
     """Overwrite assigned_to / task_category and reset prior work for a re-assignment.
 
     Resets the task fully for the new assignee: ``status`` goes back to
-    ``"Pending"`` and the previous ``field_response`` / ``photo_url`` are
-    nullified, regardless of what the ticket looked like before.
+    ``"Pending"``, the previous ``field_response`` / ``photo_url`` are
+    nullified, and ``last_assigned_at`` is refreshed so the dashboard's
+    "Days to Look Back" filter sees this as a recent event.
     """
+    now_iso = _utc_now_iso()
     updates = {
         "assigned_to": assigned_to,
         "task_category": task_category,
         "status": "Pending",
         "field_response": None,
         "photo_url": None,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_at": now_iso,
+        "last_assigned_at": now_iso,
     }
     _execute_ticket_update(updates, ticket_number)
+
+    _db_insert_attendance_log(
+        ticket_number=ticket_number,
+        member_username=assigned_to,
+        action_type="Assignment",
+    )
 
 
 async def _get_active_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -471,7 +577,7 @@ async def _clear_active_ticket(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
-        await update.message.reply_text("This chat is not available.")
+        await _reply(update, "This chat is not available.")
 
 
 _HELP_TEXT = (
@@ -499,7 +605,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply_unauthorized(update, context)
         return
     if update.message:
-        await update.message.reply_text(_HELP_TEXT)
+        await _reply(update, _HELP_TEXT)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -507,7 +613,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply_unauthorized(update, context)
         return
     if update.message:
-        await update.message.reply_text(_HELP_TEXT)
+        await _reply(update, _HELP_TEXT)
 
 
 async def active_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -518,11 +624,11 @@ async def active_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     ticket_id = await _get_active_ticket(update, context)
     if ticket_id:
-        await update.message.reply_text(
+        await _reply(update, 
             f"Active ticket: {ticket_id}\nSend a text message to save your response, or /cancel."
         )
     else:
-        await update.message.reply_text("No active ticket. Start with /respond <ticket_id>.")
+        await _reply(update, "No active ticket. Start with /respond <ticket_id>.")
 
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -533,9 +639,9 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _clear_active_ticket(update, context)
     if update.message:
         if had_ticket:
-            await update.message.reply_text(f"Cleared active ticket: {had_ticket}")
+            await _reply(update, f"Cleared active ticket: {had_ticket}")
         else:
-            await update.message.reply_text("No active ticket to clear.")
+            await _reply(update, "No active ticket to clear.")
 
 
 async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -545,25 +651,31 @@ async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message:
         return
     if not context.args:
-        await update.message.reply_text("Usage: /respond <ticket_id>")
+        await _reply(update, "Usage: /respond <ticket_id>")
         return
 
     ticket_id = _validate_ticket_id(context.args[0])
     if not ticket_id:
-        await update.message.reply_text(
+        await _reply(update, 
             "Invalid ticket id. It must be a single non-empty token "
             f"(max {_MAX_TICKET_ID_LEN} chars, no whitespace)."
         )
         return
 
     await _set_active_ticket(update, context, ticket_id)
-    await update.message.reply_text(
+    await _reply(update, 
         f"Active ticket set: {ticket_id}\n"
         "Send a text message to save your response, or /cancel."
     )
 
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.info(
+        "handle_input fired: chat=%s user=@%s text=%r",
+        _chat_id(update),
+        (update.effective_user.username if update.effective_user else None),
+        (update.message.text[:120] if update.message and update.message.text else None),
+    )
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
@@ -572,22 +684,23 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     ticket_id = await _get_active_ticket(update, context)
     if not ticket_id:
-        await update.message.reply_text("Start with /respond <ticket_id>.")
+        await _reply(update, "Start with /respond <ticket_id>.")
         return
 
     text = (update.message.text or "").strip()
     if not text:
-        await update.message.reply_text("Empty message — send some text to save as the response.")
+        await _reply(update, "Empty message — send some text to save as the response.")
         return
 
     username = update.effective_user.username if update.effective_user else None
     user_handle = f"@{username}" if username else "unknown_user"
 
-    try:
-        await context.bot.send_chat_action(chat_id=update.message.chat_id, action=ChatAction.TYPING)
-    except Exception:
-        # Non-fatal — typing indicator is purely cosmetic.
-        pass
+    if not _is_group_chat(update):
+        try:
+            await context.bot.send_chat_action(chat_id=update.message.chat_id, action=ChatAction.TYPING)
+        except Exception:
+            # Non-fatal — typing indicator is purely cosmetic.
+            pass
 
     payload = {
         "ticket_id": ticket_id,
@@ -598,14 +711,14 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         supabase.table("ticket_responses").insert(payload).execute()
     except Exception as exc:
         log.exception("Supabase insert failed: %s", exc)
-        await update.message.reply_text(
+        await _reply(update, 
             f"Could not save response for ticket {ticket_id}. "
             "It is still active — try again, or /cancel to abort."
         )
         return
 
     await _clear_active_ticket(update, context)
-    await update.message.reply_text(f"Saved response for ticket {ticket_id}.")
+    await _reply(update, f"Saved response for ticket {ticket_id}.")
 
 
 async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -615,6 +728,14 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     on the ``tickets`` row (Telegram ``@username``, case-insensitive).
     """
     msg = update.message
+    log.info(
+        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r",
+        _chat_id(update),
+        (update.effective_user.username if update.effective_user else None),
+        (msg.text[:120] if msg and msg.text else (msg.caption[:120] if msg and msg.caption else None)),
+        ((msg.reply_to_message.text or msg.reply_to_message.caption or "")[:120]
+         if msg and msg.reply_to_message else None),
+    )
     if not msg or not msg.reply_to_message:
         return
 
@@ -625,12 +746,12 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ticket_number = _resolve_ticket_from_assignment_reply(parent_blob, username)
     if not ticket_number:
         if not username:
-            await msg.reply_text(
+            await _reply(update, 
                 "Could not match this reply to a ticket. "
                 "Set a Telegram username so it matches assigned_to on the ticket."
             )
         else:
-            await msg.reply_text(
+            await _reply(update, 
                 "Could not match this reply to a ticket for your username. "
                 "Reply to the assignment message that names your @handle."
             )
@@ -640,35 +761,36 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         row = _db_get_ticket(ticket_number)
     except Exception:
         log.exception("tickets lookup failed for field reply: %s", ticket_number)
-        await msg.reply_text(f"Database error while loading ticket {ticket_number}.")
+        await _reply(update, f"Database error while loading ticket {ticket_number}.")
         return
 
     if not row:
-        await msg.reply_text(f"No ticket record found for {ticket_number}.")
+        await _reply(update, f"No ticket record found for {ticket_number}.")
         return
 
     if not _sender_matches_assigned_to(row.get("assigned_to"), username):
-        await msg.reply_text("You are not the assignee for that ticket.")
+        await _reply(update, "You are not the assignee for that ticket.")
         return
 
     has_photo = bool(msg.photo)
     caption_or_text = (msg.caption or msg.text or "").strip() or None
 
     if not has_photo and not caption_or_text:
-        await msg.reply_text(
+        await _reply(update, 
             "Send a text message or a photo (optional caption) to complete this task."
         )
         return
 
     if has_photo:
         largest = msg.photo[-1]
-        try:
-            await context.bot.send_chat_action(
-                chat_id=msg.chat_id,
-                action=ChatAction.UPLOAD_PHOTO,
-            )
-        except Exception:
-            pass
+        if not _is_group_chat(update):
+            try:
+                await context.bot.send_chat_action(
+                    chat_id=msg.chat_id,
+                    action=ChatAction.UPLOAD_PHOTO,
+                )
+            except Exception:
+                pass
         try:
             tg_file = await context.bot.get_file(largest.file_id)
             raw = await tg_file.download_as_bytearray()
@@ -676,34 +798,38 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             upload_url = _storage_upload_ticket_photo(ticket_number, image_bytes, "image/jpeg")
         except Exception:
             log.exception("photo download or storage upload failed")
-            await msg.reply_text("Could not upload the photo. Please try again.")
+            await _reply(update, "Could not upload the photo. Please try again.")
             return
+        responder_handle = f"@{username}" if username else "@unknown"
         try:
             _db_complete_ticket_field_response(
                 ticket_number,
                 field_response=caption_or_text,
                 photo_url=upload_url,
                 update_photo_url=True,
+                responder_username=responder_handle,
             )
         except Exception:
             log.exception("ticket field completion update failed")
-            await msg.reply_text(
+            await _reply(update, 
                 f"Photo uploaded but ticket {ticket_number} could not be updated in the database."
             )
             return
-        await msg.reply_text(f"Ticket {ticket_number} marked Completed (photo saved).")
+        await _reply(update, f"Ticket {ticket_number} marked Completed (photo saved).")
     else:
+        responder_handle = f"@{username}" if username else "@unknown"
         try:
             _db_complete_ticket_field_response(
                 ticket_number,
                 field_response=caption_or_text,
                 update_photo_url=False,
+                responder_username=responder_handle,
             )
         except Exception:
             log.exception("ticket field completion update failed")
-            await msg.reply_text(f"Could not update ticket {ticket_number}.")
+            await _reply(update, f"Could not update ticket {ticket_number}.")
             return
-        await msg.reply_text(f"Ticket {ticket_number} marked Completed.")
+        await _reply(update, f"Ticket {ticket_number} marked Completed.")
 
     if await _get_active_ticket(update, context) == ticket_number:
         await _clear_active_ticket(update, context)
@@ -715,6 +841,12 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     A single message may contain multiple assignments; each match is processed
     independently and the results are reported back as a single reply.
     """
+    log.info(
+        "handle_assignment fired: chat=%s user=@%s text=%r",
+        _chat_id(update),
+        (update.effective_user.username if update.effective_user else None),
+        (update.message.text[:120] if update.message and update.message.text else None),
+    )
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
@@ -763,7 +895,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if len(lines) == 1
         else f"Processed {len(lines)} assignments:"
     )
-    await update.message.reply_text(header + "\n" + "\n".join(lines))
+    await _reply(update, header + "\n" + "\n".join(lines))
 
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -775,12 +907,12 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     ticket_id = await _get_active_ticket(update, context)
     if ticket_id:
-        await update.message.reply_text(
+        await _reply(update, 
             "Only text responses are supported right now. "
             f"Send a text message for ticket {ticket_id}, or /cancel."
         )
     else:
-        await update.message.reply_text("Send /respond <ticket_id> to start a reply.")
+        await _reply(update, "Send /respond <ticket_id> to start a reply.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

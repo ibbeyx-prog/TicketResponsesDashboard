@@ -39,7 +39,13 @@ from supabase import create_client
 
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
-_TS_COLS: tuple[str, ...] = ("created_at", "updated_at", "responded_at")
+_TS_COLS: tuple[str, ...] = (
+    "created_at",
+    "updated_at",
+    "responded_at",
+    "last_assigned_at",
+    "timestamp",
+)
 
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH, encoding="utf-8-sig")
@@ -63,7 +69,11 @@ def _read_setting(key: str, default: str = "") -> str:
 
 SUPABASE_URL = _read_setting("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY = _read_setting("SUPABASE_KEY")
-TICKETS_TABLE = _read_setting("TICKETS_TABLE", "tickets") or "tickets"
+TICKETS_TABLE = _read_setting("TICKETS_TABLE", "tickets_active") or "tickets_active"
+ATTENDANCE_LOGS_TABLE = (
+    _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
+    or "ticket_attendance_logs"
+)
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -147,7 +157,12 @@ def _get_supabase_client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-_ORDER_COLUMN_CANDIDATES: tuple[str, ...] = ("updated_at", "responded_at", "created_at")
+_ORDER_COLUMN_CANDIDATES: tuple[str, ...] = (
+    "last_assigned_at",
+    "updated_at",
+    "responded_at",
+    "created_at",
+)
 
 
 @st.cache_resource(show_spinner=False)
@@ -173,6 +188,39 @@ def _fetch_tickets() -> pd.DataFrame:
     client = _get_supabase_client()
     order_col = _get_order_column()
     res = client.table(TICKETS_TABLE).select("*").order(order_col, desc=True).execute()
+    rows = res.data or []
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def _fetch_attendance(
+    *,
+    ticket_number: str | None = None,
+    member_query: str | None = None,
+    limit: int = 500,
+) -> pd.DataFrame:
+    """Read attendance logs.
+
+    At least one of ``ticket_number`` / ``member_query`` should be set; if both
+    are ``None`` the function returns the latest ``limit`` rows for general
+    browsing. ``member_query`` is matched case-insensitively against
+    ``member_username`` using ``ilike``.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return pd.DataFrame()
+    client = _get_supabase_client()
+    q = client.table(ATTENDANCE_LOGS_TABLE).select("*")
+    if ticket_number:
+        q = q.eq("ticket_number", ticket_number.strip())
+    if member_query:
+        cleaned = member_query.strip().lstrip("@")
+        if cleaned:
+            q = q.ilike("member_username", f"%{cleaned}%")
+    try:
+        res = q.order("timestamp", desc=True).limit(limit).execute()
+    except Exception:
+        return pd.DataFrame()
     rows = res.data or []
     if not rows:
         return pd.DataFrame()
@@ -212,10 +260,27 @@ DEFAULT_REFRESH_MINUTES = 5
 MIN_REFRESH_MINUTES = 1
 MAX_REFRESH_MINUTES = 60
 
+DEFAULT_LOOKBACK_DAYS = 7
+MIN_LOOKBACK_DAYS = 1
+MAX_LOOKBACK_DAYS = 30
 
-def _sidebar_controls() -> tuple[bool, int]:
-    """Return (auto_enabled, interval_minutes)."""
+
+def _sidebar_controls() -> tuple[bool, int, int]:
+    """Return (auto_enabled, interval_minutes, lookback_days)."""
     with st.sidebar:
+        st.header("Filters")
+        lookback_days = st.slider(
+            "Days to Look Back",
+            min_value=MIN_LOOKBACK_DAYS,
+            max_value=MAX_LOOKBACK_DAYS,
+            value=DEFAULT_LOOKBACK_DAYS,
+            step=1,
+            help=(
+                "Only show tickets whose **last assignment** happened within "
+                "this window. Counts and tabs honour this filter."
+            ),
+        )
+
         st.header("Refresh")
         auto = st.toggle(
             "Auto-refresh",
@@ -237,7 +302,7 @@ def _sidebar_controls() -> tuple[bool, int]:
             st.session_state.pop(_AUTH_OK_KEY, None)
             st.session_state.pop(_AUTH_PWD_VER_KEY, None)
             st.rerun()
-    return auto, int(interval_minutes)
+    return auto, int(interval_minutes), int(lookback_days)
 
 
 def main() -> None:
@@ -271,17 +336,44 @@ def main() -> None:
             )
         return
 
-    auto, interval_minutes = _sidebar_controls()
+    auto, interval_minutes, lookback_days = _sidebar_controls()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
     def _dashboard_fragment() -> None:
-        _render_dashboard(auto=auto, interval_minutes=interval_minutes)
+        _render_dashboard(
+            auto=auto,
+            interval_minutes=interval_minutes,
+            lookback_days=lookback_days,
+        )
 
     _dashboard_fragment()
 
 
-def _render_dashboard(*, auto: bool, interval_minutes: int) -> None:
+def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
+    """Return rows whose ``last_assigned_at`` (or fallbacks) is within window.
+
+    Falls back to ``updated_at`` then ``created_at`` so legacy rows that
+    pre-date the ``last_assigned_at`` column are still surfaced rather than
+    silently dropped from the dashboard.
+    """
+    if df.empty:
+        return df
+    for col in ("last_assigned_at", "updated_at", "created_at"):
+        if col in df.columns:
+            ts = _parse_ts(df[col])
+            cutoff = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC") - pd.Timedelta(days=lookback_days)
+            mask = ts.notna() & (ts >= cutoff)
+            return df[mask].copy()
+    return df
+
+
+def _render_dashboard(
+    *,
+    auto: bool,
+    interval_minutes: int,
+    lookback_days: int,
+) -> None:
     now_local = pd.Timestamp.now(tz=LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
     unit = "minute" if interval_minutes == 1 else "minutes"
     refresh_note = (
@@ -289,131 +381,246 @@ def _render_dashboard(*, auto: bool, interval_minutes: int) -> None:
         if auto
         else "auto-refresh **off**"
     )
+    day_word = "day" if lookback_days == 1 else "days"
     st.caption(
-        f"Table: `{TICKETS_TABLE}` · times in **{LOCAL_TZ_LABEL}** · "
-        f"now {now_local} · {refresh_note}"
+        f"Table: `{TICKETS_TABLE}` · history: `{ATTENDANCE_LOGS_TABLE}` · "
+        f"window: **last {lookback_days} {day_word}** · "
+        f"times in **{LOCAL_TZ_LABEL}** · now {now_local} · {refresh_note}"
     )
 
-    df = _fetch_tickets()
-    if df.empty:
+    df_all = _fetch_tickets()
+    if df_all.empty:
         st.warning("No rows returned (empty table or connection issue).")
+        _render_attendance_tab()  # search still useful even with no active rows
         return
 
-    if "status" not in df.columns:
-        st.error("The tickets table has no `status` column.")
+    if "status" not in df_all.columns:
+        st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
         return
 
-    status = df["status"].astype(str).str.strip()
-    pending_mask = status.eq("Pending")
-    completed_mask = status.eq("Completed")
+    df = _apply_lookback(df_all, lookback_days)
 
-    total_pending = int(pending_mask.sum())
+    status = df["status"].astype(str).str.strip() if not df.empty else pd.Series(dtype=str)
+    pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
+    completed_mask = status.eq("Completed") if not df.empty else pd.Series(dtype=bool)
+
+    total_pending = int(pending_mask.sum()) if not df.empty else 0
 
     avg_seconds: float | None = None
-    completed_df = df[completed_mask].copy()
-    if not completed_df.empty and "created_at" in completed_df.columns and "responded_at" in completed_df.columns:
-        c = _parse_ts(completed_df["created_at"])
-        r = _parse_ts(completed_df["responded_at"])
-        valid = c.notna() & r.notna()
-        if valid.any():
-            delta = (r[valid] - c[valid]).dt.total_seconds()
-            avg_seconds = float(delta.mean())
+    if not df.empty:
+        completed_df = df[completed_mask].copy()
+        if (
+            not completed_df.empty
+            and "created_at" in completed_df.columns
+            and "responded_at" in completed_df.columns
+        ):
+            c = _parse_ts(completed_df["created_at"])
+            r = _parse_ts(completed_df["responded_at"])
+            valid = c.notna() & r.notna()
+            if valid.any():
+                delta = (r[valid] - c[valid]).dt.total_seconds()
+                avg_seconds = float(delta.mean())
 
     st.header("Overview")
-    m1, m2 = st.columns(2)
+    m1, m2, m3 = st.columns(3)
     with m1:
         st.metric("Total Pending", f"{total_pending:,}")
     with m2:
         st.metric("Average completion time", _format_duration(avg_seconds))
+    with m3:
+        st.metric(f"Tickets in last {lookback_days} {day_word}", f"{len(df):,}")
 
     st.divider()
 
-    tab_pending, tab_completed = st.tabs(["Pending", "Completed"])
+    tab_pending, tab_completed, tab_attendance = st.tabs(
+        ["Pending", "Completed", "Attendance"]
+    )
 
     with tab_pending:
-        pend = df[pending_mask].copy()
         st.subheader("Pending tickets")
-        if pend.empty:
-            st.info("No pending tickets.")
+        st.caption(
+            "Reassigned tickets reset to **Pending** here, even if they were "
+            "previously Completed, and remain pending until a new response is "
+            "logged in the attendance history."
+        )
+        if df.empty:
+            st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
-            if "created_at" in pend.columns:
-                pend["_created"] = _parse_ts(pend["created_at"])
-                now_local = pd.Timestamp.now(tz=LOCAL_TZ)
-                pend["_stale"] = pend["_created"].notna() & (
-                    (now_local - pend["_created"]) > pd.Timedelta(hours=24)
-                )
+            pend = df[pending_mask].copy()
+            if pend.empty:
+                st.info(f"No pending tickets in the last {lookback_days} {day_word}.")
             else:
-                pend["_stale"] = False
+                if "created_at" in pend.columns:
+                    pend["_created"] = _parse_ts(pend["created_at"])
+                    now_utc = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")
+                    pend["_stale"] = pend["_created"].notna() & (
+                        (now_utc - pend["_created"]) > pd.Timedelta(hours=24)
+                    )
+                else:
+                    pend["_stale"] = False
 
-            view_cols = [c for c in pend.columns if not c.startswith("_")]
-            view = _format_local(pend[view_cols])
+                view_cols = [c for c in pend.columns if not c.startswith("_")]
+                view = _format_local(pend[view_cols])
 
-            def _row_red(_row: pd.Series) -> list[str]:
-                stale = bool(pend.loc[_row.name, "_stale"]) if "_stale" in pend.columns else False
-                color = "background-color: #ffcccc" if stale else ""
-                return [color] * len(_row)
+                def _row_red(_row: pd.Series) -> list[str]:
+                    stale = bool(pend.loc[_row.name, "_stale"]) if "_stale" in pend.columns else False
+                    color = "background-color: #ffcccc" if stale else ""
+                    return [color] * len(_row)
 
-            try:
-                styled = view.style.apply(_row_red, axis=1)
-                st.dataframe(styled, use_container_width=True, hide_index=True)
-            except Exception:
-                st.dataframe(view, use_container_width=True, hide_index=True)
-            st.caption(
-                f"Rows with a **red** background are pending for **more than 24 hours** "
-                f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
-            )
+                try:
+                    styled = view.style.apply(_row_red, axis=1)
+                    st.dataframe(styled, use_container_width=True, hide_index=True)
+                except Exception:
+                    st.dataframe(view, use_container_width=True, hide_index=True)
+                st.caption(
+                    f"Rows with a **red** background are pending for **more than 24 hours** "
+                    f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
+                )
 
     with tab_completed:
-        done = df[completed_mask].copy()
         st.subheader("Completed tickets")
-        if done.empty:
-            st.info("No completed tickets.")
+        if df.empty:
+            st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
-            show_cols = [
-                c
-                for c in [
-                    "ticket_number",
-                    "assigned_to",
-                    "task_category",
-                    "field_response",
-                    "photo_url",
-                    "created_at",
-                    "responded_at",
-                ]
-                if c in done.columns
-            ]
-            st.dataframe(
-                _format_local(done[show_cols]),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.subheader("Field photos")
-            if "photo_url" not in done.columns:
-                st.caption("No `photo_url` column.")
+            done = df[completed_mask].copy()
+            if done.empty:
+                st.info(f"No completed tickets in the last {lookback_days} {day_word}.")
             else:
-                ph = done["photo_url"].astype(str).str.strip()
-                photo_rows = done[ph.str.startswith("http")]
-                if photo_rows.empty:
-                    st.caption("No `photo_url` values to display.")
+                show_cols = [
+                    c
+                    for c in [
+                        "ticket_number",
+                        "assigned_to",
+                        "task_category",
+                        "field_response",
+                        "photo_url",
+                        "created_at",
+                        "last_assigned_at",
+                        "responded_at",
+                    ]
+                    if c in done.columns
+                ]
+                st.dataframe(
+                    _format_local(done[show_cols]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.subheader("Field photos")
+                if "photo_url" not in done.columns:
+                    st.caption("No `photo_url` column.")
                 else:
-                    for _, row in photo_rows.iterrows():
-                        url = str(row.get("photo_url") or "").strip()
-                        if not url or not url.startswith("http"):
-                            continue
-                        tid = row.get("ticket_number", "—")
-                        cap = row.get("field_response") or ""
-                        with st.container():
-                            st.markdown(f"**Ticket `{tid}`**")
-                            try:
-                                st.image(
-                                    url,
-                                    caption=str(cap)[:500] if cap else None,
-                                    use_container_width=True,
-                                )
-                            except Exception as exc:
-                                st.warning(f"Could not load image for ticket `{tid}`: {exc}")
-                            st.divider()
+                    ph = done["photo_url"].astype(str).str.strip()
+                    photo_rows = done[ph.str.startswith("http")]
+                    if photo_rows.empty:
+                        st.caption("No `photo_url` values to display.")
+                    else:
+                        for _, row in photo_rows.iterrows():
+                            url = str(row.get("photo_url") or "").strip()
+                            if not url or not url.startswith("http"):
+                                continue
+                            tid = row.get("ticket_number", "—")
+                            cap = row.get("field_response") or ""
+                            with st.container():
+                                st.markdown(f"**Ticket `{tid}`**")
+                                try:
+                                    st.image(
+                                        url,
+                                        caption=str(cap)[:500] if cap else None,
+                                        use_container_width=True,
+                                    )
+                                except Exception as exc:
+                                    st.warning(f"Could not load image for ticket `{tid}`: {exc}")
+                                st.divider()
+
+    with tab_attendance:
+        _render_attendance_tab()
+
+
+def _render_attendance_tab() -> None:
+    """Search bar + timeline view backed by ``ticket_attendance_logs``."""
+    st.subheader("Attendance history")
+    st.caption(
+        "Search by **ticket number** (exact) or **@username** (case-insensitive, "
+        "partial). Leave both blank to see the 100 most recent log entries across "
+        "all tickets."
+    )
+
+    with st.form("attendance_search_form", clear_on_submit=False):
+        c1, c2 = st.columns([2, 2])
+        with c1:
+            ticket_q = st.text_input(
+                "Ticket number",
+                placeholder="e.g. 1234567890123567",
+                key="att_ticket_q",
+            )
+        with c2:
+            member_q = st.text_input(
+                "Member (@username)",
+                placeholder="e.g. @Mular_as",
+                key="att_member_q",
+            )
+        submitted = st.form_submit_button("Search", use_container_width=True)
+
+    ticket_clean = (ticket_q or "").strip()
+    member_clean = (member_q or "").strip()
+
+    if submitted and not ticket_clean and not member_clean:
+        st.info("Enter a ticket number or @username to refine the search.")
+
+    logs = _fetch_attendance(
+        ticket_number=ticket_clean or None,
+        member_query=member_clean or None,
+        limit=100 if not ticket_clean and not member_clean else 500,
+    )
+
+    if logs.empty:
+        st.info("No attendance records match.")
+        return
+
+    show_cols = [
+        c
+        for c in (
+            "timestamp",
+            "ticket_number",
+            "member_username",
+            "action_type",
+            "note",
+            "photo_url",
+        )
+        if c in logs.columns
+    ]
+    table = _format_local(logs[show_cols])
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Timeline")
+    for _, row in logs.iterrows():
+        member = row.get("member_username") or "unknown"
+        action = row.get("action_type") or "?"
+        tid = row.get("ticket_number") or "—"
+        when_local = ""
+        ts_raw = row.get("timestamp")
+        if pd.notna(ts_raw):
+            try:
+                when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                when_local = str(ts_raw)
+
+        with st.container(border=True):
+            st.markdown(
+                f"**{member}** · `{action}` · ticket `{tid}` · "
+                f"{when_local} {LOCAL_TZ_LABEL}"
+            )
+            note = row.get("note")
+            if isinstance(note, str) and note.strip():
+                st.write(note)
+            photo = row.get("photo_url")
+            if isinstance(photo, str) and photo.startswith("http"):
+                try:
+                    st.image(photo, use_container_width=True)
+                except Exception as exc:
+                    st.warning(f"Could not load image: {exc}")
 
 
 # Streamlit executes this file as the app script; do not hide ``main()`` behind
