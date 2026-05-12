@@ -4,8 +4,19 @@ Streamlit control room for ticket ops (reads ``tickets`` from Supabase).
 Run: ``streamlit run app.py``
 
 Requires the same env as the bot: ``SUPABASE_URL``, ``SUPABASE_KEY``,
-optional ``TICKETS_TABLE`` (default ``tickets``). Copy ``.env.example`` to
-``.env`` in this folder (UTF-8).
+optional ``TICKETS_TABLE`` (default ``tickets``).
+
+Configuration sources, checked in this order:
+  1. Process environment (set by the shell, Railway, Docker, etc.).
+  2. ``.env`` file next to this script (auto-loaded by python-dotenv).
+  3. ``st.secrets`` -- used by Streamlit Community Cloud, where the
+     "Secrets" pane in app settings is the only place to put credentials.
+
+For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
+
+    SUPABASE_URL = "https://<project>.supabase.co"
+    SUPABASE_KEY = "<service-role-or-anon-key>"
+    # TICKETS_TABLE = "tickets"
 """
 
 from __future__ import annotations
@@ -26,9 +37,26 @@ _TS_COLS: tuple[str, ...] = ("created_at", "updated_at", "responded_at")
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH, encoding="utf-8-sig")
 
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
-TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets").strip()
+
+def _read_setting(key: str, default: str = "") -> str:
+    """Return ``key`` from process env, falling back to ``st.secrets``.
+
+    ``st.secrets`` raises ``StreamlitSecretNotFoundError`` when no secrets
+    file/section exists (typical on a fresh local run); we treat that the
+    same as "not set".
+    """
+    value = os.getenv(key)
+    if value is None or value == "":
+        try:
+            value = st.secrets[key]  # type: ignore[index]
+        except Exception:
+            value = default
+    return str(value or default).strip()
+
+
+SUPABASE_URL = _read_setting("SUPABASE_URL").rstrip("/")
+SUPABASE_KEY = _read_setting("SUPABASE_KEY")
+TICKETS_TABLE = _read_setting("TICKETS_TABLE", "tickets") or "tickets"
 
 
 @st.cache_resource(show_spinner=False)
@@ -130,12 +158,25 @@ def main() -> None:
 
     if not SUPABASE_URL or not SUPABASE_KEY:
         missing = [k for k, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
-        st.error(
-            f"Missing {', '.join(missing)}. "
-            f"Checked process env and `{_ENV_PATH}` "
-            f"(exists={_ENV_PATH.exists()}). "
-            "Copy `.env.example` to `.env` and fill in values."
-        )
+        on_cloud = str(_ENV_PATH).startswith("/mount/src/")
+        st.error(f"Missing {', '.join(missing)}.")
+        if on_cloud:
+            st.info(
+                "Detected Streamlit Community Cloud. "
+                "Open *Manage app -> Settings -> Secrets* and paste:\n\n"
+                "```toml\n"
+                'SUPABASE_URL = "https://<project>.supabase.co"\n'
+                'SUPABASE_KEY = "<service-role-or-anon-key>"\n'
+                "```\n"
+                "Save -- the app reboots automatically."
+            )
+        else:
+            st.info(
+                f"Checked process env and `{_ENV_PATH}` "
+                f"(exists={_ENV_PATH.exists()}). "
+                "Copy `.env.example` to `.env` and fill in values, "
+                "or set the variables in your shell before running `streamlit run app.py`."
+            )
         return
 
     auto, interval_minutes = _sidebar_controls()
