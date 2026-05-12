@@ -57,18 +57,20 @@ Get-Process ngrok -ErrorAction SilentlyContinue | ForEach-Object {
 
 # Sweep zombie python.exe processes that target this project's bot or
 # dashboard but no longer hold a listening port (crashed/half-shutdown).
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+#
+# Matches by command-line pattern alone. The previous version also required
+# the project root to appear in the command line or executable path, but
+# Python invocations typically reference scripts by relative path (e.g.
+# `python bot.py`) and system-installed interpreters live outside this
+# folder, so that check silently let stale duplicates survive.
 $pattern = '(bot\.py|streamlit\s+run\s+(app|dashboard)\.py)'
 Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.CommandLine -and
-        $_.CommandLine -match $pattern -and
-        ($_.CommandLine -match [regex]::Escape($projectRoot) -or $_.ExecutablePath -match [regex]::Escape($projectRoot))
-    } |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern } |
     ForEach-Object {
         try {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
-            Write-Host "[OK ] killed zombie python (PID $($_.ProcessId)) -- $($_.CommandLine -replace '\s+', ' ')"
+            $interp = if ($_.ExecutablePath) { Split-Path -Parent $_.ExecutablePath } else { '<unknown>' }
+            Write-Host "[OK ] killed zombie python (PID $($_.ProcessId), from ${interp}) -- $($_.CommandLine -replace '\s+', ' ')"
             $killed++
         } catch {
             Write-Host "[FAIL] could not stop python PID $($_.ProcessId): $_"
