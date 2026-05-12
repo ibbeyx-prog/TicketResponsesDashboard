@@ -1,10 +1,10 @@
 """
-Streamlit control room for ticket ops (reads ``tickets`` from Supabase).
+Field Ticket Ops — Streamlit dashboard for field ticket operations (Supabase).
 
 Run: ``streamlit run app.py``
 
 Requires the same env as the bot: ``SUPABASE_URL``, ``SUPABASE_KEY``,
-optional ``TICKETS_TABLE`` (default ``tickets``).
+optional ``TICKETS_TABLE`` (default ``tickets_active``).
 
 Configuration sources, checked in this order:
   1. Process environment (set by the shell, Railway, Docker, etc.).
@@ -134,7 +134,7 @@ def _check_password() -> None:
     st.session_state.pop(_AUTH_OK_KEY, None)
     st.session_state.pop(_AUTH_PWD_VER_KEY, None)
 
-    st.title("Ticket Control Room")
+    st.title("Field Ticket Ops")
     st.caption("Sign in to continue.")
 
     with st.form("login_form", clear_on_submit=False):
@@ -341,11 +341,11 @@ def _sidebar_controls() -> tuple[bool, int, int]:
 
 def main() -> None:
     # Must be the first Streamlit command every run (login + dashboard).
-    st.set_page_config(page_title="Ticket Control Room", layout="wide")
+    st.set_page_config(page_title="Field Ticket Ops", layout="wide")
 
     _check_password()
 
-    st.title("Ticket Control Room")
+    st.title("Field Ticket Ops")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
         missing = [k for k, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
