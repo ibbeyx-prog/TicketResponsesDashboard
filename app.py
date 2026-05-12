@@ -182,12 +182,44 @@ def _get_order_column() -> str:
     return "created_at"
 
 
+class _TableMissingError(RuntimeError):
+    """Raised when a Supabase table the dashboard depends on is missing.
+
+    Carries the table name so the UI can render a precise message
+    pointing the operator at the right migration.
+    """
+
+    def __init__(self, table: str, original: Exception):
+        super().__init__(f"table `{table}` is missing (PostgREST said: {original})")
+        self.table = table
+        self.original = original
+
+
+def _looks_like_missing_table_error(exc: Exception) -> bool:
+    """Detect PostgREST's `42P01 relation does not exist` errors.
+
+    Works against both the new dict-style ``APIError`` and older string-only
+    forms so we don't need to import postgrest's exception class.
+    """
+    text = str(exc)
+    return (
+        "42P01" in text
+        or "does not exist" in text
+        or "Could not find the table" in text
+    )
+
+
 def _fetch_tickets() -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
     client = _get_supabase_client()
     order_col = _get_order_column()
-    res = client.table(TICKETS_TABLE).select("*").order(order_col, desc=True).execute()
+    try:
+        res = client.table(TICKETS_TABLE).select("*").order(order_col, desc=True).execute()
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            raise _TableMissingError(TICKETS_TABLE, exc) from exc
+        raise
     rows = res.data or []
     if not rows:
         return pd.DataFrame()
@@ -219,7 +251,9 @@ def _fetch_attendance(
             q = q.ilike("member_username", f"%{cleaned}%")
     try:
         res = q.order("timestamp", desc=True).limit(limit).execute()
-    except Exception:
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            raise _TableMissingError(ATTENDANCE_LOGS_TABLE, exc) from exc
         return pd.DataFrame()
     rows = res.data or []
     if not rows:
@@ -388,7 +422,12 @@ def _render_dashboard(
         f"times in **{LOCAL_TZ_LABEL}** · now {now_local} · {refresh_note}"
     )
 
-    df_all = _fetch_tickets()
+    try:
+        df_all = _fetch_tickets()
+    except _TableMissingError as missing:
+        _render_missing_table_help(missing.table)
+        return
+
     if df_all.empty:
         st.warning("No rows returned (empty table or connection issue).")
         _render_attendance_tab()  # search still useful even with no active rows
@@ -537,6 +576,31 @@ def _render_dashboard(
         _render_attendance_tab()
 
 
+def _render_missing_table_help(table: str) -> None:
+    """Friendly screen shown when a required Supabase table is missing.
+
+    Triggered the first time the new dashboard code is deployed against an
+    old database that hasn't run ``20260512_history_and_rename.sql`` yet.
+    """
+    st.error(f"Supabase table **`{table}`** is missing.")
+    st.markdown(
+        "This usually means the **history migration hasn't been applied yet** "
+        "in Supabase. Until it runs, the dashboard can't read its data."
+    )
+    st.markdown("**Fix:** open Supabase -> SQL Editor and run:")
+    st.code(
+        """-- supabase/migrations/20260512_history_and_rename.sql
+-- (copy from the repo and paste here, then press Run)
+""",
+        language="sql",
+    )
+    st.caption(
+        "After the migration succeeds, refresh this page. If you intentionally "
+        "renamed the table, update `TICKETS_TABLE` / `ATTENDANCE_LOGS_TABLE` "
+        "in this app's secrets to match."
+    )
+
+
 def _render_attendance_tab() -> None:
     """Search bar + timeline view backed by ``ticket_attendance_logs``."""
     st.subheader("Attendance history")
@@ -568,11 +632,15 @@ def _render_attendance_tab() -> None:
     if submitted and not ticket_clean and not member_clean:
         st.info("Enter a ticket number or @username to refine the search.")
 
-    logs = _fetch_attendance(
-        ticket_number=ticket_clean or None,
-        member_query=member_clean or None,
-        limit=100 if not ticket_clean and not member_clean else 500,
-    )
+    try:
+        logs = _fetch_attendance(
+            ticket_number=ticket_clean or None,
+            member_query=member_clean or None,
+            limit=100 if not ticket_clean and not member_clean else 500,
+        )
+    except _TableMissingError as missing:
+        _render_missing_table_help(missing.table)
+        return
 
     if logs.empty:
         st.info("No attendance records match.")
