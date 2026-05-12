@@ -384,6 +384,26 @@ def main() -> None:
     _dashboard_fragment()
 
 
+def _dataframe_column_config(df: pd.DataFrame) -> dict:
+    """Streamlit ``column_config`` that renders ``photo_url`` as a clickable link.
+
+    Falls back to no config if Streamlit is too old to support
+    ``column_config.LinkColumn`` (rare, but keeps the table viewable).
+    """
+    if "photo_url" not in df.columns:
+        return {}
+    try:
+        return {
+            "photo_url": st.column_config.LinkColumn(
+                "photo_url",
+                help="Click to open the field photo in a new tab.",
+                display_text="Open photo",
+            ),
+        }
+    except Exception:
+        return {}
+
+
 def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
     """Return rows whose ``last_assigned_at`` (or fallbacks) is within window.
 
@@ -539,10 +559,12 @@ def _render_dashboard(
                     ]
                     if c in done.columns
                 ]
+                done_view = _format_local(done[show_cols])
                 st.dataframe(
-                    _format_local(done[show_cols]),
+                    done_view,
                     use_container_width=True,
                     hide_index=True,
+                    column_config=_dataframe_column_config(done_view),
                 )
 
                 st.subheader("Field photos")
@@ -659,7 +681,12 @@ def _render_attendance_tab() -> None:
         if c in logs.columns
     ]
     table = _format_local(logs[show_cols])
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True,
+        column_config=_dataframe_column_config(table),
+    )
 
     st.divider()
     st.subheader("Timeline")
@@ -689,6 +716,7 @@ def _render_attendance_tab() -> None:
                     st.image(photo, use_container_width=True)
                 except Exception as exc:
                     st.warning(f"Could not load image: {exc}")
+                st.markdown(f"[Open photo in a new tab]({photo})")
 
 
 # Streamlit executes this file as the app script; do not hide ``main()`` behind
