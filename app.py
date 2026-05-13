@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -273,6 +273,103 @@ def _fetch_ticket_photos(
             }
         )
     return grouped
+
+
+def _set_ticket_status(
+    ticket_number: str,
+    *,
+    new_status: str,
+    log_action: str | None = None,
+    actor: str = "@dashboard-admin",
+    note: str | None = None,
+) -> None:
+    """Flip a ticket's ``status`` and (optionally) append a history log row.
+
+    Used by the admin controls in the dashboard. We touch only ``status`` /
+    ``updated_at`` so we don't accidentally clobber the field team's
+    ``field_response`` or ``photo_url``. The reverse-direction (Reopen)
+    intentionally does **not** clear ``responded_at`` so we keep the
+    original first-response timestamp for downstream metrics.
+    """
+    client = _get_supabase_client()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload = {"status": new_status, "updated_at": now_iso}
+    client.table(TICKETS_TABLE).update(payload).eq(
+        "ticket_number", str(ticket_number)
+    ).execute()
+
+    if log_action:
+        try:
+            client.table(ATTENDANCE_LOGS_TABLE).insert(
+                {
+                    "ticket_number": str(ticket_number),
+                    "member_username": actor,
+                    "action_type": log_action,
+                    "note": note,
+                    "timestamp": now_iso,
+                }
+            ).execute()
+        except Exception:
+            # Don't fail the status change if the history table is missing
+            # or temporarily unavailable; the status update itself succeeded.
+            pass
+
+
+def _render_admin_action_form(
+    df: pd.DataFrame,
+    *,
+    action_label: str,
+    target_status: str,
+    log_action: str,
+    key_prefix: str,
+) -> None:
+    """Render a [ticket-number dropdown] + [action button] above a table.
+
+    ``df`` is the already-filtered set of tickets the action applies to
+    (e.g. Open rows for "Mark Completed"). The dropdown is sorted so the
+    most recently touched ticket is on top to match the table the admin is
+    already looking at.
+    """
+    if "ticket_number" not in df.columns or df.empty:
+        return
+
+    sort_col = next(
+        (c for c in ("responded_at", "last_assigned_at", "updated_at", "created_at") if c in df.columns),
+        None,
+    )
+    ordered = df.sort_values(sort_col, ascending=False) if sort_col else df
+    options = [str(t) for t in ordered["ticket_number"].astype(str).tolist() if t]
+    if not options:
+        return
+
+    with st.container(border=True):
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            picked = st.selectbox(
+                f"Pick a ticket to **{action_label}**",
+                options=options,
+                key=f"{key_prefix}_select",
+            )
+        with c2:
+            st.write("")  # vertical alignment with the selectbox label
+            clicked = st.button(
+                action_label,
+                key=f"{key_prefix}_btn",
+                type="primary",
+                use_container_width=True,
+            )
+        if clicked and picked:
+            try:
+                _set_ticket_status(
+                    picked,
+                    new_status=target_status,
+                    log_action=log_action,
+                )
+            except Exception as exc:
+                st.error(f"Could not update ticket {picked}: {exc}")
+                return
+            st.success(f"Ticket {picked} → **{target_status}**.")
+            st.rerun()
 
 
 def _fetch_attendance(
@@ -560,9 +657,11 @@ def _render_dashboard(
 
     status = df["status"].astype(str).str.strip() if not df.empty else pd.Series(dtype=str)
     pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
+    open_mask = status.eq("Open") if not df.empty else pd.Series(dtype=bool)
     completed_mask = status.eq("Completed") if not df.empty else pd.Series(dtype=bool)
 
     total_pending = int(pending_mask.sum()) if not df.empty else 0
+    total_open = int(open_mask.sum()) if not df.empty else 0
 
     avg_seconds: float | None = None
     if not df.empty:
@@ -580,22 +679,24 @@ def _render_dashboard(
                 avg_seconds = float(delta.mean())
 
     st.header("Overview")
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.metric("Total Pending", f"{total_pending:,}")
     with m2:
-        st.metric("Average completion time", _format_duration(avg_seconds))
+        st.metric("Awaiting admin review", f"{total_open:,}")
     with m3:
+        st.metric("Avg completion time", _format_duration(avg_seconds))
+    with m4:
         st.metric(f"Tickets in last {lookback_days} {day_word}", f"{len(df):,}")
 
     st.divider()
 
-    tab_pending, tab_completed, tab_attendance = st.tabs(
-        ["Pending", "Completed", "Attendance"]
+    tab_assigned, tab_open, tab_completed, tab_log = st.tabs(
+        ["(Assigned Task)", "(Open)", "Completed", "(Log)"]
     )
 
-    with tab_pending:
-        st.subheader("Pending tickets")
+    with tab_assigned:
+        st.subheader("Assigned tasks (pending)")
         st.caption(
             "Reassigned tickets reset to **Pending** here, even if they were "
             "previously Completed, and remain pending until a new response is "
@@ -635,8 +736,60 @@ def _render_dashboard(
                     f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
                 )
 
+    with tab_open:
+        st.subheader("(Open) — awaiting admin review")
+        st.caption(
+            "Field team has responded. Review the response below and pick a "
+            "ticket to **Mark Completed** once it's verified, or leave it Open "
+            "for follow-up."
+        )
+        if df.empty:
+            st.info(f"No tickets in the last {lookback_days} {day_word}.")
+        else:
+            open_df = df[open_mask].copy()
+            if open_df.empty:
+                st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
+            else:
+                _render_admin_action_form(
+                    open_df,
+                    action_label="Mark Completed",
+                    target_status="Completed",
+                    log_action="Completed",
+                    key_prefix="open_to_completed",
+                )
+
+                open_show = [
+                    c
+                    for c in [
+                        "ticket_number",
+                        "assigned_to",
+                        "task_category",
+                        "additional_info",
+                        "field_response",
+                        "photo_url",
+                        "created_at",
+                        "last_assigned_at",
+                        "responded_at",
+                    ]
+                    if c in open_df.columns
+                ]
+                open_view = _format_local(open_df[open_show].copy())
+                st.dataframe(
+                    open_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=_dataframe_column_config(open_view),
+                )
+
+                st.subheader("Field photos awaiting review")
+                _render_field_photos_section(open_df)
+
     with tab_completed:
         st.subheader("Completed tickets")
+        st.caption(
+            "Only tickets the admin team has signed off on appear here. If "
+            "something needs another look, send it back to **Open**."
+        )
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -644,6 +797,14 @@ def _render_dashboard(
             if done.empty:
                 st.info(f"No completed tickets in the last {lookback_days} {day_word}.")
             else:
+                _render_admin_action_form(
+                    done,
+                    action_label="Send back to Open",
+                    target_status="Open",
+                    log_action="Reopened",
+                    key_prefix="completed_to_open",
+                )
+
                 show_cols = [
                     c
                     for c in [
@@ -670,7 +831,7 @@ def _render_dashboard(
                 st.subheader("Field photos")
                 _render_field_photos_section(done)
 
-    with tab_attendance:
+    with tab_log:
         _render_attendance_tab()
 
 
@@ -771,7 +932,7 @@ def _render_missing_table_help(table: str) -> None:
 
 def _render_attendance_tab() -> None:
     """Search bar + timeline view backed by ``ticket_attendance_logs``."""
-    st.subheader("Attendance history")
+    st.subheader("(Log) — search & timeline")
     st.caption(
         "Search by **ticket number** (exact) or **@username** (case-insensitive, "
         "partial). Leave both blank to see the 100 most recent log entries across "
@@ -811,7 +972,7 @@ def _render_attendance_tab() -> None:
         return
 
     if logs.empty:
-        st.info("No attendance records match.")
+        st.info("No log entries match.")
         return
 
     show_cols = [
