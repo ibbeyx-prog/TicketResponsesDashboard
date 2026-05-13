@@ -1169,7 +1169,14 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        await bot_app.bot.delete_webhook(drop_pending_updates=False)
+        # Never call ``delete_webhook`` by default: every local ``uvicorn``
+        # shutdown (Ctrl+C, killing a duplicate process, IDE stop) would
+        # clear Telegram's webhook for *this bot token*, so the next group
+        # message never reaches *any* running instance until something calls
+        # ``set_webhook`` again. Rolling deploys on Railway have the same race.
+        # Opt in explicitly when you really want Telegram to stop delivering.
+        if _truthy_env("TELEGRAM_DELETE_WEBHOOK_ON_SHUTDOWN"):
+            await bot_app.bot.delete_webhook(drop_pending_updates=False)
         await bot_app.stop()
         await bot_app.shutdown()
 
