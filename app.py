@@ -391,7 +391,16 @@ def _render_admin_delete_form(df: pd.DataFrame, *, key_prefix: str) -> None:
             try:
                 _delete_ticket(picked)
             except Exception as exc:
-                st.error(f"Could not delete ticket {picked}: {exc}")
+                err = str(exc).lower()
+                if "42501" in str(exc) or "permission denied" in err or "row-level security" in err:
+                    st.error(
+                        f"Could not delete ticket **{picked}**: the database denied DELETE "
+                        "(Row Level Security). Apply the migration "
+                        "`supabase/migrations/20260514_tickets_active_anon_delete.sql` "
+                        "in the Supabase SQL editor, then try again."
+                    )
+                else:
+                    st.error(f"Could not delete ticket {picked}: {exc}")
                 return
             st.success(f"Ticket {picked} deleted. History kept in the Log tab.")
             st.rerun()
