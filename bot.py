@@ -136,6 +136,11 @@ _use_db_sessions = True
 
 _EXTRA_ALLOWED_USERS: frozenset[str] = frozenset({"dissiby"})
 
+
+def _truthy_env(key: str) -> bool:
+    return (os.getenv(key) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Reasonable bounds for a ticket identifier carried in a Telegram command.
 _MAX_TICKET_ID_LEN = 128
 
@@ -201,6 +206,21 @@ _ASSIGNMENT_PATTERN: re.Pattern[str] = re.compile(
 )
 
 
+def _normalize_assignment_blob(blob: str) -> str:
+    """Make coordinator / Telegram punctuation friendlier for regex matching.
+
+    Non-breaking spaces (``\\xa0``) and other unicode spaces often appear
+    when messages are copied from spreadsheets; they break ``\\s``-based
+    patterns if left in place.
+    """
+    if not blob:
+        return ""
+    s = str(blob).replace("\ufeff", "")
+    s = s.replace("\u00a0", " ").replace("\u200b", "").replace("\u200c", "")
+    s = re.sub(r"[\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]", " ", s)
+    return s
+
+
 def _clean_assignment_info(raw: str | None) -> str | None:
     """Tidy the trailing additional-info capture from the assignment regex.
 
@@ -225,7 +245,7 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         parent = message.reply_to_message
         if not parent:
             return False
-        blob = f"{parent.text or ''}\n{parent.caption or ''}"
+        blob = _normalize_assignment_blob(f"{parent.text or ''}\n{parent.caption or ''}")
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
@@ -266,10 +286,10 @@ async def _reply(update: Update, text: str, **kwargs) -> None:
     """
     if _is_group_chat(update):
         return
-    msg = update.message
+    msg = update.effective_message
     if msg is None:
         return
-    await _reply(update, text, **kwargs)
+    await msg.reply_text(text, **kwargs)
 
 
 def _disable_db_sessions(reason: str) -> None:
@@ -346,6 +366,7 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
 
 def _resolve_ticket_from_assignment_reply(parent_blob: str, replier_username: str | None) -> str | None:
     """Pick the ticket_number from the parent assignment message for this replier."""
+    parent_blob = _normalize_assignment_blob(parent_blob)
     matches = list(_ASSIGNMENT_PATTERN.finditer(parent_blob))
     if not matches:
         return None
@@ -663,6 +684,10 @@ _HELP_TEXT = (
     "  Reply to your assignment message with text and/or a photo.\n"
     "  Text → saved as field_response; photo → uploaded to ticket-photos; ticket → Open (admin review).\n"
     "\n"
+    "Groups + Telegram bot privacy:\n"
+    "  If the bot never sees your reply, turn privacy OFF in @BotFather, or set\n"
+    "  TELEGRAM_GROUP_REPLY_BRIDGE=1 so the bot posts a follow-up line you reply to.\n"
+    "\n"
     "Operator /respond workflow:\n"
     "  1) /respond <ticket_id> — pick the ticket you want to reply to\n"
     "  2) Send a single text message — it is saved as your response\n"
@@ -816,7 +841,7 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     parent = msg.reply_to_message
-    parent_blob = f"{parent.text or ''}\n{parent.caption or ''}"
+    parent_blob = _normalize_assignment_blob(f"{parent.text or ''}\n{parent.caption or ''}")
     username = update.effective_user.username if update.effective_user else None
 
     ticket_number = _resolve_ticket_from_assignment_reply(parent_blob, username)
@@ -891,6 +916,11 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Photo uploaded but ticket {ticket_number} could not be updated in the database."
             )
             return
+        log.info(
+            "field response saved ticket=%s chat=%s photo=1",
+            ticket_number,
+            _chat_id(update),
+        )
         await _reply(update, f"Ticket {ticket_number} sent for admin review (photo saved).")
     else:
         responder_handle = f"@{username}" if username else "@unknown"
@@ -905,6 +935,11 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             log.exception("ticket field completion update failed")
             await _reply(update, f"Could not update ticket {ticket_number}.")
             return
+        log.info(
+            "field response saved ticket=%s chat=%s photo=0",
+            ticket_number,
+            _chat_id(update),
+        )
         await _reply(update, f"Ticket {ticket_number} sent for admin review.")
 
     if await _get_active_ticket(update, context) == ticket_number:
@@ -929,7 +964,8 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message or not update.message.text:
         return
 
-    matches = list(_ASSIGNMENT_PATTERN.finditer(update.message.text))
+    text = _normalize_assignment_blob(update.message.text)
+    matches = list(_ASSIGNMENT_PATTERN.finditer(text))
     if not matches:
         return  # Filter shouldn't have triggered, but be defensive.
 
@@ -986,6 +1022,33 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         else f"Processed {len(lines)} assignments:"
     )
     await _reply(update, header + "\n" + "\n".join(lines))
+
+    # In groups with bot privacy ON, Telegram does not deliver replies to
+    # *other users'* messages to the bot. Optional bridge: duplicate the
+    # assignment line(s) in a bot-owned message so the field team can reply
+    # *to the bot* (which privacy still allows).
+    if (
+        _truthy_env("TELEGRAM_GROUP_REPLY_BRIDGE")
+        and _is_group_chat(update)
+        and update.message
+        and matches
+        and lines
+        and not all("failed" in ln.lower() for ln in lines)
+    ):
+        bridge_lines = [f"{m.group(1)} {m.group(2)} {m.group(3)}" for m in matches]
+        bridge_text = (
+            "\n".join(bridge_lines)
+            + "\n\nField team: reply HERE (to this bot message) with text or photo."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=bridge_text,
+                reply_to_message_id=update.message.message_id,
+                disable_notification=True,
+            )
+        except Exception as exc:
+            log.warning("TELEGRAM_GROUP_REPLY_BRIDGE send failed: %s", exc)
 
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
