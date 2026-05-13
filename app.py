@@ -315,6 +315,88 @@ def _set_ticket_status(
             pass
 
 
+def _delete_ticket(ticket_number: str, *, actor: str = "@dashboard-admin") -> None:
+    """Delete the ticket row but keep its attendance history.
+
+    The ``ticket_attendance_logs.ticket_number`` foreign key is **not**
+    cascaded, so the history rows remain queryable from the Log tab even
+    after the active ticket is gone. We also append a ``Deleted`` log
+    entry so the audit trail explicitly records the removal.
+    """
+    client = _get_supabase_client()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": str(ticket_number),
+                "member_username": actor,
+                "action_type": "Deleted",
+                "note": "Ticket row deleted from dashboard. History retained.",
+                "timestamp": now_iso,
+            }
+        ).execute()
+    except Exception:
+        # Don't block the delete if the history table is missing.
+        pass
+    client.table(TICKETS_TABLE).delete().eq(
+        "ticket_number", str(ticket_number)
+    ).execute()
+
+
+def _render_admin_delete_form(df: pd.DataFrame, *, key_prefix: str) -> None:
+    """Render a [ticket-number dropdown] + [confirm checkbox] + [Delete button].
+
+    The Delete button stays disabled until the checkbox is ticked so a
+    stray click cannot remove a row by accident. Attendance history is
+    preserved (see ``_delete_ticket``).
+    """
+    if "ticket_number" not in df.columns or df.empty:
+        return
+
+    sort_col = next(
+        (c for c in ("responded_at", "last_assigned_at", "updated_at", "created_at") if c in df.columns),
+        None,
+    )
+    ordered = df.sort_values(sort_col, ascending=False) if sort_col else df
+    options = [str(t) for t in ordered["ticket_number"].astype(str).tolist() if t]
+    if not options:
+        return
+
+    with st.container(border=True):
+        st.markdown("**Delete ticket** — removes the active row; history stays in the Log tab.")
+        c1, c2, c3 = st.columns([3, 2, 1])
+        with c1:
+            picked = st.selectbox(
+                "Ticket to delete",
+                options=options,
+                key=f"{key_prefix}_delete_select",
+            )
+        with c2:
+            confirmed = st.checkbox(
+                "Yes, delete",
+                value=False,
+                key=f"{key_prefix}_delete_confirm",
+                help="Required safety toggle. Tick this to enable the Delete button.",
+            )
+        with c3:
+            st.write("")  # vertical alignment with the selectbox label
+            clicked = st.button(
+                "Delete",
+                key=f"{key_prefix}_delete_btn",
+                type="secondary",
+                use_container_width=True,
+                disabled=not confirmed,
+            )
+        if clicked and picked and confirmed:
+            try:
+                _delete_ticket(picked)
+            except Exception as exc:
+                st.error(f"Could not delete ticket {picked}: {exc}")
+                return
+            st.success(f"Ticket {picked} deleted. History kept in the Log tab.")
+            st.rerun()
+
+
 def _render_admin_action_form(
     df: pd.DataFrame,
     *,
@@ -456,8 +538,9 @@ def _sidebar_controls() -> tuple[bool, int, int]:
             value=DEFAULT_LOOKBACK_DAYS,
             step=1,
             help=(
-                "Only show tickets whose **last assignment** happened within "
-                "this window. Counts and tabs honour this filter."
+                "Only show tickets with **any activity** (assignment, field "
+                "response, admin update, or creation) within this window. "
+                "Counts and tabs honour this filter."
             ),
         )
 
@@ -601,21 +684,37 @@ def _dataframe_column_config(df: pd.DataFrame) -> dict:
 
 
 def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
-    """Return rows whose ``last_assigned_at`` (or fallbacks) is within window.
+    """Return rows with **any recent activity** within the lookback window.
 
-    Falls back to ``updated_at`` then ``created_at`` so legacy rows that
-    pre-date the ``last_assigned_at`` column are still surfaced rather than
-    silently dropped from the dashboard.
+    We used to filter on ``last_assigned_at`` only whenever that column
+    existed. That hid tickets whose assignment was old but which had a
+    fresh field response (``Open``), admin status change, or DB
+    ``updated_at`` — making the dashboard look "stuck" even though
+    Supabase had new data.
+
+    Now each row is kept if the **latest** of the available activity
+    timestamps (assignment, response, generic update, or creation) falls
+    inside the window.
     """
     if df.empty:
         return df
-    for col in ("last_assigned_at", "updated_at", "created_at"):
-        if col in df.columns:
-            ts = _parse_ts(df[col])
-            cutoff = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC") - pd.Timedelta(days=lookback_days)
-            mask = ts.notna() & (ts >= cutoff)
-            return df[mask].copy()
-    return df
+    cols = [
+        c
+        for c in (
+            "last_assigned_at",
+            "responded_at",
+            "updated_at",
+            "created_at",
+        )
+        if c in df.columns
+    ]
+    if not cols:
+        return df
+    stacked = pd.concat([_parse_ts(df[c]) for c in cols], axis=1)
+    ref = stacked.max(axis=1, skipna=True)
+    cutoff = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC") - pd.Timedelta(days=lookback_days)
+    mask = ref.notna() & (ref >= cutoff)
+    return df[mask].copy()
 
 
 def _render_dashboard(
@@ -634,7 +733,8 @@ def _render_dashboard(
     day_word = "day" if lookback_days == 1 else "days"
     st.caption(
         f"Table: `{TICKETS_TABLE}` · history: `{ATTENDANCE_LOGS_TABLE}` · "
-        f"window: **last {lookback_days} {day_word}** · "
+        f"window: **last {lookback_days} {day_word}** (rows kept if **any** of "
+        f"last_assigned_at / responded_at / updated_at / created_at is in range) · "
         f"times in **{LOCAL_TZ_LABEL}** · now {now_local} · {refresh_note}"
     )
 
@@ -709,6 +809,8 @@ def _render_dashboard(
             if pend.empty:
                 st.info(f"No pending tickets in the last {lookback_days} {day_word}.")
             else:
+                _render_admin_delete_form(pend, key_prefix="assigned")
+
                 if "created_at" in pend.columns:
                     pend["_created"] = _parse_ts(pend["created_at"])
                     now_utc = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")
@@ -757,6 +859,7 @@ def _render_dashboard(
                     log_action="Completed",
                     key_prefix="open_to_completed",
                 )
+                _render_admin_delete_form(open_df, key_prefix="open")
 
                 open_show = [
                     c
@@ -804,6 +907,7 @@ def _render_dashboard(
                     log_action="Reopened",
                     key_prefix="completed_to_open",
                 )
+                _render_admin_delete_form(done, key_prefix="completed")
 
                 show_cols = [
                     c
