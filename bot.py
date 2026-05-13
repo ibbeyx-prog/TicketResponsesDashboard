@@ -35,9 +35,12 @@ Database expectations
 
    Override the table name with ``TICKETS_TABLE`` (default ``tickets_active``).
 
-   Field engineers complete a task by **replying** to an assignment message with
+   Field engineers submit work by **replying** to an assignment message with
    plain text and/or a photo. Photos are stored in the Storage bucket
-   ``ticket-photos`` (override with ``TICKET_PHOTOS_BUCKET``).
+   ``ticket-photos`` (override with ``TICKET_PHOTOS_BUCKET``). A field reply
+   moves the ticket to ``status='Open'`` (admin review queue); only the
+   admin/ops team marks tickets ``'Completed'`` (or sends them back to
+   ``'Open'``) from the dashboard.
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row
@@ -413,9 +416,23 @@ def _strip_missing_ticket_columns(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_missing_column(message: str) -> str | None:
-    """Extract the column name from a PostgREST `42703` error string."""
+    """Extract the column name from a PostgREST missing-column error.
+
+    Handles both error shapes PostgREST has emitted historically:
+
+    * Legacy SQL error (``42703``):
+      ``column tickets_active.additional_info does not exist``
+    * Schema cache error (``PGRST204``):
+      ``Could not find the 'additional_info' column of 'tickets_active'
+      in the schema cache``
+    """
     m = re.search(r"column [\w\.]*?\.?(\w+) does not exist", message)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    m = re.search(r"Could not find the '(\w+)' column", message)
+    if m:
+        return m.group(1)
+    return None
 
 
 def _execute_ticket_update(
@@ -439,11 +456,10 @@ def _execute_ticket_update(
             _TICKETS_MISSING_COLUMNS.add(col)
             log.warning(
                 "tickets table is missing column %r; dropping it from updates "
-                "for the rest of this process. Add it with:\n  alter table "
-                "public.%s add column if not exists %s timestamptz;",
+                "for the rest of this process. Apply the pending migration "
+                "for `public.%s` to surface this column in the dashboard.",
                 col,
                 TICKETS_TABLE,
-                col,
             )
             attempt = {k: v for k, v in attempt.items() if k != col}
             last_err = exc
@@ -498,9 +514,16 @@ def _db_complete_ticket_field_response(
     update_photo_url: bool = False,
     responder_username: str | None = None,
 ) -> None:
+    """Record a field response and move the ticket into the admin review queue.
+
+    A field reply is *not* the final state anymore -- it lands as ``Open``
+    so the ops/admin team can review the photo+note on the dashboard and
+    decide whether to mark the ticket ``Completed`` (or send it back to
+    ``Open`` after re-review). The bot never sets ``Completed`` itself.
+    """
     responded_at = _utc_now_iso()
     updates: dict[str, Any] = {
-        "status": "Completed",
+        "status": "Open",
         "responded_at": responded_at,
         "field_response": field_response,
         "updated_at": responded_at,
@@ -638,7 +661,7 @@ _HELP_TEXT = (
     "\n"
     "Field work (assignee):\n"
     "  Reply to your assignment message with text and/or a photo.\n"
-    "  Text → saved as field_response; photo → uploaded to ticket-photos; ticket → Completed.\n"
+    "  Text → saved as field_response; photo → uploaded to ticket-photos; ticket → Open (admin review).\n"
     "\n"
     "Operator /respond workflow:\n"
     "  1) /respond <ticket_id> — pick the ticket you want to reply to\n"
@@ -868,7 +891,7 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Photo uploaded but ticket {ticket_number} could not be updated in the database."
             )
             return
-        await _reply(update, f"Ticket {ticket_number} marked Completed (photo saved).")
+        await _reply(update, f"Ticket {ticket_number} sent for admin review (photo saved).")
     else:
         responder_handle = f"@{username}" if username else "@unknown"
         try:
@@ -882,7 +905,7 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             log.exception("ticket field completion update failed")
             await _reply(update, f"Could not update ticket {ticket_number}.")
             return
-        await _reply(update, f"Ticket {ticket_number} marked Completed.")
+        await _reply(update, f"Ticket {ticket_number} sent for admin review.")
 
     if await _get_active_ticket(update, context) == ticket_number:
         await _clear_active_ticket(update, context)
