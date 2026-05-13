@@ -692,7 +692,7 @@ def _render_dashboard(
     st.divider()
 
     tab_assigned, tab_open, tab_completed, tab_log = st.tabs(
-        ["(Assigned Task)", "(Open)", "Completed", "(Log)"]
+        ["Assigned Task", "Open", "Completed", "Log"]
     )
 
     with tab_assigned:
@@ -737,7 +737,7 @@ def _render_dashboard(
                 )
 
     with tab_open:
-        st.subheader("(Open) — awaiting admin review")
+        st.subheader("Open — awaiting admin review")
         st.caption(
             "Field team has responded. Review the response below and pick a "
             "ticket to **Mark Completed** once it's verified, or leave it Open "
@@ -932,7 +932,7 @@ def _render_missing_table_help(table: str) -> None:
 
 def _render_attendance_tab() -> None:
     """Search bar + timeline view backed by ``ticket_attendance_logs``."""
-    st.subheader("(Log) — search & timeline")
+    st.subheader("Log — search & timeline")
     st.caption(
         "Search by **ticket number** (exact) or **@username** (case-insensitive, "
         "partial). Leave both blank to see the 100 most recent log entries across "
