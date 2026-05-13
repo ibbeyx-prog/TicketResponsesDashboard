@@ -343,123 +343,109 @@ def _delete_ticket(ticket_number: str, *, actor: str = "@dashboard-admin") -> No
     ).execute()
 
 
-def _render_admin_delete_form(df: pd.DataFrame, *, key_prefix: str) -> None:
-    """Render a [ticket-number dropdown] + [confirm checkbox] + [Delete button].
-
-    The Delete button stays disabled until the checkbox is ticked so a
-    stray click cannot remove a row by accident. Attendance history is
-    preserved (see ``_delete_ticket``).
-    """
+def _ticket_options_for_admin(df: pd.DataFrame) -> list[str]:
+    """Sorted ticket numbers for admin pickers (newest activity first)."""
     if "ticket_number" not in df.columns or df.empty:
-        return
-
+        return []
     sort_col = next(
         (c for c in ("responded_at", "last_assigned_at", "updated_at", "created_at") if c in df.columns),
         None,
     )
     ordered = df.sort_values(sort_col, ascending=False) if sort_col else df
-    options = [str(t) for t in ordered["ticket_number"].astype(str).tolist() if t]
-    if not options:
-        return
-
-    with st.container(border=True):
-        st.markdown("**Delete ticket** — removes the active row; history stays in the Log tab.")
-        c1, c2, c3 = st.columns([3, 2, 1])
-        with c1:
-            picked = st.selectbox(
-                "Ticket to delete",
-                options=options,
-                key=f"{key_prefix}_delete_select",
-            )
-        with c2:
-            confirmed = st.checkbox(
-                "Yes, delete",
-                value=False,
-                key=f"{key_prefix}_delete_confirm",
-                help="Required safety toggle. Tick this to enable the Delete button.",
-            )
-        with c3:
-            st.write("")  # vertical alignment with the selectbox label
-            clicked = st.button(
-                "Delete",
-                key=f"{key_prefix}_delete_btn",
-                type="secondary",
-                use_container_width=True,
-                disabled=not confirmed,
-            )
-        if clicked and picked and confirmed:
-            try:
-                _delete_ticket(picked)
-            except Exception as exc:
-                err = str(exc).lower()
-                if "42501" in str(exc) or "permission denied" in err or "row-level security" in err:
-                    st.error(
-                        f"Could not delete ticket **{picked}**: the database denied DELETE "
-                        "(Row Level Security). Apply the migration "
-                        "`supabase/migrations/20260514_tickets_active_anon_delete.sql` "
-                        "in the Supabase SQL editor, then try again."
-                    )
-                else:
-                    st.error(f"Could not delete ticket {picked}: {exc}")
-                return
-            st.success(f"Ticket {picked} deleted. History kept in the Log tab.")
-            st.rerun()
+    return [str(t) for t in ordered["ticket_number"].astype(str).tolist() if t]
 
 
-def _render_admin_action_form(
+def _delete_ticket_error_ui(picked: str, exc: Exception) -> None:
+    err = str(exc).lower()
+    if "42501" in str(exc) or "permission denied" in err or "row-level security" in err:
+        st.error(
+            f"Could not delete ticket **{picked}**: the database denied DELETE "
+            "(Row Level Security). Apply the migration "
+            "`supabase/migrations/20260514_tickets_active_anon_delete.sql` "
+            "in the Supabase SQL editor, then try again."
+        )
+    else:
+        st.error(f"Could not delete ticket {picked}: {exc}")
+
+
+def _render_admin_ticket_toolbar(
     df: pd.DataFrame,
     *,
-    action_label: str,
-    target_status: str,
-    log_action: str,
     key_prefix: str,
+    title: str = "Admin — ticket",
+    caption: str | None = None,
+    status_actions: tuple[tuple[str, str, str], ...] = (),
+    allow_delete: bool = True,
 ) -> None:
-    """Render a [ticket-number dropdown] + [action button] above a table.
+    """One compact row: pick ticket → pick action → Apply.
 
-    ``df`` is the already-filtered set of tickets the action applies to
-    (e.g. Open rows for "Mark Completed"). The dropdown is sorted so the
-    most recently touched ticket is on top to match the table the admin is
-    already looking at.
+    ``status_actions`` entries are ``(radio_label, new_status, log_action)``.
+    Delete is optional; it requires the small confirm checkbox below the radio.
+    Everything lives in a **collapsed** expander so the main table stays clean.
     """
-    if "ticket_number" not in df.columns or df.empty:
-        return
-
-    sort_col = next(
-        (c for c in ("responded_at", "last_assigned_at", "updated_at", "created_at") if c in df.columns),
-        None,
-    )
-    ordered = df.sort_values(sort_col, ascending=False) if sort_col else df
-    options = [str(t) for t in ordered["ticket_number"].astype(str).tolist() if t]
+    options = _ticket_options_for_admin(df)
     if not options:
         return
 
-    with st.container(border=True):
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            picked = st.selectbox(
-                f"Pick a ticket to **{action_label}**",
-                options=options,
-                key=f"{key_prefix}_select",
+    radio_labels: list[str] = [a[0] for a in status_actions]
+    if allow_delete:
+        radio_labels.append("Delete row")
+
+    with st.expander(title, expanded=False):
+        if caption:
+            st.caption(caption)
+        picked = st.selectbox("Ticket", options=options, key=f"{key_prefix}_sb_ticket")
+
+        if not radio_labels:
+            return
+
+        if radio_labels == ["Delete row"]:
+            choice = "Delete row"
+            st.caption("Removes the active row; history stays in the Log tab.")
+        else:
+            choice = st.radio(
+                "Action",
+                options=radio_labels,
+                horizontal=True,
+                key=f"{key_prefix}_radio",
             )
-        with c2:
-            st.write("")  # vertical alignment with the selectbox label
-            clicked = st.button(
-                action_label,
-                key=f"{key_prefix}_btn",
-                type="primary",
-                use_container_width=True,
+
+        confirm_del = False
+        if choice == "Delete row":
+            confirm_del = st.checkbox(
+                "Confirm delete",
+                value=False,
+                key=f"{key_prefix}_del_confirm",
             )
-        if clicked and picked:
+
+        if st.button("Apply", key=f"{key_prefix}_apply", type="primary"):
+            if choice == "Delete row":
+                if not confirm_del:
+                    st.warning("Check **Confirm delete** first.")
+                    return
+                try:
+                    _delete_ticket(picked)
+                except Exception as exc:
+                    _delete_ticket_error_ui(picked, exc)
+                    return
+                st.success(f"{picked} deleted (history kept in Log).")
+                st.rerun()
+
+            matched = next((a for a in status_actions if a[0] == choice), None)
+            if not matched:
+                st.error("Unknown action.")
+                return
+            _, new_status, log_action = matched
             try:
                 _set_ticket_status(
                     picked,
-                    new_status=target_status,
+                    new_status=new_status,
                     log_action=log_action,
                 )
             except Exception as exc:
-                st.error(f"Could not update ticket {picked}: {exc}")
+                st.error(f"Could not update {picked}: {exc}")
                 return
-            st.success(f"Ticket {picked} → **{target_status}**.")
+            st.success(f"{picked} → **{new_status}**.")
             st.rerun()
 
 
@@ -469,13 +455,6 @@ def _fetch_attendance(
     member_query: str | None = None,
     limit: int = 500,
 ) -> pd.DataFrame:
-    """Read attendance logs.
-
-    At least one of ``ticket_number`` / ``member_query`` should be set; if both
-    are ``None`` the function returns the latest ``limit`` rows for general
-    browsing. ``member_query`` is matched case-insensitively against
-    ``member_username`` using ``ilike``.
-    """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
     client = _get_supabase_client()
@@ -818,7 +797,14 @@ def _render_dashboard(
             if pend.empty:
                 st.info(f"No pending tickets in the last {lookback_days} {day_word}.")
             else:
-                _render_admin_delete_form(pend, key_prefix="assigned")
+                _render_admin_ticket_toolbar(
+                    pend,
+                    key_prefix="assigned",
+                    title="Admin",
+                    caption="Delete removes the active row; history stays in the Log tab.",
+                    status_actions=(),
+                    allow_delete=True,
+                )
 
                 if "created_at" in pend.columns:
                     pend["_created"] = _parse_ts(pend["created_at"])
@@ -861,14 +847,16 @@ def _render_dashboard(
             if open_df.empty:
                 st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
             else:
-                _render_admin_action_form(
+                _render_admin_ticket_toolbar(
                     open_df,
-                    action_label="Mark Completed",
-                    target_status="Completed",
-                    log_action="Completed",
-                    key_prefix="open_to_completed",
+                    key_prefix="open",
+                    title="Admin",
+                    caption="Mark reviewed as Completed, or delete the row.",
+                    status_actions=(
+                        ("Mark Completed", "Completed", "Completed"),
+                    ),
+                    allow_delete=True,
                 )
-                _render_admin_delete_form(open_df, key_prefix="open")
 
                 open_show = [
                     c
@@ -909,14 +897,16 @@ def _render_dashboard(
             if done.empty:
                 st.info(f"No completed tickets in the last {lookback_days} {day_word}.")
             else:
-                _render_admin_action_form(
+                _render_admin_ticket_toolbar(
                     done,
-                    action_label="Send back to Open",
-                    target_status="Open",
-                    log_action="Reopened",
-                    key_prefix="completed_to_open",
+                    key_prefix="completed",
+                    title="Admin",
+                    caption="Send back for more field work, or delete the row.",
+                    status_actions=(
+                        ("Send back to Open", "Open", "Reopened"),
+                    ),
+                    allow_delete=True,
                 )
-                _render_admin_delete_form(done, key_prefix="completed")
 
                 show_cols = [
                     c
