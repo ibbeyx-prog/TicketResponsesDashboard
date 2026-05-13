@@ -650,6 +650,7 @@ def _render_dashboard(
                         "ticket_number",
                         "assigned_to",
                         "task_category",
+                        "additional_info",
                         "field_response",
                         "photo_url",
                         "created_at",
@@ -724,9 +725,22 @@ def _render_field_photos_section(done: pd.DataFrame) -> None:
         f"Each ticket groups every photo the assignee has submitted, "
         f"newest first."
     )
+    info_lookup: dict[str, str] = {}
+    if "additional_info" in done.columns and "ticket_number" in done.columns:
+        for _, row in done.iterrows():
+            tid = str(row.get("ticket_number") or "").strip()
+            info = row.get("additional_info")
+            if tid and isinstance(info, str) and info.strip():
+                info_lookup[tid] = info.strip()
+
     for tid in tickets_with_photos:
         photos = grouped.get(tid, [])
         with st.expander(f"Ticket {tid} — {len(photos)} photo(s)", expanded=False):
+            info_text = info_lookup.get(tid)
+            if info_text:
+                st.caption("**Additional info from assignment:**")
+                st.markdown(info_text)
+                st.divider()
             _render_photo_grid(photos, cols_per_row=3)
 
 

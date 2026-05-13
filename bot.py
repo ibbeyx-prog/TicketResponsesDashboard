@@ -181,11 +181,38 @@ _ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
     "Repeater Fault",
 )
 
+_CATEGORY_ALTS: str = "|".join(re.escape(cat) for cat in _ASSIGNMENT_TASK_CATEGORIES)
+
+# Groups:
+#   1 = @username, 2 = category, 3 = ticket_number (9 or 16 digits),
+#   4 / named "info" = any additional text after the ticket number, up to
+#       the next assignment header (so multi-assignment messages still
+#       split cleanly) or the end of the message.
+# `[\s\S]*?` is the canonical "match anything, including newlines, non-greedy"
+# pattern; we don't use `re.DOTALL` so the rest of the pattern keeps its
+# default semantics.
 _ASSIGNMENT_PATTERN: re.Pattern[str] = re.compile(
-    r"(@\w+)\s+("
-    + "|".join(re.escape(cat) for cat in _ASSIGNMENT_TASK_CATEGORIES)
-    + r")\s+(\d{16}|\d{9})"
+    rf"(@\w+)\s+({_CATEGORY_ALTS})\s+(\d{{16}}|\d{{9}})"
+    rf"(?P<info>[\s\S]*?)"
+    rf"(?=(?:@\w+\s+(?:{_CATEGORY_ALTS})\s+\d)|\Z)"
 )
+
+
+def _clean_assignment_info(raw: str | None) -> str | None:
+    """Tidy the trailing additional-info capture from the assignment regex.
+
+    Strips leading / trailing whitespace and collapses any run of blank
+    lines so multi-line address blocks survive but stray separators don't.
+    Returns ``None`` if nothing useful remains.
+    """
+    if not raw:
+        return None
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    # Collapse 3+ consecutive newlines down to a single blank line.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
 
 
 class _ReplyToAssignmentFilter(filters.MessageFilter):
@@ -492,7 +519,13 @@ def _db_complete_ticket_field_response(
         )
 
 
-def _db_insert_assignment(ticket_number: str, assigned_to: str, task_category: str) -> None:
+def _db_insert_assignment(
+    ticket_number: str,
+    assigned_to: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+) -> None:
     now_iso = _utc_now_iso()
     row = {
         "ticket_number": ticket_number,
@@ -502,34 +535,52 @@ def _db_insert_assignment(ticket_number: str, assigned_to: str, task_category: s
         "field_response": None,
         "photo_url": None,
         "last_assigned_at": now_iso,
+        "additional_info": additional_info,
     }
-    # `last_assigned_at` is a recent addition; if the column hasn't been
-    # migrated yet on a given environment, drop it and retry once.
-    try:
-        supabase.table(TICKETS_TABLE).insert(row).execute()
-    except Exception as exc:
-        col = _parse_missing_column(str(exc))
-        if col == "last_assigned_at":
-            _TICKETS_MISSING_COLUMNS.add(col)
-            row.pop("last_assigned_at", None)
+    # `last_assigned_at` and `additional_info` are recent additions; if the
+    # column hasn't been migrated yet on a given environment, drop it and
+    # retry. Each missing column gets one strip-and-retry, so we cope with
+    # both being absent without an infinite loop.
+    for _ in range(4):
+        try:
             supabase.table(TICKETS_TABLE).insert(row).execute()
-        else:
-            raise
+            break
+        except Exception as exc:
+            col = _parse_missing_column(str(exc))
+            if not col or col not in row:
+                raise
+            _TICKETS_MISSING_COLUMNS.add(col)
+            row.pop(col, None)
+    else:
+        # All retries exhausted (extremely unlikely; we only retry while
+        # PostgREST keeps telling us about new missing columns).
+        raise RuntimeError(
+            f"insert into {TICKETS_TABLE} failed: too many missing columns"
+        )
 
     _db_insert_attendance_log(
         ticket_number=ticket_number,
         member_username=assigned_to,
         action_type="Assignment",
+        note=additional_info,
     )
 
 
-def _db_reassign_ticket(ticket_number: str, assigned_to: str, task_category: str) -> None:
+def _db_reassign_ticket(
+    ticket_number: str,
+    assigned_to: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+) -> None:
     """Overwrite assigned_to / task_category and reset prior work for a re-assignment.
 
     Resets the task fully for the new assignee: ``status`` goes back to
     ``"Pending"``, the previous ``field_response`` / ``photo_url`` are
-    nullified, and ``last_assigned_at`` is refreshed so the dashboard's
-    "Days to Look Back" filter sees this as a recent event.
+    nullified, ``additional_info`` is overwritten with whatever came on the
+    new assignment message (or NULLed out if none provided), and
+    ``last_assigned_at`` is refreshed so the dashboard's "Days to Look
+    Back" filter sees this as a recent event.
     """
     now_iso = _utc_now_iso()
     updates = {
@@ -540,6 +591,7 @@ def _db_reassign_ticket(ticket_number: str, assigned_to: str, task_category: str
         "photo_url": None,
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
+        "additional_info": additional_info,
     }
     _execute_ticket_update(updates, ticket_number)
 
@@ -547,6 +599,7 @@ def _db_reassign_ticket(ticket_number: str, assigned_to: str, task_category: str
         ticket_number=ticket_number,
         member_username=assigned_to,
         action_type="Assignment",
+        note=additional_info,
     )
 
 
@@ -862,6 +915,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         assigned_to = m.group(1)        # e.g. "@john"
         task_category = m.group(2)      # e.g. "Femto Installation"
         ticket_number = m.group(3)      # 16- or 9-digit string
+        additional_info = _clean_assignment_info(m.group("info"))
 
         try:
             existing = _db_get_ticket(ticket_number)
@@ -870,19 +924,32 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             lines.append(f"• Lookup failed for ticket {ticket_number}.")
             continue
 
+        info_suffix = " (with extra info)" if additional_info else ""
+
         try:
             if existing is None:
-                _db_insert_assignment(ticket_number, assigned_to, task_category)
+                _db_insert_assignment(
+                    ticket_number,
+                    assigned_to,
+                    task_category,
+                    additional_info=additional_info,
+                )
                 lines.append(
-                    f"• Assigned ticket {ticket_number} ({task_category}) to {assigned_to}."
+                    f"• Assigned ticket {ticket_number} ({task_category}) "
+                    f"to {assigned_to}{info_suffix}."
                 )
             else:
-                _db_reassign_ticket(ticket_number, assigned_to, task_category)
+                _db_reassign_ticket(
+                    ticket_number,
+                    assigned_to,
+                    task_category,
+                    additional_info=additional_info,
+                )
                 prev_assignee = existing.get("assigned_to") or "—"
                 prev_status = existing.get("status") or "—"
                 lines.append(
                     f"• Re-assigned ticket {ticket_number} ({task_category}) "
-                    f"from {prev_assignee} to {assigned_to}. "
+                    f"from {prev_assignee} to {assigned_to}{info_suffix}. "
                     f"Status reset to Pending (was {prev_status}); "
                     "previous response and photo cleared."
                 )
