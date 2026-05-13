@@ -226,6 +226,55 @@ def _fetch_tickets() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _fetch_ticket_photos(
+    ticket_numbers: list[str] | None = None,
+    *,
+    limit_per_ticket: int = 200,
+) -> dict[str, list[dict]]:
+    """Return every Response photo per ticket, newest-first.
+
+    Reads ``ticket_attendance_logs`` so the gallery shows the full history,
+    not just the single ``photo_url`` currently pinned on
+    ``tickets_active``. If ``ticket_numbers`` is None we fetch all photos
+    in the table (capped); otherwise we restrict to those IDs.
+
+    Returns ``{ticket_number: [ {url, note, member, when}, ... ]}``.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return {}
+    client = _get_supabase_client()
+    q = (
+        client.table(ATTENDANCE_LOGS_TABLE)
+        .select("ticket_number, member_username, note, photo_url, timestamp")
+        .eq("action_type", "Response")
+        .not_.is_("photo_url", "null")
+    )
+    if ticket_numbers:
+        ids = [t for t in dict.fromkeys(ticket_numbers) if t]
+        if not ids:
+            return {}
+        q = q.in_("ticket_number", ids)
+    try:
+        res = q.order("timestamp", desc=True).limit(limit_per_ticket * max(len(ticket_numbers or [1]), 1)).execute()
+    except Exception:
+        return {}
+    grouped: dict[str, list[dict]] = {}
+    for row in res.data or []:
+        url = str(row.get("photo_url") or "").strip()
+        if not url.startswith("http"):
+            continue
+        tid = row.get("ticket_number") or "—"
+        grouped.setdefault(tid, []).append(
+            {
+                "url": url,
+                "note": row.get("note"),
+                "member": row.get("member_username"),
+                "when": row.get("timestamp"),
+            }
+        )
+    return grouped
+
+
 def _fetch_attendance(
     *,
     ticket_number: str | None = None,
@@ -382,6 +431,56 @@ def main() -> None:
         )
 
     _dashboard_fragment()
+
+
+PHOTO_THUMB_WIDTH = 220  # px — tight enough that 3 fit per row on a laptop
+
+
+def _format_when(when: object) -> str:
+    if when is None:
+        return ""
+    try:
+        return pd.Timestamp(when).tz_convert(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        try:
+            return pd.Timestamp(when).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(when)
+
+
+def _render_photo_grid(photos: list[dict], cols_per_row: int = 3) -> None:
+    """Render a list of photo dicts in a fixed-width thumbnail grid.
+
+    Each thumbnail shows ``member · timestamp`` underneath, an inline note
+    (truncated), and an "Open full size" link. Keeps photos compact so
+    multiple shots from the same ticket fit on one screen.
+    """
+    if not photos:
+        return
+    for chunk_start in range(0, len(photos), cols_per_row):
+        chunk = photos[chunk_start : chunk_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for slot, photo in enumerate(chunk):
+            with cols[slot]:
+                try:
+                    st.image(photo["url"], width=PHOTO_THUMB_WIDTH)
+                except Exception as exc:
+                    st.warning(f"Could not load image: {exc}")
+                meta_bits = []
+                if photo.get("member"):
+                    meta_bits.append(str(photo["member"]))
+                when = _format_when(photo.get("when"))
+                if when:
+                    meta_bits.append(f"{when} {LOCAL_TZ_LABEL}")
+                if meta_bits:
+                    st.caption(" · ".join(meta_bits))
+                note = photo.get("note")
+                if isinstance(note, str) and note.strip():
+                    trimmed = note.strip()
+                    if len(trimmed) > 140:
+                        trimmed = trimmed[:140] + "…"
+                    st.markdown(trimmed)
+                st.markdown(f"[Open full size]({photo['url']})")
 
 
 def _dataframe_column_config(df: pd.DataFrame) -> dict:
@@ -568,34 +667,67 @@ def _render_dashboard(
                 )
 
                 st.subheader("Field photos")
-                if "photo_url" not in done.columns:
-                    st.caption("No `photo_url` column.")
-                else:
-                    ph = done["photo_url"].astype(str).str.strip()
-                    photo_rows = done[ph.str.startswith("http")]
-                    if photo_rows.empty:
-                        st.caption("No `photo_url` values to display.")
-                    else:
-                        for _, row in photo_rows.iterrows():
-                            url = str(row.get("photo_url") or "").strip()
-                            if not url or not url.startswith("http"):
-                                continue
-                            tid = row.get("ticket_number", "—")
-                            cap = row.get("field_response") or ""
-                            with st.container():
-                                st.markdown(f"**Ticket `{tid}`**")
-                                try:
-                                    st.image(
-                                        url,
-                                        caption=str(cap)[:500] if cap else None,
-                                        use_container_width=True,
-                                    )
-                                except Exception as exc:
-                                    st.warning(f"Could not load image for ticket `{tid}`: {exc}")
-                                st.divider()
+                _render_field_photos_section(done)
 
     with tab_attendance:
         _render_attendance_tab()
+
+
+def _render_field_photos_section(done: pd.DataFrame) -> None:
+    """Group every Response photo per ticket and render as a thumbnail grid.
+
+    Photo history comes from ``ticket_attendance_logs`` (every Response
+    with a non-null ``photo_url``). For tickets that only ever had the
+    single "pinned" ``photo_url`` on ``tickets_active`` -- e.g. before the
+    storage migration was applied -- we still surface that one so nothing
+    disappears from view.
+    """
+    ticket_ids = [
+        str(t)
+        for t in (done.get("ticket_number") if "ticket_number" in done.columns else [])
+        if t is not None
+    ]
+    if not ticket_ids:
+        st.caption("No completed tickets to show photos for.")
+        return
+
+    grouped = _fetch_ticket_photos(ticket_ids)
+
+    # Fallback: stitch in the pinned tickets_active.photo_url if its URL
+    # isn't already represented in the log history for that ticket. This
+    # covers older rows recorded before the bot started logging Responses.
+    if "photo_url" in done.columns:
+        for _, row in done.iterrows():
+            tid = str(row.get("ticket_number") or "").strip()
+            pinned = str(row.get("photo_url") or "").strip()
+            if not tid or not pinned.startswith("http"):
+                continue
+            existing_urls = {p["url"] for p in grouped.get(tid, [])}
+            if pinned in existing_urls:
+                continue
+            grouped.setdefault(tid, []).append(
+                {
+                    "url": pinned,
+                    "note": row.get("field_response"),
+                    "member": row.get("assigned_to"),
+                    "when": row.get("responded_at") or row.get("updated_at"),
+                }
+            )
+
+    tickets_with_photos = [t for t in ticket_ids if grouped.get(t)]
+    if not tickets_with_photos:
+        st.caption("No field photos uploaded yet for these tickets.")
+        return
+
+    st.caption(
+        f"**{len(tickets_with_photos)}** ticket(s) with photos. "
+        f"Each ticket groups every photo the assignee has submitted, "
+        f"newest first."
+    )
+    for tid in tickets_with_photos:
+        photos = grouped.get(tid, [])
+        with st.expander(f"Ticket {tid} — {len(photos)} photo(s)", expanded=False):
+            _render_photo_grid(photos, cols_per_row=3)
 
 
 def _render_missing_table_help(table: str) -> None:
@@ -713,7 +845,7 @@ def _render_attendance_tab() -> None:
             photo = row.get("photo_url")
             if isinstance(photo, str) and photo.startswith("http"):
                 try:
-                    st.image(photo, use_container_width=True)
+                    st.image(photo, width=PHOTO_THUMB_WIDTH)
                 except Exception as exc:
                     st.warning(f"Could not load image: {exc}")
                 st.markdown(f"[Open photo in a new tab]({photo})")
