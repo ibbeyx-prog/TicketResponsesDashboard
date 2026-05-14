@@ -42,10 +42,14 @@ Database expectations
    admin/ops team marks tickets ``'Completed'`` (or sends them back to
    ``'Open'``) from the dashboard.
 
-   The Streamlit Command Center can assign from the dashboard (``TELEGRAM_TOKEN``
-   + ``TELEGRAM_GROUP_CHAT_ID``). Operators run ``/chatid`` in the field group
-   (as an allowed user when ``TELEGRAM_ALLOWED_USERNAMES`` is set) to print that
-   chat id.
+   Dashboard Command Center posts use HTML formatting in Telegram, but the
+   **first line** of the message is always the canonical
+   ``@user <Category> <ticket_number>`` pattern so the same reply listener
+   matches and updates Supabase.
+
+   Operators run ``/chatid`` in the field group (as an allowed user when
+   ``TELEGRAM_ALLOWED_USERNAMES`` is set) to print ``TELEGRAM_GROUP_CHAT_ID`` /
+   ``TG_GROUP_ID`` for Railway or Streamlit secrets.
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row

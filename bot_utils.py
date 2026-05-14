@@ -1,5 +1,5 @@
 """
-Outbound Telegram posts for the Streamlit Command Center.
+Outbound Telegram posts for the Streamlit Command Center (``notify_telegram_group``).
 
 Two transports:
 
@@ -10,13 +10,13 @@ Two transports:
 2. **python-telegram-bot** (HTTP Bot API) — when API id/hash are **not**
    configured; only bot token + group id are required.
 
-The first line of every assignment message matches the assignment regex in
-``bot.py`` so field engineers can **reply to that message** and the bot
-resolves the ticket correctly.
+Messages use HTML formatting after the first line. Line 1 is always the plain
+assignment token line so the reply listener in ``bot.py`` still matches.
 """
 
 from __future__ import annotations
 
+import html
 import os
 from pathlib import Path
 
@@ -32,16 +32,23 @@ def _at_username(username: str) -> str:
     return u if u.startswith("@") else f"@{u}"
 
 
-def _build_assignment_text(assigned_to: str, ticket_id: str, category: str) -> str:
+def _build_notify_html(assigned_to: str, ticket_id: str, category: str) -> str:
+    """Return HTML message: line 1 is plain assignment syntax for ``bot.py`` regex.
+
+    The bold block is for operators; field replies still match on line 1.
+    """
     handle = _at_username(assigned_to)
     line1 = f"{handle} {category} {ticket_id}"
+    h = html.escape(handle)
+    c = html.escape(category)
+    t = html.escape(ticket_id)
     return (
         f"{line1}\n\n"
-        "📋 NEW DASHBOARD ASSIGNMENT\n\n"
-        f"Field Member: {handle}\n"
-        f"Task: {category}\n"
-        f"Ticket ID: {ticket_id}\n\n"
-        "Field team: please reply to this message with your updates or photos."
+        "<b>📋 NEW ASSIGNMENT FROM DASHBOARD</b>\n\n"
+        f"<b>User:</b> {h}\n"
+        f"<b>Category:</b> {c}\n"
+        f"<b>Ticket ID:</b> {t}\n\n"
+        "<i>Field team: Please reply directly to this message with your updates.</i>"
     )
 
 
@@ -73,9 +80,14 @@ async def _send_via_ptb(
     bot_token: str,
     group_entity: int | str,
     text: str,
+    parse_mode: str | None,
 ) -> None:
     async with Bot(bot_token) as bot:
-        await bot.send_message(chat_id=group_entity, text=text)
+        await bot.send_message(
+            chat_id=group_entity,
+            text=text,
+            parse_mode=parse_mode,
+        )
 
 
 async def _send_via_telethon(
@@ -85,17 +97,18 @@ async def _send_via_telethon(
     bot_token: str,
     group_entity: int | str,
     text: str,
+    parse_mode: str,
 ) -> None:
     client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
     try:
         await client.start(bot_token=bot_token)
-        await client.send_message(group_entity, text)
+        await client.send_message(group_entity, text, parse_mode=parse_mode)
     finally:
         if client.is_connected():
             await client.disconnect()
 
 
-async def send_telegram_assignment(
+async def notify_telegram_group(
     username: str,
     ticket_id: str,
     category: str,
@@ -105,7 +118,10 @@ async def send_telegram_assignment(
     bot_token: str | None = None,
     group_id: int | str | None = None,
 ) -> None:
-    """Post an assignment line into the field Telegram group.
+    """Notify the field Telegram group after a dashboard assignment upsert.
+
+    Uses **Telethon** when ``TG_API_ID`` + ``TG_API_HASH`` are set; otherwise
+    the HTTP Bot API (``python-telegram-bot``).
 
     Parameters override environment variables. Env fallbacks:
 
@@ -127,7 +143,7 @@ async def send_telegram_assignment(
         api_id_res = _env_str("TG_API_ID", "TELEGRAM_API_ID") or None
     api_hash_res = (api_hash or "").strip() or _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
 
-    text = _build_assignment_text(username, ticket_id, category)
+    text = _build_notify_html(username, ticket_id, category)
     entity = _parse_group_entity(group_raw)
 
     use_telethon = bool(
@@ -144,7 +160,17 @@ async def send_telegram_assignment(
             bot_token=token,
             group_entity=entity,
             text=text,
+            parse_mode="html",
         )
         return
 
-    await _send_via_ptb(bot_token=token, group_entity=entity, text=text)
+    await _send_via_ptb(
+        bot_token=token,
+        group_entity=entity,
+        text=text,
+        parse_mode="HTML",
+    )
+
+
+# Backward-compatible name used by earlier commits.
+send_telegram_assignment = notify_telegram_group

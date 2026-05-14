@@ -29,7 +29,7 @@ For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
     # TICKETS_TABLE = "tickets"
 
 **Command Center** (sidebar assign) writes to Supabase then posts into the
-field Telegram group via ``bot_utils.send_telegram_assignment``:
+field Telegram group via ``notify_telegram_group`` in ``bot_utils.py``:
 
 - **Simple:** ``TELEGRAM_TOKEN`` + ``TELEGRAM_GROUP_CHAT_ID`` (HTTP Bot API).
 - **Telethon:** also set ``TG_API_ID`` and ``TG_API_HASH`` (and optionally
@@ -62,7 +62,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from bot_utils import send_telegram_assignment
+from bot_utils import notify_telegram_group
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -845,7 +845,7 @@ def _sidebar_command_center() -> None:
 
     try:
         asyncio.run(
-            send_telegram_assignment(
+            notify_telegram_group(
                 handle,
                 tid,
                 cat,
@@ -946,6 +946,8 @@ def main() -> None:
             )
         return
 
+    _inject_bon_theme()
+
     auto, interval_minutes, lookback_days = _sidebar_controls()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
@@ -958,8 +960,91 @@ def main() -> None:
 
 PHOTO_THUMB_WIDTH = 220  # px — tight enough that 3 fit per row on a laptop
 
+# BONFamily-inspired UI: charcoal base (#121212), Light Oak (#D7B491) accents.
+_BON_THEME_CSS = """
+<style>
+    :root {
+        --bon-bg: #121212;
+        --bon-panel: #1a1a1a;
+        --bon-card: #1e1e1e;
+        --bon-oak: #D7B491;
+        --bon-text: #e8e6e3;
+        --bon-muted: #a39e97;
+    }
+    .stApp {
+        background-color: var(--bon-bg);
+        color: var(--bon-text);
+    }
+    [data-testid="stHeader"] {
+        background-color: rgba(18, 18, 18, 0.96);
+        border-bottom: 1px solid var(--bon-oak);
+    }
+    [data-testid="stSidebar"] {
+        background-color: var(--bon-panel);
+        border-right: 1px solid var(--bon-oak);
+    }
+    [data-testid="stSidebar"] .stMarkdown,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] span {
+        color: var(--bon-text);
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-color: var(--bon-oak) !important;
+        border-radius: 14px !important;
+        background-color: var(--bon-card) !important;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        background-color: var(--bon-panel);
+        border-radius: 10px;
+        padding: 4px;
+        gap: 4px;
+        border: 1px solid rgba(215, 180, 145, 0.35);
+    }
+    .stTabs [data-baseweb="tab"] {
+        color: var(--bon-muted);
+        border-radius: 8px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: var(--bon-oak) !important;
+        color: #121212 !important;
+    }
+    .stButton > button {
+        border-radius: 10px !important;
+        border: 1px solid var(--bon-oak) !important;
+        background-color: #2a2420 !important;
+        color: var(--bon-oak) !important;
+        font-weight: 600;
+    }
+    .stButton > button:hover {
+        background-color: var(--bon-oak) !important;
+        color: #121212 !important;
+    }
+    div[data-testid="stExpander"] details {
+        border: 1px solid var(--bon-oak);
+        border-radius: 14px;
+        background-color: var(--bon-card);
+    }
+    div[data-testid="stExpander"] summary {
+        color: var(--bon-oak);
+    }
+    [data-testid="stMetric"] {
+        background: var(--bon-card);
+        padding: 10px 14px;
+        border-radius: 12px;
+        border: 1px solid rgba(215, 180, 145, 0.35);
+    }
+    [data-testid="stMetric"] label { color: var(--bon-muted) !important; }
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: var(--bon-oak) !important;
+    }
+    .stMarkdown a { color: var(--bon-oak); }
+    [data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
+</style>
+"""
 
-def _format_when(when: object) -> str:
+
+def _inject_bon_theme() -> None:
+    st.markdown(_BON_THEME_CSS, unsafe_allow_html=True)
     if when is None:
         return ""
     try:
@@ -985,25 +1070,26 @@ def _render_photo_grid(photos: list[dict], cols_per_row: int = 3) -> None:
         cols = st.columns(cols_per_row)
         for slot, photo in enumerate(chunk):
             with cols[slot]:
-                try:
-                    st.image(photo["url"], width=PHOTO_THUMB_WIDTH)
-                except Exception as exc:
-                    st.warning(f"Could not load image: {exc}")
-                meta_bits = []
-                if photo.get("member"):
-                    meta_bits.append(str(photo["member"]))
-                when = _format_when(photo.get("when"))
-                if when:
-                    meta_bits.append(f"{when} {LOCAL_TZ_LABEL}")
-                if meta_bits:
-                    st.caption(" · ".join(meta_bits))
-                note = photo.get("note")
-                if isinstance(note, str) and note.strip():
-                    trimmed = note.strip()
-                    if len(trimmed) > 140:
-                        trimmed = trimmed[:140] + "…"
-                    st.markdown(trimmed)
-                st.markdown(f"[Open full size]({photo['url']})")
+                with st.container(border=True):
+                    try:
+                        st.image(photo["url"], width=PHOTO_THUMB_WIDTH)
+                    except Exception as exc:
+                        st.warning(f"Could not load image: {exc}")
+                    meta_bits = []
+                    if photo.get("member"):
+                        meta_bits.append(str(photo["member"]))
+                    when = _format_when(photo.get("when"))
+                    if when:
+                        meta_bits.append(f"{when} {LOCAL_TZ_LABEL}")
+                    if meta_bits:
+                        st.caption(" · ".join(meta_bits))
+                    note = photo.get("note")
+                    if isinstance(note, str) and note.strip():
+                        trimmed = note.strip()
+                        if len(trimmed) > 140:
+                            trimmed = trimmed[:140] + "…"
+                        st.markdown(trimmed)
+                    st.markdown(f"[Open full size]({photo['url']})")
 
 
 def _dataframe_column_config(df: pd.DataFrame) -> dict:
@@ -1160,7 +1246,7 @@ def _render_dashboard(
 
                 def _row_red(_row: pd.Series) -> list[str]:
                     stale = bool(pend.loc[_row.name, "_stale"]) if "_stale" in pend.columns else False
-                    color = "background-color: #ffcccc" if stale else ""
+                    color = "background-color: rgba(215, 180, 145, 0.12); color: #f0e6dc" if stale else ""
                     return [color] * len(_row)
 
                 try:
@@ -1169,7 +1255,7 @@ def _render_dashboard(
                 except Exception:
                     st.dataframe(view, use_container_width=True, hide_index=True)
                 st.caption(
-                    f"Rows with a **red** background are pending for **more than 24 hours** "
+                    f"Rows with a **subtle oak tint** are pending for **more than 24 hours** "
                     f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
                 )
 
@@ -1221,7 +1307,7 @@ def _render_dashboard(
                     column_config=_dataframe_column_config(open_view),
                 )
 
-                st.subheader("Field photos awaiting review")
+                st.subheader("Gallery view — field photos awaiting review")
                 _render_field_photos_section(open_df)
 
     with tab_completed:
@@ -1271,7 +1357,7 @@ def _render_dashboard(
                     column_config=_dataframe_column_config(done_view),
                 )
 
-                st.subheader("Field photos")
+                st.subheader("Gallery view — completed field photos")
                 _render_field_photos_section(done)
 
     with tab_log:
