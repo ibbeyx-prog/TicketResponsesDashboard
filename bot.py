@@ -1375,24 +1375,29 @@ async def lifespan(_: FastAPI):
                 drop_pending_updates=False,
             )
         except Exception:
-            log.exception("Telegram set_webhook failed (url=%s)", webhook_url)
-            raise
-        log.info("Telegram set_webhook succeeded: %s", webhook_url)
-        try:
-            wh = await bot_app.bot.get_webhook_info()
-            err = (wh.last_error_message or "").strip()
-            if err:
-                log.warning(
-                    "Telegram getWebhookInfo reports a delivery error (fix URL/TLS or secret): %s",
-                    err[:500],
-                )
-            log.info(
-                "Telegram webhook status: url=%r pending_updates=%s",
-                wh.url,
-                wh.pending_update_count,
+            log.exception(
+                "Telegram set_webhook failed (url=%s). Process keeps running so "
+                "/health stays up; fix env or network and redeploy or run "
+                "restore_webhook.py.",
+                webhook_url,
             )
-        except Exception:
-            log.exception("Telegram get_webhook_info failed after set_webhook")
+        else:
+            log.info("Telegram set_webhook succeeded: %s", webhook_url)
+            try:
+                wh = await bot_app.bot.get_webhook_info()
+                err = (wh.last_error_message or "").strip()
+                if err:
+                    log.warning(
+                        "Telegram getWebhookInfo reports a delivery error (fix URL/TLS or secret): %s",
+                        err[:500],
+                    )
+                log.info(
+                    "Telegram webhook status: url=%r pending_updates=%s",
+                    wh.url,
+                    wh.pending_update_count,
+                )
+            except Exception:
+                log.exception("Telegram get_webhook_info failed after set_webhook")
     else:
         log.warning(
             "WEBHOOK_BASE_URL or RAILWAY_PUBLIC_DOMAIN not set; Telegram webhook not registered."
