@@ -762,7 +762,8 @@ _HELP_TEXT = (
     "  3) The active ticket is cleared automatically after a successful save\n"
     "\n"
     "Commands:\n"
-    "  /respond <ticket_id> — start a reply for a ticket\n"
+    "  /start, /help — always available in private (confirm the bot is online)\n"
+    "  /respond <ticket_id> — start a reply for a ticket (may require allowlist)\n"
     "  /active — show the ticket you are currently replying to\n"
     "  /cancel — clear the active ticket without saving\n"
     "  /chatid — show this chat's id (for TELEGRAM_GROUP_CHAT_ID; posts in groups)\n"
@@ -771,17 +772,18 @@ _HELP_TEXT = (
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_sender_allowed(update):
-        await _reply_unauthorized(update, context)
-        return
+    """Public entrypoint: do **not** gate on ``TELEGRAM_ALLOWED_USERNAMES``.
+
+    Otherwise users without a Telegram @username (or anyone not on the list)
+    see no usable reply in private — they think the bot is dead. Operator
+    commands stay gated separately.
+    """
     if update.message:
         await _reply(update, _HELP_TEXT)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_sender_allowed(update):
-        await _reply_unauthorized(update, context)
-        return
+    """Same as ``/start`` — always available so help works in private."""
     if update.message:
         await _reply(update, _HELP_TEXT)
 
