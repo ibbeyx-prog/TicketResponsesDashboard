@@ -32,16 +32,29 @@ import httpx
 from dotenv import load_dotenv
 
 
+def _normalize_webhook_origin(raw: str) -> str:
+    """Strip trailing ``/webhook`` so we never build ``.../webhook/webhook``."""
+    u = raw.strip().rstrip("/")
+    suf = "/webhook"
+    while u.lower().endswith(suf):
+        u = u[: -len(suf)].rstrip("/")
+    return u
+
+
 def _resolve_webhook_url() -> str | None:
-    base = (os.getenv("WEBHOOK_BASE_URL") or "").strip().rstrip("/")
+    base = (os.getenv("WEBHOOK_BASE_URL") or "").strip()
     if base:
-        return f"{base}/webhook"
-    domain = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
-    if not domain:
-        return None
-    if not domain.startswith(("http://", "https://")):
-        domain = f"https://{domain}"
-    return f"{domain.rstrip('/')}/webhook"
+        b = _normalize_webhook_origin(base)
+        if not b:
+            return None
+        return f"{b.rstrip('/')}/webhook"
+    domain_raw = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+    if domain_raw:
+        domain = _normalize_webhook_origin(domain_raw)
+        if not domain.startswith(("http://", "https://")):
+            domain = f"https://{domain}"
+        return f"{domain.rstrip('/')}/webhook"
+    return None
 
 
 def _resolve_public_base() -> str | None:

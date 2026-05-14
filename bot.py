@@ -1312,11 +1312,28 @@ def _build_bot_app() -> Application:
     return bot_app
 
 
+def _normalize_webhook_origin(raw: str) -> str:
+    """Strip accidental ``/webhook`` suffix so we never register ``.../webhook/webhook``.
+
+    Operators often paste the full Telegram callback URL into ``WEBHOOK_BASE_URL``;
+    this repo always appends ``/webhook`` itself, so the duplicate path 404s.
+    """
+    u = raw.strip().rstrip("/")
+    suf = "/webhook"
+    while u.lower().endswith(suf):
+        u = u[: -len(suf)].rstrip("/")
+    return u
+
+
 def _resolve_webhook_url() -> str | None:
     if WEBHOOK_BASE_URL:
-        return f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
-    if RAILWAY_PUBLIC_DOMAIN:
-        domain = RAILWAY_PUBLIC_DOMAIN
+        base = _normalize_webhook_origin(WEBHOOK_BASE_URL)
+        if not base:
+            return None
+        return f"{base.rstrip('/')}/webhook"
+    domain_raw = (RAILWAY_PUBLIC_DOMAIN or "").strip()
+    if domain_raw:
+        domain = _normalize_webhook_origin(domain_raw)
         if not domain.startswith(("http://", "https://")):
             domain = f"https://{domain}"
         return f"{domain.rstrip('/')}/webhook"
@@ -1351,12 +1368,31 @@ async def lifespan(_: FastAPI):
 
     webhook_url = _resolve_webhook_url()
     if webhook_url:
-        await bot_app.bot.set_webhook(
-            url=webhook_url,
-            secret_token=TELEGRAM_WEBHOOK_SECRET,
-            drop_pending_updates=False,
-        )
-        log.info("Webhook registered (secret token enforced): %s", webhook_url)
+        try:
+            await bot_app.bot.set_webhook(
+                url=webhook_url,
+                secret_token=TELEGRAM_WEBHOOK_SECRET,
+                drop_pending_updates=False,
+            )
+        except Exception:
+            log.exception("Telegram set_webhook failed (url=%s)", webhook_url)
+            raise
+        log.info("Telegram set_webhook succeeded: %s", webhook_url)
+        try:
+            wh = await bot_app.bot.get_webhook_info()
+            err = (wh.last_error_message or "").strip()
+            if err:
+                log.warning(
+                    "Telegram getWebhookInfo reports a delivery error (fix URL/TLS or secret): %s",
+                    err[:500],
+                )
+            log.info(
+                "Telegram webhook status: url=%r pending_updates=%s",
+                wh.url,
+                wh.pending_update_count,
+            )
+        except Exception:
+            log.exception("Telegram get_webhook_info failed after set_webhook")
     else:
         log.warning(
             "WEBHOOK_BASE_URL or RAILWAY_PUBLIC_DOMAIN not set; Telegram webhook not registered."
@@ -1382,7 +1418,20 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    """Liveness for load balancers; includes whether a webhook URL is configured in env.
+
+    Does not call Telegram on every request (avoid rate limits). After deploy,
+    read startup logs for ``set_webhook`` / ``get_webhook_info``, or run
+    ``py -3 restore_webhook.py --probe`` from a machine with ``.env``.
+    """
+    url = _resolve_webhook_url()
+    return {
+        "status": "ok",
+        "webhook_url_configured": "yes" if url else "no",
+        # What Telegram is told to POST to (after normalizing env). Compare to
+        # getWebhookInfo.url if you still see 404 — they must match exactly.
+        "telegram_callback_url": url or "",
+    }
 
 
 @app.post("/webhook")
