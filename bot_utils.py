@@ -32,7 +32,12 @@ def _at_username(username: str) -> str:
     return u if u.startswith("@") else f"@{u}"
 
 
-def _build_notify_html(assigned_to: str, ticket_id: str, category: str) -> str:
+def _build_notify_html(
+    assigned_to: str,
+    ticket_id: str,
+    category: str,
+    additional_note: str | None = None,
+) -> str:
     """Return HTML message: line 1 is plain assignment syntax for ``bot.py`` regex.
 
     The bold block is for operators; field replies still match on line 1.
@@ -42,14 +47,20 @@ def _build_notify_html(assigned_to: str, ticket_id: str, category: str) -> str:
     h = html.escape(handle)
     c = html.escape(category)
     t = html.escape(ticket_id)
-    return (
-        f"{line1}\n\n"
-        "<b>📋 NEW ASSIGNMENT FROM DASHBOARD</b>\n\n"
-        f"<b>User:</b> {h}\n"
-        f"<b>Category:</b> {c}\n"
-        f"<b>Ticket ID:</b> {t}\n\n"
-        "<i>Field team: Please reply directly to this message with your updates.</i>"
+    parts = [
+        f"{line1}\n\n",
+        "<b>📋 NEW ASSIGNMENT FROM DASHBOARD</b>\n\n",
+        f"<b>User:</b> {h}\n",
+        f"<b>Category:</b> {c}\n",
+        f"<b>Ticket ID:</b> {t}\n",
+    ]
+    note = (additional_note or "").strip()
+    if note:
+        parts.append(f"\n<b>Additional note:</b> {html.escape(note)}\n")
+    parts.append(
+        "\n<i>Field team: Please reply directly to this message with your updates.</i>"
     )
+    return "".join(parts)
 
 
 def _env_str(*names: str) -> str:
@@ -113,6 +124,7 @@ async def notify_telegram_group(
     ticket_id: str,
     category: str,
     *,
+    additional_note: str | None = None,
     api_id: str | int | None = None,
     api_hash: str | None = None,
     bot_token: str | None = None,
@@ -143,7 +155,7 @@ async def notify_telegram_group(
         api_id_res = _env_str("TG_API_ID", "TELEGRAM_API_ID") or None
     api_hash_res = (api_hash or "").strip() or _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
 
-    text = _build_notify_html(username, ticket_id, category)
+    text = _build_notify_html(username, ticket_id, category, additional_note=additional_note)
     entity = _parse_group_entity(group_raw)
 
     use_telethon = bool(

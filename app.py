@@ -732,14 +732,28 @@ def _cc_upsert_assignment(
     assigned_to: str,
     ticket_number: str,
     task_category: str,
+    *,
+    additional_info: str | None = None,
 ) -> str:
     """Insert or reassign; ``assigned_to`` is ``@username``. Returns a short summary."""
     client = _get_supabase_client()
     existing = _cc_fetch_ticket_minimal(client, ticket_number)
     if existing is None:
-        _cc_insert_assignment(client, ticket_number, assigned_to, task_category)
+        _cc_insert_assignment(
+            client,
+            ticket_number,
+            assigned_to,
+            task_category,
+            additional_info=additional_info,
+        )
         return f"Created ticket **{ticket_number}** and logged assignment."
-    _cc_reassign_ticket(client, ticket_number, assigned_to, task_category)
+    _cc_reassign_ticket(
+        client,
+        ticket_number,
+        assigned_to,
+        task_category,
+        additional_info=additional_info,
+    )
     prev_assignee = existing.get("assigned_to") or "—"
     return (
         f"Re-assigned **{ticket_number}** from {prev_assignee} to {assigned_to}; "
@@ -910,6 +924,12 @@ def _sidebar_command_center() -> None:
             help="Must match the bot assignment format (9 or 16 digits).",
         )
         cat = st.selectbox("Task category", options=list(ASSIGNMENT_TASK_CATEGORIES))
+        additional_note_raw = st.text_area(
+            "Additional Note",
+            placeholder="Optional — site context, access details, etc.",
+            height=88,
+            help="Stored as **additional_info** on the ticket and shown in the Telegram assignment.",
+        )
         submitted = st.form_submit_button("Assign", type="primary", use_container_width=True)
 
     if not submitted:
@@ -927,6 +947,8 @@ def _sidebar_command_center() -> None:
     except ValueError as exc:
         st.error(str(exc))
         return
+
+    additional_info_val = (additional_note_raw or "").strip() or None
 
     if not token or chat_id is None:
         missing_bits: list[str] = []
@@ -949,7 +971,7 @@ def _sidebar_command_center() -> None:
         return
 
     try:
-        summary = _cc_upsert_assignment(handle, tid, cat)
+        summary = _cc_upsert_assignment(handle, tid, cat, additional_info=additional_info_val)
     except Exception as exc:
         st.error(f"Supabase upsert failed: {exc}")
         return
@@ -960,6 +982,7 @@ def _sidebar_command_center() -> None:
                 handle,
                 tid,
                 cat,
+                additional_note=additional_info_val,
                 api_id=_read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None,
                 api_hash=_read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None,
                 bot_token=token or None,
