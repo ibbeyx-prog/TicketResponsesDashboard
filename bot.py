@@ -68,6 +68,8 @@ import hmac
 import logging
 import os
 import re
+import secrets
+import string
 import sys
 import time
 import uuid
@@ -108,6 +110,8 @@ PORT = int(os.getenv("PORT", "8000"))
 RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+# Telegram ``secret_token`` must match ``[A-Za-z0-9_-]{1,256}`` (Bot API).
+_WEBHOOK_SECRET_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 BOT_SESSIONS_TABLE = (os.getenv("BOT_SESSIONS_TABLE") or "bot_sessions").strip()
 TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets_active").strip()
 ATTENDANCE_LOGS_TABLE = (
@@ -127,6 +131,24 @@ if not TELEGRAM_TOKEN:
         "Missing TELEGRAM_TOKEN. "
         f"Checked process env and {_ENV_PATH} (exists={_ENV_PATH.exists()}). "
         "See .env.example for all supported keys."
+    )
+
+_webhook_url_configured = bool(WEBHOOK_BASE_URL) or bool(RAILWAY_PUBLIC_DOMAIN)
+if _webhook_url_configured and not TELEGRAM_WEBHOOK_SECRET:
+    alphabet = string.ascii_letters + string.digits + "_-"
+    example = "".join(secrets.choice(alphabet) for _ in range(32))
+    raise ValueError(
+        "TELEGRAM_WEBHOOK_SECRET is required whenever WEBHOOK_BASE_URL or "
+        "RAILWAY_PUBLIC_DOMAIN is set. Telegram sends it back as the "
+        "X-Telegram-Bot-Api-Secret-Token header on every webhook POST so "
+        "random clients cannot POST fake updates to your /webhook URL. "
+        "Use 1–256 characters from A–Z, a–z, 0–9, underscore, hyphen only. "
+        f"Example (generate your own): {example}"
+    )
+if TELEGRAM_WEBHOOK_SECRET and not _WEBHOOK_SECRET_PATTERN.fullmatch(TELEGRAM_WEBHOOK_SECRET):
+    raise ValueError(
+        "TELEGRAM_WEBHOOK_SECRET must be 1–256 characters from "
+        "A–Z, a–z, 0–9, underscore, hyphen only (Telegram Bot API rule)."
     )
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -1137,10 +1159,20 @@ def _resolve_webhook_url() -> str | None:
 
 
 def _verify_webhook_secret(request: Request) -> None:
+    """Reject webhook POSTs that are not from Telegram (wrong / missing secret).
+
+    When ``TELEGRAM_WEBHOOK_SECRET`` is unset (no webhook URL configured in
+    env), we skip the check so local experiments can hit ``/webhook`` without
+    Telegram headers. When it **is** set — required if ``WEBHOOK_BASE_URL`` /
+    ``RAILWAY_PUBLIC_DOMAIN`` is set — every POST must carry the matching
+    ``X-Telegram-Bot-Api-Secret-Token`` header.
+    """
     if not TELEGRAM_WEBHOOK_SECRET:
         return
     header = request.headers.get("X-Telegram-Bot-Api-Secret-Token") or ""
-    if not hmac.compare_digest(header.encode("utf-8"), TELEGRAM_WEBHOOK_SECRET.encode("utf-8")):
+    if not hmac.compare_digest(
+        header.encode("utf-8"), TELEGRAM_WEBHOOK_SECRET.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing webhook secret")
 
 
@@ -1154,13 +1186,12 @@ async def lifespan(_: FastAPI):
 
     webhook_url = _resolve_webhook_url()
     if webhook_url:
-        secret = TELEGRAM_WEBHOOK_SECRET or None
         await bot_app.bot.set_webhook(
             url=webhook_url,
-            secret_token=secret,
+            secret_token=TELEGRAM_WEBHOOK_SECRET,
             drop_pending_updates=False,
         )
-        log.info("Webhook registered: %s", webhook_url)
+        log.info("Webhook registered (secret token enforced): %s", webhook_url)
     else:
         log.warning(
             "WEBHOOK_BASE_URL or RAILWAY_PUBLIC_DOMAIN not set; Telegram webhook not registered."
@@ -1169,7 +1200,14 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        await bot_app.bot.delete_webhook(drop_pending_updates=False)
+        # Never call ``delete_webhook`` by default: every local ``uvicorn``
+        # shutdown (Ctrl+C, killing a duplicate process, IDE stop) would
+        # clear Telegram's webhook for *this bot token*, so the next group
+        # message never reaches *any* running instance until something calls
+        # ``set_webhook`` again. Rolling deploys on Railway have the same race.
+        # Opt in explicitly when you really want Telegram to stop delivering.
+        if _truthy_env("TELEGRAM_DELETE_WEBHOOK_ON_SHUTDOWN"):
+            await bot_app.bot.delete_webhook(drop_pending_updates=False)
         await bot_app.stop()
         await bot_app.shutdown()
 
