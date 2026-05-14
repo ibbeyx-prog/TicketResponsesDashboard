@@ -36,8 +36,8 @@ field Telegram group via ``notify_telegram_group`` in ``bot_utils.py``:
   ``TG_BOT_TOKEN`` / ``TG_GROUP_ID`` as aliases). A session file
   ``telethon_bot_session.session`` is created next to ``bot_utils.py``.
 
-The first line of the outbound message matches the assignment regex in
-``bot.py`` so field replies resolve.
+The first line of the outbound message is ``@handle <category> <ticket>`` (plain
+text, normal spaces) so the assignment regex in ``bot.py`` matches field replies.
 
 You do **not** need to delete your webhook to find a chat id. That advice only
 applies if you are using ``getUpdates`` in a browser while a webhook is active
@@ -1037,11 +1037,11 @@ def _sidebar_command_center() -> None:
             help="Must match the bot assignment format (9 or 16 digits).",
         )
         cat = st.selectbox("Task category", options=list(ASSIGNMENT_TASK_CATEGORIES))
-        additional_note_raw = st.text_area(
-            "Additional Note",
+        additional_info_raw = st.text_area(
+            "Additional info",
             placeholder="Optional — site context, access details, etc.",
             height=88,
-            help="Stored as **additional_info** on the ticket and shown in the Telegram assignment.",
+            help="Saved to the ticket's **additional_info** column and the same text appears in the Telegram assignment.",
         )
         submitted = st.form_submit_button("Assign", type="primary", use_container_width=True)
 
@@ -1064,7 +1064,7 @@ def _sidebar_command_center() -> None:
         st.error(str(exc))
         return
 
-    additional_info_val = (additional_note_raw or "").strip() or None
+    additional_info_val = (additional_info_raw or "").strip() or None
 
     # Form widgets with ``key=`` sometimes leave return values empty on submit;
     # merge ``st.session_state`` (updated when the form posts).
@@ -1122,7 +1122,7 @@ def _sidebar_command_center() -> None:
                 handle,
                 tid,
                 cat,
-                additional_note=additional_info_val,
+                additional_info=additional_info_val,
                 api_id=_read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None,
                 api_hash=_read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None,
                 bot_token=token or None,
@@ -1419,7 +1419,9 @@ def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
     stacked = pd.concat([_parse_ts(df[c]) for c in cols], axis=1)
     ref = stacked.max(axis=1, skipna=True)
     cutoff = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC") - pd.Timedelta(days=lookback_days)
-    mask = ref.notna() & (ref >= cutoff)
+    # Keep rows with no parseable timestamps so a bad/legacy cell does not wipe
+    # the whole dashboard (everything became NaT → empty frame).
+    mask = ref.isna() | (ref >= cutoff)
     return df[mask].copy()
 
 
@@ -1433,6 +1435,16 @@ def _render_dashboard(
         df_all = _fetch_tickets()
     except _TableMissingError as missing:
         _render_missing_table_help(missing.table)
+        return
+    except Exception as exc:
+        st.error(f"Could not load tickets from Supabase: {exc}")
+        st.caption(
+            "Check `SUPABASE_URL` / `SUPABASE_KEY` / `TICKETS_TABLE` in env or Streamlit "
+            "Secrets. If the key is the **anon** publishable key, ensure RLS policies on "
+            f"`{TICKETS_TABLE}` allow **select** (and **update** for Command Center). "
+            "Apply pending SQL migrations if this project recently renamed `tickets` → "
+            "`tickets_active`."
+        )
         return
 
     if df_all.empty:
