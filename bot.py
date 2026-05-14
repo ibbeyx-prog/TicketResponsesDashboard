@@ -74,6 +74,7 @@ Database expectations
 from __future__ import annotations
 
 import hmac
+import html
 import logging
 import os
 import re
@@ -222,6 +223,11 @@ _ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
 
 _CATEGORY_ALTS: str = "|".join(re.escape(cat) for cat in _ASSIGNMENT_TASK_CATEGORIES)
 
+# Telegram usernames: 5–32 chars, [A-Za-z0-9_], must start with a letter. Avoid
+# ``\\w`` (Unicode "letters") so odd scripts cannot steal the @-capture.
+_ASSIGNMENT_HANDLE = r"@[A-Za-z][A-Za-z0-9_]{3,31}"
+_NEXT_ASSIGNMENT_HEAD = rf"(?:{_ASSIGNMENT_HANDLE})\s+(?:{_CATEGORY_ALTS})\s+[0-9]"
+
 # Groups:
 #   1 = @username, 2 = category, 3 = ticket_number (9 or 16 digits),
 #   4 / named "info" = any additional text after the ticket number, up to
@@ -231,9 +237,9 @@ _CATEGORY_ALTS: str = "|".join(re.escape(cat) for cat in _ASSIGNMENT_TASK_CATEGO
 # pattern; we don't use `re.DOTALL` so the rest of the pattern keeps its
 # default semantics.
 _ASSIGNMENT_PATTERN: re.Pattern[str] = re.compile(
-    rf"(@\w+)\s+({_CATEGORY_ALTS})\s+(\d{{16}}|\d{{9}})"
+    rf"({_ASSIGNMENT_HANDLE})\s+({_CATEGORY_ALTS})\s+((?:[0-9]{{16}})|(?:[0-9]{{9}}))"
     rf"(?P<info>[\s\S]*?)"
-    rf"(?=(?:@\w+\s+(?:{_CATEGORY_ALTS})\s+\d)|\Z)"
+    rf"(?=(?:{_NEXT_ASSIGNMENT_HEAD})|\Z)"
 )
 
 
@@ -243,13 +249,37 @@ def _normalize_assignment_blob(blob: str) -> str:
     Non-breaking spaces (``\\xa0``) and other unicode spaces often appear
     when messages are copied from spreadsheets; they break ``\\s``-based
     patterns if left in place.
+
+    Dashboard / bot posts may use HTML parse mode; Telegram sometimes
+    delivers ``reply_to_message.text`` with tags still present. Strip those
+    so ``@user <Category> <ticket>`` on line 1 matches reliably.
     """
     if not blob:
         return ""
     s = str(blob).replace("\ufeff", "")
+    s = html.unescape(s)
+    s = re.sub(r"<[^>]+>", " ", s)
     s = s.replace("\u00a0", " ").replace("\u200b", "").replace("\u200c", "")
+    s = s.replace("\u200e", "").replace("\u200f", "")  # LRM / RLM around mentions
+    s = re.sub(r"[\u202A-\u202E\u2066-\u2069]", "", s)  # bidi embedding (can break ticket digits)
     s = re.sub(r"[\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]", " ", s)
+    # Emoji / variation selectors sometimes attach to the category token.
+    s = re.sub(r"[\uFE00-\uFE0F]", "", s)
+    s = re.sub(r"[ \t]+", " ", s)
     return s
+
+
+def _parent_assignment_blob(parent: object) -> str:
+    """Text used to match ``@user <Category> <ticket>`` on the replied-to message.
+
+    PTB 21+ may set ``reply_to_message`` to ``InaccessibleMessage`` (no text);
+    ignore those instead of treating them as empty ``Message`` payloads.
+    """
+    if parent is None or not isinstance(parent, Message):
+        return ""
+    return _normalize_assignment_blob(
+        f"{parent.text or ''}\n{parent.caption or ''}"
+    )
 
 
 def _clean_assignment_info(raw: str | None) -> str | None:
@@ -276,7 +306,7 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         parent = message.reply_to_message
         if not parent:
             return False
-        blob = _normalize_assignment_blob(f"{parent.text or ''}\n{parent.caption or ''}")
+        blob = _parent_assignment_blob(parent)
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
@@ -495,9 +525,19 @@ def _execute_ticket_update(
     last_err: Exception | None = None
     for _ in range(4):
         try:
-            supabase.table(TICKETS_TABLE).update(attempt).eq(
-                "ticket_number", ticket_number
-            ).execute()
+            res = (
+                supabase.table(TICKETS_TABLE)
+                .update(attempt)
+                .eq("ticket_number", ticket_number)
+                .select("ticket_number")
+                .execute()
+            )
+            rows = res.data if res and getattr(res, "data", None) is not None else []
+            if not rows:
+                raise RuntimeError(
+                    "ticket update affected 0 rows "
+                    f"(ticket_number={ticket_number!r}, table={TICKETS_TABLE!r})"
+                )
             return
         except Exception as exc:
             text = str(exc)
@@ -892,23 +932,44 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     on the ``tickets`` row (Telegram ``@username``, case-insensitive).
     """
     msg = update.message
+    parent_preview = ""
+    if msg and msg.reply_to_message:
+        pr = msg.reply_to_message
+        if isinstance(pr, Message):
+            parent_preview = ((pr.text or "") + "\n" + (pr.caption or ""))[:200]
+        else:
+            parent_preview = f"<{type(pr).__name__}>"
     log.info(
         "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r",
         _chat_id(update),
         (update.effective_user.username if update.effective_user else None),
         (msg.text[:120] if msg and msg.text else (msg.caption[:120] if msg and msg.caption else None)),
-        ((msg.reply_to_message.text or msg.reply_to_message.caption or "")[:120]
-         if msg and msg.reply_to_message else None),
+        parent_preview,
     )
     if not msg or not msg.reply_to_message:
         return
 
     parent = msg.reply_to_message
-    parent_blob = _normalize_assignment_blob(f"{parent.text or ''}\n{parent.caption or ''}")
+    if not isinstance(parent, Message):
+        log.warning(
+            "field_reply ignored: reply parent is not a readable Message (type=%s)",
+            type(parent).__name__,
+        )
+        return
+
+    parent_blob = _parent_assignment_blob(parent)
     username = update.effective_user.username if update.effective_user else None
 
     ticket_number = _resolve_ticket_from_assignment_reply(parent_blob, username)
     if not ticket_number:
+        match_n = len(list(_ASSIGNMENT_PATTERN.finditer(parent_blob)))
+        log.warning(
+            "field_reply no ticket match chat=%s user=@%s parent_matches=%s parent_head=%r",
+            _chat_id(update),
+            username,
+            match_n,
+            parent_blob[:400],
+        )
         if not username:
             await _reply(update, 
                 "Could not match this reply to a ticket. "
@@ -933,13 +994,24 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if not _sender_matches_assigned_to(row.get("assigned_to"), username):
+        log.warning(
+            "field_reply assignee mismatch ticket=%s db_assigned_to=%r replier=@%s",
+            ticket_number,
+            row.get("assigned_to"),
+            username,
+        )
         await _reply(update, "You are not the assignee for that ticket.")
         return
 
     has_photo = bool(msg.photo)
+    image_doc = (
+        msg.document
+        if msg.document and (msg.document.mime_type or "").startswith("image/")
+        else None
+    )
     caption_or_text = (msg.caption or msg.text or "").strip() or None
 
-    if not has_photo and not caption_or_text:
+    if not has_photo and not image_doc and not caption_or_text:
         await _reply(update, 
             "Send a text message or a photo (optional caption) to complete this task."
         )
@@ -985,6 +1057,46 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             _chat_id(update),
         )
         await _reply(update, f"Ticket {ticket_number} sent for admin review (photo saved).")
+    elif image_doc is not None:
+        if not _is_group_chat(update):
+            try:
+                await context.bot.send_chat_action(
+                    chat_id=msg.chat_id,
+                    action=ChatAction.UPLOAD_PHOTO,
+                )
+            except Exception:
+                pass
+        try:
+            tg_file = await context.bot.get_file(image_doc.file_id)
+            raw = await tg_file.download_as_bytearray()
+            image_bytes = bytes(raw)
+            mime = (image_doc.mime_type or "image/jpeg").split(";")[0].strip()
+            upload_url = _storage_upload_ticket_photo(ticket_number, image_bytes, mime)
+        except Exception:
+            log.exception("document image download or storage upload failed")
+            await _reply(update, "Could not upload the image file. Please try again.")
+            return
+        responder_handle = f"@{username}" if username else "@unknown"
+        try:
+            _db_complete_ticket_field_response(
+                ticket_number,
+                field_response=caption_or_text,
+                photo_url=upload_url,
+                update_photo_url=True,
+                responder_username=responder_handle,
+            )
+        except Exception:
+            log.exception("ticket field completion update failed")
+            await _reply(update, 
+                f"Image uploaded but ticket {ticket_number} could not be updated in the database."
+            )
+            return
+        log.info(
+            "field response saved ticket=%s chat=%s document_image=1",
+            ticket_number,
+            _chat_id(update),
+        )
+        await _reply(update, f"Ticket {ticket_number} sent for admin review (image saved).")
     else:
         responder_handle = f"@{username}" if username else "@unknown"
         try:
@@ -1168,10 +1280,17 @@ def _build_bot_app() -> Application:
     bot_app.add_handler(CommandHandler("active", active_cmd))
     bot_app.add_handler(CommandHandler("cancel", cancel_cmd))
     bot_app.add_handler(CommandHandler("respond", respond_cmd))
+    _field_reply_media = (
+        filters.PHOTO
+        | filters.TEXT
+        | filters.Document.JPG
+        | filters.Document.MimeType("image/png")
+        | filters.Document.MimeType("image/webp")
+    )
     _field_reply_filter = (
         filters.REPLY
         & ~filters.COMMAND
-        & (filters.PHOTO | filters.TEXT)
+        & _field_reply_media
         & _ReplyToAssignmentFilter()
     )
     bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))

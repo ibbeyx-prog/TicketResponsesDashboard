@@ -71,8 +71,21 @@ def _env_str(*names: str) -> str:
     return ""
 
 
+def normalize_telegram_group_id_paste(raw: str) -> str:
+    """Strip whitespace, BOM/zero-width, and one layer of matching quotes (copy/paste)."""
+    s = raw.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").strip()
+    if len(s) >= 2:
+        if (s[0] == s[-1] == '"') or (s[0] == s[-1] == "'"):
+            s = s[1:-1].strip()
+        elif s.startswith("\u201c") and s.endswith("\u201d"):
+            s = s[1:-1].strip()
+        elif s.startswith("\u2018") and s.endswith("\u2019"):
+            s = s[1:-1].strip()
+    return s.strip()
+
+
 def _parse_group_entity(raw: str) -> int | str:
-    s = raw.strip()
+    s = normalize_telegram_group_id_paste(raw)
     if s.startswith("@"):
         return s
     return int(s)
@@ -83,7 +96,14 @@ def _coalesce_group_id(group_id: int | str | None) -> str:
         s = str(group_id).strip()
         if s:
             return s
-    return _env_str("TG_GROUP_ID", "TELEGRAM_GROUP_ID", "TELEGRAM_GROUP_CHAT_ID")
+    return _env_str(
+        "TG_GROUP_ID",
+        "TELEGRAM_GROUP_ID",
+        "TELEGRAM_GROUP_CHAT_ID",
+        "TELEGRAM_CHAT_ID",
+        "GROUP_CHAT_ID",
+        "FIELD_GROUP_CHAT_ID",
+    )
 
 
 async def _send_via_ptb(
@@ -141,6 +161,7 @@ async def notify_telegram_group(
     - ``TG_API_HASH`` / ``TELEGRAM_API_HASH``
     - ``TG_BOT_TOKEN`` / ``TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_TOKEN``
     - ``TG_GROUP_ID`` / ``TELEGRAM_GROUP_ID`` / ``TELEGRAM_GROUP_CHAT_ID``
+      / ``TELEGRAM_CHAT_ID`` / ``GROUP_CHAT_ID``
     """
     token = (bot_token or "").strip() or _env_str("TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN")
     group_raw = _coalesce_group_id(group_id)
