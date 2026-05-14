@@ -1045,6 +1045,9 @@ _BON_THEME_CSS = """
 
 def _inject_bon_theme() -> None:
     st.markdown(_BON_THEME_CSS, unsafe_allow_html=True)
+
+
+def _format_when(when: object) -> str:
     if when is None:
         return ""
     try:
