@@ -102,8 +102,10 @@ from telegram.ext import (
     filters,
 )
 
+from webhook_config import resolve_telegram_webhook_url
+
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(_ENV_PATH, encoding="utf-8-sig")
+load_dotenv(_ENV_PATH, encoding="utf-8-sig", override=True)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -116,8 +118,6 @@ SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 PORT = int(os.getenv("PORT", "8000"))
-RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 # Telegram ``secret_token`` must match ``[A-Za-z0-9_-]{1,256}`` (Bot API).
 _WEBHOOK_SECRET_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
@@ -142,15 +142,16 @@ if not TELEGRAM_TOKEN:
         "See .env.example for all supported keys."
     )
 
-_webhook_url_configured = bool(WEBHOOK_BASE_URL) or bool(RAILWAY_PUBLIC_DOMAIN)
+_webhook_url_configured = resolve_telegram_webhook_url() is not None
 if _webhook_url_configured and not TELEGRAM_WEBHOOK_SECRET:
     alphabet = string.ascii_letters + string.digits + "_-"
     example = "".join(secrets.choice(alphabet) for _ in range(32))
     raise ValueError(
-        "TELEGRAM_WEBHOOK_SECRET is required whenever WEBHOOK_BASE_URL or "
-        "RAILWAY_PUBLIC_DOMAIN is set. Telegram sends it back as the "
-        "X-Telegram-Bot-Api-Secret-Token header on every webhook POST so "
-        "random clients cannot POST fake updates to your /webhook URL. "
+        "TELEGRAM_WEBHOOK_SECRET is required whenever a webhook URL is set "
+        "(RAILWAY_PUBLIC_DOMAIN, WEBHOOK_BASE_URL, or WEBHOOK_FULL_URL). "
+        "Telegram sends it back as the X-Telegram-Bot-Api-Secret-Token header "
+        "on every webhook POST so random clients cannot POST fake updates to "
+        "your /webhook URL. "
         "Use 1–256 characters from A–Z, a–z, 0–9, underscore, hyphen only. "
         f"Example (generate your own): {example}"
     )
@@ -1314,41 +1315,14 @@ def _build_bot_app() -> Application:
     return bot_app
 
 
-def _normalize_webhook_origin(raw: str) -> str:
-    """Strip accidental ``/webhook`` suffix so we never register ``.../webhook/webhook``.
-
-    Operators often paste the full Telegram callback URL into ``WEBHOOK_BASE_URL``;
-    this repo always appends ``/webhook`` itself, so the duplicate path 404s.
-    """
-    u = raw.strip().rstrip("/")
-    suf = "/webhook"
-    while u.lower().endswith(suf):
-        u = u[: -len(suf)].rstrip("/")
-    return u
-
-
-def _resolve_webhook_url() -> str | None:
-    if WEBHOOK_BASE_URL:
-        base = _normalize_webhook_origin(WEBHOOK_BASE_URL)
-        if not base:
-            return None
-        return f"{base.rstrip('/')}/webhook"
-    domain_raw = (RAILWAY_PUBLIC_DOMAIN or "").strip()
-    if domain_raw:
-        domain = _normalize_webhook_origin(domain_raw)
-        if not domain.startswith(("http://", "https://")):
-            domain = f"https://{domain}"
-        return f"{domain.rstrip('/')}/webhook"
-    return None
-
-
 def _verify_webhook_secret(request: Request) -> None:
     """Reject webhook POSTs that are not from Telegram (wrong / missing secret).
 
     When ``TELEGRAM_WEBHOOK_SECRET`` is unset (no webhook URL configured in
     env), we skip the check so local experiments can hit ``/webhook`` without
-    Telegram headers. When it **is** set — required if ``WEBHOOK_BASE_URL`` /
-    ``RAILWAY_PUBLIC_DOMAIN`` is set — every POST must carry the matching
+    Telegram headers. When it **is** set — required if a webhook URL is
+    configured (``WEBHOOK_FULL_URL``, ``WEBHOOK_BASE_URL``, or
+    ``RAILWAY_PUBLIC_DOMAIN``) — every POST must carry the matching
     ``X-Telegram-Bot-Api-Secret-Token`` header.
     """
     if not TELEGRAM_WEBHOOK_SECRET:
@@ -1368,7 +1342,7 @@ async def lifespan(_: FastAPI):
     await bot_app.initialize()
     await bot_app.start()
 
-    webhook_url = _resolve_webhook_url()
+    webhook_url = resolve_telegram_webhook_url()
     if webhook_url:
         try:
             await bot_app.bot.set_webhook(
@@ -1402,7 +1376,8 @@ async def lifespan(_: FastAPI):
                 log.exception("Telegram get_webhook_info failed after set_webhook")
     else:
         log.warning(
-            "WEBHOOK_BASE_URL or RAILWAY_PUBLIC_DOMAIN not set; Telegram webhook not registered."
+            "No webhook URL configured (set RAILWAY_PUBLIC_DOMAIN, WEBHOOK_BASE_URL, or "
+            "WEBHOOK_FULL_URL); Telegram webhook not registered."
         )
 
     try:
@@ -1423,6 +1398,12 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    """Shallow root so probes to ``/`` do not 404; use ``/health`` for webhook hints."""
+    return {"service": "ticket_bot", "health": "/health", "webhook": "/webhook"}
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Liveness for load balancers; includes whether a webhook URL is configured in env.
@@ -1431,7 +1412,7 @@ async def health() -> dict[str, str]:
     read startup logs for ``set_webhook`` / ``get_webhook_info``, or run
     ``py -3 restore_webhook.py --probe`` from a machine with ``.env``.
     """
-    url = _resolve_webhook_url()
+    url = resolve_telegram_webhook_url()
     return {
         "status": "ok",
         "webhook_url_configured": "yes" if url else "no",
@@ -1442,6 +1423,7 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/webhook")
+@app.post("/webhook/")
 async def webhook_handler(request: Request) -> dict[str, str]:
     _verify_webhook_secret(request)
 
