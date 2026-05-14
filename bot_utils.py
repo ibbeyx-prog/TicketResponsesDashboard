@@ -72,7 +72,7 @@ def _coalesce_group_id(group_id: int | str | None) -> str:
         s = str(group_id).strip()
         if s:
             return s
-    return _env_str("TG_GROUP_ID", "TELEGRAM_GROUP_CHAT_ID")
+    return _env_str("TG_GROUP_ID", "TELEGRAM_GROUP_ID", "TELEGRAM_GROUP_CHAT_ID")
 
 
 async def _send_via_ptb(
@@ -127,10 +127,10 @@ async def notify_telegram_group(
 
     - ``TG_API_ID`` / ``TELEGRAM_API_ID``
     - ``TG_API_HASH`` / ``TELEGRAM_API_HASH``
-    - ``TG_BOT_TOKEN`` / ``TELEGRAM_TOKEN``
-    - ``TG_GROUP_ID`` / ``TELEGRAM_GROUP_CHAT_ID``
+    - ``TG_BOT_TOKEN`` / ``TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_TOKEN``
+    - ``TG_GROUP_ID`` / ``TELEGRAM_GROUP_ID`` / ``TELEGRAM_GROUP_CHAT_ID``
     """
-    token = (bot_token or "").strip() or _env_str("TG_BOT_TOKEN", "TELEGRAM_TOKEN")
+    token = (bot_token or "").strip() or _env_str("TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN")
     group_raw = _coalesce_group_id(group_id)
     if not token or not group_raw:
         raise ValueError(

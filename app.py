@@ -771,10 +771,12 @@ def _sidebar_command_center() -> None:
     st.header("Command Center")
     token = (
         _read_setting("TG_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_BOT_TOKEN").strip()
         or _read_setting("TELEGRAM_TOKEN").strip()
     )
     chat_raw = (
         _read_setting("TG_GROUP_ID").strip()
+        or _read_setting("TELEGRAM_GROUP_ID").strip()
         or _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
     )
     chat_id: int | str | None = None
@@ -786,10 +788,10 @@ def _sidebar_command_center() -> None:
 
     if not token or chat_id is None:
         st.caption(
-            "Add **TELEGRAM_TOKEN** (or **TG_BOT_TOKEN**) and **TELEGRAM_GROUP_CHAT_ID** "
-            "(or **TG_GROUP_ID**) in `.env` or Streamlit secrets so each assign is posted "
-            "after the Supabase upsert. Optional: **TG_API_ID** + **TG_API_HASH** to send "
-            "via Telethon (see `bot_utils.py`)."
+            "Add a **bot token** (**TELEGRAM_TOKEN**, **TELEGRAM_BOT_TOKEN**, or **TG_BOT_TOKEN**) "
+            "and a **group id** (**TELEGRAM_GROUP_CHAT_ID**, **TELEGRAM_GROUP_ID**, or **TG_GROUP_ID**) "
+            "in `.env` or Streamlit secrets. Optional: **TG_API_ID** + **TG_API_HASH** for Telethon "
+            "(see `bot_utils.py`). **Restart Streamlit** after saving `.env`."
         )
         with st.expander("Finding the group chat id (no webhook delete needed)"):
             st.markdown(
@@ -834,7 +836,23 @@ def _sidebar_command_center() -> None:
         return
 
     if not token or chat_id is None:
-        st.error("Configure Telegram token and group chat id before assigning.")
+        missing_bits: list[str] = []
+        if not token:
+            missing_bits.append(
+                "no bot token — set **TELEGRAM_TOKEN** (or **TELEGRAM_BOT_TOKEN** / **TG_BOT_TOKEN**)"
+            )
+        if not chat_raw:
+            missing_bits.append(
+                "no group id — set **TELEGRAM_GROUP_CHAT_ID** (or **TELEGRAM_GROUP_ID** / **TG_GROUP_ID**)"
+            )
+        elif chat_id is None:
+            missing_bits.append(
+                f"group id **{chat_raw[:72]}** is not a valid integer or **@** public username"
+            )
+        st.error(
+            "Cannot post to Telegram yet. " + " · ".join(missing_bits) + ". "
+            "Restart `streamlit run` after editing `.env`. On Streamlit Cloud, use **Secrets** (not only a local `.env`)."
+        )
         return
 
     try:
