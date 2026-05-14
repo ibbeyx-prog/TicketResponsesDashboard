@@ -62,7 +62,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from bot_utils import notify_telegram_group
+from bot_utils import normalize_telegram_group_id_paste, notify_telegram_group
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -80,20 +80,101 @@ _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH, encoding="utf-8-sig")
 
 
+def _mapping_scalar_get(container: object, key: str) -> str | None:
+    """Read ``key`` from a dict-like or attribute-style Streamlit secrets subsection."""
+    if container is None:
+        return None
+    if isinstance(container, dict):
+        if key in container:
+            v = container[key]
+        else:
+            lk = key.lower()
+            v = next((container[k] for k in container if str(k).lower() == lk), None)
+    else:
+        try:
+            v = container[key]  # type: ignore[index]
+        except Exception:
+            v = getattr(container, key, None)
+    if v in (None, ""):
+        return None
+    s = str(v).strip()
+    return s or None
+
+
 def _read_setting(key: str, default: str = "") -> str:
     """Return ``key`` from process env, falling back to ``st.secrets``.
+
+    Also checks nested tables some teams use in Secrets TOML, e.g.::
+
+        [telegram]
+        TELEGRAM_GROUP_CHAT_ID = "-5149869288"
 
     ``st.secrets`` raises ``StreamlitSecretNotFoundError`` when no secrets
     file/section exists (typical on a fresh local run); we treat that the
     same as "not set".
     """
     value = os.getenv(key)
-    if value is None or value == "":
+    if value not in (None, ""):
+        return str(value).strip()
+
+    try:
+        v = st.secrets[key]  # type: ignore[index]
+        if v not in (None, "") and str(v).strip() != "":
+            return str(v).strip()
+    except Exception:
+        pass
+
+    for sect in ("telegram", "TELEGRAM", "tg"):
         try:
-            value = st.secrets[key]  # type: ignore[index]
+            nested = st.secrets[sect]  # type: ignore[index]
         except Exception:
-            value = default
-    return str(value or default).strip()
+            continue
+        v = _mapping_scalar_get(nested, key)
+        if v:
+            return v
+
+    return str(default or "").strip()
+
+
+def _read_nested_secret_sections(*keys: str) -> str:
+    """Return first non-empty ``keys`` entry under ``[telegram]`` / ``[TELEGRAM]`` / ``[tg]``."""
+    for sect in ("telegram", "TELEGRAM", "tg"):
+        try:
+            nested = st.secrets[sect]  # type: ignore[index]
+        except Exception:
+            continue
+        for k in keys:
+            v = _mapping_scalar_get(nested, k)
+            if v:
+                return v
+    return ""
+
+
+def _read_telegram_group_chat_raw() -> str:
+    """Resolve field-group chat id from env and ``st.secrets`` (top-level + common sub-tables)."""
+    primary = (
+        _read_setting("TG_GROUP_ID").strip()
+        or _read_setting("TELEGRAM_GROUP_ID").strip()
+        or _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
+        or _read_setting("TELEGRAM_CHAT_ID").strip()
+        or _read_setting("GROUP_CHAT_ID").strip()
+        or _read_setting("FIELD_GROUP_CHAT_ID").strip()
+    )
+    if primary:
+        return primary
+    nested_keys = (
+        "TG_GROUP_ID",
+        "TELEGRAM_GROUP_ID",
+        "TELEGRAM_GROUP_CHAT_ID",
+        "TELEGRAM_CHAT_ID",
+        "GROUP_CHAT_ID",
+        "FIELD_GROUP_CHAT_ID",
+        "group_chat_id",
+        "group_id",
+        "field_group_chat_id",
+        "telegram_group_chat_id",
+    )
+    return _read_nested_secret_sections(*nested_keys).strip()
 
 
 SUPABASE_URL = _read_setting("SUPABASE_URL").rstrip("/")
@@ -120,8 +201,8 @@ ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
-_CC_SESSION_GROUP_KEY = "_ticket_dashboard_cc_group_id_session"
 _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
+_CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -769,7 +850,7 @@ def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | Non
     Telegram accepts a negative numeric id or ``@channelusername`` for public
     chats. No webhook deletion is required to configure this.
     """
-    s = raw.strip()
+    s = normalize_telegram_group_id_paste(raw)
     if not s:
         return None, None
     if s.startswith("@"):
@@ -825,56 +906,66 @@ def _delete_field_engineer(username: str) -> None:
 
 
 def _field_team_directory_ui() -> tuple[list[str], bool]:
-    """Render expander to add/remove handles; return ``(names, table_missing)``."""
+    """Field team directory in a collapsible expander; return ``(names, table_missing)``."""
     names, missing = _try_fetch_field_engineer_usernames()
-    with st.expander("Field team (Telegram handles)", expanded=False):
+    with st.expander("Field team", expanded=False):
         if missing:
             st.info(
                 f"Add table `{FIELD_ENGINEERS_TABLE}` in Supabase (see migration "
                 f"`supabase/migrations/20260515_dashboard_field_engineers.sql`), "
-                "then refresh. Until then, use **Or type @username** when assigning."
+                "then refresh. Until then, use the **Field engineer** box in the assign form."
             )
             return names, True
         if not names:
-            st.caption("No handles in the directory yet — add one below.")
+            st.caption("No handles yet — add below.")
         for u in names:
-            c1, c2 = st.columns((5, 1))
-            c1.markdown(f"**@{u}**")
-            key = hashlib.sha256(u.encode("utf-8")).hexdigest()[:16]
-            if c2.button("Remove", key=f"fe_rm_{key}"):
-                try:
-                    _delete_field_engineer(u)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
-        st.divider()
-        st.text_input(
-            "New handle (letters, digits, underscore; no @)",
-            key="fe_new_handle",
-            placeholder="engineer_name",
-        )
-        if st.button("Add to team", key="fe_add_btn"):
-            raw = str(st.session_state.get("fe_new_handle") or "").strip()
-            if not raw:
-                st.warning("Enter a handle first.")
-            else:
-                try:
-                    norm = _normalize_engineer_dir_handle(raw)
-                    existing, _ = _try_fetch_field_engineer_usernames()
-                    if any(e.lower() == norm.lower() for e in existing):
-                        st.warning(f"**@{norm}** is already in the list (case-insensitive).")
-                    else:
-                        _insert_field_engineer(norm)
-                        st.session_state.pop("fe_new_handle", None)
+            c1, c2 = st.columns([14, 1])
+            with c1:
+                st.markdown(f"**@{u}**")
+            with c2:
+                hkey = hashlib.sha256(u.encode("utf-8")).hexdigest()[:16]
+                if st.button(
+                    "🗑",
+                    key=f"fe_rm_{hkey}",
+                    help=f"Remove @{u}",
+                    type="secondary",
+                ):
+                    try:
+                        _delete_field_engineer(u)
                         st.rerun()
-                except ValueError as ve:
-                    st.error(str(ve))
-                except Exception as exc:
-                    err = str(exc).lower()
-                    if "duplicate" in err or "23505" in str(exc) or "unique" in err:
-                        st.warning("That handle is already in the directory.")
-                    else:
+                    except Exception as exc:
                         st.error(str(exc))
+        add_left, add_right = st.columns([6, 1])
+        with add_left:
+            st.text_input(
+                "New handle",
+                key="fe_new_handle",
+                placeholder="engineer_name",
+                label_visibility="collapsed",
+            )
+        with add_right:
+            if st.button("+", key="fe_add_btn", help="Add to team", type="secondary"):
+                raw = str(st.session_state.get("fe_new_handle") or "").strip()
+                if not raw:
+                    st.warning("Enter a handle first.")
+                else:
+                    try:
+                        norm = _normalize_engineer_dir_handle(raw)
+                        existing, _ = _try_fetch_field_engineer_usernames()
+                        if any(e.lower() == norm.lower() for e in existing):
+                            st.warning(f"**@{norm}** is already in the list (case-insensitive).")
+                        else:
+                            _insert_field_engineer(norm)
+                            st.session_state.pop("fe_new_handle", None)
+                            st.rerun()
+                    except ValueError as ve:
+                        st.error(str(ve))
+                    except Exception as exc:
+                        err = str(exc).lower()
+                        if "duplicate" in err or "23505" in str(exc) or "unique" in err:
+                            st.warning("That handle is already in the directory.")
+                        else:
+                            st.error(str(exc))
     return names, False
 
 
@@ -889,62 +980,57 @@ def _sidebar_command_center() -> None:
         or _read_setting("TELEGRAM_BOT_TOKEN").strip()
         or _read_setting("TELEGRAM_TOKEN").strip()
     )
-    env_chat_raw = (
-        _read_setting("TG_GROUP_ID").strip()
-        or _read_setting("TELEGRAM_GROUP_ID").strip()
-        or _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
-    )
-
-    if not token_env:
-        st.text_input(
-            "Bot token (this session only)",
-            type="password",
-            key=_CC_SESSION_TOKEN_KEY,
-            placeholder="Paste TELEGRAM_TOKEN if missing from .env / Secrets",
-            help="Not saved to disk. Prefer **TELEGRAM_TOKEN** in `.env` or Streamlit Secrets.",
-        )
-    if not env_chat_raw:
-        st.text_input(
-            "Group chat id (this session only)",
-            key=_CC_SESSION_GROUP_KEY,
-            placeholder="-100xxxxxxxxxx or @YourPublicGroup",
-            help="Not saved to disk. Prefer **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) in `.env` or Secrets; use **/chatid** in the field group to discover the id.",
-        )
-
-    token = (
-        token_env
-        or str(st.session_state.get(_CC_SESSION_TOKEN_KEY, "")).strip()
-    )
-    chat_raw = (
-        env_chat_raw
-        or str(st.session_state.get(_CC_SESSION_GROUP_KEY, "")).strip()
-    )
-    chat_id: int | str | None = None
-    chat_parse_err: str | None = None
-    if chat_raw:
-        chat_id, chat_parse_err = _parse_telegram_group_chat_id(chat_raw)
-        if chat_parse_err:
-            st.warning(chat_parse_err)
+    env_chat_raw = _read_telegram_group_chat_raw()
+    env_group_parsed: int | str | None = None
+    env_group_warn: str | None = None
+    if env_chat_raw:
+        env_group_parsed, env_group_warn = _parse_telegram_group_chat_id(env_chat_raw)
+        if env_group_warn:
+            st.warning(
+                "Group id from env / Streamlit Secrets is invalid. "
+                + env_group_warn
+                + " Fix **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) in Secrets / `.env` and restart."
+            )
+    env_group_ok = env_group_parsed is not None
 
     fe_names, fe_missing = _field_team_directory_ui()
 
-    _MANUAL_ASSIGNEE = "— Type @username below —"
     pick_choice: str | None = None
+    fe_handle_raw = ""
+    token_session = ""
+    chat_session = ""
     with st.form("cc_assign_form"):
+        # Session token only when env/Secrets lack it.
+        if not token_env:
+            token_session = st.text_input(
+                "Bot token (this session only)",
+                type="password",
+                key=_CC_SESSION_TOKEN_KEY,
+                placeholder="Paste TELEGRAM_TOKEN if missing from .env / Secrets",
+                help="Not saved to disk. Prefer **TELEGRAM_TOKEN** in `.env` or Streamlit Secrets.",
+            )
+        if not env_group_ok:
+            chat_session = st.text_input(
+                "Group chat id (only if missing from Secrets)",
+                key=_CC_SESSION_GROUP_KEY,
+                placeholder="-5149869288 or -100… or @YourPublicGroup",
+                help="Hidden when **TELEGRAM_GROUP_CHAT_ID** (or nested `[telegram]` keys) is valid. "
+                "Paste the group id here if the app still cannot read Secrets, then Assign.",
+            )
         if fe_names and not fe_missing:
-            opts = [_MANUAL_ASSIGNEE] + [f"@{n}" for n in fe_names]
-            default_i = 1 if fe_names else 0
             pick_choice = st.selectbox(
                 "Field engineer",
-                options=opts,
-                index=min(default_i, len(opts) - 1),
-                help="Pick a saved team handle, or choose manual entry and type below.",
+                options=[f"@{n}" for n in fe_names],
+                index=0,
+                help="Pick a handle from the directory (expand **Field team** above to edit the list).",
             )
-        u_raw = st.text_input(
-            "@username",
-            placeholder="field_engineer",
-            help="Required when using manual entry; optional if you selected a field engineer above.",
-        )
+        else:
+            fe_handle_raw = st.text_input(
+                "Field engineer",
+                placeholder="ibeyx",
+                help="Telegram username (with or without @). "
+                "Add `dashboard_field_engineers` in Supabase to pick from a saved list instead.",
+            )
         tid_raw = st.text_input(
             "Ticket number",
             placeholder="9 or 16 digits",
@@ -963,19 +1049,40 @@ def _sidebar_command_center() -> None:
         return
 
     try:
-        if u_raw.strip():
-            handle = _cc_normalize_handle(u_raw)
-        elif pick_choice is not None and pick_choice != _MANUAL_ASSIGNEE:
+        if fe_names and not fe_missing:
+            if pick_choice is None or not str(pick_choice).strip():
+                st.error("Pick a field engineer from the list.")
+                return
             handle = _cc_normalize_handle(pick_choice)
         else:
-            st.error("Pick a field engineer from the list or enter a @username.")
-            return
+            if not fe_handle_raw.strip():
+                st.error("Enter a field engineer Telegram username.")
+                return
+            handle = _cc_normalize_handle(fe_handle_raw)
         tid = _cc_validate_ticket_number(tid_raw)
     except ValueError as exc:
         st.error(str(exc))
         return
 
     additional_info_val = (additional_note_raw or "").strip() or None
+
+    # Form widgets with ``key=`` sometimes leave return values empty on submit;
+    # merge ``st.session_state`` (updated when the form posts).
+    token = token_env or (
+        str(token_session).strip()
+        or str(st.session_state.get(_CC_SESSION_TOKEN_KEY, "")).strip()
+    )
+    # Prefer env/Secrets; allow one form override when missing or invalid there.
+    chat_raw = (env_chat_raw if env_group_ok else "") or (
+        str(chat_session).strip()
+        or str(st.session_state.get(_CC_SESSION_GROUP_KEY, "")).strip()
+    )
+    chat_id: int | str | None = None
+    chat_parse_err: str | None = None
+    if chat_raw:
+        chat_id, chat_parse_err = _parse_telegram_group_chat_id(chat_raw)
+    if chat_parse_err:
+        st.warning(chat_parse_err)
 
     if not token or chat_id is None:
         missing_bits: list[str] = []
@@ -985,7 +1092,9 @@ def _sidebar_command_center() -> None:
             )
         if not chat_raw:
             missing_bits.append(
-                "no group id — set **TELEGRAM_GROUP_CHAT_ID** (or **TELEGRAM_GROUP_ID** / **TG_GROUP_ID**)"
+                "no group id — set **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID** / **FIELD_GROUP_CHAT_ID**), "
+                "including under `[telegram]` in Secrets if you use a subsection, "
+                "or paste into **Group chat id (only if missing from Secrets)** in this form"
             )
         elif chat_id is None:
             missing_bits.append(
@@ -993,9 +1102,11 @@ def _sidebar_command_center() -> None:
             )
         st.error(
             "Cannot post to Telegram yet. " + " · ".join(missing_bits) + ". "
-            "Use the **session** fields above if `.env` / Secrets are empty, then click **Assign** again. "
-            "For production, set **TELEGRAM_TOKEN** and **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) "
-            "in Streamlit **Secrets** or `.env` and restart the app."
+            "If the bot token is missing, use the **session-only** token field in this form or set "
+            "**TELEGRAM_TOKEN** in Secrets. "
+            "For the group, use top-level Secrets keys or `[telegram]` / `group_chat_id` style keys; "
+            "restart after editing Secrets. If the id still is not picked up, paste it in the "
+            "**Group chat id (only if missing from Secrets)** field and Assign again."
         )
         return
 
