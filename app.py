@@ -792,6 +792,10 @@ def _sidebar_command_center() -> None:
             placeholder="field_engineer",
             help="Telegram username (letters, digits, underscore). Stored as @handle.",
         )
+        st.caption(
+            "Examples: @ibeyx · @Dissiby · @Nallu10 · @FatrixShaquiell "
+            "(you can omit the leading @ — it is added automatically)."
+        )
         tid_raw = st.text_input(
             "Ticket number",
             placeholder="9 or 16 digits",
