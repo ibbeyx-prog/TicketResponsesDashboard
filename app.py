@@ -103,6 +103,10 @@ ATTENDANCE_LOGS_TABLE = (
     _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
     or "ticket_attendance_logs"
 )
+FIELD_ENGINEERS_TABLE = (
+    _read_setting("FIELD_ENGINEERS_TABLE", "dashboard_field_engineers")
+    or "dashboard_field_engineers"
+)
 
 # Keep in sync with ``_ASSIGNMENT_TASK_CATEGORIES`` in ``bot.py``.
 ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
@@ -763,6 +767,101 @@ def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | Non
         )
 
 
+def _normalize_engineer_dir_handle(raw: str) -> str:
+    """Normalize a directory entry: strip ``@``, validate Telegram username rules."""
+    cleaned = raw.strip().lstrip("@")
+    if not cleaned:
+        raise ValueError("Handle is empty.")
+    if len(cleaned) > 32:
+        raise ValueError("Handle is too long (max 32 characters).")
+    if not re.match(r"^[A-Za-z0-9_]+$", cleaned):
+        raise ValueError("Use only letters, digits, and underscores.")
+    return cleaned
+
+
+def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
+    """Return ``(usernames_without_at, table_missing)`` sorted case-insensitively."""
+    client = _get_supabase_client()
+    try:
+        res = (
+            client.table(FIELD_ENGINEERS_TABLE)
+            .select("username")
+            .order("username")
+            .execute()
+        )
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            return [], True
+        raise
+    rows = res.data or []
+    names = [str(r["username"]) for r in rows if r.get("username")]
+    return sorted(set(names), key=str.lower), False
+
+
+def _insert_field_engineer(username: str) -> None:
+    client = _get_supabase_client()
+    client.table(FIELD_ENGINEERS_TABLE).insert({"username": username}).execute()
+
+
+def _delete_field_engineer(username: str) -> None:
+    client = _get_supabase_client()
+    client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
+
+
+def _field_team_directory_ui() -> tuple[list[str], bool]:
+    """Render expander to add/remove handles; return ``(names, table_missing)``."""
+    names, missing = _try_fetch_field_engineer_usernames()
+    with st.expander("Field team (Telegram handles)", expanded=False):
+        if missing:
+            st.info(
+                f"Add table `{FIELD_ENGINEERS_TABLE}` in Supabase (see migration "
+                f"`supabase/migrations/20260515_dashboard_field_engineers.sql`), "
+                "then refresh. Until then, use **Or type @username** when assigning."
+            )
+            return names, True
+        if not names:
+            st.caption("No handles in the directory yet — add one below.")
+        for u in names:
+            c1, c2 = st.columns((5, 1))
+            c1.markdown(f"**@{u}**")
+            key = hashlib.sha256(u.encode("utf-8")).hexdigest()[:16]
+            if c2.button("Remove", key=f"fe_rm_{key}"):
+                try:
+                    _delete_field_engineer(u)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+        st.divider()
+        st.text_input(
+            "New handle (letters, digits, underscore; no @)",
+            key="fe_new_handle",
+            placeholder="engineer_name",
+        )
+        if st.button("Add to team", key="fe_add_btn"):
+            raw = str(st.session_state.get("fe_new_handle") or "").strip()
+            if not raw:
+                st.warning("Enter a handle first.")
+            else:
+                try:
+                    norm = _normalize_engineer_dir_handle(raw)
+                    existing, _ = _try_fetch_field_engineer_usernames()
+                    if any(e.lower() == norm.lower() for e in existing):
+                        st.warning(f"**@{norm}** is already in the list (case-insensitive).")
+                    else:
+                        _insert_field_engineer(norm)
+                        st.session_state.pop("fe_new_handle", None)
+                        st.rerun()
+                except ValueError as ve:
+                    st.error(str(ve))
+                except Exception as exc:
+                    err = str(exc).lower()
+                    if "duplicate" in err or "23505" in str(exc) or "unique" in err:
+                        st.warning("That handle is already in the directory.")
+                    else:
+                        st.error(str(exc))
+    return names, False
+
+
 def _sidebar_command_center() -> None:
     flash = st.session_state.pop(_CC_FLASH_KEY, None)
     if flash:
@@ -786,11 +885,24 @@ def _sidebar_command_center() -> None:
         if chat_parse_err:
             st.warning(chat_parse_err)
 
+    fe_names, fe_missing = _field_team_directory_ui()
+
+    _MANUAL_ASSIGNEE = "— Type @username below —"
+    pick_choice: str | None = None
     with st.form("cc_assign_form"):
+        if fe_names and not fe_missing:
+            opts = [_MANUAL_ASSIGNEE] + [f"@{n}" for n in fe_names]
+            default_i = 1 if fe_names else 0
+            pick_choice = st.selectbox(
+                "Field engineer",
+                options=opts,
+                index=min(default_i, len(opts) - 1),
+                help="Pick a saved team handle, or choose manual entry and type below.",
+            )
         u_raw = st.text_input(
             "@username",
             placeholder="field_engineer",
-            help="Telegram username (letters, digits, underscore). Stored as @handle.",
+            help="Required when using manual entry; optional if you selected a field engineer above.",
         )
         tid_raw = st.text_input(
             "Ticket number",
@@ -804,7 +916,13 @@ def _sidebar_command_center() -> None:
         return
 
     try:
-        handle = _cc_normalize_handle(u_raw)
+        if u_raw.strip():
+            handle = _cc_normalize_handle(u_raw)
+        elif pick_choice is not None and pick_choice != _MANUAL_ASSIGNEE:
+            handle = _cc_normalize_handle(pick_choice)
+        else:
+            st.error("Pick a field engineer from the list or enter a @username.")
+            return
         tid = _cc_validate_ticket_number(tid_raw)
     except ValueError as exc:
         st.error(str(exc))
