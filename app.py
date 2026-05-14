@@ -592,11 +592,7 @@ def main() -> None:
 
     @st.fragment(run_every=run_every)
     def _dashboard_fragment() -> None:
-        _render_dashboard(
-            auto=auto,
-            interval_minutes=interval_minutes,
-            lookback_days=lookback_days,
-        )
+        _render_dashboard(lookback_days=lookback_days)
 
     _dashboard_fragment()
 
@@ -707,24 +703,9 @@ def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
 
 def _render_dashboard(
     *,
-    auto: bool,
-    interval_minutes: int,
     lookback_days: int,
 ) -> None:
-    now_local = pd.Timestamp.now(tz=LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    unit = "minute" if interval_minutes == 1 else "minutes"
-    refresh_note = (
-        f"auto-refresh **every {interval_minutes} {unit}**"
-        if auto
-        else "auto-refresh **off**"
-    )
     day_word = "day" if lookback_days == 1 else "days"
-    st.caption(
-        f"Table: `{TICKETS_TABLE}` · history: `{ATTENDANCE_LOGS_TABLE}` · "
-        f"window: **last {lookback_days} {day_word}** (rows kept if **any** of "
-        f"last_assigned_at / responded_at / updated_at / created_at is in range) · "
-        f"times in **{LOCAL_TZ_LABEL}** · now {now_local} · {refresh_note}"
-    )
 
     try:
         df_all = _fetch_tickets()
