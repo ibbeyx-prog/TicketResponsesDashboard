@@ -42,6 +42,15 @@ Database expectations
    admin/ops team marks tickets ``'Completed'`` (or sends them back to
    ``'Open'``) from the dashboard.
 
+   Dashboard Command Center posts use HTML formatting in Telegram, but the
+   **first line** of the message is always the canonical
+   ``@user <Category> <ticket_number>`` pattern so the same reply listener
+   matches and updates Supabase.
+
+   Operators run ``/chatid`` in the field group (as an allowed user when
+   ``TELEGRAM_ALLOWED_USERNAMES`` is set) to print ``TELEGRAM_GROUP_CHAT_ID`` /
+   ``TG_GROUP_ID`` for Railway or Streamlit secrets.
+
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row
     (``action_type='Response'`` with ``note`` + optional ``photo_url``). Override
@@ -719,6 +728,7 @@ _HELP_TEXT = (
     "  /respond <ticket_id> — start a reply for a ticket\n"
     "  /active — show the ticket you are currently replying to\n"
     "  /cancel — clear the active ticket without saving\n"
+    "  /chatid — show this chat's id (for TELEGRAM_GROUP_CHAT_ID; posts in groups)\n"
     "  /help — show this message"
 )
 
@@ -765,6 +775,37 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await _reply(update, f"Cleared active ticket: {had_ticket}")
         else:
             await _reply(update, "No active ticket to clear.")
+
+
+async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show ``chat.id`` for ``TELEGRAM_GROUP_CHAT_ID`` (Streamlit Command Center).
+
+    Deliberately uses ``reply_text`` in groups (not ``_reply``) so operators
+    see the id in the field chat without deleting the webhook or using
+    ``getUpdates``.
+    """
+    if not _is_sender_allowed(update):
+        await _reply_unauthorized(update, context)
+        return
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    cid = int(chat.id)
+    ctype = chat.type or "unknown"
+    raw_username = getattr(chat, "username", None)
+    uname = raw_username.strip() if isinstance(raw_username, str) else ""
+
+    lines = [
+        "For TELEGRAM_GROUP_CHAT_ID (Streamlit Command Center), use:",
+        str(cid),
+        f"(this chat is a {ctype})",
+    ]
+    if uname:
+        lines.append(f"Or use the public handle: @{uname}")
+
+    await msg.reply_text("\n".join(lines))
 
 
 async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -986,6 +1027,12 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message or not update.message.text:
         return
 
+    # Dashboard (and TELEGRAM_GROUP_REPLY_BRIDGE) post assignment-shaped lines
+    # as the bot user. Those rows are already written in Supabase; skip so we
+    # do not append duplicate attendance logs or re-run reassignment logic.
+    if update.effective_user and update.effective_user.id == context.bot.id:
+        return
+
     text = _normalize_assignment_blob(update.message.text)
     matches = list(_ASSIGNMENT_PATTERN.finditer(text))
     if not matches:
@@ -1099,6 +1146,7 @@ async def post_init(application: Application) -> None:
         [
             BotCommand("start", "Show help"),
             BotCommand("help", "Show help"),
+            BotCommand("chatid", "Show this chat id for TELEGRAM_GROUP_CHAT_ID"),
             BotCommand("respond", "Start a reply for a ticket"),
             BotCommand("active", "Show the current active ticket"),
             BotCommand("cancel", "Clear active ticket"),
@@ -1116,6 +1164,7 @@ def _build_bot_app() -> Application:
     bot_app.add_error_handler(error_handler)
     bot_app.add_handler(CommandHandler("start", start_cmd))
     bot_app.add_handler(CommandHandler("help", help_cmd))
+    bot_app.add_handler(CommandHandler("chatid", chatid_cmd))
     bot_app.add_handler(CommandHandler("active", active_cmd))
     bot_app.add_handler(CommandHandler("cancel", cancel_cmd))
     bot_app.add_handler(CommandHandler("respond", respond_cmd))

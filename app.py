@@ -17,7 +17,33 @@ For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
     SUPABASE_URL = "https://<project>.supabase.co"
     SUPABASE_KEY = "<service-role-or-anon-key>"
     DASHBOARD_PASSWORD = "<pick a strong password>"
+    TELEGRAM_TOKEN = "<same bot token as the webhook service>"
+    TELEGRAM_GROUP_CHAT_ID = "-1001234567890"
+    # Optional Telethon (see bot_utils.py); if set, outbound posts use Telethon:
+    # TG_API_ID = "12345678"
+    # TG_API_HASH = "<from https://my.telegram.org>"
+    # TG_BOT_TOKEN = "<optional; defaults to TELEGRAM_TOKEN>"
+    # TG_GROUP_ID = "-1001234567890"
+    # Or for a public supergroup with a @username:
+    # TELEGRAM_GROUP_CHAT_ID = "@my_field_team"
     # TICKETS_TABLE = "tickets"
+
+**Command Center** (sidebar assign) writes to Supabase then posts into the
+field Telegram group via ``notify_telegram_group`` in ``bot_utils.py``:
+
+- **Simple:** ``TELEGRAM_TOKEN`` + ``TELEGRAM_GROUP_CHAT_ID`` (HTTP Bot API).
+- **Telethon:** also set ``TG_API_ID`` and ``TG_API_HASH`` (and optionally
+  ``TG_BOT_TOKEN`` / ``TG_GROUP_ID`` as aliases). A session file
+  ``telethon_bot_session.session`` is created next to ``bot_utils.py``.
+
+The first line of the outbound message matches the assignment regex in
+``bot.py`` so field replies resolve.
+
+You do **not** need to delete your webhook to find a chat id. That advice only
+applies if you are using ``getUpdates`` in a browser while a webhook is active
+(Telegram will not fill ``getUpdates`` in that mode). Use a numeric id from any
+update your bot already receives, an id bot in the group, or ``@groupusername``
+if the supergroup is public.
 
 Authentication: a single shared password gates the dashboard. It is read from
 ``DASHBOARD_PASSWORD`` (env / ``st.secrets``). If unset, the app refuses to
@@ -26,14 +52,17 @@ render -- never serve this dashboard unauthenticated.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from bot_utils import notify_telegram_group
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -74,6 +103,25 @@ ATTENDANCE_LOGS_TABLE = (
     _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
     or "ticket_attendance_logs"
 )
+FIELD_ENGINEERS_TABLE = (
+    _read_setting("FIELD_ENGINEERS_TABLE", "dashboard_field_engineers")
+    or "dashboard_field_engineers"
+)
+
+# Keep in sync with ``_ASSIGNMENT_TASK_CATEGORIES`` in ``bot.py``.
+ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
+    "Coverage Check",
+    "Femto Installation",
+    "Repeater Installation",
+    "Femto Recover",
+    "Femto Fault",
+    "Repeater Fault",
+)
+
+_TICKETS_MISSING_COLUMNS: set[str] = set()
+_CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
+_CC_SESSION_GROUP_KEY = "_ticket_dashboard_cc_group_id_session"
+_CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -506,6 +554,478 @@ def _format_duration(seconds: float | None) -> str:
     return f"{d} d {h} h"
 
 
+_ASSIGNMENT_ID_PATTERN = re.compile(r"^(?:\d{9}|\d{16})$")
+
+
+def _cc_utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _cc_parse_missing_column(message: str) -> str | None:
+    m = re.search(r"column [\w\.]*?\.?(\w+) does not exist", message)
+    if m:
+        return m.group(1)
+    m = re.search(r"Could not find the '(\w+)' column", message)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _cc_strip_missing_ticket_columns(payload: dict) -> dict:
+    if not _TICKETS_MISSING_COLUMNS:
+        return payload
+    return {k: v for k, v in payload.items() if k not in _TICKETS_MISSING_COLUMNS}
+
+
+def _cc_normalize_handle(raw: str) -> str:
+    """Return ``@username`` for Supabase / Telegram."""
+    cleaned = raw.strip().lstrip("@")
+    if not cleaned:
+        raise ValueError("Username is empty.")
+    if len(cleaned) > 32:
+        raise ValueError("Username is too long (max 32 characters).")
+    if not re.match(r"^[A-Za-z0-9_]+$", cleaned):
+        raise ValueError(
+            "Username must contain only letters, digits, and underscores (no spaces)."
+        )
+    return "@" + cleaned
+
+
+def _cc_validate_ticket_number(raw: str) -> str:
+    cleaned = raw.strip()
+    if not _ASSIGNMENT_ID_PATTERN.fullmatch(cleaned):
+        raise ValueError(
+            "Ticket number must be exactly **9** or **16** digits "
+            "(same rule as Telegram assignment messages)."
+        )
+    return cleaned
+
+
+def _cc_fetch_ticket_minimal(client, ticket_number: str) -> dict | None:
+    res = (
+        client.table(TICKETS_TABLE)
+        .select("ticket_number, assigned_to, task_category, status")
+        .eq("ticket_number", ticket_number)
+        .limit(1)
+        .execute()
+    )
+    rows = res.data or []
+    return rows[0] if rows else None
+
+
+def _cc_insert_attendance_log(
+    client,
+    *,
+    ticket_number: str,
+    member_username: str,
+    action_type: str,
+    note: str | None = None,
+) -> None:
+    row = {
+        "ticket_number": ticket_number,
+        "member_username": member_username,
+        "action_type": action_type,
+        "note": note,
+        "photo_url": None,
+        "timestamp": _cc_utc_now_iso(),
+    }
+    try:
+        client.table(ATTENDANCE_LOGS_TABLE).insert(row).execute()
+    except Exception:
+        pass
+
+
+def _cc_execute_ticket_update(client, payload: dict, ticket_number: str) -> None:
+    attempt = _cc_strip_missing_ticket_columns(dict(payload))
+    last_err: Exception | None = None
+    for _ in range(4):
+        try:
+            client.table(TICKETS_TABLE).update(attempt).eq(
+                "ticket_number", ticket_number
+            ).execute()
+            return
+        except Exception as exc:
+            text = str(exc)
+            col = _cc_parse_missing_column(text)
+            if not col or col not in attempt:
+                last_err = exc
+                break
+            _TICKETS_MISSING_COLUMNS.add(col)
+            attempt = {k: v for k, v in attempt.items() if k != col}
+            last_err = exc
+    if last_err is not None:
+        raise last_err
+
+
+def _cc_insert_assignment(
+    client,
+    ticket_number: str,
+    assigned_to: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+) -> None:
+    now_iso = _cc_utc_now_iso()
+    row: dict = {
+        "ticket_number": ticket_number,
+        "assigned_to": assigned_to,
+        "task_category": task_category,
+        "status": "Pending",
+        "field_response": None,
+        "photo_url": None,
+        "last_assigned_at": now_iso,
+        "additional_info": additional_info,
+    }
+    for _ in range(4):
+        try:
+            client.table(TICKETS_TABLE).insert(row).execute()
+            break
+        except Exception as exc:
+            col = _cc_parse_missing_column(str(exc))
+            if not col or col not in row:
+                raise
+            _TICKETS_MISSING_COLUMNS.add(col)
+            row.pop(col, None)
+    else:
+        raise RuntimeError(
+            f"insert into {TICKETS_TABLE} failed: too many missing-column retries"
+        )
+
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=assigned_to,
+        action_type="Assignment",
+        note=additional_info,
+    )
+
+
+def _cc_reassign_ticket(
+    client,
+    ticket_number: str,
+    assigned_to: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+) -> None:
+    now_iso = _cc_utc_now_iso()
+    updates = {
+        "assigned_to": assigned_to,
+        "task_category": task_category,
+        "status": "Pending",
+        "field_response": None,
+        "photo_url": None,
+        "updated_at": now_iso,
+        "last_assigned_at": now_iso,
+        "additional_info": additional_info,
+    }
+    _cc_execute_ticket_update(client, updates, ticket_number)
+
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=assigned_to,
+        action_type="Assignment",
+        note=additional_info,
+    )
+
+
+def _cc_upsert_assignment(
+    assigned_to: str,
+    ticket_number: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+) -> str:
+    """Insert or reassign; ``assigned_to`` is ``@username``. Returns a short summary."""
+    client = _get_supabase_client()
+    existing = _cc_fetch_ticket_minimal(client, ticket_number)
+    if existing is None:
+        _cc_insert_assignment(
+            client,
+            ticket_number,
+            assigned_to,
+            task_category,
+            additional_info=additional_info,
+        )
+        return f"Created ticket **{ticket_number}** and logged assignment."
+    _cc_reassign_ticket(
+        client,
+        ticket_number,
+        assigned_to,
+        task_category,
+        additional_info=additional_info,
+    )
+    prev_assignee = existing.get("assigned_to") or "—"
+    return (
+        f"Re-assigned **{ticket_number}** from {prev_assignee} to {assigned_to}; "
+        "status reset to Pending."
+    )
+
+
+def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | None]:
+    """Return a ``chat_id`` for ``send_message`` (int or ``@public_group``).
+
+    Telegram accepts a negative numeric id or ``@channelusername`` for public
+    chats. No webhook deletion is required to configure this.
+    """
+    s = raw.strip()
+    if not s:
+        return None, None
+    if s.startswith("@"):
+        return s, None
+    try:
+        return int(s), None
+    except ValueError:
+        return None, (
+            "Use a numeric id (e.g. -100…) or a public supergroup @username "
+            "(must start with @)."
+        )
+
+
+def _normalize_engineer_dir_handle(raw: str) -> str:
+    """Normalize a directory entry: strip ``@``, validate Telegram username rules."""
+    cleaned = raw.strip().lstrip("@")
+    if not cleaned:
+        raise ValueError("Handle is empty.")
+    if len(cleaned) > 32:
+        raise ValueError("Handle is too long (max 32 characters).")
+    if not re.match(r"^[A-Za-z0-9_]+$", cleaned):
+        raise ValueError("Use only letters, digits, and underscores.")
+    return cleaned
+
+
+def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
+    """Return ``(usernames_without_at, table_missing)`` sorted case-insensitively."""
+    client = _get_supabase_client()
+    try:
+        res = (
+            client.table(FIELD_ENGINEERS_TABLE)
+            .select("username")
+            .order("username")
+            .execute()
+        )
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            return [], True
+        raise
+    rows = res.data or []
+    names = [str(r["username"]) for r in rows if r.get("username")]
+    return sorted(set(names), key=str.lower), False
+
+
+def _insert_field_engineer(username: str) -> None:
+    client = _get_supabase_client()
+    client.table(FIELD_ENGINEERS_TABLE).insert({"username": username}).execute()
+
+
+def _delete_field_engineer(username: str) -> None:
+    client = _get_supabase_client()
+    client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
+
+
+def _field_team_directory_ui() -> tuple[list[str], bool]:
+    """Render expander to add/remove handles; return ``(names, table_missing)``."""
+    names, missing = _try_fetch_field_engineer_usernames()
+    with st.expander("Field team (Telegram handles)", expanded=False):
+        if missing:
+            st.info(
+                f"Add table `{FIELD_ENGINEERS_TABLE}` in Supabase (see migration "
+                f"`supabase/migrations/20260515_dashboard_field_engineers.sql`), "
+                "then refresh. Until then, use **Or type @username** when assigning."
+            )
+            return names, True
+        if not names:
+            st.caption("No handles in the directory yet — add one below.")
+        for u in names:
+            c1, c2 = st.columns((5, 1))
+            c1.markdown(f"**@{u}**")
+            key = hashlib.sha256(u.encode("utf-8")).hexdigest()[:16]
+            if c2.button("Remove", key=f"fe_rm_{key}"):
+                try:
+                    _delete_field_engineer(u)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+        st.divider()
+        st.text_input(
+            "New handle (letters, digits, underscore; no @)",
+            key="fe_new_handle",
+            placeholder="engineer_name",
+        )
+        if st.button("Add to team", key="fe_add_btn"):
+            raw = str(st.session_state.get("fe_new_handle") or "").strip()
+            if not raw:
+                st.warning("Enter a handle first.")
+            else:
+                try:
+                    norm = _normalize_engineer_dir_handle(raw)
+                    existing, _ = _try_fetch_field_engineer_usernames()
+                    if any(e.lower() == norm.lower() for e in existing):
+                        st.warning(f"**@{norm}** is already in the list (case-insensitive).")
+                    else:
+                        _insert_field_engineer(norm)
+                        st.session_state.pop("fe_new_handle", None)
+                        st.rerun()
+                except ValueError as ve:
+                    st.error(str(ve))
+                except Exception as exc:
+                    err = str(exc).lower()
+                    if "duplicate" in err or "23505" in str(exc) or "unique" in err:
+                        st.warning("That handle is already in the directory.")
+                    else:
+                        st.error(str(exc))
+    return names, False
+
+
+def _sidebar_command_center() -> None:
+    flash = st.session_state.pop(_CC_FLASH_KEY, None)
+    if flash:
+        st.success(flash)
+
+    st.header("Command Center")
+    token_env = (
+        _read_setting("TG_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_TOKEN").strip()
+    )
+    env_chat_raw = (
+        _read_setting("TG_GROUP_ID").strip()
+        or _read_setting("TELEGRAM_GROUP_ID").strip()
+        or _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
+    )
+
+    if not token_env:
+        st.text_input(
+            "Bot token (this session only)",
+            type="password",
+            key=_CC_SESSION_TOKEN_KEY,
+            placeholder="Paste TELEGRAM_TOKEN if missing from .env / Secrets",
+            help="Not saved to disk. Prefer **TELEGRAM_TOKEN** in `.env` or Streamlit Secrets.",
+        )
+    if not env_chat_raw:
+        st.text_input(
+            "Group chat id (this session only)",
+            key=_CC_SESSION_GROUP_KEY,
+            placeholder="-100xxxxxxxxxx or @YourPublicGroup",
+            help="Not saved to disk. Prefer **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) in `.env` or Secrets; use **/chatid** in the field group to discover the id.",
+        )
+
+    token = (
+        token_env
+        or str(st.session_state.get(_CC_SESSION_TOKEN_KEY, "")).strip()
+    )
+    chat_raw = (
+        env_chat_raw
+        or str(st.session_state.get(_CC_SESSION_GROUP_KEY, "")).strip()
+    )
+    chat_id: int | str | None = None
+    chat_parse_err: str | None = None
+    if chat_raw:
+        chat_id, chat_parse_err = _parse_telegram_group_chat_id(chat_raw)
+        if chat_parse_err:
+            st.warning(chat_parse_err)
+
+    fe_names, fe_missing = _field_team_directory_ui()
+
+    _MANUAL_ASSIGNEE = "— Type @username below —"
+    pick_choice: str | None = None
+    with st.form("cc_assign_form"):
+        if fe_names and not fe_missing:
+            opts = [_MANUAL_ASSIGNEE] + [f"@{n}" for n in fe_names]
+            default_i = 1 if fe_names else 0
+            pick_choice = st.selectbox(
+                "Field engineer",
+                options=opts,
+                index=min(default_i, len(opts) - 1),
+                help="Pick a saved team handle, or choose manual entry and type below.",
+            )
+        u_raw = st.text_input(
+            "@username",
+            placeholder="field_engineer",
+            help="Required when using manual entry; optional if you selected a field engineer above.",
+        )
+        tid_raw = st.text_input(
+            "Ticket number",
+            placeholder="9 or 16 digits",
+            help="Must match the bot assignment format (9 or 16 digits).",
+        )
+        cat = st.selectbox("Task category", options=list(ASSIGNMENT_TASK_CATEGORIES))
+        additional_note_raw = st.text_area(
+            "Additional Note",
+            placeholder="Optional — site context, access details, etc.",
+            height=88,
+            help="Stored as **additional_info** on the ticket and shown in the Telegram assignment.",
+        )
+        submitted = st.form_submit_button("Assign", type="primary", use_container_width=True)
+
+    if not submitted:
+        return
+
+    try:
+        if u_raw.strip():
+            handle = _cc_normalize_handle(u_raw)
+        elif pick_choice is not None and pick_choice != _MANUAL_ASSIGNEE:
+            handle = _cc_normalize_handle(pick_choice)
+        else:
+            st.error("Pick a field engineer from the list or enter a @username.")
+            return
+        tid = _cc_validate_ticket_number(tid_raw)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    additional_info_val = (additional_note_raw or "").strip() or None
+
+    if not token or chat_id is None:
+        missing_bits: list[str] = []
+        if not token:
+            missing_bits.append(
+                "no bot token — set **TELEGRAM_TOKEN** (or **TELEGRAM_BOT_TOKEN** / **TG_BOT_TOKEN**)"
+            )
+        if not chat_raw:
+            missing_bits.append(
+                "no group id — set **TELEGRAM_GROUP_CHAT_ID** (or **TELEGRAM_GROUP_ID** / **TG_GROUP_ID**)"
+            )
+        elif chat_id is None:
+            missing_bits.append(
+                f"group id **{chat_raw[:72]}** is not a valid integer or **@** public username"
+            )
+        st.error(
+            "Cannot post to Telegram yet. " + " · ".join(missing_bits) + ". "
+            "Use the **session** fields above if `.env` / Secrets are empty, then click **Assign** again. "
+            "For production, set **TELEGRAM_TOKEN** and **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) "
+            "in Streamlit **Secrets** or `.env` and restart the app."
+        )
+        return
+
+    try:
+        summary = _cc_upsert_assignment(handle, tid, cat, additional_info=additional_info_val)
+    except Exception as exc:
+        st.error(f"Supabase upsert failed: {exc}")
+        return
+
+    try:
+        asyncio.run(
+            notify_telegram_group(
+                handle,
+                tid,
+                cat,
+                additional_note=additional_info_val,
+                api_id=_read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None,
+                api_hash=_read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None,
+                bot_token=token or None,
+                group_id=chat_id,
+            )
+        )
+    except Exception as exc:
+        st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
+        return
+
+    st.session_state[_CC_FLASH_KEY] = f"{summary} Posted to Telegram."
+    st.rerun()
+
+
 DEFAULT_REFRESH_MINUTES = 5
 MIN_REFRESH_MINUTES = 1
 MAX_REFRESH_MINUTES = 60
@@ -518,6 +1038,8 @@ MAX_LOOKBACK_DAYS = 30
 def _sidebar_controls() -> tuple[bool, int, int]:
     """Return (auto_enabled, interval_minutes, lookback_days)."""
     with st.sidebar:
+        _sidebar_command_center()
+        st.divider()
         st.header("Filters")
         lookback_days = st.slider(
             "Days to Look Back",
@@ -587,21 +1109,105 @@ def main() -> None:
             )
         return
 
+    _inject_bon_theme()
+
     auto, interval_minutes, lookback_days = _sidebar_controls()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
     def _dashboard_fragment() -> None:
-        _render_dashboard(
-            auto=auto,
-            interval_minutes=interval_minutes,
-            lookback_days=lookback_days,
-        )
+        _render_dashboard(lookback_days=lookback_days)
 
     _dashboard_fragment()
 
 
 PHOTO_THUMB_WIDTH = 220  # px — tight enough that 3 fit per row on a laptop
+
+# BONFamily-inspired UI: charcoal base (#121212), Light Oak (#D7B491) accents.
+_BON_THEME_CSS = """
+<style>
+    :root {
+        --bon-bg: #121212;
+        --bon-panel: #1a1a1a;
+        --bon-card: #1e1e1e;
+        --bon-oak: #D7B491;
+        --bon-text: #e8e6e3;
+        --bon-muted: #a39e97;
+    }
+    .stApp {
+        background-color: var(--bon-bg);
+        color: var(--bon-text);
+    }
+    [data-testid="stHeader"] {
+        background-color: rgba(18, 18, 18, 0.96);
+        border-bottom: 1px solid var(--bon-oak);
+    }
+    [data-testid="stSidebar"] {
+        background-color: var(--bon-panel);
+        border-right: 1px solid var(--bon-oak);
+    }
+    [data-testid="stSidebar"] .stMarkdown,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] span {
+        color: var(--bon-text);
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-color: var(--bon-oak) !important;
+        border-radius: 14px !important;
+        background-color: var(--bon-card) !important;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        background-color: var(--bon-panel);
+        border-radius: 10px;
+        padding: 4px;
+        gap: 4px;
+        border: 1px solid rgba(215, 180, 145, 0.35);
+    }
+    .stTabs [data-baseweb="tab"] {
+        color: var(--bon-muted);
+        border-radius: 8px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: var(--bon-oak) !important;
+        color: #121212 !important;
+    }
+    .stButton > button {
+        border-radius: 10px !important;
+        border: 1px solid var(--bon-oak) !important;
+        background-color: #2a2420 !important;
+        color: var(--bon-oak) !important;
+        font-weight: 600;
+    }
+    .stButton > button:hover {
+        background-color: var(--bon-oak) !important;
+        color: #121212 !important;
+    }
+    div[data-testid="stExpander"] details {
+        border: 1px solid var(--bon-oak);
+        border-radius: 14px;
+        background-color: var(--bon-card);
+    }
+    div[data-testid="stExpander"] summary {
+        color: var(--bon-oak);
+    }
+    [data-testid="stMetric"] {
+        background: var(--bon-card);
+        padding: 10px 14px;
+        border-radius: 12px;
+        border: 1px solid rgba(215, 180, 145, 0.35);
+    }
+    [data-testid="stMetric"] label { color: var(--bon-muted) !important; }
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: var(--bon-oak) !important;
+    }
+    .stMarkdown a { color: var(--bon-oak); }
+    [data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
+</style>
+"""
+
+
+def _inject_bon_theme() -> None:
+    st.markdown(_BON_THEME_CSS, unsafe_allow_html=True)
 
 
 def _format_when(when: object) -> str:
@@ -630,25 +1236,26 @@ def _render_photo_grid(photos: list[dict], cols_per_row: int = 3) -> None:
         cols = st.columns(cols_per_row)
         for slot, photo in enumerate(chunk):
             with cols[slot]:
-                try:
-                    st.image(photo["url"], width=PHOTO_THUMB_WIDTH)
-                except Exception as exc:
-                    st.warning(f"Could not load image: {exc}")
-                meta_bits = []
-                if photo.get("member"):
-                    meta_bits.append(str(photo["member"]))
-                when = _format_when(photo.get("when"))
-                if when:
-                    meta_bits.append(f"{when} {LOCAL_TZ_LABEL}")
-                if meta_bits:
-                    st.caption(" · ".join(meta_bits))
-                note = photo.get("note")
-                if isinstance(note, str) and note.strip():
-                    trimmed = note.strip()
-                    if len(trimmed) > 140:
-                        trimmed = trimmed[:140] + "…"
-                    st.markdown(trimmed)
-                st.markdown(f"[Open full size]({photo['url']})")
+                with st.container(border=True):
+                    try:
+                        st.image(photo["url"], width=PHOTO_THUMB_WIDTH)
+                    except Exception as exc:
+                        st.warning(f"Could not load image: {exc}")
+                    meta_bits = []
+                    if photo.get("member"):
+                        meta_bits.append(str(photo["member"]))
+                    when = _format_when(photo.get("when"))
+                    if when:
+                        meta_bits.append(f"{when} {LOCAL_TZ_LABEL}")
+                    if meta_bits:
+                        st.caption(" · ".join(meta_bits))
+                    note = photo.get("note")
+                    if isinstance(note, str) and note.strip():
+                        trimmed = note.strip()
+                        if len(trimmed) > 140:
+                            trimmed = trimmed[:140] + "…"
+                        st.markdown(trimmed)
+                    st.markdown(f"[Open full size]({photo['url']})")
 
 
 def _dataframe_column_config(df: pd.DataFrame) -> dict:
@@ -707,24 +1314,9 @@ def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
 
 def _render_dashboard(
     *,
-    auto: bool,
-    interval_minutes: int,
     lookback_days: int,
 ) -> None:
-    now_local = pd.Timestamp.now(tz=LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    unit = "minute" if interval_minutes == 1 else "minutes"
-    refresh_note = (
-        f"auto-refresh **every {interval_minutes} {unit}**"
-        if auto
-        else "auto-refresh **off**"
-    )
     day_word = "day" if lookback_days == 1 else "days"
-    st.caption(
-        f"Table: `{TICKETS_TABLE}` · history: `{ATTENDANCE_LOGS_TABLE}` · "
-        f"window: **last {lookback_days} {day_word}** (rows kept if **any** of "
-        f"last_assigned_at / responded_at / updated_at / created_at is in range) · "
-        f"times in **{LOCAL_TZ_LABEL}** · now {now_local} · {refresh_note}"
-    )
 
     try:
         df_all = _fetch_tickets()
@@ -820,7 +1412,7 @@ def _render_dashboard(
 
                 def _row_red(_row: pd.Series) -> list[str]:
                     stale = bool(pend.loc[_row.name, "_stale"]) if "_stale" in pend.columns else False
-                    color = "background-color: #ffcccc" if stale else ""
+                    color = "background-color: rgba(215, 180, 145, 0.12); color: #f0e6dc" if stale else ""
                     return [color] * len(_row)
 
                 try:
@@ -829,7 +1421,7 @@ def _render_dashboard(
                 except Exception:
                     st.dataframe(view, use_container_width=True, hide_index=True)
                 st.caption(
-                    f"Rows with a **red** background are pending for **more than 24 hours** "
+                    f"Rows with a **subtle oak tint** are pending for **more than 24 hours** "
                     f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
                 )
 
@@ -881,7 +1473,7 @@ def _render_dashboard(
                     column_config=_dataframe_column_config(open_view),
                 )
 
-                st.subheader("Field photos awaiting review")
+                st.subheader("Gallery view — field photos awaiting review")
                 _render_field_photos_section(open_df)
 
     with tab_completed:
@@ -931,7 +1523,7 @@ def _render_dashboard(
                     column_config=_dataframe_column_config(done_view),
                 )
 
-                st.subheader("Field photos")
+                st.subheader("Gallery view — completed field photos")
                 _render_field_photos_section(done)
 
     with tab_log:

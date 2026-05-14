@@ -19,5 +19,8 @@ __pycache__/
 
 *.log
 *.err
+bot.log.*
+bot.err.*
+telethon_bot_session.session
 .DS_Store
 Thumbs.db
