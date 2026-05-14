@@ -19,15 +19,25 @@ For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
     DASHBOARD_PASSWORD = "<pick a strong password>"
     TELEGRAM_TOKEN = "<same bot token as the webhook service>"
     TELEGRAM_GROUP_CHAT_ID = "-1001234567890"
+    # Optional Telethon (see bot_utils.py); if set, outbound posts use Telethon:
+    # TG_API_ID = "12345678"
+    # TG_API_HASH = "<from https://my.telegram.org>"
+    # TG_BOT_TOKEN = "<optional; defaults to TELEGRAM_TOKEN>"
+    # TG_GROUP_ID = "-1001234567890"
     # Or for a public supergroup with a @username:
     # TELEGRAM_GROUP_CHAT_ID = "@my_field_team"
     # TICKETS_TABLE = "tickets"
 
-**Command Center** (sidebar assign) needs ``TELEGRAM_TOKEN`` plus
-``TELEGRAM_GROUP_CHAT_ID`` (numeric id like ``-100…``, **or** a public group
-``@username``). The dashboard upserts Supabase first, then posts into the group
-using the same Bot API as ``bot.py`` (first line matches the assignment pattern
-so field replies resolve).
+**Command Center** (sidebar assign) writes to Supabase then posts into the
+field Telegram group via ``bot_utils.send_telegram_assignment``:
+
+- **Simple:** ``TELEGRAM_TOKEN`` + ``TELEGRAM_GROUP_CHAT_ID`` (HTTP Bot API).
+- **Telethon:** also set ``TG_API_ID`` and ``TG_API_HASH`` (and optionally
+  ``TG_BOT_TOKEN`` / ``TG_GROUP_ID`` as aliases). A session file
+  ``telethon_bot_session.session`` is created next to ``bot_utils.py``.
+
+The first line of the outbound message matches the assignment regex in
+``bot.py`` so field replies resolve.
 
 You do **not** need to delete your webhook to find a chat id. That advice only
 applies if you are using ``getUpdates`` in a browser while a webhook is active
@@ -52,9 +62,9 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from bot_utils import send_telegram_assignment
 from dotenv import load_dotenv
 from supabase import create_client
-from telegram import Bot
 
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
@@ -753,37 +763,20 @@ def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | Non
         )
 
 
-async def send_telegram_assignment(
-    *,
-    bot_token: str,
-    chat_id: int | str,
-    assigned_to: str,
-    ticket_number: str,
-    task_category: str,
-) -> None:
-    """Post the assignment into the field group via the Telegram Bot API.
-
-    The first line matches the assignment regex in ``bot.py`` so replies to
-    this message resolve to the correct ticket.
-    """
-    line1 = f"{assigned_to} {task_category} {ticket_number}"
-    line2 = f"{assigned_to}, you have a new task: {ticket_number} ({task_category})"
-    text = (
-        f"{line1}\n\n{line2}\n\n"
-        "Reply to **this message** with text or a photo when the task is done."
-    )
-    async with Bot(bot_token) as bot:
-        await bot.send_message(chat_id=chat_id, text=text)
-
-
 def _sidebar_command_center() -> None:
     flash = st.session_state.pop(_CC_FLASH_KEY, None)
     if flash:
         st.success(flash)
 
     st.header("Command Center")
-    token = _read_setting("TELEGRAM_TOKEN").strip()
-    chat_raw = _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
+    token = (
+        _read_setting("TG_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_TOKEN").strip()
+    )
+    chat_raw = (
+        _read_setting("TG_GROUP_ID").strip()
+        or _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
+    )
     chat_id: int | str | None = None
     chat_parse_err: str | None = None
     if chat_raw:
@@ -793,8 +786,10 @@ def _sidebar_command_center() -> None:
 
     if not token or chat_id is None:
         st.caption(
-            "Add **TELEGRAM_TOKEN** and **TELEGRAM_GROUP_CHAT_ID** to `.env` or Streamlit "
-            "secrets so each assign is posted into Telegram after the Supabase upsert."
+            "Add **TELEGRAM_TOKEN** (or **TG_BOT_TOKEN**) and **TELEGRAM_GROUP_CHAT_ID** "
+            "(or **TG_GROUP_ID**) in `.env` or Streamlit secrets so each assign is posted "
+            "after the Supabase upsert. Optional: **TG_API_ID** + **TG_API_HASH** to send "
+            "via Telethon (see `bot_utils.py`)."
         )
         with st.expander("Finding the group chat id (no webhook delete needed)"):
             st.markdown(
@@ -851,11 +846,13 @@ def _sidebar_command_center() -> None:
     try:
         asyncio.run(
             send_telegram_assignment(
-                bot_token=token,
-                chat_id=chat_id,
-                assigned_to=handle,
-                ticket_number=tid,
-                task_category=cat,
+                handle,
+                tid,
+                cat,
+                api_id=_read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None,
+                api_hash=_read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None,
+                bot_token=token or None,
+                group_id=chat_id,
             )
         )
     except Exception as exc:
