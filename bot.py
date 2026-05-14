@@ -42,10 +42,9 @@ Database expectations
    admin/ops team marks tickets ``'Completed'`` (or sends them back to
    ``'Open'``) from the dashboard.
 
-   Dashboard Command Center posts use HTML formatting in Telegram, but the
-   **first line** of the message is always the canonical
-   ``@user <Category> <ticket_number>`` pattern so the same reply listener
-   matches and updates Supabase.
+   Dashboard Command Center posts are **plain text**: line 1 is
+   ``@user <Category> <ticket_number>`` (normal spaces) so the same reply
+   listener matches and updates Supabase.
 
    Operators run ``/chatid`` in the field group (as an allowed user when
    ``TELEGRAM_ALLOWED_USERNAMES`` is set) to print ``TELEGRAM_GROUP_CHAT_ID`` /
@@ -259,6 +258,8 @@ def _normalize_assignment_blob(blob: str) -> str:
     s = str(blob).replace("\ufeff", "")
     s = html.unescape(s)
     s = re.sub(r"<[^>]+>", " ", s)
+    # Command Center uses U+00BB (») between @handle, category, and ticket on line 1.
+    s = s.replace("\u00bb", " ")
     s = s.replace("\u00a0", " ").replace("\u200b", "").replace("\u200c", "")
     s = s.replace("\u200e", "").replace("\u200f", "")  # LRM / RLM around mentions
     s = re.sub(r"[\u202A-\u202E\u2066-\u2069]", "", s)  # bidi embedding (can break ticket digits)
@@ -525,19 +526,15 @@ def _execute_ticket_update(
     last_err: Exception | None = None
     for _ in range(4):
         try:
-            res = (
-                supabase.table(TICKETS_TABLE)
-                .update(attempt)
-                .eq("ticket_number", ticket_number)
-                .select("ticket_number")
-                .execute()
-            )
-            rows = res.data if res and getattr(res, "data", None) is not None else []
-            if not rows:
-                raise RuntimeError(
-                    "ticket update affected 0 rows "
-                    f"(ticket_number={ticket_number!r}, table={TICKETS_TABLE!r})"
-                )
+            # PostgREST ``SyncFilterRequestBuilder`` (``update().eq(...)``) does not
+            # support chaining ``.select()`` like a standalone SELECT. Chaining it
+            # raises ``AttributeError`` before ``execute()``, so the DB never
+            # updates — field replies looked successful in logs only up to the
+            # failing line. Match ``app.py`` ``_cc_execute_ticket_update``: PATCH
+            # and rely on PostgREST errors for real failures.
+            supabase.table(TICKETS_TABLE).update(attempt).eq(
+                "ticket_number", ticket_number
+            ).execute()
             return
         except Exception as exc:
             text = str(exc)

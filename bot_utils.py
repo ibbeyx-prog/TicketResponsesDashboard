@@ -10,13 +10,13 @@ Two transports:
 2. **python-telegram-bot** (HTTP Bot API) — when API id/hash are **not**
    configured; only bot token + group id are required.
 
-Messages use HTML formatting after the first line. Line 1 is always the plain
-assignment token line so the reply listener in ``bot.py`` still matches.
+Command Center assignments are **plain text** (no HTML): line 1 is
+``@handle <category> <ticket_id>`` with normal spaces so the bot assignment
+regex matches without any special separators.
 """
 
 from __future__ import annotations
 
-import html
 import os
 from pathlib import Path
 
@@ -32,35 +32,22 @@ def _at_username(username: str) -> str:
     return u if u.startswith("@") else f"@{u}"
 
 
-def _build_notify_html(
+def _build_assignment_notify_text(
     assigned_to: str,
     ticket_id: str,
     category: str,
-    additional_note: str | None = None,
+    additional_info: str | None = None,
 ) -> str:
-    """Return HTML message: line 1 is plain assignment syntax for ``bot.py`` regex.
-
-    The bold block is for operators; field replies still match on line 1.
-    """
+    """Plain-text assignment body for the field Telegram group (Command Center)."""
     handle = _at_username(assigned_to)
     line1 = f"{handle} {category} {ticket_id}"
-    h = html.escape(handle)
-    c = html.escape(category)
-    t = html.escape(ticket_id)
-    parts = [
-        f"{line1}\n\n",
-        "<b>📋 NEW ASSIGNMENT FROM DASHBOARD</b>\n\n",
-        f"<b>User:</b> {h}\n",
-        f"<b>Category:</b> {c}\n",
-        f"<b>Ticket ID:</b> {t}\n",
-    ]
-    note = (additional_note or "").strip()
+    note = (additional_info or "").strip()
+    parts: list[str] = [line1, "Additional_info"]
     if note:
-        parts.append(f"\n<b>Additional note:</b> {html.escape(note)}\n")
-    parts.append(
-        "\n<i>Field team: Please reply directly to this message with your updates.</i>"
-    )
-    return "".join(parts)
+        parts.append(note)
+    parts.append("")
+    parts.append("Please reply directly to this message with your updates.")
+    return "\n".join(parts)
 
 
 def _env_str(*names: str) -> str:
@@ -128,7 +115,7 @@ async def _send_via_telethon(
     bot_token: str,
     group_entity: int | str,
     text: str,
-    parse_mode: str,
+    parse_mode: str | None,
 ) -> None:
     client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
     try:
@@ -144,7 +131,7 @@ async def notify_telegram_group(
     ticket_id: str,
     category: str,
     *,
-    additional_note: str | None = None,
+    additional_info: str | None = None,
     api_id: str | int | None = None,
     api_hash: str | None = None,
     bot_token: str | None = None,
@@ -176,7 +163,9 @@ async def notify_telegram_group(
         api_id_res = _env_str("TG_API_ID", "TELEGRAM_API_ID") or None
     api_hash_res = (api_hash or "").strip() or _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
 
-    text = _build_notify_html(username, ticket_id, category, additional_note=additional_note)
+    text = _build_assignment_notify_text(
+        username, ticket_id, category, additional_info=additional_info
+    )
     entity = _parse_group_entity(group_raw)
 
     use_telethon = bool(
@@ -193,7 +182,7 @@ async def notify_telegram_group(
             bot_token=token,
             group_entity=entity,
             text=text,
-            parse_mode="html",
+            parse_mode=None,
         )
         return
 
@@ -201,7 +190,7 @@ async def notify_telegram_group(
         bot_token=token,
         group_entity=entity,
         text=text,
-        parse_mode="HTML",
+        parse_mode=None,
     )
 
 
