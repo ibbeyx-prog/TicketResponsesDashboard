@@ -120,6 +120,8 @@ ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
+_CC_SESSION_GROUP_KEY = "_ticket_dashboard_cc_group_id_session"
+_CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -882,15 +884,40 @@ def _sidebar_command_center() -> None:
         st.success(flash)
 
     st.header("Command Center")
-    token = (
+    token_env = (
         _read_setting("TG_BOT_TOKEN").strip()
         or _read_setting("TELEGRAM_BOT_TOKEN").strip()
         or _read_setting("TELEGRAM_TOKEN").strip()
     )
-    chat_raw = (
+    env_chat_raw = (
         _read_setting("TG_GROUP_ID").strip()
         or _read_setting("TELEGRAM_GROUP_ID").strip()
         or _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
+    )
+
+    if not token_env:
+        st.text_input(
+            "Bot token (this session only)",
+            type="password",
+            key=_CC_SESSION_TOKEN_KEY,
+            placeholder="Paste TELEGRAM_TOKEN if missing from .env / Secrets",
+            help="Not saved to disk. Prefer **TELEGRAM_TOKEN** in `.env` or Streamlit Secrets.",
+        )
+    if not env_chat_raw:
+        st.text_input(
+            "Group chat id (this session only)",
+            key=_CC_SESSION_GROUP_KEY,
+            placeholder="-100xxxxxxxxxx or @YourPublicGroup",
+            help="Not saved to disk. Prefer **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) in `.env` or Secrets; use **/chatid** in the field group to discover the id.",
+        )
+
+    token = (
+        token_env
+        or str(st.session_state.get(_CC_SESSION_TOKEN_KEY, "")).strip()
+    )
+    chat_raw = (
+        env_chat_raw
+        or str(st.session_state.get(_CC_SESSION_GROUP_KEY, "")).strip()
     )
     chat_id: int | str | None = None
     chat_parse_err: str | None = None
@@ -966,7 +993,9 @@ def _sidebar_command_center() -> None:
             )
         st.error(
             "Cannot post to Telegram yet. " + " · ".join(missing_bits) + ". "
-            "Restart `streamlit run` after editing `.env`. On Streamlit Cloud, use **Secrets** (not only a local `.env`)."
+            "Use the **session** fields above if `.env` / Secrets are empty, then click **Assign** again. "
+            "For production, set **TELEGRAM_TOKEN** and **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) "
+            "in Streamlit **Secrets** or `.env` and restart the app."
         )
         return
 
