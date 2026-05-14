@@ -786,31 +786,6 @@ def _sidebar_command_center() -> None:
         if chat_parse_err:
             st.warning(chat_parse_err)
 
-    if not token or chat_id is None:
-        st.caption(
-            "Add a **bot token** (**TELEGRAM_TOKEN**, **TELEGRAM_BOT_TOKEN**, or **TG_BOT_TOKEN**) "
-            "and a **group id** (**TELEGRAM_GROUP_CHAT_ID**, **TELEGRAM_GROUP_ID**, or **TG_GROUP_ID**) "
-            "in `.env` or Streamlit secrets. Optional: **TG_API_ID** + **TG_API_HASH** for Telethon "
-            "(see `bot_utils.py`). **Restart Streamlit** after saving `.env`."
-        )
-        with st.expander("Finding the group chat id (no webhook delete needed)"):
-            st.markdown(
-                "Deleting the webhook is only relevant if you are using "
-                "`https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser "
-                "while a **webhook** is set — Telegram will not populate "
-                "`getUpdates` in that case.\n\n"
-                "**Easiest:** in the field Telegram group, send **`/chatid`** as a user "
-                "listed in `TELEGRAM_ALLOWED_USERNAMES` (if you use that allowlist). "
-                "The bot replies with the numeric id (and `@username` if the group is public).\n"
-                "- If the field supergroup has a **public @username**, you can also set "
-                "`TELEGRAM_GROUP_CHAT_ID=@ThatUsername` (this app accepts that).\n"
-                "- Otherwise use the **numeric** id (often `-100…`). Your bot "
-                "already receives it on every group message in JSON as "
-                "`message.chat.id`; check your host logs, or add a bot such as "
-                "@RawDataBot / @getidsbot to the group once to read the id.\n"
-                "- You do **not** need to remove the webhook for Command Center."
-            )
-
     with st.form("cc_assign_form"):
         u_raw = st.text_input(
             "@username",
