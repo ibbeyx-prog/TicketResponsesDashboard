@@ -17,7 +17,23 @@ For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
     SUPABASE_URL = "https://<project>.supabase.co"
     SUPABASE_KEY = "<service-role-or-anon-key>"
     DASHBOARD_PASSWORD = "<pick a strong password>"
+    TELEGRAM_TOKEN = "<same bot token as the webhook service>"
+    TELEGRAM_GROUP_CHAT_ID = "-1001234567890"
+    # Or for a public supergroup with a @username:
+    # TELEGRAM_GROUP_CHAT_ID = "@my_field_team"
     # TICKETS_TABLE = "tickets"
+
+**Command Center** (sidebar assign) needs ``TELEGRAM_TOKEN`` plus
+``TELEGRAM_GROUP_CHAT_ID`` (numeric id like ``-100…``, **or** a public group
+``@username``). The dashboard upserts Supabase first, then posts into the group
+using the same Bot API as ``bot.py`` (first line matches the assignment pattern
+so field replies resolve).
+
+You do **not** need to delete your webhook to find a chat id. That advice only
+applies if you are using ``getUpdates`` in a browser while a webhook is active
+(Telegram will not fill ``getUpdates`` in that mode). Use a numeric id from any
+update your bot already receives, an id bot in the group, or ``@groupusername``
+if the supergroup is public.
 
 Authentication: a single shared password gates the dashboard. It is read from
 ``DASHBOARD_PASSWORD`` (env / ``st.secrets``). If unset, the app refuses to
@@ -26,9 +42,11 @@ render -- never serve this dashboard unauthenticated.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,6 +54,7 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client
+from telegram import Bot
 
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
@@ -74,6 +93,19 @@ ATTENDANCE_LOGS_TABLE = (
     _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
     or "ticket_attendance_logs"
 )
+
+# Keep in sync with ``_ASSIGNMENT_TASK_CATEGORIES`` in ``bot.py``.
+ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
+    "Coverage Check",
+    "Femto Installation",
+    "Repeater Installation",
+    "Femto Recover",
+    "Femto Fault",
+    "Repeater Fault",
+)
+
+_TICKETS_MISSING_COLUMNS: set[str] = set()
+_CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -506,6 +538,334 @@ def _format_duration(seconds: float | None) -> str:
     return f"{d} d {h} h"
 
 
+_ASSIGNMENT_ID_PATTERN = re.compile(r"^(?:\d{9}|\d{16})$")
+
+
+def _cc_utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _cc_parse_missing_column(message: str) -> str | None:
+    m = re.search(r"column [\w\.]*?\.?(\w+) does not exist", message)
+    if m:
+        return m.group(1)
+    m = re.search(r"Could not find the '(\w+)' column", message)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _cc_strip_missing_ticket_columns(payload: dict) -> dict:
+    if not _TICKETS_MISSING_COLUMNS:
+        return payload
+    return {k: v for k, v in payload.items() if k not in _TICKETS_MISSING_COLUMNS}
+
+
+def _cc_normalize_handle(raw: str) -> str:
+    """Return ``@username`` for Supabase / Telegram."""
+    cleaned = raw.strip().lstrip("@")
+    if not cleaned:
+        raise ValueError("Username is empty.")
+    if len(cleaned) > 32:
+        raise ValueError("Username is too long (max 32 characters).")
+    if not re.match(r"^[A-Za-z0-9_]+$", cleaned):
+        raise ValueError(
+            "Username must contain only letters, digits, and underscores (no spaces)."
+        )
+    return "@" + cleaned
+
+
+def _cc_validate_ticket_number(raw: str) -> str:
+    cleaned = raw.strip()
+    if not _ASSIGNMENT_ID_PATTERN.fullmatch(cleaned):
+        raise ValueError(
+            "Ticket number must be exactly **9** or **16** digits "
+            "(same rule as Telegram assignment messages)."
+        )
+    return cleaned
+
+
+def _cc_fetch_ticket_minimal(client, ticket_number: str) -> dict | None:
+    res = (
+        client.table(TICKETS_TABLE)
+        .select("ticket_number, assigned_to, task_category, status")
+        .eq("ticket_number", ticket_number)
+        .limit(1)
+        .execute()
+    )
+    rows = res.data or []
+    return rows[0] if rows else None
+
+
+def _cc_insert_attendance_log(
+    client,
+    *,
+    ticket_number: str,
+    member_username: str,
+    action_type: str,
+    note: str | None = None,
+) -> None:
+    row = {
+        "ticket_number": ticket_number,
+        "member_username": member_username,
+        "action_type": action_type,
+        "note": note,
+        "photo_url": None,
+        "timestamp": _cc_utc_now_iso(),
+    }
+    try:
+        client.table(ATTENDANCE_LOGS_TABLE).insert(row).execute()
+    except Exception:
+        pass
+
+
+def _cc_execute_ticket_update(client, payload: dict, ticket_number: str) -> None:
+    attempt = _cc_strip_missing_ticket_columns(dict(payload))
+    last_err: Exception | None = None
+    for _ in range(4):
+        try:
+            client.table(TICKETS_TABLE).update(attempt).eq(
+                "ticket_number", ticket_number
+            ).execute()
+            return
+        except Exception as exc:
+            text = str(exc)
+            col = _cc_parse_missing_column(text)
+            if not col or col not in attempt:
+                last_err = exc
+                break
+            _TICKETS_MISSING_COLUMNS.add(col)
+            attempt = {k: v for k, v in attempt.items() if k != col}
+            last_err = exc
+    if last_err is not None:
+        raise last_err
+
+
+def _cc_insert_assignment(
+    client,
+    ticket_number: str,
+    assigned_to: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+) -> None:
+    now_iso = _cc_utc_now_iso()
+    row: dict = {
+        "ticket_number": ticket_number,
+        "assigned_to": assigned_to,
+        "task_category": task_category,
+        "status": "Pending",
+        "field_response": None,
+        "photo_url": None,
+        "last_assigned_at": now_iso,
+        "additional_info": additional_info,
+    }
+    for _ in range(4):
+        try:
+            client.table(TICKETS_TABLE).insert(row).execute()
+            break
+        except Exception as exc:
+            col = _cc_parse_missing_column(str(exc))
+            if not col or col not in row:
+                raise
+            _TICKETS_MISSING_COLUMNS.add(col)
+            row.pop(col, None)
+    else:
+        raise RuntimeError(
+            f"insert into {TICKETS_TABLE} failed: too many missing-column retries"
+        )
+
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=assigned_to,
+        action_type="Assignment",
+        note=additional_info,
+    )
+
+
+def _cc_reassign_ticket(
+    client,
+    ticket_number: str,
+    assigned_to: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+) -> None:
+    now_iso = _cc_utc_now_iso()
+    updates = {
+        "assigned_to": assigned_to,
+        "task_category": task_category,
+        "status": "Pending",
+        "field_response": None,
+        "photo_url": None,
+        "updated_at": now_iso,
+        "last_assigned_at": now_iso,
+        "additional_info": additional_info,
+    }
+    _cc_execute_ticket_update(client, updates, ticket_number)
+
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=assigned_to,
+        action_type="Assignment",
+        note=additional_info,
+    )
+
+
+def _cc_upsert_assignment(
+    assigned_to: str,
+    ticket_number: str,
+    task_category: str,
+) -> str:
+    """Insert or reassign; ``assigned_to`` is ``@username``. Returns a short summary."""
+    client = _get_supabase_client()
+    existing = _cc_fetch_ticket_minimal(client, ticket_number)
+    if existing is None:
+        _cc_insert_assignment(client, ticket_number, assigned_to, task_category)
+        return f"Created ticket **{ticket_number}** and logged assignment."
+    _cc_reassign_ticket(client, ticket_number, assigned_to, task_category)
+    prev_assignee = existing.get("assigned_to") or "—"
+    return (
+        f"Re-assigned **{ticket_number}** from {prev_assignee} to {assigned_to}; "
+        "status reset to Pending."
+    )
+
+
+def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | None]:
+    """Return a ``chat_id`` for ``send_message`` (int or ``@public_group``).
+
+    Telegram accepts a negative numeric id or ``@channelusername`` for public
+    chats. No webhook deletion is required to configure this.
+    """
+    s = raw.strip()
+    if not s:
+        return None, None
+    if s.startswith("@"):
+        return s, None
+    try:
+        return int(s), None
+    except ValueError:
+        return None, (
+            "Use a numeric id (e.g. -100…) or a public supergroup @username "
+            "(must start with @)."
+        )
+
+
+async def send_telegram_assignment(
+    *,
+    bot_token: str,
+    chat_id: int | str,
+    assigned_to: str,
+    ticket_number: str,
+    task_category: str,
+) -> None:
+    """Post the assignment into the field group via the Telegram Bot API.
+
+    The first line matches the assignment regex in ``bot.py`` so replies to
+    this message resolve to the correct ticket.
+    """
+    line1 = f"{assigned_to} {task_category} {ticket_number}"
+    line2 = f"{assigned_to}, you have a new task: {ticket_number} ({task_category})"
+    text = (
+        f"{line1}\n\n{line2}\n\n"
+        "Reply to **this message** with text or a photo when the task is done."
+    )
+    async with Bot(bot_token) as bot:
+        await bot.send_message(chat_id=chat_id, text=text)
+
+
+def _sidebar_command_center() -> None:
+    flash = st.session_state.pop(_CC_FLASH_KEY, None)
+    if flash:
+        st.success(flash)
+
+    st.header("Command Center")
+    token = _read_setting("TELEGRAM_TOKEN").strip()
+    chat_raw = _read_setting("TELEGRAM_GROUP_CHAT_ID").strip()
+    chat_id: int | str | None = None
+    chat_parse_err: str | None = None
+    if chat_raw:
+        chat_id, chat_parse_err = _parse_telegram_group_chat_id(chat_raw)
+        if chat_parse_err:
+            st.warning(chat_parse_err)
+
+    if not token or chat_id is None:
+        st.caption(
+            "Add **TELEGRAM_TOKEN** and **TELEGRAM_GROUP_CHAT_ID** to `.env` or Streamlit "
+            "secrets so each assign is posted into Telegram after the Supabase upsert."
+        )
+        with st.expander("Finding the group chat id (no webhook delete needed)"):
+            st.markdown(
+                "Deleting the webhook is only relevant if you are using "
+                "`https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser "
+                "while a **webhook** is set — Telegram will not populate "
+                "`getUpdates` in that case.\n\n"
+                "**Easiest:** in the field Telegram group, send **`/chatid`** as a user "
+                "listed in `TELEGRAM_ALLOWED_USERNAMES` (if you use that allowlist). "
+                "The bot replies with the numeric id (and `@username` if the group is public).\n"
+                "- If the field supergroup has a **public @username**, you can also set "
+                "`TELEGRAM_GROUP_CHAT_ID=@ThatUsername` (this app accepts that).\n"
+                "- Otherwise use the **numeric** id (often `-100…`). Your bot "
+                "already receives it on every group message in JSON as "
+                "`message.chat.id`; check your host logs, or add a bot such as "
+                "@RawDataBot / @getidsbot to the group once to read the id.\n"
+                "- You do **not** need to remove the webhook for Command Center."
+            )
+
+    with st.form("cc_assign_form"):
+        u_raw = st.text_input(
+            "@username",
+            placeholder="field_engineer",
+            help="Telegram username (letters, digits, underscore). Stored as @handle.",
+        )
+        tid_raw = st.text_input(
+            "Ticket number",
+            placeholder="9 or 16 digits",
+            help="Must match the bot assignment format (9 or 16 digits).",
+        )
+        cat = st.selectbox("Task category", options=list(ASSIGNMENT_TASK_CATEGORIES))
+        submitted = st.form_submit_button("Assign", type="primary", use_container_width=True)
+
+    if not submitted:
+        return
+
+    try:
+        handle = _cc_normalize_handle(u_raw)
+        tid = _cc_validate_ticket_number(tid_raw)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    if not token or chat_id is None:
+        st.error("Configure Telegram token and group chat id before assigning.")
+        return
+
+    try:
+        summary = _cc_upsert_assignment(handle, tid, cat)
+    except Exception as exc:
+        st.error(f"Supabase upsert failed: {exc}")
+        return
+
+    try:
+        asyncio.run(
+            send_telegram_assignment(
+                bot_token=token,
+                chat_id=chat_id,
+                assigned_to=handle,
+                ticket_number=tid,
+                task_category=cat,
+            )
+        )
+    except Exception as exc:
+        st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
+        return
+
+    st.session_state[_CC_FLASH_KEY] = f"{summary} Posted to Telegram."
+    st.rerun()
+
+
 DEFAULT_REFRESH_MINUTES = 5
 MIN_REFRESH_MINUTES = 1
 MAX_REFRESH_MINUTES = 60
@@ -518,6 +878,8 @@ MAX_LOOKBACK_DAYS = 30
 def _sidebar_controls() -> tuple[bool, int, int]:
     """Return (auto_enabled, interval_minutes, lookback_days)."""
     with st.sidebar:
+        _sidebar_command_center()
+        st.divider()
         st.header("Filters")
         lookback_days = st.slider(
             "Days to Look Back",

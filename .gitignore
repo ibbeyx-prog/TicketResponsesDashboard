@@ -19,5 +19,7 @@ __pycache__/
 
 *.log
 *.err
+bot.log.*
+bot.err.*
 .DS_Store
 Thumbs.db
