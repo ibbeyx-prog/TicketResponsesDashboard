@@ -1092,7 +1092,7 @@ def _sidebar_command_center() -> None:
         tid_raw = st.text_input(
             "Ticket number",
             placeholder="9 or 16 digits",
-            help="Must match the bot assignment format (9 or 16 digits).",
+            help="Unique per task (9 or 16 digits). Shown in Telegram line 1 and used to match field replies.",
         )
         cat = st.selectbox("Task category", options=list(ASSIGNMENT_TASK_CATEGORIES))
         additional_info_raw = st.text_area(

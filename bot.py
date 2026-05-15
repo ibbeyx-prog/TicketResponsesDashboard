@@ -35,6 +35,7 @@ Database expectations
 
    Override the table name with ``TICKETS_TABLE`` (default ``tickets_active``).
 
+   Each ``ticket_number`` (9 or 16 digits) is **unique** in ``tickets_active``.
    Field engineers submit work by **replying** to an assignment message with
    plain text and/or a photo. Photos are stored in the Storage bucket
    ``ticket-photos`` (override with ``TICKET_PHOTOS_BUCKET``). A field reply
@@ -544,53 +545,66 @@ def _resolve_ticket_from_assignment_reply(parent_blob: str, replier_username: st
     return None
 
 
-def _resolve_ticket_from_reply_text(
-    reply_text: str | None, replier_username: str | None
-) -> str | None:
-    """Match ticket id embedded in the field reply body (caption/text)."""
-    if not reply_text or not replier_username:
-        return None
-    blob = _normalize_assignment_blob(reply_text)
-    candidates: list[str] = []
-    for m in _ASSIGNMENT_PATTERN.finditer(blob):
-        candidates.append(m.group(3))
-    for m in re.finditer(r"\b(\d{16}|\d{9})\b", blob):
-        candidates.append(m.group(1))
+_TICKET_ID_PATTERN: re.Pattern[str] = re.compile(r"\b(\d{16}|\d{9})\b")
+
+
+def _extract_ticket_ids(*blobs: str | None) -> list[str]:
+    """Collect unique 9/16-digit ticket ids from one or more message bodies (order preserved)."""
     seen: set[str] = set()
-    for tid in candidates:
-        if tid in seen:
+    ordered: list[str] = []
+    for blob in blobs:
+        if not blob:
             continue
-        seen.add(tid)
+        norm = _normalize_assignment_blob(blob)
+        for m in _TICKET_ID_PATTERN.finditer(norm):
+            tid = m.group(1)
+            if tid not in seen:
+                seen.add(tid)
+                ordered.append(tid)
+    return ordered
+
+
+def _resolve_ticket_by_unique_id(
+    parent_blob: str,
+    reply_text: str | None,
+    replier_username: str | None,
+) -> str | None:
+    """Resolve using ticket_number (globally unique) from parent and/or reply text."""
+    if not replier_username:
+        return None
+    ids = _extract_ticket_ids(parent_blob, reply_text)
+    if not ids:
+        return None
+
+    matched: list[str] = []
+    for tid in ids:
         try:
             row = _db_get_ticket(tid)
         except Exception:
-            log.exception("tickets lookup failed for reply-text ticket %s", tid)
+            log.exception("tickets lookup failed for ticket id %s", tid)
             continue
-        if row and _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
-            return tid
-    return None
+        if not row:
+            continue
+        if _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
+            matched.append(tid)
 
-
-def _resolve_ticket_from_parent_loose(
-    parent_blob: str, replier_username: str | None
-) -> str | None:
-    """Match ticket id digits in the replied-to message (assignment or bot ack)."""
-    if not parent_blob or not replier_username:
-        return None
-    blob = _normalize_assignment_blob(parent_blob)
-    seen: set[str] = set()
-    for m in re.finditer(r"\b(\d{16}|\d{9})\b", blob):
-        tid = m.group(1)
-        if tid in seen:
-            continue
-        seen.add(tid)
-        try:
-            row = _db_get_ticket(tid)
-        except Exception:
-            log.exception("tickets lookup failed for loose parent ticket %s", tid)
-            continue
-        if row and _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
-            return tid
+    if len(matched) == 1:
+        return matched[0]
+    if len(matched) > 1:
+        # Rare: two ticket ids in one message; first assignee match wins.
+        log.info(
+            "field_reply: multiple ticket ids for @%s, using %s among %s",
+            replier_username,
+            matched[0],
+            matched,
+        )
+        return matched[0]
+    if len(ids) == 1:
+        log.warning(
+            "field_reply: ticket %s found in message but assignee does not match @%s",
+            ids[0],
+            replier_username,
+        )
     return None
 
 
@@ -634,19 +648,13 @@ def _resolve_ticket_for_field_reply(
     replier_username: str | None,
     reply_text: str | None,
 ) -> str | None:
+    """Match a field reply to exactly one ticket (ticket_number is unique in the DB)."""
+    ticket = _resolve_ticket_by_unique_id(parent_blob, reply_text, replier_username)
+    if ticket:
+        log.info("field_reply matched unique ticket_number %s", ticket)
+        return ticket
     ticket = _resolve_ticket_from_assignment_reply(parent_blob, replier_username)
     if ticket:
-        return ticket
-    ticket = _resolve_ticket_from_parent_loose(parent_blob, replier_username)
-    if ticket:
-        log.info("field_reply matched ticket %s from parent ticket id", ticket)
-        return ticket
-    ticket = _resolve_ticket_from_reply_text(reply_text, replier_username)
-    if ticket:
-        log.info(
-            "field_reply matched ticket %s from reply text (parent had no assignment line)",
-            ticket,
-        )
         return ticket
     ticket = _resolve_ticket_single_pending_for_assignee(replier_username)
     if ticket:
@@ -1401,15 +1409,15 @@ async def handle_group_field_work(update: Update, context: ContextTypes.DEFAULT_
             await _group_field_nudge(
                 update,
                 context,
-                f"@{username}: you have {len(pending)} pending tickets ({ids}). "
-                "Swipe-reply to the assignment message for the ticket you finished, "
-                "or include the ticket number in your message.",
+                f"@{username}: swipe-reply to the assignment for one ticket, or send your "
+                f"update with that ticket number (each id is unique: {ids}).",
             )
         elif not msg.reply_to_message:
             await _group_field_nudge(
                 update,
                 context,
-                f"@{username}: reply to the bot assignment message (or include the ticket number).",
+                f"@{username}: reply to the assignment message or include the ticket number "
+                "(each ticket number is unique).",
             )
         return
 
