@@ -403,6 +403,28 @@ async def _reply(update: Update, text: str, **kwargs) -> None:
     await msg.reply_text(text, **kwargs)
 
 
+async def _group_field_nudge(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> None:
+    """Tell the assignee how to complete a task when we cannot match a ticket."""
+    if not _is_group_chat(update):
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=msg.chat_id,
+            text=text,
+            reply_to_message_id=msg.message_id,
+            disable_notification=True,
+        )
+    except Exception:
+        log.warning("could not send group field nudge")
+
+
 async def _group_field_ack(
     update: Update, context: ContextTypes.DEFAULT_TYPE, ticket_number: str
 ) -> None:
@@ -549,10 +571,32 @@ def _resolve_ticket_from_reply_text(
     return None
 
 
-def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) -> str | None:
-    """When the parent assignment text is missing, use Pending row(s) for this assignee."""
-    if not replier_username:
+def _resolve_ticket_from_parent_loose(
+    parent_blob: str, replier_username: str | None
+) -> str | None:
+    """Match ticket id digits in the replied-to message (assignment or bot ack)."""
+    if not parent_blob or not replier_username:
         return None
+    blob = _normalize_assignment_blob(parent_blob)
+    seen: set[str] = set()
+    for m in re.finditer(r"\b(\d{16}|\d{9})\b", blob):
+        tid = m.group(1)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        try:
+            row = _db_get_ticket(tid)
+        except Exception:
+            log.exception("tickets lookup failed for loose parent ticket %s", tid)
+            continue
+        if row and _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
+            return tid
+    return None
+
+
+def _pending_tickets_for_assignee(replier_username: str | None) -> list[dict[str, Any]]:
+    if not replier_username:
+        return []
     try:
         res = (
             supabase.table(TICKETS_TABLE)
@@ -561,29 +605,28 @@ def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) ->
             .execute()
         )
     except Exception:
-        log.exception("pending tickets lookup failed for field-reply fallback")
-        return None
-    rows = [
+        log.exception("pending tickets lookup failed for @%s", replier_username)
+        return []
+    return [
         r
         for r in (res.data or [])
         if _sender_matches_assigned_to(r.get("assigned_to"), replier_username)
     ]
-    if not rows:
-        return None
+
+
+def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) -> str | None:
+    """Use the sole Pending row for this assignee (never guess among several)."""
+    rows = _pending_tickets_for_assignee(replier_username)
     if len(rows) == 1:
         return str(rows[0].get("ticket_number") or "") or None
-    rows.sort(
-        key=lambda r: str(r.get("last_assigned_at") or ""),
-        reverse=True,
-    )
-    chosen = str(rows[0].get("ticket_number") or "") or None
-    log.info(
-        "field_reply fallback: @%s has %s pending tickets; using most recent %s",
-        replier_username,
-        len(rows),
-        chosen,
-    )
-    return chosen
+    if len(rows) > 1:
+        log.warning(
+            "field_reply ambiguous: @%s has %s pending tickets; require reply to "
+            "assignment or ticket id in message",
+            replier_username,
+            len(rows),
+        )
+    return None
 
 
 def _resolve_ticket_for_field_reply(
@@ -593,6 +636,10 @@ def _resolve_ticket_for_field_reply(
 ) -> str | None:
     ticket = _resolve_ticket_from_assignment_reply(parent_blob, replier_username)
     if ticket:
+        return ticket
+    ticket = _resolve_ticket_from_parent_loose(parent_blob, replier_username)
+    if ticket:
+        log.info("field_reply matched ticket %s from parent ticket id", ticket)
         return ticket
     ticket = _resolve_ticket_from_reply_text(reply_text, replier_username)
     if ticket:
@@ -1341,11 +1388,28 @@ async def handle_group_field_work(update: Update, context: ContextTypes.DEFAULT_
             username,
             parent_blob[:200],
         )
-        if msg.reply_to_message and not username:
+        if not username:
             await _reply(
                 update,
                 "Could not match this reply. Set a Telegram @username that matches "
                 "the assignee on the ticket.",
+            )
+            return
+        pending = _pending_tickets_for_assignee(username)
+        if len(pending) > 1:
+            ids = ", ".join(str(r.get("ticket_number")) for r in pending[:8])
+            await _group_field_nudge(
+                update,
+                context,
+                f"@{username}: you have {len(pending)} pending tickets ({ids}). "
+                "Swipe-reply to the assignment message for the ticket you finished, "
+                "or include the ticket number in your message.",
+            )
+        elif not msg.reply_to_message:
+            await _group_field_nudge(
+                update,
+                context,
+                f"@{username}: reply to the bot assignment message (or include the ticket number).",
             )
         return
 

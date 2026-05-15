@@ -1654,19 +1654,25 @@ def _render_dashboard(
         _queue_segment_label("Completed", int(completed_mask.sum()) if not df.empty else 0),
         "Log",
     ]
+    open_label = _queue_segment_label("Open", total_open)
+    pending_label = _queue_segment_label("Pending", total_pending)
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
     if total_open > prev_open:
-        st.session_state["dash_queue_segmented"] = _queue_segment_label("Open", total_open)
+        st.session_state["dash_queue_segmented"] = open_label
+    elif "dash_queue_segmented" not in st.session_state:
+        st.session_state["dash_queue_segmented"] = (
+            open_label if total_open > 0 else pending_label
+        )
+    current_seg = st.session_state.get("dash_queue_segmented")
+    if current_seg not in queue_options:
+        st.session_state["dash_queue_segmented"] = (
+            open_label if total_open > 0 else pending_label
+        )
     st.session_state["_dash_prev_open_count"] = total_open
-
-    default_queue = queue_options[0]
-    if total_open > 0:
-        default_queue = _queue_segment_label("Open", total_open)
 
     queue_picked = st.segmented_control(
         "Ticket queues",
         options=queue_options,
-        default=default_queue,
         key="dash_queue_segmented",
         help=(
             "Pending = assigned, waiting on field. Open = field replied in Telegram, "
