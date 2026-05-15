@@ -1595,6 +1595,12 @@ def _render_dashboard(
         return
 
     df = _apply_lookback(df_all, lookback_days)
+    if len(df_all) > len(df):
+        st.caption(
+            f"Showing **{len(df)}** of **{len(df_all)}** tickets in the last "
+            f"{lookback_days} day(s). Increase **Days to Look Back** in the sidebar "
+            "if a Telegram assignment is missing."
+        )
 
     mismatches = _fetch_pending_with_response_mismatch()
     if mismatches:

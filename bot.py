@@ -313,6 +313,16 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
+class _CoordinatorAssignmentFilter(filters.MessageFilter):
+    """New assignment post in the group (not a reply): ``@user <Category> <ticket>``."""
+
+    def filter(self, message: Message) -> bool:
+        if not message or not message.text or message.reply_to_message:
+            return False
+        blob = _normalize_assignment_blob(message.text)
+        return bool(_ASSIGNMENT_PATTERN.search(blob))
+
+
 def _is_sender_allowed(update: Update) -> bool:
     handles = _effective_allowed_handles()
     if handles is None:
@@ -389,6 +399,32 @@ async def _reply(update: Update, text: str, **kwargs) -> None:
     if msg is None:
         return
     await msg.reply_text(text, **kwargs)
+
+
+async def _group_assignment_ack(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    ticket_number: str,
+    assigned_to: str,
+) -> None:
+    """Confirm in the group that Supabase + dashboard received the assignment."""
+    if not _is_group_chat(update):
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=msg.chat_id,
+            text=(
+                f"Recorded {ticket_number} for {assigned_to} — "
+                "check the dashboard **Pending** queue."
+            ),
+            reply_to_message_id=msg.message_id,
+            disable_notification=True,
+        )
+    except Exception:
+        log.warning("could not send group assignment ack for %s", ticket_number)
 
 
 async def _group_field_nudge(
@@ -901,6 +937,20 @@ def _db_insert_assignment(
             f"insert into {TICKETS_TABLE} failed: too many missing columns"
         )
 
+    verify = (
+        supabase.table(TICKETS_TABLE)
+        .select("ticket_number")
+        .eq("ticket_number", ticket_number)
+        .limit(1)
+        .execute()
+    )
+    if not (verify.data or []):
+        raise RuntimeError(
+            f"insert into {TICKETS_TABLE} for {ticket_number} did not persist "
+            f"(check Supabase RLS / TICKETS_TABLE={TICKETS_TABLE!r})"
+        )
+    log.info("assignment inserted ticket=%s assignee=%s", ticket_number, assigned_to)
+
     _db_insert_attendance_log(
         ticket_number=ticket_number,
         member_username=assigned_to,
@@ -984,8 +1034,9 @@ _HELP_TEXT = (
     "  Text → saved as field_response; photo → uploaded to ticket-photos; ticket → Open (admin review).\n"
     "\n"
     "Groups + Telegram bot privacy:\n"
-    "  Reply to the bot assignment message (swipe-reply). If the bot never sees\n"
-    "  your message, turn privacy OFF in @BotFather for this bot.\n"
+    "  Coordinators: post ``@user <Category> <ticket>`` as a new message (not a reply).\n"
+    "  Field team: swipe-reply to that assignment. If the bot never sees messages,\n"
+    "  turn privacy OFF in @BotFather or @mention the bot on assignments.\n"
     "\n"
     "Operator /respond workflow:\n"
     "  1) /respond <ticket_id> — pick the ticket you want to reply to\n"
@@ -1440,6 +1491,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     f"• Assigned ticket {ticket_number} ({task_category}) "
                     f"to {assigned_to}{info_suffix}."
                 )
+                await _group_assignment_ack(update, context, ticket_number, assigned_to)
             else:
                 _db_reassign_ticket(
                     ticket_number,
@@ -1455,9 +1507,18 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     f"Status reset to Pending (was {prev_status}); "
                     "previous response and photo cleared."
                 )
+                await _group_assignment_ack(update, context, ticket_number, assigned_to)
         except Exception as exc:
             log.exception("tickets upsert failed for %s: %s", ticket_number, exc)
             lines.append(f"• Failed to record assignment for ticket {ticket_number}.")
+            if _is_group_chat(update):
+                await _group_field_nudge(
+                    update,
+                    context,
+                    f"Could not save ticket {ticket_number} to the dashboard. "
+                    f"Use an exact category name (e.g. Femto Recover, Coverage Check). "
+                    f"Error: {str(exc)[:120]}",
+                )
 
     header = (
         "Processed assignment:"
@@ -1564,19 +1625,16 @@ def _build_bot_app() -> Application:
         | filters.Document.MimeType("image/png")
         | filters.Document.MimeType("image/webp")
     )
-    # Original flow (pre–Command Center): swipe-reply to the assignment message.
-    # Registered before assignment + handle_input so field work is never swallowed.
-    _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
-    bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
-    # Assignment messages take priority over the generic /respond text flow.
-    # Within a handler group only the first matching handler runs, so this must
-    # be registered before the catch-all text handler below.
+    # Coordinator posts a new assignment in the group (original flow — not a reply).
     bot_app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Regex(_ASSIGNMENT_PATTERN),
+            filters.TEXT & ~filters.COMMAND & _CoordinatorAssignmentFilter(),
             handle_assignment,
         )
     )
+    # Field swipe-reply to an assignment (works for coordinator or dashboard posts).
+    _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
+    bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
     # Anything else (photos, documents, voice, stickers, ...) gets a friendly fallback.
     bot_app.add_handler(
