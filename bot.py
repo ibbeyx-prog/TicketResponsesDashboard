@@ -343,6 +343,22 @@ def _chat_id(update: Update) -> int | None:
     return int(chat.id) if chat else None
 
 
+def _skip_bot_own_assignment_echo(update: Update) -> bool:
+    """Ignore dashboard assignment posts echoed back via webhook (prevents duplicate bridge)."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user or not _is_group_chat(update):
+        return False
+    try:
+        bot_id = bot_app.bot.id
+    except Exception:
+        return False
+    if user.id != bot_id:
+        return False
+    blob = _normalize_assignment_blob(f"{msg.text or ''}\n{msg.caption or ''}")
+    return bool(blob and _ASSIGNMENT_PATTERN.search(blob))
+
+
 def _log_incoming_update(update: Update) -> None:
     """Trace webhook delivery (Railway logs) without logging secrets."""
     msg = update.effective_message
@@ -1711,6 +1727,13 @@ async def webhook_handler(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid Telegram update payload")
 
     _log_incoming_update(update)
+
+    if _skip_bot_own_assignment_echo(update):
+        log.info(
+            "skip bot-own assignment echo update_id=%s (dashboard already posted)",
+            update.update_id,
+        )
+        return {"status": "ok"}
 
     # Always ack with 200 so Telegram does not endlessly retry on transient
     # handler failures. The handler logs the exception via error_handler.

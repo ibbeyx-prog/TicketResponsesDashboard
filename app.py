@@ -62,7 +62,11 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from bot_utils import normalize_telegram_group_id_paste, notify_telegram_group
+from bot_utils import (
+    NOTIFY_BUILD_ID,
+    normalize_telegram_group_id_paste,
+    notify_telegram_group,
+)
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -975,6 +979,12 @@ def _sidebar_command_center() -> None:
         st.success(flash)
 
     st.header("Command Center")
+    st.caption(
+        f"Telegram posts **one** assignment message ({NOTIFY_BUILD_ID}). "
+        "If you still see **Additional_info** or a second **reply HERE** line, "
+        "restart this dashboard (`run-dashboard.ps1`) or redeploy Streamlit Cloud from **main** — "
+        "redeploying only the Railway bot is not enough."
+    )
     token_env = (
         _read_setting("TG_BOT_TOKEN").strip()
         or _read_setting("TELEGRAM_BOT_TOKEN").strip()
@@ -1133,7 +1143,9 @@ def _sidebar_command_center() -> None:
         st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
         return
 
-    st.session_state[_CC_FLASH_KEY] = f"{summary} Posted to Telegram."
+    st.session_state[_CC_FLASH_KEY] = (
+        f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message)."
+    )
     st.rerun()
 
 
