@@ -17,14 +17,21 @@ regex matches without any special separators.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+_log = logging.getLogger("bot_utils")
 
 from telegram import Bot
 from telethon import TelegramClient
 
 # Session file lives next to this module (add ``*.session`` to ``.gitignore``).
 _SESSION_BASE = Path(__file__).resolve().parent / "telethon_bot_session"
+
+# Shown in the dashboard Command Center — if Telegram still shows "Additional_info"
+# or a second "reply HERE" message, restart/redeploy Streamlit (not only Railway).
+NOTIFY_BUILD_ID = "2026-05-16-single"
 
 
 def _at_username(username: str) -> str:
@@ -170,6 +177,16 @@ async def notify_telegram_group(
         username, ticket_id, category, additional_info=additional_info
     )
     entity = _parse_group_entity(group_raw)
+    _log.info(
+        "notify_telegram_group %s: single assignment post to %s (telethon=%s)",
+        NOTIFY_BUILD_ID,
+        entity,
+        bool(
+            api_id_res is not None
+            and str(api_id_res).strip()
+            and api_hash_res
+        ),
+    )
 
     use_telethon = bool(
         api_id_res is not None
