@@ -82,6 +82,7 @@ import secrets
 import string
 import sys
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -271,6 +272,9 @@ def _normalize_assignment_blob(blob: str) -> str:
         return ""
     s = str(blob).replace("\ufeff", "")
     s = html.unescape(s)
+    # Full-width / compatibility digits (Excel, some keyboards) → ASCII so
+    # ``[0-9]{9}`` / ``{16}`` ticket captures work.
+    s = unicodedata.normalize("NFKC", s)
     s = re.sub(r"<[^>]+>", " ", s)
     # Command Center uses U+00BB (») between @handle, category, and ticket on line 1.
     s = s.replace("\u00bb", " ")
