@@ -222,7 +222,16 @@ _ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
     "Repeater Fault",
 )
 
-_CATEGORY_ALTS: str = "|".join(re.escape(cat) for cat in _ASSIGNMENT_TASK_CATEGORIES)
+# Extra spellings accepted in Telegram text; normalized to a canonical DB value.
+_ASSIGNMENT_CATEGORY_SYNONYMS: dict[str, str] = {
+    "Femto Recovery": "Femto Recover",
+}
+
+_ASSIGNMENT_CATEGORY_SPELLINGS: tuple[str, ...] = _ASSIGNMENT_TASK_CATEGORIES + tuple(
+    _ASSIGNMENT_CATEGORY_SYNONYMS.keys()
+)
+
+_CATEGORY_ALTS: str = "|".join(re.escape(cat) for cat in _ASSIGNMENT_CATEGORY_SPELLINGS)
 
 # Telegram usernames: 5–32 chars, [A-Za-z0-9_], must start with a letter. Avoid
 # ``\\w`` (Unicode "letters") so odd scripts cannot steal the @-capture.
@@ -314,10 +323,10 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
 
 
 class _CoordinatorAssignmentFilter(filters.MessageFilter):
-    """New assignment post in the group (not a reply): ``@user <Category> <ticket>``."""
+    """Text that looks like a new assignment (including forum / thread replies)."""
 
     def filter(self, message: Message) -> bool:
-        if not message or not message.text or message.reply_to_message:
+        if not message or not message.text:
             return False
         blob = _normalize_assignment_blob(message.text)
         return bool(_ASSIGNMENT_PATTERN.search(blob))
@@ -734,6 +743,30 @@ def _strip_missing_ticket_columns(payload: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if k not in _TICKETS_MISSING_COLUMNS}
 
 
+def _is_duplicate_key_error(exc: Exception) -> bool:
+    """Detect Postgres unique / duplicate-key violations from PostgREST."""
+    t = str(exc).lower()
+    return "23505" in t or "duplicate key" in t or "unique constraint" in t
+
+
+def _canonical_task_category(raw: str) -> str | None:
+    """Map synonym / typo labels to allowed ``task_category`` values (DB check constraint)."""
+    s = (raw or "").strip()
+    if s in _ASSIGNMENT_TASK_CATEGORIES:
+        return s
+    if s in _ASSIGNMENT_CATEGORY_SYNONYMS:
+        return _ASSIGNMENT_CATEGORY_SYNONYMS[s]
+    aliases = {
+        "femto recovery": "Femto Recover",
+        "femto-installation": "Femto Installation",
+        "repeater installation": "Repeater Installation",
+        "repeater-installation": "Repeater Installation",
+        "coverage": "Coverage Check",
+        "coverage check": "Coverage Check",
+    }
+    return aliases.get(s.lower())
+
+
 def _parse_missing_column(message: str) -> str | None:
     """Extract the column name from a PostgREST missing-column error.
 
@@ -1022,8 +1055,30 @@ async def _clear_active_ticket(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message:
-        await _reply(update, "This chat is not available.")
+    if not update.message:
+        return
+    if _is_group_chat(update):
+        msg = update.message
+        try:
+            who = (
+                f"@{update.effective_user.username}"
+                if update.effective_user and update.effective_user.username
+                else "You"
+            )
+            await context.bot.send_message(
+                chat_id=msg.chat_id,
+                text=(
+                    f"{who}: this bot only accepts assignments from usernames listed in "
+                    "TELEGRAM_ALLOWED_USERNAMES (Railway env). Add your @username, redeploy, "
+                    "or remove that variable to allow any coordinator."
+                ),
+                reply_to_message_id=msg.message_id,
+                disable_notification=True,
+            )
+        except Exception:
+            log.warning("could not send group unauthorized notice", exc_info=True)
+        return
+    await _reply(update, "This chat is not available.")
 
 
 _HELP_TEXT = (
@@ -1034,7 +1089,7 @@ _HELP_TEXT = (
     "  Text → saved as field_response; photo → uploaded to ticket-photos; ticket → Open (admin review).\n"
     "\n"
     "Groups + Telegram bot privacy:\n"
-    "  Coordinators: post ``@user <Category> <ticket>`` as a new message (not a reply).\n"
+    "  Coordinators: post ``@user <Category> <ticket>`` (new message or thread reply).\n"
     "  Field team: swipe-reply to that assignment. If the bot never sees messages,\n"
     "  turn privacy OFF in @BotFather or @mention the bot on assignments.\n"
     "\n"
@@ -1155,6 +1210,8 @@ async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _is_group_chat(update):
+        return
     log.info(
         "handle_input fired: chat=%s user=@%s text=%r",
         _chat_id(update),
@@ -1466,9 +1523,20 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     lines: list[str] = []
     for m in matches:
         assigned_to = m.group(1)        # e.g. "@john"
-        task_category = m.group(2)      # e.g. "Femto Installation"
+        task_category_raw = m.group(2)  # e.g. "Femto Installation"
         ticket_number = m.group(3)      # 16- or 9-digit string
         additional_info = _clean_assignment_info(m.group("info"))
+
+        task_category = _canonical_task_category(task_category_raw)
+        if not task_category:
+            msg = (
+                f"Unknown category {task_category_raw!r} for ticket {ticket_number}. "
+                f"Use one of: {', '.join(_ASSIGNMENT_TASK_CATEGORIES)}."
+            )
+            lines.append(f"• {msg}")
+            if _is_group_chat(update):
+                await _group_field_nudge(update, context, msg[:350])
+            continue
 
         try:
             existing = _db_get_ticket(ticket_number)
@@ -1481,16 +1549,44 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         try:
             if existing is None:
-                _db_insert_assignment(
-                    ticket_number,
-                    assigned_to,
-                    task_category,
-                    additional_info=additional_info,
-                )
-                lines.append(
-                    f"• Assigned ticket {ticket_number} ({task_category}) "
-                    f"to {assigned_to}{info_suffix}."
-                )
+                try:
+                    _db_insert_assignment(
+                        ticket_number,
+                        assigned_to,
+                        task_category,
+                        additional_info=additional_info,
+                    )
+                except Exception as insert_exc:
+                    if _is_duplicate_key_error(insert_exc):
+                        log.warning(
+                            "duplicate insert for %s, retrying as reassign: %s",
+                            ticket_number,
+                            insert_exc,
+                        )
+                        existing = _db_get_ticket(ticket_number)
+                        if existing is None:
+                            raise insert_exc
+                        _db_reassign_ticket(
+                            ticket_number,
+                            assigned_to,
+                            task_category,
+                            additional_info=additional_info,
+                        )
+                        prev_assignee = existing.get("assigned_to") or "—"
+                        prev_status = existing.get("status") or "—"
+                        lines.append(
+                            f"• Re-assigned ticket {ticket_number} ({task_category}) "
+                            f"from {prev_assignee} to {assigned_to}{info_suffix}. "
+                            f"Status reset to Pending (was {prev_status}); "
+                            "previous response and photo cleared."
+                        )
+                    else:
+                        raise insert_exc
+                else:
+                    lines.append(
+                        f"• Assigned ticket {ticket_number} ({task_category}) "
+                        f"to {assigned_to}{info_suffix}."
+                    )
                 await _group_assignment_ack(update, context, ticket_number, assigned_to)
             else:
                 _db_reassign_ticket(
@@ -1516,8 +1612,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     update,
                     context,
                     f"Could not save ticket {ticket_number} to the dashboard. "
-                    f"Use an exact category name (e.g. Femto Recover, Coverage Check). "
-                    f"Error: {str(exc)[:120]}",
+                    f"Check Railway logs. Supabase said: {str(exc)[:200]}",
                 )
 
     header = (
