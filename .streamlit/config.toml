@@ -1,0 +1,8 @@
+[server]
+port = 8501
+headless = true
+address = "localhost"
+
+[browser]
+serverAddress = "localhost"
+gatherUsageStats = false

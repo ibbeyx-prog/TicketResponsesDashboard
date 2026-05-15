@@ -13,7 +13,9 @@ __pycache__/
 *.pyo
 
 .pytest_cache/
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
+logs/
 .idea/
 .vscode/
 

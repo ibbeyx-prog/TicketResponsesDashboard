@@ -1137,7 +1137,7 @@ def _sidebar_command_center() -> None:
     st.rerun()
 
 
-DEFAULT_REFRESH_MINUTES = 5
+DEFAULT_REFRESH_MINUTES = 1
 MIN_REFRESH_MINUTES = 1
 MAX_REFRESH_MINUTES = 60
 
@@ -1244,6 +1244,39 @@ _BON_THEME_CSS = """
         --bon-oak: #D7B491;
         --bon-text: #e8e6e3;
         --bon-muted: #a39e97;
+        --bon-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    /* One UI font everywhere Streamlit allows (tables, metrics, forms, markdown). */
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"],
+    [data-testid="stSidebar"],
+    [data-testid="stMarkdownContainer"],
+    [data-testid="stMarkdownContainer"] *,
+    [data-testid="stMetric"],
+    [data-testid="stMetric"] *,
+    [data-testid="stDataFrame"],
+    [data-testid="stDataFrame"] *,
+    .stTabs [data-baseweb="tab-list"],
+    .stTabs [data-baseweb="tab"],
+    [data-baseweb="select"],
+    [data-baseweb="input"],
+    [data-baseweb="textarea"],
+    [data-baseweb="typo-body"],
+    [data-baseweb="typo-label"],
+    .stTextInput input,
+    .stTextArea textarea,
+    .stSelectbox [data-baseweb="select"] > div,
+    .stMultiSelect [data-baseweb="select"] > div,
+    .stNumberInput input,
+    .stSlider [data-baseweb="slider"] label,
+    .stCheckbox label,
+    .stRadio label,
+    .stToggle label,
+    .stDateInput input,
+    .stTimeInput input,
+    .stButton > button {
+        font-family: var(--bon-font) !important;
     }
     .stApp {
         background-color: var(--bon-bg);
@@ -1281,6 +1314,15 @@ _BON_THEME_CSS = """
     .stTabs [aria-selected="true"] {
         background-color: var(--bon-oak) !important;
         color: #121212 !important;
+    }
+    /* Queue switcher (segmented control): more space between choices than tabs */
+    div[data-baseweb="segmented-control"] {
+        gap: 12px !important;
+        flex-wrap: wrap !important;
+    }
+    div[data-baseweb="segmented-control"] button {
+        padding: 10px 20px !important;
+        min-height: 2.75rem !important;
     }
     .stButton > button {
         border-radius: 10px !important;
@@ -1425,11 +1467,27 @@ def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
     return df[mask].copy()
 
 
+def _queue_segment_label(name: str, count: int) -> str:
+    return f"{name} ({count})" if count else name
+
+
+def _queue_segment_base(label: str | None) -> str:
+    """Map segmented-control label (with optional count) back to queue name."""
+    if not label:
+        return "Pending"
+    for base in ("Pending", "Open", "Completed", "Log"):
+        if label == base or label.startswith(f"{base} ("):
+            return base
+    return "Pending"
+
+
 def _render_dashboard(
     *,
     lookback_days: int,
 ) -> None:
     day_word = "day" if lookback_days == 1 else "days"
+    refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    st.caption(f"Data from Supabase table `{TICKETS_TABLE}` · last refresh **{refreshed_at} {LOCAL_TZ_LABEL}**")
 
     try:
         df_all = _fetch_tickets()
@@ -1494,11 +1552,38 @@ def _render_dashboard(
 
     st.divider()
 
-    tab_assigned, tab_open, tab_completed, tab_log = st.tabs(
-        ["Assigned Task", "Open", "Completed", "Log"]
-    )
+    if total_open > 0:
+        st.info(
+            f"**{total_open}** ticket(s) have a field reply and are in **Open** "
+            f"(awaiting your review). They leave **Pending** after the bot saves the response — "
+            f"switch the queue below to **Open ({total_open})**."
+        )
 
-    with tab_assigned:
+    queue_options = [
+        _queue_segment_label("Pending", total_pending),
+        _queue_segment_label("Open", total_open),
+        _queue_segment_label("Completed", int(completed_mask.sum()) if not df.empty else 0),
+        "Log",
+    ]
+    prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
+    if total_open > prev_open:
+        st.session_state["dash_queue_segmented"] = _queue_segment_label("Open", total_open)
+    st.session_state["_dash_prev_open_count"] = total_open
+
+    queue_picked = st.segmented_control(
+        "Ticket queues",
+        options=queue_options,
+        default=queue_options[0],
+        key="dash_queue_segmented",
+        help=(
+            "Pending = assigned, waiting on field. Open = field replied in Telegram, "
+            "needs your review. Use sidebar **Refresh now** if auto-refresh is off."
+        ),
+    )
+    queue_view = _queue_segment_base(queue_picked)
+    st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
+
+    if queue_view == "Pending":
         st.subheader("Assigned tasks (pending)")
         st.caption(
             "Reassigned tickets reset to **Pending** here, even if they were "
@@ -1548,7 +1633,7 @@ def _render_dashboard(
                     f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
                 )
 
-    with tab_open:
+    elif queue_view == "Open":
         st.subheader("Open — awaiting admin review")
         st.caption(
             "Field team has responded. Review the response below and pick a "
@@ -1599,7 +1684,7 @@ def _render_dashboard(
                 st.subheader("Gallery view — field photos awaiting review")
                 _render_field_photos_section(open_df)
 
-    with tab_completed:
+    elif queue_view == "Completed":
         st.subheader("Completed tickets")
         st.caption(
             "Only tickets the admin team has signed off on appear here. If "
@@ -1649,8 +1734,10 @@ def _render_dashboard(
                 st.subheader("Gallery view — completed field photos")
                 _render_field_photos_section(done)
 
-    with tab_log:
+    elif queue_view == "Log":
         _render_attendance_tab()
+    else:
+        st.warning("Unknown queue view; pick Pending, Open, Completed, or Log.")
 
 
 def _render_field_photos_section(done: pd.DataFrame) -> None:
