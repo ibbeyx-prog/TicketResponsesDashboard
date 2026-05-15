@@ -102,8 +102,10 @@ from telegram.ext import (
     filters,
 )
 
+from webhook_config import resolve_telegram_webhook_url
+
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(_ENV_PATH, encoding="utf-8-sig")
+load_dotenv(_ENV_PATH, encoding="utf-8-sig", override=True)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -116,8 +118,6 @@ SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 PORT = int(os.getenv("PORT", "8000"))
-RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 # Telegram ``secret_token`` must match ``[A-Za-z0-9_-]{1,256}`` (Bot API).
 _WEBHOOK_SECRET_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
@@ -142,15 +142,16 @@ if not TELEGRAM_TOKEN:
         "See .env.example for all supported keys."
     )
 
-_webhook_url_configured = bool(WEBHOOK_BASE_URL) or bool(RAILWAY_PUBLIC_DOMAIN)
+_webhook_url_configured = resolve_telegram_webhook_url() is not None
 if _webhook_url_configured and not TELEGRAM_WEBHOOK_SECRET:
     alphabet = string.ascii_letters + string.digits + "_-"
     example = "".join(secrets.choice(alphabet) for _ in range(32))
     raise ValueError(
-        "TELEGRAM_WEBHOOK_SECRET is required whenever WEBHOOK_BASE_URL or "
-        "RAILWAY_PUBLIC_DOMAIN is set. Telegram sends it back as the "
-        "X-Telegram-Bot-Api-Secret-Token header on every webhook POST so "
-        "random clients cannot POST fake updates to your /webhook URL. "
+        "TELEGRAM_WEBHOOK_SECRET is required whenever a webhook URL is set "
+        "(RAILWAY_PUBLIC_DOMAIN, WEBHOOK_BASE_URL, or WEBHOOK_FULL_URL). "
+        "Telegram sends it back as the X-Telegram-Bot-Api-Secret-Token header "
+        "on every webhook POST so random clients cannot POST fake updates to "
+        "your /webhook URL. "
         "Use 1–256 characters from A–Z, a–z, 0–9, underscore, hyphen only. "
         f"Example (generate your own): {example}"
     )
@@ -451,6 +452,88 @@ def _resolve_ticket_from_assignment_reply(parent_blob: str, replier_username: st
         if _normalize_username(m.group(1)) == replier_key:
             return m.group(3)
     return None
+
+
+def _resolve_ticket_from_reply_text(
+    reply_text: str | None, replier_username: str | None
+) -> str | None:
+    """Match ticket id embedded in the field reply body (caption/text)."""
+    if not reply_text or not replier_username:
+        return None
+    blob = _normalize_assignment_blob(reply_text)
+    candidates: list[str] = []
+    for m in _ASSIGNMENT_PATTERN.finditer(blob):
+        candidates.append(m.group(3))
+    for m in re.finditer(r"\b(\d{16}|\d{9})\b", blob):
+        candidates.append(m.group(1))
+    seen: set[str] = set()
+    for tid in candidates:
+        if tid in seen:
+            continue
+        seen.add(tid)
+        try:
+            row = _db_get_ticket(tid)
+        except Exception:
+            log.exception("tickets lookup failed for reply-text ticket %s", tid)
+            continue
+        if row and _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
+            return tid
+    return None
+
+
+def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) -> str | None:
+    """When the replied-to message is missing (privacy), use the sole Pending row."""
+    if not replier_username:
+        return None
+    try:
+        res = (
+            supabase.table(TICKETS_TABLE)
+            .select("ticket_number, assigned_to")
+            .eq("status", "Pending")
+            .execute()
+        )
+    except Exception:
+        log.exception("pending tickets lookup failed for field-reply fallback")
+        return None
+    rows = [
+        r
+        for r in (res.data or [])
+        if _sender_matches_assigned_to(r.get("assigned_to"), replier_username)
+    ]
+    if len(rows) == 1:
+        return str(rows[0].get("ticket_number") or "") or None
+    if len(rows) > 1:
+        log.warning(
+            "field_reply fallback ambiguous: @%s has %s pending tickets",
+            replier_username,
+            len(rows),
+        )
+    return None
+
+
+def _resolve_ticket_for_field_reply(
+    parent_blob: str,
+    replier_username: str | None,
+    reply_text: str | None,
+) -> str | None:
+    ticket = _resolve_ticket_from_assignment_reply(parent_blob, replier_username)
+    if ticket:
+        return ticket
+    ticket = _resolve_ticket_from_reply_text(reply_text, replier_username)
+    if ticket:
+        log.info(
+            "field_reply matched ticket %s from reply text (parent had no assignment line)",
+            ticket,
+        )
+        return ticket
+    ticket = _resolve_ticket_single_pending_for_assignee(replier_username)
+    if ticket:
+        log.info(
+            "field_reply matched ticket %s via sole Pending row for @%s",
+            ticket,
+            replier_username,
+        )
+    return ticket
 
 
 def _public_storage_object_url(bucket: str, object_path: str) -> str:
@@ -762,7 +845,8 @@ _HELP_TEXT = (
     "  3) The active ticket is cleared automatically after a successful save\n"
     "\n"
     "Commands:\n"
-    "  /respond <ticket_id> — start a reply for a ticket\n"
+    "  /start, /help — always available in private (confirm the bot is online)\n"
+    "  /respond <ticket_id> — start a reply for a ticket (may require allowlist)\n"
     "  /active — show the ticket you are currently replying to\n"
     "  /cancel — clear the active ticket without saving\n"
     "  /chatid — show this chat's id (for TELEGRAM_GROUP_CHAT_ID; posts in groups)\n"
@@ -771,17 +855,18 @@ _HELP_TEXT = (
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_sender_allowed(update):
-        await _reply_unauthorized(update, context)
-        return
+    """Public entrypoint: do **not** gate on ``TELEGRAM_ALLOWED_USERNAMES``.
+
+    Otherwise users without a Telegram @username (or anyone not on the list)
+    see no usable reply in private — they think the bot is dead. Operator
+    commands stay gated separately.
+    """
     if update.message:
         await _reply(update, _HELP_TEXT)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_sender_allowed(update):
-        await _reply_unauthorized(update, context)
-        return
+    """Same as ``/start`` — always available so help works in private."""
     if update.message:
         await _reply(update, _HELP_TEXT)
 
@@ -903,6 +988,23 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Non-fatal — typing indicator is purely cosmetic.
             pass
 
+    row = _db_get_ticket(ticket_id)
+    if row:
+        try:
+            _db_complete_ticket_field_response(
+                ticket_id,
+                field_response=text,
+                update_photo_url=False,
+                responder_username=user_handle,
+            )
+        except Exception:
+            log.exception("ticket field completion failed for /respond flow: %s", ticket_id)
+            await _reply(update, f"Could not update ticket {ticket_id} in the dashboard.")
+            return
+        await _clear_active_ticket(update, context)
+        await _reply(update, f"Ticket {ticket_id} sent for admin review.")
+        return
+
     payload = {
         "ticket_id": ticket_id,
         "user_handle": user_handle,
@@ -919,85 +1021,19 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     await _clear_active_ticket(update, context)
-    await _reply(update, f"Saved response for ticket {ticket_id}.")
+    await _reply(update, f"Saved response for ticket {ticket_id} (legacy log only).")
 
 
-async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Assignee completes a task by replying to the assignment message (text and/or photo).
-
-    Not gated by ``TELEGRAM_ALLOWED_USERNAMES`` — the replier must match ``assigned_to``
-    on the ``tickets`` row (Telegram ``@username``, case-insensitive).
-    """
+async def _apply_field_completion(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    ticket_number: str,
+    *,
+    username: str | None,
+) -> None:
+    """Save text/photo for ``ticket_number`` and set status Open (admin review)."""
     msg = update.message
-    parent_preview = ""
-    if msg and msg.reply_to_message:
-        pr = msg.reply_to_message
-        if isinstance(pr, Message):
-            parent_preview = ((pr.text or "") + "\n" + (pr.caption or ""))[:200]
-        else:
-            parent_preview = f"<{type(pr).__name__}>"
-    log.info(
-        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r",
-        _chat_id(update),
-        (update.effective_user.username if update.effective_user else None),
-        (msg.text[:120] if msg and msg.text else (msg.caption[:120] if msg and msg.caption else None)),
-        parent_preview,
-    )
-    if not msg or not msg.reply_to_message:
-        return
-
-    parent = msg.reply_to_message
-    if not isinstance(parent, Message):
-        log.warning(
-            "field_reply ignored: reply parent is not a readable Message (type=%s)",
-            type(parent).__name__,
-        )
-        return
-
-    parent_blob = _parent_assignment_blob(parent)
-    username = update.effective_user.username if update.effective_user else None
-
-    ticket_number = _resolve_ticket_from_assignment_reply(parent_blob, username)
-    if not ticket_number:
-        match_n = len(list(_ASSIGNMENT_PATTERN.finditer(parent_blob)))
-        log.warning(
-            "field_reply no ticket match chat=%s user=@%s parent_matches=%s parent_head=%r",
-            _chat_id(update),
-            username,
-            match_n,
-            parent_blob[:400],
-        )
-        if not username:
-            await _reply(update, 
-                "Could not match this reply to a ticket. "
-                "Set a Telegram username so it matches assigned_to on the ticket."
-            )
-        else:
-            await _reply(update, 
-                "Could not match this reply to a ticket for your username. "
-                "Reply to the assignment message that names your @handle."
-            )
-        return
-
-    try:
-        row = _db_get_ticket(ticket_number)
-    except Exception:
-        log.exception("tickets lookup failed for field reply: %s", ticket_number)
-        await _reply(update, f"Database error while loading ticket {ticket_number}.")
-        return
-
-    if not row:
-        await _reply(update, f"No ticket record found for {ticket_number}.")
-        return
-
-    if not _sender_matches_assigned_to(row.get("assigned_to"), username):
-        log.warning(
-            "field_reply assignee mismatch ticket=%s db_assigned_to=%r replier=@%s",
-            ticket_number,
-            row.get("assigned_to"),
-            username,
-        )
-        await _reply(update, "You are not the assignee for that ticket.")
+    if not msg:
         return
 
     has_photo = bool(msg.photo)
@@ -1116,6 +1152,131 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if await _get_active_ticket(update, context) == ticket_number:
         await _clear_active_ticket(update, context)
+
+
+async def handle_field_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Field completion without using Telegram's reply swipe (common in groups).
+
+    Matches the assignee's sole Pending ticket or a ticket id in the message body.
+    """
+    if not _is_group_chat(update):
+        return
+    msg = update.message
+    if not msg or msg.reply_to_message:
+        return
+
+    username = update.effective_user.username if update.effective_user else None
+    body = (msg.text or msg.caption or "").strip()
+    if body and _ASSIGNMENT_PATTERN.search(_normalize_assignment_blob(body)):
+        return
+
+    log.info(
+        "handle_field_standalone fired: chat=%s user=@%s text=%r",
+        _chat_id(update),
+        username,
+        body[:120] if body else None,
+    )
+
+    ticket_number = _resolve_ticket_for_field_reply("", username, body or None)
+    if not ticket_number:
+        return
+
+    try:
+        row = _db_get_ticket(ticket_number)
+    except Exception:
+        log.exception("tickets lookup failed for standalone field message")
+        return
+
+    if not row:
+        return
+    if str(row.get("status") or "").strip() != "Pending":
+        return
+    if not _sender_matches_assigned_to(row.get("assigned_to"), username):
+        return
+
+    await _apply_field_completion(update, context, ticket_number, username=username)
+
+
+async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Assignee completes a task by replying to the assignment message (text and/or photo).
+
+    Not gated by ``TELEGRAM_ALLOWED_USERNAMES`` — the replier must match ``assigned_to``
+    on the ``tickets`` row (Telegram ``@username``, case-insensitive).
+    """
+    msg = update.message
+    parent_preview = ""
+    if msg and msg.reply_to_message:
+        pr = msg.reply_to_message
+        if isinstance(pr, Message):
+            parent_preview = ((pr.text or "") + "\n" + (pr.caption or ""))[:200]
+        else:
+            parent_preview = f"<{type(pr).__name__}>"
+    log.info(
+        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r",
+        _chat_id(update),
+        (update.effective_user.username if update.effective_user else None),
+        (msg.text[:120] if msg and msg.text else (msg.caption[:120] if msg and msg.caption else None)),
+        parent_preview,
+    )
+    if not msg or not msg.reply_to_message:
+        return
+
+    parent = msg.reply_to_message
+    parent_blob = _parent_assignment_blob(parent) if isinstance(parent, Message) else ""
+    if not isinstance(parent, Message):
+        log.info(
+            "field_reply parent not readable (type=%s); using reply text / pending fallback",
+            type(parent).__name__,
+        )
+
+    username = update.effective_user.username if update.effective_user else None
+    reply_text = (msg.caption or msg.text or "").strip() or None
+
+    ticket_number = _resolve_ticket_for_field_reply(parent_blob, username, reply_text)
+    if not ticket_number:
+        match_n = len(list(_ASSIGNMENT_PATTERN.finditer(_normalize_assignment_blob(parent_blob))))
+        log.warning(
+            "field_reply no ticket match chat=%s user=@%s parent_matches=%s parent_head=%r",
+            _chat_id(update),
+            username,
+            match_n,
+            parent_blob[:400],
+        )
+        if not username:
+            await _reply(update, 
+                "Could not match this reply to a ticket. "
+                "Set a Telegram username so it matches assigned_to on the ticket."
+            )
+        else:
+            await _reply(update, 
+                "Could not match this reply to a ticket for your username. "
+                "Reply to the bot assignment message (or the bot's 'reply HERE' line), "
+                "or include the ticket number in your message."
+            )
+        return
+
+    try:
+        row = _db_get_ticket(ticket_number)
+    except Exception:
+        log.exception("tickets lookup failed for field reply: %s", ticket_number)
+        await _reply(update, f"Database error while loading ticket {ticket_number}.")
+        return
+
+    if not row:
+        await _reply(update, f"No ticket record found for {ticket_number}.")
+        return
+
+    if not _sender_matches_assigned_to(row.get("assigned_to"), username):
+        log.warning(
+            "field_reply assignee mismatch ticket=%s db_assigned_to=%r replier=@%s",
+            ticket_number,
+            row.get("assigned_to"),
+            username,
+        )
+        await _reply(update, "You are not the assignee for that ticket.")
+        return
+
+    await _apply_field_completion(update, context, ticket_number, username=username)
 
 
 async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1284,13 +1445,18 @@ def _build_bot_app() -> Application:
         | filters.Document.MimeType("image/png")
         | filters.Document.MimeType("image/webp")
     )
-    _field_reply_filter = (
-        filters.REPLY
+    # Accept any assignee reply with media/text; ticket resolution tolerates
+    # InaccessibleMessage parents and privacy mode when only one Pending row exists.
+    _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
+    bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
+    _field_standalone_filter = (
+        filters.ChatType.GROUPS
+        & ~filters.REPLY
         & ~filters.COMMAND
         & _field_reply_media
-        & _ReplyToAssignmentFilter()
+        & ~filters.Regex(_ASSIGNMENT_PATTERN)
     )
-    bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
+    bot_app.add_handler(MessageHandler(_field_standalone_filter, handle_field_standalone))
     # Assignment messages take priority over the generic /respond text flow.
     # Within a handler group only the first matching handler runs, so this must
     # be registered before the catch-all text handler below.
@@ -1312,24 +1478,14 @@ def _build_bot_app() -> Application:
     return bot_app
 
 
-def _resolve_webhook_url() -> str | None:
-    if WEBHOOK_BASE_URL:
-        return f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
-    if RAILWAY_PUBLIC_DOMAIN:
-        domain = RAILWAY_PUBLIC_DOMAIN
-        if not domain.startswith(("http://", "https://")):
-            domain = f"https://{domain}"
-        return f"{domain.rstrip('/')}/webhook"
-    return None
-
-
 def _verify_webhook_secret(request: Request) -> None:
     """Reject webhook POSTs that are not from Telegram (wrong / missing secret).
 
     When ``TELEGRAM_WEBHOOK_SECRET`` is unset (no webhook URL configured in
     env), we skip the check so local experiments can hit ``/webhook`` without
-    Telegram headers. When it **is** set — required if ``WEBHOOK_BASE_URL`` /
-    ``RAILWAY_PUBLIC_DOMAIN`` is set — every POST must carry the matching
+    Telegram headers. When it **is** set — required if a webhook URL is
+    configured (``WEBHOOK_FULL_URL``, ``WEBHOOK_BASE_URL``, or
+    ``RAILWAY_PUBLIC_DOMAIN``) — every POST must carry the matching
     ``X-Telegram-Bot-Api-Secret-Token`` header.
     """
     if not TELEGRAM_WEBHOOK_SECRET:
@@ -1349,17 +1505,42 @@ async def lifespan(_: FastAPI):
     await bot_app.initialize()
     await bot_app.start()
 
-    webhook_url = _resolve_webhook_url()
+    webhook_url = resolve_telegram_webhook_url()
     if webhook_url:
-        await bot_app.bot.set_webhook(
-            url=webhook_url,
-            secret_token=TELEGRAM_WEBHOOK_SECRET,
-            drop_pending_updates=False,
-        )
-        log.info("Webhook registered (secret token enforced): %s", webhook_url)
+        try:
+            await bot_app.bot.set_webhook(
+                url=webhook_url,
+                secret_token=TELEGRAM_WEBHOOK_SECRET,
+                drop_pending_updates=False,
+            )
+        except Exception:
+            log.exception(
+                "Telegram set_webhook failed (url=%s). Process keeps running so "
+                "/health stays up; fix env or network and redeploy or run "
+                "restore_webhook.py.",
+                webhook_url,
+            )
+        else:
+            log.info("Telegram set_webhook succeeded: %s", webhook_url)
+            try:
+                wh = await bot_app.bot.get_webhook_info()
+                err = (wh.last_error_message or "").strip()
+                if err:
+                    log.warning(
+                        "Telegram getWebhookInfo reports a delivery error (fix URL/TLS or secret): %s",
+                        err[:500],
+                    )
+                log.info(
+                    "Telegram webhook status: url=%r pending_updates=%s",
+                    wh.url,
+                    wh.pending_update_count,
+                )
+            except Exception:
+                log.exception("Telegram get_webhook_info failed after set_webhook")
     else:
         log.warning(
-            "WEBHOOK_BASE_URL or RAILWAY_PUBLIC_DOMAIN not set; Telegram webhook not registered."
+            "No webhook URL configured (set RAILWAY_PUBLIC_DOMAIN, WEBHOOK_BASE_URL, or "
+            "WEBHOOK_FULL_URL); Telegram webhook not registered."
         )
 
     try:
@@ -1380,12 +1561,32 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    """Shallow root so probes to ``/`` do not 404; use ``/health`` for webhook hints."""
+    return {"service": "ticket_bot", "health": "/health", "webhook": "/webhook"}
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    """Liveness for load balancers; includes whether a webhook URL is configured in env.
+
+    Does not call Telegram on every request (avoid rate limits). After deploy,
+    read startup logs for ``set_webhook`` / ``get_webhook_info``, or run
+    ``py -3 restore_webhook.py --probe`` from a machine with ``.env``.
+    """
+    url = resolve_telegram_webhook_url()
+    return {
+        "status": "ok",
+        "webhook_url_configured": "yes" if url else "no",
+        # What Telegram is told to POST to (after normalizing env). Compare to
+        # getWebhookInfo.url if you still see 404 — they must match exactly.
+        "telegram_callback_url": url or "",
+    }
 
 
 @app.post("/webhook")
+@app.post("/webhook/")
 async def webhook_handler(request: Request) -> dict[str, str]:
     _verify_webhook_secret(request)
 

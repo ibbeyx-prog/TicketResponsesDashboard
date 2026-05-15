@@ -77,19 +77,22 @@ if ($NoBot) {
     Start-Sleep -Seconds 3
 }
 
-# 3) Streamlit on :8501
+# 3) Streamlit on :8501 (background + wait until HTTP responds)
 if ($NoDashboard) {
     Write-Host "[--] dashboard start skipped (-NoDashboard)"
 } elseif (Test-Listen 8501) {
     Write-Host "[OK ] dashboard already running on :8501"
 } else {
-    Write-Host "[..] starting streamlit dashboard"
-    Start-InNewWindow "ticket-dashboard" $venvPython @(
-        "-m", "streamlit", "run", "app.py",
-        "--server.port", "8501",
-        "--server.headless", "true"
-    )
-    Start-Sleep -Seconds 2
+    Write-Host "[..] starting streamlit dashboard (background)"
+    $dashScript = Join-Path $root "run-dashboard.ps1"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dashScript -Background -Quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] dashboard did not start — run .\run-dashboard.ps1 or see logs\dashboard.err.log"
+    } elseif (-not (Test-Listen 8501)) {
+        Write-Host "[FAIL] dashboard port :8501 still not listening after start"
+    } else {
+        Write-Host "[OK ] dashboard ready on :8501"
+    }
 }
 
 Start-Sleep -Seconds 1
@@ -134,6 +137,7 @@ try {
 
 Write-Host ""
 Write-Host "Public bot:  $publicUrl"
-Write-Host "Dashboard:   http://localhost:8501"
+Write-Host "Dashboard:   http://localhost:8501  (or: .\open-dashboard.ps1)"
 Write-Host ""
+Write-Host "Keep dashboard alive after reboot:  .\install-dashboard-autostart.ps1"
 Write-Host "Stop everything with:  .\stop.ps1"

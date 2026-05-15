@@ -63,7 +63,7 @@ Get-Process ngrok -ErrorAction SilentlyContinue | ForEach-Object {
 # Python invocations typically reference scripts by relative path (e.g.
 # `python bot.py`) and system-installed interpreters live outside this
 # folder, so that check silently let stale duplicates survive.
-$pattern = '(bot\.py|streamlit\s+run\s+(app|dashboard)\.py)'
+$pattern = '(bot\.py|streamlit\s+run\s+(app|dashboard)\.py|run-dashboard\.ps1)'
 Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern } |
     ForEach-Object {
