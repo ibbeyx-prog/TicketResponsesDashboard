@@ -191,7 +191,12 @@ def main() -> int:
         "url": webhook_url,
         "secret_token": secret,
         "drop_pending_updates": False,
-        "allowed_updates": ["message", "edited_message"],
+        "allowed_updates": [
+            "message",
+            "edited_message",
+            "channel_post",
+            "edited_channel_post",
+        ],
     }
     with httpx.Client(timeout=30.0) as client:
         r = client.post(f"{api}/setWebhook", json=payload)

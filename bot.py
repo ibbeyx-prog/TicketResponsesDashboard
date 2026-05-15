@@ -323,12 +323,16 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
 
 
 class _CoordinatorAssignmentFilter(filters.MessageFilter):
-    """Text that looks like a new assignment (including forum / thread replies)."""
+    """Body text or **photo caption** contains ``@user <Category> <ticket>``."""
 
     def filter(self, message: Message) -> bool:
-        if not message or not message.text:
+        if not message:
             return False
-        blob = _normalize_assignment_blob(message.text)
+        t = message.text or ""
+        cap = message.caption or ""
+        if not (t.strip() or cap.strip()):
+            return False
+        blob = _normalize_assignment_blob(f"{t}\n{cap}")
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
@@ -1494,19 +1498,27 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Detect ``@user <Category> <ticket_number>`` patterns and upsert tickets.
 
-    A single message may contain multiple assignments; each match is processed
-    independently and the results are reported back as a single reply.
+    Uses ``effective_message`` so **channel posts** and **photo captions** work,
+    not only plain group text messages.
     """
+    msg = update.effective_message
+    body_preview = ""
+    if msg:
+        body_preview = ((msg.text or "") + "\n" + (msg.caption or "")).strip()[:120]
     log.info(
-        "handle_assignment fired: chat=%s user=@%s text=%r",
+        "handle_assignment fired: chat=%s user=@%s body=%r",
         _chat_id(update),
         (update.effective_user.username if update.effective_user else None),
-        (update.message.text[:120] if update.message and update.message.text else None),
+        body_preview,
     )
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message or not update.message.text:
+    if not msg:
+        return
+    t = msg.text or ""
+    cap = msg.caption or ""
+    if not (t.strip() or cap.strip()):
         return
 
     # Dashboard posts assignment-shaped lines as the bot user. Those rows are
@@ -1515,7 +1527,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if update.effective_user and update.effective_user.id == context.bot.id:
         return
 
-    text = _normalize_assignment_blob(update.message.text)
+    text = _normalize_assignment_blob(f"{t}\n{cap}")
     matches = list(_ASSIGNMENT_PATTERN.finditer(text))
     if not matches:
         return  # Filter shouldn't have triggered, but be defensive.
@@ -1720,10 +1732,11 @@ def _build_bot_app() -> Application:
         | filters.Document.MimeType("image/png")
         | filters.Document.MimeType("image/webp")
     )
-    # Coordinator posts a new assignment in the group (original flow — not a reply).
+    # Assignment lines can be plain text, a photo/document **caption**, or a channel post.
+    # Do not restrict to ``filters.TEXT`` only — that misses most caption-only assignments.
     bot_app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & _CoordinatorAssignmentFilter(),
+            ~filters.COMMAND & _CoordinatorAssignmentFilter(),
             handle_assignment,
         )
     )
@@ -1776,7 +1789,12 @@ async def lifespan(_: FastAPI):
                 url=webhook_url,
                 secret_token=TELEGRAM_WEBHOOK_SECRET,
                 drop_pending_updates=False,
-                allowed_updates=["message", "edited_message"],
+                allowed_updates=[
+                    "message",
+                    "edited_message",
+                    "channel_post",
+                    "edited_channel_post",
+                ],
             )
         except Exception:
             log.exception(
@@ -1847,6 +1865,7 @@ async def health() -> dict[str, str]:
         # What Telegram is told to POST to (after normalizing env). Compare to
         # getWebhookInfo.url if you still see 404 — they must match exactly.
         "telegram_callback_url": url or "",
+        "tickets_table": TICKETS_TABLE,
     }
 
 
