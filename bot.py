@@ -312,6 +312,18 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
+class _GroupFieldStandaloneFilter(filters.MessageFilter):
+    """Group field completion without reply — exclude new assignment-shaped posts."""
+
+    def filter(self, message: Message) -> bool:
+        if message.reply_to_message:
+            return False
+        blob = _normalize_assignment_blob(
+            f"{message.text or ''}\n{message.caption or ''}"
+        )
+        return not (blob and _ASSIGNMENT_PATTERN.search(blob))
+
+
 def _is_sender_allowed(update: Update) -> bool:
     handles = _effective_allowed_handles()
     if handles is None:
@@ -329,6 +341,25 @@ def _telegram_user_id(update: Update) -> int | None:
 def _chat_id(update: Update) -> int | None:
     chat = update.effective_chat
     return int(chat.id) if chat else None
+
+
+def _log_incoming_update(update: Update) -> None:
+    """Trace webhook delivery (Railway logs) without logging secrets."""
+    msg = update.effective_message
+    if not msg:
+        log.info("webhook update_id=%s (no message payload)", update.update_id)
+        return
+    user = update.effective_user
+    log.info(
+        "webhook update_id=%s chat=%s chat_type=%s user=@%s reply=%s photo=%s text=%r",
+        update.update_id,
+        _chat_id(update),
+        getattr(update.effective_chat, "type", None),
+        user.username if user else None,
+        bool(msg.reply_to_message),
+        bool(msg.photo),
+        (msg.text or msg.caption or "")[:120],
+    )
 
 
 def _is_group_chat(update: Update) -> bool:
@@ -353,6 +384,26 @@ async def _reply(update: Update, text: str, **kwargs) -> None:
     if msg is None:
         return
     await msg.reply_text(text, **kwargs)
+
+
+async def _group_field_ack(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, ticket_number: str
+) -> None:
+    """Short in-group confirmation so assignees know the dashboard was updated."""
+    if not _is_group_chat(update):
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=msg.chat_id,
+            text=f"✓ Ticket {ticket_number} received — moved to Open for review.",
+            reply_to_message_id=msg.message_id,
+            disable_notification=True,
+        )
+    except Exception:
+        log.warning("could not send group ack for ticket %s", ticket_number)
 
 
 def _disable_db_sessions(reason: str) -> None:
@@ -482,13 +533,13 @@ def _resolve_ticket_from_reply_text(
 
 
 def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) -> str | None:
-    """When the replied-to message is missing (privacy), use the sole Pending row."""
+    """When the parent assignment text is missing, use Pending row(s) for this assignee."""
     if not replier_username:
         return None
     try:
         res = (
             supabase.table(TICKETS_TABLE)
-            .select("ticket_number, assigned_to")
+            .select("ticket_number, assigned_to, last_assigned_at")
             .eq("status", "Pending")
             .execute()
         )
@@ -500,15 +551,22 @@ def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) ->
         for r in (res.data or [])
         if _sender_matches_assigned_to(r.get("assigned_to"), replier_username)
     ]
+    if not rows:
+        return None
     if len(rows) == 1:
         return str(rows[0].get("ticket_number") or "") or None
-    if len(rows) > 1:
-        log.warning(
-            "field_reply fallback ambiguous: @%s has %s pending tickets",
-            replier_username,
-            len(rows),
-        )
-    return None
+    rows.sort(
+        key=lambda r: str(r.get("last_assigned_at") or ""),
+        reverse=True,
+    )
+    chosen = str(rows[0].get("ticket_number") or "") or None
+    log.info(
+        "field_reply fallback: @%s has %s pending tickets; using most recent %s",
+        replier_username,
+        len(rows),
+        chosen,
+    )
+    return chosen
 
 
 def _resolve_ticket_for_field_reply(
@@ -703,6 +761,16 @@ def _db_complete_ticket_field_response(
     if update_photo_url:
         updates["photo_url"] = photo_url
     _execute_ticket_update(updates, ticket_number)
+    try:
+        row = _db_get_ticket(ticket_number)
+        if row and str(row.get("status") or "").strip() != "Open":
+            log.error(
+                "ticket %s status is still %r after field response update",
+                ticket_number,
+                row.get("status"),
+            )
+    except Exception:
+        log.exception("post-update verify failed for ticket %s", ticket_number)
 
     if responder_username:
         _db_insert_attendance_log(
@@ -836,8 +904,8 @@ _HELP_TEXT = (
     "  Text → saved as field_response; photo → uploaded to ticket-photos; ticket → Open (admin review).\n"
     "\n"
     "Groups + Telegram bot privacy:\n"
-    "  If the bot never sees your reply, turn privacy OFF in @BotFather, or set\n"
-    "  TELEGRAM_GROUP_REPLY_BRIDGE=1 so the bot posts a follow-up line you reply to.\n"
+    "  Reply to the bot assignment message (swipe-reply). If the bot never sees\n"
+    "  your message, turn privacy OFF in @BotFather for this bot.\n"
     "\n"
     "Operator /respond workflow:\n"
     "  1) /respond <ticket_id> — pick the ticket you want to reply to\n"
@@ -1089,6 +1157,7 @@ async def _apply_field_completion(
             ticket_number,
             _chat_id(update),
         )
+        await _group_field_ack(update, context, ticket_number)
         await _reply(update, f"Ticket {ticket_number} sent for admin review (photo saved).")
     elif image_doc is not None:
         if not _is_group_chat(update):
@@ -1129,6 +1198,7 @@ async def _apply_field_completion(
             ticket_number,
             _chat_id(update),
         )
+        await _group_field_ack(update, context, ticket_number)
         await _reply(update, f"Ticket {ticket_number} sent for admin review (image saved).")
     else:
         responder_handle = f"@{username}" if username else "@unknown"
@@ -1148,6 +1218,7 @@ async def _apply_field_completion(
             ticket_number,
             _chat_id(update),
         )
+        await _group_field_ack(update, context, ticket_number)
         await _reply(update, f"Ticket {ticket_number} sent for admin review.")
 
     if await _get_active_ticket(update, context) == ticket_number:
@@ -1179,6 +1250,11 @@ async def handle_field_standalone(update: Update, context: ContextTypes.DEFAULT_
 
     ticket_number = _resolve_ticket_for_field_reply("", username, body or None)
     if not ticket_number:
+        log.info(
+            "handle_field_standalone: no ticket for @%s body=%r",
+            username,
+            (body or "")[:80],
+        )
         return
 
     try:
@@ -1190,8 +1266,19 @@ async def handle_field_standalone(update: Update, context: ContextTypes.DEFAULT_
     if not row:
         return
     if str(row.get("status") or "").strip() != "Pending":
+        log.info(
+            "handle_field_standalone: ticket %s status=%s (not Pending)",
+            ticket_number,
+            row.get("status"),
+        )
         return
     if not _sender_matches_assigned_to(row.get("assigned_to"), username):
+        log.warning(
+            "handle_field_standalone: assignee mismatch ticket=%s db=%r user=@%s",
+            ticket_number,
+            row.get("assigned_to"),
+            username,
+        )
         return
 
     await _apply_field_completion(update, context, ticket_number, username=username)
@@ -1243,15 +1330,21 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parent_blob[:400],
         )
         if not username:
+            log.warning(
+                "field_reply failed: Telegram user has no @username (set one in Telegram settings)"
+            )
             await _reply(update, 
                 "Could not match this reply to a ticket. "
                 "Set a Telegram username so it matches assigned_to on the ticket."
             )
         else:
+            log.warning(
+                "field_reply failed for @%s — reply to the assignment message or include the ticket id",
+                username,
+            )
             await _reply(update, 
                 "Could not match this reply to a ticket for your username. "
-                "Reply to the bot assignment message (or the bot's 'reply HERE' line), "
-                "or include the ticket number in your message."
+                "Reply to the bot assignment message, or include the ticket number in your message."
             )
         return
 
@@ -1297,8 +1390,8 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message or not update.message.text:
         return
 
-    # Dashboard (and TELEGRAM_GROUP_REPLY_BRIDGE) post assignment-shaped lines
-    # as the bot user. Those rows are already written in Supabase; skip so we
+    # Dashboard posts assignment-shaped lines as the bot user. Those rows are
+    # already written in Supabase; skip so we
     # do not append duplicate attendance logs or re-run reassignment logic.
     if update.effective_user and update.effective_user.id == context.bot.id:
         return
@@ -1362,40 +1455,41 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     await _reply(update, header + "\n" + "\n".join(lines))
 
-    # In groups with bot privacy ON, Telegram does not deliver replies to
-    # *other users'* messages to the bot. Optional bridge: duplicate the
-    # assignment line(s) in a bot-owned message so the field team can reply
-    # *to the bot* (which privacy still allows).
-    if (
-        _truthy_env("TELEGRAM_GROUP_REPLY_BRIDGE")
-        and _is_group_chat(update)
-        and update.message
-        and matches
-        and lines
-        and not all("failed" in ln.lower() for ln in lines)
-    ):
-        bridge_lines = [f"{m.group(1)} {m.group(2)} {m.group(3)}" for m in matches]
-        bridge_text = (
-            "\n".join(bridge_lines)
-            + "\n\nField team: reply HERE (to this bot message) with text or photo."
-        )
-        try:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=bridge_text,
-                reply_to_message_id=update.message.message_id,
-                disable_notification=True,
-            )
-        except Exception as exc:
-            log.warning("TELEGRAM_GROUP_REPLY_BRIDGE send failed: %s", exc)
-
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Friendly fallback when the user sends non-text while a ticket is active."""
+    """Fallback for unsupported types; in groups, photos may be field completions."""
+    if not update.message:
+        return
+
+    if _is_group_chat(update) and not update.message.reply_to_message:
+        username = update.effective_user.username if update.effective_user else None
+        has_photo = bool(update.message.photo) or (
+            update.message.document
+            and (update.message.document.mime_type or "").startswith("image/")
+        )
+        if has_photo and username:
+            ticket_number = _resolve_ticket_for_field_reply("", username, None)
+            if ticket_number:
+                try:
+                    row = _db_get_ticket(ticket_number)
+                except Exception:
+                    row = None
+                if (
+                    row
+                    and str(row.get("status") or "").strip() == "Pending"
+                    and _sender_matches_assigned_to(row.get("assigned_to"), username)
+                ):
+                    log.info(
+                        "handle_non_text: treating photo as field completion for %s",
+                        ticket_number,
+                    )
+                    await _apply_field_completion(
+                        update, context, ticket_number, username=username
+                    )
+                    return
+
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
-        return
-    if not update.message:
         return
     ticket_id = await _get_active_ticket(update, context)
     if ticket_id:
@@ -1412,6 +1506,21 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def post_init(application: Application) -> None:
+    me = await application.bot.get_me()
+    log.info("Telegram bot identity: @%s id=%s", me.username, me.id)
+    group_raw = (
+        os.getenv("TELEGRAM_GROUP_CHAT_ID")
+        or os.getenv("TG_GROUP_ID")
+        or os.getenv("TELEGRAM_GROUP_ID")
+        or ""
+    ).strip()
+    if group_raw:
+        log.info("TELEGRAM_GROUP_CHAT_ID (configured): %s", group_raw[:80])
+    else:
+        log.warning(
+            "TELEGRAM_GROUP_CHAT_ID is not set on this service — field group posts "
+            "from the dashboard may use a different host's secrets."
+        )
     await application.bot.set_my_commands(
         [
             BotCommand("start", "Show help"),
@@ -1449,12 +1558,13 @@ def _build_bot_app() -> Application:
     # InaccessibleMessage parents and privacy mode when only one Pending row exists.
     _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
     bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
+    _group_chats = filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP
     _field_standalone_filter = (
-        filters.ChatType.GROUPS
+        _group_chats
         & ~filters.REPLY
         & ~filters.COMMAND
         & _field_reply_media
-        & ~filters.Regex(_ASSIGNMENT_PATTERN)
+        & _GroupFieldStandaloneFilter()
     )
     bot_app.add_handler(MessageHandler(_field_standalone_filter, handle_field_standalone))
     # Assignment messages take priority over the generic /respond text flow.
@@ -1512,6 +1622,7 @@ async def lifespan(_: FastAPI):
                 url=webhook_url,
                 secret_token=TELEGRAM_WEBHOOK_SECRET,
                 drop_pending_updates=False,
+                allowed_updates=["message", "edited_message"],
             )
         except Exception:
             log.exception(
@@ -1598,6 +1709,8 @@ async def webhook_handler(request: Request) -> dict[str, str]:
     update = Update.de_json(data, bot_app.bot)
     if not update:
         raise HTTPException(status_code=400, detail="Invalid Telegram update payload")
+
+    _log_incoming_update(update)
 
     # Always ack with 200 so Telegram does not endlessly retry on transient
     # handler failures. The handler logs the exception via error_handler.
