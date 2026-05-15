@@ -342,6 +342,54 @@ def _looks_like_missing_table_error(exc: Exception) -> bool:
     )
 
 
+def _fetch_ticket_row(ticket_number: str) -> dict | None:
+    """Load one ticket by id (ignores lookback filter)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    tid = (ticket_number or "").strip()
+    if not tid:
+        return None
+    client = _get_supabase_client()
+    res = (
+        client.table(TICKETS_TABLE)
+        .select("*")
+        .eq("ticket_number", tid)
+        .limit(1)
+        .execute()
+    )
+    rows = res.data or []
+    return rows[0] if rows else None
+
+
+def _fetch_pending_with_response_mismatch() -> list[str]:
+    """Tickets still Pending but with a recent Response log (bot update likely failed)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    client = _get_supabase_client()
+    try:
+        pending = (
+            client.table(TICKETS_TABLE)
+            .select("ticket_number")
+            .eq("status", "Pending")
+            .limit(200)
+            .execute()
+        ).data or []
+        if not pending:
+            return []
+        ids = [str(r["ticket_number"]) for r in pending if r.get("ticket_number")]
+        logs = (
+            client.table(ATTENDANCE_LOGS_TABLE)
+            .select("ticket_number")
+            .eq("action_type", "Response")
+            .in_("ticket_number", ids)
+            .execute()
+        ).data or []
+        logged = {str(r["ticket_number"]) for r in logs if r.get("ticket_number")}
+        return sorted(logged)
+    except Exception:
+        return []
+
+
 def _fetch_tickets() -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
@@ -1192,7 +1240,27 @@ def _sidebar_controls() -> tuple[bool, int, int]:
             disabled=not auto,
         )
         if st.button("Refresh Data", use_container_width=True):
+            _get_supabase_client.clear()
             st.rerun()
+        st.caption(
+            f"After a field reply in Telegram, tickets move **Pending → Open**. "
+            f"Use the **Open** queue below (not Pending). Table: `{TICKETS_TABLE}`."
+        )
+        lookup = st.text_input(
+            "Look up ticket #",
+            placeholder="9 or 16 digits",
+            key="dash_ticket_lookup",
+        )
+        if lookup.strip():
+            row = _fetch_ticket_row(lookup.strip())
+            if row:
+                st.success(
+                    f"**{row.get('ticket_number')}** — status **{row.get('status')}**, "
+                    f"assigned **{row.get('assigned_to')}**, "
+                    f"responded_at={row.get('responded_at') or '—'}"
+                )
+            else:
+                st.warning(f"No row in `{TICKETS_TABLE}` for that ticket number.")
         st.divider()
         if st.button("Log out", use_container_width=True):
             st.session_state.pop(_AUTH_OK_KEY, None)
@@ -1528,6 +1596,15 @@ def _render_dashboard(
 
     df = _apply_lookback(df_all, lookback_days)
 
+    mismatches = _fetch_pending_with_response_mismatch()
+    if mismatches:
+        st.error(
+            f"**{len(mismatches)}** ticket(s) have a Response in the log but are still **Pending** "
+            f"in `{TICKETS_TABLE}` (e.g. {', '.join(mismatches[:5])}). "
+            "The Railway bot could not UPDATE the row — check bot logs and apply "
+            "`supabase/migrations/20260516_tickets_active_anon_policies.sql`."
+        )
+
     status = df["status"].astype(str).str.strip() if not df.empty else pd.Series(dtype=str)
     pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
     open_mask = status.eq("Open") if not df.empty else pd.Series(dtype=bool)
@@ -1582,10 +1659,14 @@ def _render_dashboard(
         st.session_state["dash_queue_segmented"] = _queue_segment_label("Open", total_open)
     st.session_state["_dash_prev_open_count"] = total_open
 
+    default_queue = queue_options[0]
+    if total_open > 0:
+        default_queue = _queue_segment_label("Open", total_open)
+
     queue_picked = st.segmented_control(
         "Ticket queues",
         options=queue_options,
-        default=queue_options[0],
+        default=default_queue,
         key="dash_queue_segmented",
         help=(
             "Pending = assigned, waiting on field. Open = field replied in Telegram, "

@@ -312,16 +312,17 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
-class _GroupFieldStandaloneFilter(filters.MessageFilter):
-    """Group field completion without reply — exclude new assignment-shaped posts."""
+class _GroupFieldWorkFilter(filters.MessageFilter):
+    """Group field replies/completions — skip coordinator assignment posts (not replies)."""
 
     def filter(self, message: Message) -> bool:
-        if message.reply_to_message:
-            return False
-        blob = _normalize_assignment_blob(
-            f"{message.text or ''}\n{message.caption or ''}"
-        )
-        return not (blob and _ASSIGNMENT_PATTERN.search(blob))
+        if not message.reply_to_message:
+            blob = _normalize_assignment_blob(
+                f"{message.text or ''}\n{message.caption or ''}"
+            )
+            if blob and _ASSIGNMENT_PATTERN.search(blob):
+                return False
+        return True
 
 
 def _is_sender_allowed(update: Update) -> bool:
@@ -692,6 +693,27 @@ def _execute_ticket_update(
             supabase.table(TICKETS_TABLE).update(attempt).eq(
                 "ticket_number", ticket_number
             ).execute()
+            if "status" in attempt:
+                verify = (
+                    supabase.table(TICKETS_TABLE)
+                    .select("ticket_number, status")
+                    .eq("ticket_number", ticket_number)
+                    .limit(1)
+                    .execute()
+                )
+                rows = verify.data or []
+                if not rows:
+                    raise RuntimeError(
+                        f"ticket {ticket_number} not found after update "
+                        f"(check TICKETS_TABLE={TICKETS_TABLE!r})"
+                    )
+                got = str(rows[0].get("status") or "").strip()
+                want = str(attempt["status"]).strip()
+                if got != want:
+                    raise RuntimeError(
+                        f"ticket {ticket_number} status is {got!r}, expected {want!r} "
+                        "(Supabase RLS may be blocking UPDATE for this bot key)"
+                    )
             return
         except Exception as exc:
             text = str(exc)
@@ -1144,22 +1166,28 @@ async def _apply_field_completion(
                 )
             except Exception:
                 pass
+        upload_url: str | None = None
         try:
             tg_file = await context.bot.get_file(largest.file_id)
             raw = await tg_file.download_as_bytearray()
             image_bytes = bytes(raw)
             upload_url = _storage_upload_ticket_photo(ticket_number, image_bytes, "image/jpeg")
         except Exception:
-            log.exception("photo download or storage upload failed")
-            await _reply(update, "Could not upload the photo. Please try again.")
-            return
+            log.exception("photo download or storage upload failed for %s", ticket_number)
+            if not caption_or_text:
+                await _reply(update, "Could not upload the photo. Try again or send a text update.")
+                return
+            log.warning(
+                "saving text-only field response for %s after photo upload failed",
+                ticket_number,
+            )
         responder_handle = f"@{username}" if username else "@unknown"
         try:
             _db_complete_ticket_field_response(
                 ticket_number,
                 field_response=caption_or_text,
                 photo_url=upload_url,
-                update_photo_url=True,
+                update_photo_url=bool(upload_url),
                 responder_username=responder_handle,
             )
         except Exception:
@@ -1184,6 +1212,7 @@ async def _apply_field_completion(
                 )
             except Exception:
                 pass
+        upload_url = None
         try:
             tg_file = await context.bot.get_file(image_doc.file_id)
             raw = await tg_file.download_as_bytearray()
@@ -1191,16 +1220,17 @@ async def _apply_field_completion(
             mime = (image_doc.mime_type or "image/jpeg").split(";")[0].strip()
             upload_url = _storage_upload_ticket_photo(ticket_number, image_bytes, mime)
         except Exception:
-            log.exception("document image download or storage upload failed")
-            await _reply(update, "Could not upload the image file. Please try again.")
-            return
+            log.exception("document image upload failed for %s", ticket_number)
+            if not caption_or_text:
+                await _reply(update, "Could not upload the image. Try again or send text.")
+                return
         responder_handle = f"@{username}" if username else "@unknown"
         try:
             _db_complete_ticket_field_response(
                 ticket_number,
                 field_response=caption_or_text,
                 photo_url=upload_url,
-                update_photo_url=True,
+                update_photo_url=bool(upload_url),
                 responder_username=responder_handle,
             )
         except Exception:
@@ -1241,133 +1271,18 @@ async def _apply_field_completion(
         await _clear_active_ticket(update, context)
 
 
-async def handle_field_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Field completion without using Telegram's reply swipe (common in groups).
-
-    Matches the assignee's sole Pending ticket or a ticket id in the message body.
-    """
-    if not _is_group_chat(update):
-        return
-    msg = update.message
-    if not msg or msg.reply_to_message:
-        return
-
-    username = update.effective_user.username if update.effective_user else None
-    body = (msg.text or msg.caption or "").strip()
-    if body and _ASSIGNMENT_PATTERN.search(_normalize_assignment_blob(body)):
-        return
-
-    log.info(
-        "handle_field_standalone fired: chat=%s user=@%s text=%r",
-        _chat_id(update),
-        username,
-        body[:120] if body else None,
-    )
-
-    ticket_number = _resolve_ticket_for_field_reply("", username, body or None)
-    if not ticket_number:
-        log.info(
-            "handle_field_standalone: no ticket for @%s body=%r",
-            username,
-            (body or "")[:80],
-        )
-        return
-
+async def _complete_field_work_if_allowed(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    ticket_number: str,
+    *,
+    username: str | None,
+) -> None:
+    """Resolve assignee + status, then persist field work."""
     try:
         row = _db_get_ticket(ticket_number)
     except Exception:
-        log.exception("tickets lookup failed for standalone field message")
-        return
-
-    if not row:
-        return
-    if str(row.get("status") or "").strip() != "Pending":
-        log.info(
-            "handle_field_standalone: ticket %s status=%s (not Pending)",
-            ticket_number,
-            row.get("status"),
-        )
-        return
-    if not _sender_matches_assigned_to(row.get("assigned_to"), username):
-        log.warning(
-            "handle_field_standalone: assignee mismatch ticket=%s db=%r user=@%s",
-            ticket_number,
-            row.get("assigned_to"),
-            username,
-        )
-        return
-
-    await _apply_field_completion(update, context, ticket_number, username=username)
-
-
-async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Assignee completes a task by replying to the assignment message (text and/or photo).
-
-    Not gated by ``TELEGRAM_ALLOWED_USERNAMES`` — the replier must match ``assigned_to``
-    on the ``tickets`` row (Telegram ``@username``, case-insensitive).
-    """
-    msg = update.message
-    parent_preview = ""
-    if msg and msg.reply_to_message:
-        pr = msg.reply_to_message
-        if isinstance(pr, Message):
-            parent_preview = ((pr.text or "") + "\n" + (pr.caption or ""))[:200]
-        else:
-            parent_preview = f"<{type(pr).__name__}>"
-    log.info(
-        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r",
-        _chat_id(update),
-        (update.effective_user.username if update.effective_user else None),
-        (msg.text[:120] if msg and msg.text else (msg.caption[:120] if msg and msg.caption else None)),
-        parent_preview,
-    )
-    if not msg or not msg.reply_to_message:
-        return
-
-    parent = msg.reply_to_message
-    parent_blob = _parent_assignment_blob(parent) if isinstance(parent, Message) else ""
-    if not isinstance(parent, Message):
-        log.info(
-            "field_reply parent not readable (type=%s); using reply text / pending fallback",
-            type(parent).__name__,
-        )
-
-    username = update.effective_user.username if update.effective_user else None
-    reply_text = (msg.caption or msg.text or "").strip() or None
-
-    ticket_number = _resolve_ticket_for_field_reply(parent_blob, username, reply_text)
-    if not ticket_number:
-        match_n = len(list(_ASSIGNMENT_PATTERN.finditer(_normalize_assignment_blob(parent_blob))))
-        log.warning(
-            "field_reply no ticket match chat=%s user=@%s parent_matches=%s parent_head=%r",
-            _chat_id(update),
-            username,
-            match_n,
-            parent_blob[:400],
-        )
-        if not username:
-            log.warning(
-                "field_reply failed: Telegram user has no @username (set one in Telegram settings)"
-            )
-            await _reply(update, 
-                "Could not match this reply to a ticket. "
-                "Set a Telegram username so it matches assigned_to on the ticket."
-            )
-        else:
-            log.warning(
-                "field_reply failed for @%s — reply to the assignment message or include the ticket id",
-                username,
-            )
-            await _reply(update, 
-                "Could not match this reply to a ticket for your username. "
-                "Reply to the bot assignment message, or include the ticket number in your message."
-            )
-        return
-
-    try:
-        row = _db_get_ticket(ticket_number)
-    except Exception:
-        log.exception("tickets lookup failed for field reply: %s", ticket_number)
+        log.exception("tickets lookup failed for field work: %s", ticket_number)
         await _reply(update, f"Database error while loading ticket {ticket_number}.")
         return
 
@@ -1377,7 +1292,7 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not _sender_matches_assigned_to(row.get("assigned_to"), username):
         log.warning(
-            "field_reply assignee mismatch ticket=%s db_assigned_to=%r replier=@%s",
+            "field work assignee mismatch ticket=%s db=%r replier=@%s",
             ticket_number,
             row.get("assigned_to"),
             username,
@@ -1385,7 +1300,58 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _reply(update, "You are not the assignee for that ticket.")
         return
 
+    status = str(row.get("status") or "").strip()
+    if status not in ("Pending", "Open"):
+        log.info("field work skipped ticket=%s status=%s", ticket_number, status)
+        return
+
     await _apply_field_completion(update, context, ticket_number, username=username)
+
+
+async def handle_group_field_work(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Assignee completes a task in the field group (reply or standalone message)."""
+    if not _is_group_chat(update):
+        return
+    msg = update.message
+    if not msg:
+        return
+    if update.effective_user and update.effective_user.id == context.bot.id:
+        return
+
+    username = update.effective_user.username if update.effective_user else None
+    body = (msg.text or msg.caption or "").strip()
+    parent_blob = ""
+    if msg.reply_to_message:
+        parent = msg.reply_to_message
+        parent_blob = _parent_assignment_blob(parent) if isinstance(parent, Message) else ""
+
+    log.info(
+        "handle_group_field_work: chat=%s user=@%s reply=%s text=%r",
+        _chat_id(update),
+        username,
+        bool(msg.reply_to_message),
+        (body[:120] if body else None),
+    )
+
+    ticket_number = _resolve_ticket_for_field_reply(parent_blob, username, body or None)
+    if not ticket_number:
+        log.warning(
+            "field work no ticket match chat=%s user=@%s parent_head=%r",
+            _chat_id(update),
+            username,
+            parent_blob[:200],
+        )
+        if msg.reply_to_message and not username:
+            await _reply(
+                update,
+                "Could not match this reply. Set a Telegram @username that matches "
+                "the assignee on the ticket.",
+            )
+        return
+
+    await _complete_field_work_if_allowed(
+        update, context, ticket_number, username=username
+    )
 
 
 async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1477,32 +1443,8 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message:
         return
 
-    if _is_group_chat(update) and not update.message.reply_to_message:
-        username = update.effective_user.username if update.effective_user else None
-        has_photo = bool(update.message.photo) or (
-            update.message.document
-            and (update.message.document.mime_type or "").startswith("image/")
-        )
-        if has_photo and username:
-            ticket_number = _resolve_ticket_for_field_reply("", username, None)
-            if ticket_number:
-                try:
-                    row = _db_get_ticket(ticket_number)
-                except Exception:
-                    row = None
-                if (
-                    row
-                    and str(row.get("status") or "").strip() == "Pending"
-                    and _sender_matches_assigned_to(row.get("assigned_to"), username)
-                ):
-                    log.info(
-                        "handle_non_text: treating photo as field completion for %s",
-                        ticket_number,
-                    )
-                    await _apply_field_completion(
-                        update, context, ticket_number, username=username
-                    )
-                    return
+    if _is_group_chat(update):
+        return
 
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
@@ -1570,19 +1512,18 @@ def _build_bot_app() -> Application:
         | filters.Document.MimeType("image/png")
         | filters.Document.MimeType("image/webp")
     )
-    # Accept any assignee reply with media/text; ticket resolution tolerates
-    # InaccessibleMessage parents and privacy mode when only one Pending row exists.
-    _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
-    bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
     _group_chats = filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP
-    _field_standalone_filter = (
+    _group_field_filter = (
         _group_chats
-        & ~filters.REPLY
         & ~filters.COMMAND
         & _field_reply_media
-        & _GroupFieldStandaloneFilter()
+        & _GroupFieldWorkFilter()
     )
-    bot_app.add_handler(MessageHandler(_field_standalone_filter, handle_field_standalone))
+    # Priority group -1: field replies before assignment / catch-all handlers.
+    bot_app.add_handler(
+        MessageHandler(_group_field_filter, handle_group_field_work),
+        group=-1,
+    )
     # Assignment messages take priority over the generic /respond text flow.
     # Within a handler group only the first matching handler runs, so this must
     # be registered before the catch-all text handler below.
