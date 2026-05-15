@@ -769,10 +769,19 @@ def _is_duplicate_key_error(exc: Exception) -> bool:
 def _canonical_task_category(raw: str) -> str | None:
     """Map synonym / typo labels to allowed ``task_category`` values (DB check constraint)."""
     s = (raw or "").strip()
+    if not s:
+        return None
     if s in _ASSIGNMENT_TASK_CATEGORIES:
         return s
     if s in _ASSIGNMENT_CATEGORY_SYNONYMS:
         return _ASSIGNMENT_CATEGORY_SYNONYMS[s]
+    key_lower = s.lower()
+    for cat in _ASSIGNMENT_TASK_CATEGORIES:
+        if cat.lower() == key_lower:
+            return cat
+    for syn, canonical in _ASSIGNMENT_CATEGORY_SYNONYMS.items():
+        if syn.lower() == key_lower:
+            return canonical
     aliases = {
         "femto recovery": "Femto Recover",
         "femto-installation": "Femto Installation",
@@ -781,7 +790,7 @@ def _canonical_task_category(raw: str) -> str | None:
         "coverage": "Coverage Check",
         "coverage check": "Coverage Check",
     }
-    return aliases.get(s.lower())
+    return aliases.get(key_lower)
 
 
 def _parse_missing_column(message: str) -> str | None:
@@ -1072,10 +1081,10 @@ async def _clear_active_ticket(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
+    msg = update.effective_message
+    if not msg:
         return
     if _is_group_chat(update):
-        msg = update.message
         try:
             who = (
                 f"@{update.effective_user.username}"
@@ -1085,9 +1094,9 @@ async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=msg.chat_id,
                 text=(
-                    f"{who}: this bot only accepts assignments from usernames listed in "
-                    "TELEGRAM_ALLOWED_USERNAMES (Railway env). Add your @username, redeploy, "
-                    "or remove that variable to allow any coordinator."
+                    f"{who}: for private commands (/respond, etc.) this bot checks "
+                    "TELEGRAM_ALLOWED_USERNAMES in Railway. Add your @username, or remove "
+                    "that env var. Group assignment lines do not use that list."
                 ),
                 reply_to_message_id=msg.message_id,
                 disable_notification=True,
