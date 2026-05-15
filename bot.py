@@ -323,12 +323,16 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
 
 
 class _CoordinatorAssignmentFilter(filters.MessageFilter):
-    """Text that looks like a new assignment (including forum / thread replies)."""
+    """Body text or **photo caption** contains ``@user <Category> <ticket>``."""
 
     def filter(self, message: Message) -> bool:
-        if not message or not message.text:
+        if not message:
             return False
-        blob = _normalize_assignment_blob(message.text)
+        t = message.text or ""
+        cap = message.caption or ""
+        if not (t.strip() or cap.strip()):
+            return False
+        blob = _normalize_assignment_blob(f"{t}\n{cap}")
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
@@ -339,6 +343,19 @@ def _is_sender_allowed(update: Update) -> bool:
     sender = update.effective_user.username if update.effective_user else None
     key = _normalize_username(sender)
     return bool(key and key in handles)
+
+
+def _is_assignment_or_group_ops_allowed(update: Update) -> bool:
+    """Whether an assignment line in the field chat may be ingested.
+
+    ``TELEGRAM_ALLOWED_USERNAMES`` is intended to gate ``/respond`` and related
+    **private** operator commands — not coordinators posting
+    ``@user <Category> <ticket>`` in the shared group. Those messages must
+    still reach Supabase or the dashboard never gets assignments from chat.
+    """
+    if _is_group_chat(update):
+        return True
+    return _is_sender_allowed(update)
 
 
 def _telegram_user_id(update: Update) -> int | None:
@@ -752,10 +769,19 @@ def _is_duplicate_key_error(exc: Exception) -> bool:
 def _canonical_task_category(raw: str) -> str | None:
     """Map synonym / typo labels to allowed ``task_category`` values (DB check constraint)."""
     s = (raw or "").strip()
+    if not s:
+        return None
     if s in _ASSIGNMENT_TASK_CATEGORIES:
         return s
     if s in _ASSIGNMENT_CATEGORY_SYNONYMS:
         return _ASSIGNMENT_CATEGORY_SYNONYMS[s]
+    key_lower = s.lower()
+    for cat in _ASSIGNMENT_TASK_CATEGORIES:
+        if cat.lower() == key_lower:
+            return cat
+    for syn, canonical in _ASSIGNMENT_CATEGORY_SYNONYMS.items():
+        if syn.lower() == key_lower:
+            return canonical
     aliases = {
         "femto recovery": "Femto Recover",
         "femto-installation": "Femto Installation",
@@ -764,7 +790,7 @@ def _canonical_task_category(raw: str) -> str | None:
         "coverage": "Coverage Check",
         "coverage check": "Coverage Check",
     }
-    return aliases.get(s.lower())
+    return aliases.get(key_lower)
 
 
 def _parse_missing_column(message: str) -> str | None:
@@ -1055,10 +1081,10 @@ async def _clear_active_ticket(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
+    msg = update.effective_message
+    if not msg:
         return
     if _is_group_chat(update):
-        msg = update.message
         try:
             who = (
                 f"@{update.effective_user.username}"
@@ -1068,9 +1094,9 @@ async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=msg.chat_id,
                 text=(
-                    f"{who}: this bot only accepts assignments from usernames listed in "
-                    "TELEGRAM_ALLOWED_USERNAMES (Railway env). Add your @username, redeploy, "
-                    "or remove that variable to allow any coordinator."
+                    f"{who}: for private commands (/respond, etc.) this bot checks "
+                    "TELEGRAM_ALLOWED_USERNAMES in Railway. Add your @username, or remove "
+                    "that env var. Group assignment lines do not use that list."
                 ),
                 reply_to_message_id=msg.message_id,
                 disable_notification=True,
@@ -1160,7 +1186,7 @@ async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     see the id in the field chat without deleting the webhook or using
     ``getUpdates``.
     """
-    if not _is_sender_allowed(update):
+    if not _is_group_chat(update) and not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
     msg = update.effective_message
@@ -1288,7 +1314,7 @@ async def _apply_field_completion(
     username: str | None,
 ) -> None:
     """Save text/photo for ``ticket_number`` and set status Open (admin review)."""
-    msg = update.message
+    msg = update.effective_message
     if not msg:
         return
 
@@ -1427,7 +1453,7 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     Works for assignments posted by a coordinator in the group **or** by the
   dashboard (bot account). Not gated on ``TELEGRAM_ALLOWED_USERNAMES``.
     """
-    msg = update.message
+    msg = update.effective_message
     if not msg or not msg.reply_to_message:
         return
 
@@ -1494,19 +1520,27 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Detect ``@user <Category> <ticket_number>`` patterns and upsert tickets.
 
-    A single message may contain multiple assignments; each match is processed
-    independently and the results are reported back as a single reply.
+    Uses ``effective_message`` so **channel posts** and **photo captions** work,
+    not only plain group text messages.
     """
+    msg = update.effective_message
+    body_preview = ""
+    if msg:
+        body_preview = ((msg.text or "") + "\n" + (msg.caption or "")).strip()[:120]
     log.info(
-        "handle_assignment fired: chat=%s user=@%s text=%r",
+        "handle_assignment fired: chat=%s user=@%s body=%r",
         _chat_id(update),
         (update.effective_user.username if update.effective_user else None),
-        (update.message.text[:120] if update.message and update.message.text else None),
+        body_preview,
     )
-    if not _is_sender_allowed(update):
+    if not _is_assignment_or_group_ops_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message or not update.message.text:
+    if not msg:
+        return
+    t = msg.text or ""
+    cap = msg.caption or ""
+    if not (t.strip() or cap.strip()):
         return
 
     # Dashboard posts assignment-shaped lines as the bot user. Those rows are
@@ -1515,7 +1549,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if update.effective_user and update.effective_user.id == context.bot.id:
         return
 
-    text = _normalize_assignment_blob(update.message.text)
+    text = _normalize_assignment_blob(f"{t}\n{cap}")
     matches = list(_ASSIGNMENT_PATTERN.finditer(text))
     if not matches:
         return  # Filter shouldn't have triggered, but be defensive.
@@ -1625,14 +1659,15 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fallback for unsupported types; in groups, photos may be field completions."""
-    if not update.message:
+    em = update.effective_message
+    if not em:
         return
 
-    if _is_group_chat(update) and not update.message.reply_to_message:
+    if _is_group_chat(update) and not em.reply_to_message:
         username = update.effective_user.username if update.effective_user else None
-        has_photo = bool(update.message.photo) or (
-            update.message.document
-            and (update.message.document.mime_type or "").startswith("image/")
+        has_photo = bool(em.photo) or (
+            em.document
+            and (em.document.mime_type or "").startswith("image/")
         )
         if has_photo and username:
             ticket_number = _resolve_ticket_for_field_reply("", username, None)
@@ -1720,10 +1755,11 @@ def _build_bot_app() -> Application:
         | filters.Document.MimeType("image/png")
         | filters.Document.MimeType("image/webp")
     )
-    # Coordinator posts a new assignment in the group (original flow — not a reply).
+    # Assignment lines can be plain text, a photo/document **caption**, or a channel post.
+    # Do not restrict to ``filters.TEXT`` only — that misses most caption-only assignments.
     bot_app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & _CoordinatorAssignmentFilter(),
+            ~filters.COMMAND & _CoordinatorAssignmentFilter(),
             handle_assignment,
         )
     )
@@ -1776,7 +1812,12 @@ async def lifespan(_: FastAPI):
                 url=webhook_url,
                 secret_token=TELEGRAM_WEBHOOK_SECRET,
                 drop_pending_updates=False,
-                allowed_updates=["message", "edited_message"],
+                allowed_updates=[
+                    "message",
+                    "edited_message",
+                    "channel_post",
+                    "edited_channel_post",
+                ],
             )
         except Exception:
             log.exception(
@@ -1847,6 +1888,7 @@ async def health() -> dict[str, str]:
         # What Telegram is told to POST to (after normalizing env). Compare to
         # getWebhookInfo.url if you still see 404 — they must match exactly.
         "telegram_callback_url": url or "",
+        "tickets_table": TICKETS_TABLE,
     }
 
 
