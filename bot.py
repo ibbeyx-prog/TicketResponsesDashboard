@@ -345,6 +345,19 @@ def _is_sender_allowed(update: Update) -> bool:
     return bool(key and key in handles)
 
 
+def _is_assignment_or_group_ops_allowed(update: Update) -> bool:
+    """Whether an assignment line in the field chat may be ingested.
+
+    ``TELEGRAM_ALLOWED_USERNAMES`` is intended to gate ``/respond`` and related
+    **private** operator commands — not coordinators posting
+    ``@user <Category> <ticket>`` in the shared group. Those messages must
+    still reach Supabase or the dashboard never gets assignments from chat.
+    """
+    if _is_group_chat(update):
+        return True
+    return _is_sender_allowed(update)
+
+
 def _telegram_user_id(update: Update) -> int | None:
     user = update.effective_user
     return int(user.id) if user else None
@@ -1164,7 +1177,7 @@ async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     see the id in the field chat without deleting the webhook or using
     ``getUpdates``.
     """
-    if not _is_sender_allowed(update):
+    if not _is_group_chat(update) and not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
     msg = update.effective_message
@@ -1511,7 +1524,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         (update.effective_user.username if update.effective_user else None),
         body_preview,
     )
-    if not _is_sender_allowed(update):
+    if not _is_assignment_or_group_ops_allowed(update):
         await _reply_unauthorized(update, context)
         return
     if not msg:
