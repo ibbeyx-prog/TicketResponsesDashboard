@@ -38,15 +38,18 @@ def _build_assignment_notify_text(
     category: str,
     additional_info: str | None = None,
 ) -> str:
-    """Plain-text assignment body for the field Telegram group (Command Center)."""
+    """Plain-text assignment body for the field Telegram group (Command Center).
+
+    One message only — line 1 must stay ``@user <Category> <ticket>`` for the bot.
+    """
     handle = _at_username(assigned_to)
     line1 = f"{handle} {category} {ticket_id}"
     note = (additional_info or "").strip()
-    parts: list[str] = [line1, "Additional_info"]
+    parts: list[str] = [line1]
     if note:
         parts.append(note)
     parts.append("")
-    parts.append("Please reply directly to this message with your updates.")
+    parts.append("Field team: reply to THIS message with your update (text or photo).")
     return "\n".join(parts)
 
 
@@ -56,27 +59,6 @@ def _env_str(*names: str) -> str:
         if v:
             return v
     return ""
-
-
-def _truthy_env(key: str) -> bool:
-    return (os.getenv(key) or "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _assignment_bridge_enabled() -> bool:
-    """Default **on** so Command Center posts get a bot-owned reply target (privacy mode)."""
-    raw = (os.getenv("TELEGRAM_GROUP_REPLY_BRIDGE") or "").strip()
-    if not raw:
-        return True
-    return _truthy_env("TELEGRAM_GROUP_REPLY_BRIDGE")
-
-
-def _assignment_line1(text: str) -> str:
-    """First line of the assignment body (``@user Category ticket``)."""
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("@"):
-            return s
-    return text.splitlines()[0].strip() if text.splitlines() else text.strip()
 
 
 def normalize_telegram_group_id_paste(raw: str) -> str:
@@ -122,21 +104,11 @@ async def _send_via_ptb(
     parse_mode: str | None,
 ) -> None:
     async with Bot(bot_token) as bot:
-        sent = await bot.send_message(
+        await bot.send_message(
             chat_id=group_entity,
             text=text,
             parse_mode=parse_mode,
         )
-        if _assignment_bridge_enabled() and sent:
-            line1 = _assignment_line1(text)
-            await bot.send_message(
-                chat_id=group_entity,
-                text=(
-                    f"{line1}\n\n"
-                    "Field team: reply HERE (to this bot message) with text or photo."
-                ),
-                reply_to_message_id=sent.message_id,
-            )
 
 
 async def _send_via_telethon(
@@ -151,15 +123,7 @@ async def _send_via_telethon(
     client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
     try:
         await client.start(bot_token=bot_token)
-        sent = await client.send_message(group_entity, text, parse_mode=parse_mode)
-        if _assignment_bridge_enabled() and sent:
-            line1 = _assignment_line1(text)
-            await client.send_message(
-                group_entity,
-                f"{line1}\n\n"
-                "Field team: reply HERE (to this bot message) with text or photo.",
-                reply_to=sent,
-            )
+        await client.send_message(group_entity, text, parse_mode=parse_mode)
     finally:
         if client.is_connected():
             await client.disconnect()
