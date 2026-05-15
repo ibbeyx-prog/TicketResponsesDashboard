@@ -47,9 +47,9 @@ Database expectations
    ``@user <Category> <ticket_number>`` (normal spaces) so the same reply
    listener matches and updates Supabase.
 
-   Operators run ``/chatid`` in the field group (as an allowed user when
-   ``TELEGRAM_ALLOWED_USERNAMES`` is set) to print ``TELEGRAM_GROUP_CHAT_ID`` /
-   ``TG_GROUP_ID`` for Railway or Streamlit secrets.
+   Operators run ``/chatid`` in the field group to print ``TELEGRAM_GROUP_CHAT_ID`` /
+   ``TG_GROUP_ID`` for Railway or Streamlit secrets (group chats do not require
+   ``TELEGRAM_ALLOWED_USERNAMES``).
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row
@@ -246,10 +246,13 @@ _NEXT_ASSIGNMENT_HEAD = rf"(?:{_ASSIGNMENT_HANDLE})\s+(?:{_CATEGORY_ALTS})\s+[0-
 # `[\s\S]*?` is the canonical "match anything, including newlines, non-greedy"
 # pattern; we don't use `re.DOTALL` so the rest of the pattern keeps its
 # default semantics.
+# IGNORECASE so ``femto installation`` / ``COVERAGE CHECK`` match; handler then
+# normalizes category text to DB enum via ``_canonical_task_category``.
 _ASSIGNMENT_PATTERN: re.Pattern[str] = re.compile(
     rf"({_ASSIGNMENT_HANDLE})\s+({_CATEGORY_ALTS})\s+((?:[0-9]{{16}})|(?:[0-9]{{9}}))"
     rf"(?P<info>[\s\S]*?)"
-    rf"(?=(?:{_NEXT_ASSIGNMENT_HEAD})|\Z)"
+    rf"(?=(?:{_NEXT_ASSIGNMENT_HEAD})|\Z)",
+    re.IGNORECASE,
 )
 
 
@@ -1141,13 +1144,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     see no usable reply in private — they think the bot is dead. Operator
     commands stay gated separately.
     """
-    if update.message:
+    if update.effective_message:
         await _reply(update, _HELP_TEXT)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Same as ``/start`` — always available so help works in private."""
-    if update.message:
+    if update.effective_message:
         await _reply(update, _HELP_TEXT)
 
 
@@ -1155,7 +1158,7 @@ async def active_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message:
+    if not update.effective_message:
         return
     ticket_id = await _get_active_ticket(update, context)
     if ticket_id:
@@ -1172,7 +1175,7 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     had_ticket = await _get_active_ticket(update, context)
     await _clear_active_ticket(update, context)
-    if update.message:
+    if update.effective_message:
         if had_ticket:
             await _reply(update, f"Cleared active ticket: {had_ticket}")
         else:
@@ -1214,7 +1217,7 @@ async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message:
+    if not update.effective_message:
         return
     if not context.args:
         await _reply(update, "Usage: /respond <ticket_id>")
@@ -1238,16 +1241,17 @@ async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if _is_group_chat(update):
         return
+    em = update.effective_message
     log.info(
         "handle_input fired: chat=%s user=@%s text=%r",
         _chat_id(update),
         (update.effective_user.username if update.effective_user else None),
-        (update.message.text[:120] if update.message and update.message.text else None),
+        ((em.text or "")[:120] if em else None),
     )
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message:
+    if not em:
         return
 
     ticket_id = await _get_active_ticket(update, context)
@@ -1255,7 +1259,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _reply(update, "Start with /respond <ticket_id>.")
         return
 
-    text = (update.message.text or "").strip()
+    text = (em.text or "").strip()
     if not text:
         await _reply(update, "Empty message — send some text to save as the response.")
         return
@@ -1265,7 +1269,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if not _is_group_chat(update):
         try:
-            await context.bot.send_chat_action(chat_id=update.message.chat_id, action=ChatAction.TYPING)
+            await context.bot.send_chat_action(chat_id=em.chat_id, action=ChatAction.TYPING)
         except Exception:
             # Non-fatal — typing indicator is purely cosmetic.
             pass
@@ -1563,13 +1567,13 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         task_category = _canonical_task_category(task_category_raw)
         if not task_category:
-            msg = (
+            cat_err = (
                 f"Unknown category {task_category_raw!r} for ticket {ticket_number}. "
                 f"Use one of: {', '.join(_ASSIGNMENT_TASK_CATEGORIES)}."
             )
-            lines.append(f"• {msg}")
+            lines.append(f"• {cat_err}")
             if _is_group_chat(update):
-                await _group_field_nudge(update, context, msg[:350])
+                await _group_field_nudge(update, context, cat_err[:350])
             continue
 
         try:
