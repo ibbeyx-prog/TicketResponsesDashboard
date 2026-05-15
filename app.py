@@ -1492,23 +1492,30 @@ def _render_photo_grid(photos: list[dict], cols_per_row: int = 3) -> None:
 
 
 def _dataframe_column_config(df: pd.DataFrame) -> dict:
-    """Streamlit ``column_config`` that renders ``photo_url`` as a clickable link.
+    """Streamlit ``column_config`` for link and long-text columns.
 
-    Falls back to no config if Streamlit is too old to support
-    ``column_config.LinkColumn`` (rare, but keeps the table viewable).
+    Falls back to partial or empty config if Streamlit rejects an option.
     """
-    if "photo_url" not in df.columns:
-        return {}
+    cfg: dict = {}
     try:
-        return {
-            "photo_url": st.column_config.LinkColumn(
+        if "field_response" in df.columns:
+            cfg["field_response"] = st.column_config.TextColumn(
+                "Field response",
+                help="Latest text from Telegram on this ticket row. Full history: **Log** tab (`note` on Response rows).",
+                width="large",
+            )
+    except Exception:
+        pass
+    try:
+        if "photo_url" in df.columns:
+            cfg["photo_url"] = st.column_config.LinkColumn(
                 "photo_url",
                 help="Click to open the field photo in a new tab.",
                 display_text="Open photo",
-            ),
-        }
+            )
     except Exception:
-        return {}
+        pass
+    return cfg
 
 
 def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
@@ -1555,10 +1562,34 @@ def _queue_segment_base(label: str | None) -> str:
     """Map segmented-control label (with optional count) back to queue name."""
     if not label:
         return "Pending"
-    for base in ("Pending", "Open", "Completed", "Log"):
+    for base in ("All", "Pending", "Open", "Completed", "Log"):
         if label == base or label.startswith(f"{base} ("):
             return base
     return "Pending"
+
+
+def _legacy_ticket_table_columns(df: pd.DataFrame) -> list[str]:
+    """Column order matching the original single-table dashboard (wide view)."""
+    preferred = (
+        "ticket_number",
+        "assigned_to",
+        "task_category",
+        "additional_info",
+        "field_response",
+        "photo_url",
+        "status",
+        "created_at",
+        "last_assigned_at",
+        "responded_at",
+        "updated_at",
+    )
+    front = [c for c in preferred if c in df.columns]
+    tail = [
+        c
+        for c in df.columns
+        if c not in front and not str(c).startswith("_")
+    ]
+    return front + tail
 
 
 def _render_dashboard(
@@ -1654,7 +1685,9 @@ def _render_dashboard(
             f"switch the queue below to **Open ({total_open})**."
         )
 
+    all_label = _queue_segment_label("All", len(df))
     queue_options = [
+        all_label,
         _queue_segment_label("Pending", total_pending),
         _queue_segment_label("Open", total_open),
         _queue_segment_label("Completed", int(completed_mask.sum()) if not df.empty else 0),
@@ -1667,7 +1700,7 @@ def _render_dashboard(
         st.session_state["dash_queue_segmented"] = open_label
     elif "dash_queue_segmented" not in st.session_state:
         st.session_state["dash_queue_segmented"] = (
-            open_label if total_open > 0 else pending_label
+            open_label if total_open > 0 else all_label
         )
     current_seg = st.session_state.get("dash_queue_segmented")
     if current_seg not in queue_options:
@@ -1681,14 +1714,33 @@ def _render_dashboard(
         options=queue_options,
         key="dash_queue_segmented",
         help=(
-            "Pending = assigned, waiting on field. Open = field replied in Telegram, "
-            "needs your review. Use sidebar **Refresh now** if auto-refresh is off."
+            "**All** = one table for every ticket in the lookback (original layout). "
+            "Pending / Open / Completed narrow the same data. Log = attendance history."
         ),
     )
     queue_view = _queue_segment_base(queue_picked)
     st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
 
-    if queue_view == "Pending":
+    if queue_view == "All":
+        st.subheader("All tickets in lookback")
+        st.caption(
+            "**Field response** is filled after Telegram saves a reply (ticket "
+            "is usually **Open**). Use **Open** for review work only — this tab is "
+            "the wide overview."
+        )
+        if df.empty:
+            st.info(f"No tickets in the last {lookback_days} {day_word}.")
+        else:
+            cols = _legacy_ticket_table_columns(df)
+            view = _format_local(df[cols].copy())
+            st.dataframe(
+                view,
+                use_container_width=True,
+                hide_index=True,
+                column_config=_dataframe_column_config(view),
+            )
+
+    elif queue_view == "Pending":
         st.subheader("Assigned tasks (pending)")
         st.caption(
             "Reassigned tickets reset to **Pending** here, even if they were "
@@ -1736,6 +1788,11 @@ def _render_dashboard(
                 st.caption(
                     f"Rows with a **subtle oak tint** are pending for **more than 24 hours** "
                     f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
+                )
+                st.caption(
+                    "Engineer text is stored in **`field_response`** after they reply "
+                    "(ticket moves to **Open**). While still **Pending**, that column "
+                    "is usually empty — use **Log** for `Response` history anytime."
                 )
 
     elif queue_view == "Open":

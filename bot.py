@@ -1292,7 +1292,7 @@ async def _apply_field_completion(
     username: str | None,
 ) -> None:
     """Save text/photo for ``ticket_number`` and set status Open (admin review)."""
-    msg = update.message
+    msg = update.effective_message
     if not msg:
         return
 
@@ -1431,7 +1431,7 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     Works for assignments posted by a coordinator in the group **or** by the
   dashboard (bot account). Not gated on ``TELEGRAM_ALLOWED_USERNAMES``.
     """
-    msg = update.message
+    msg = update.effective_message
     if not msg or not msg.reply_to_message:
         return
 
@@ -1637,14 +1637,15 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fallback for unsupported types; in groups, photos may be field completions."""
-    if not update.message:
+    em = update.effective_message
+    if not em:
         return
 
-    if _is_group_chat(update) and not update.message.reply_to_message:
+    if _is_group_chat(update) and not em.reply_to_message:
         username = update.effective_user.username if update.effective_user else None
-        has_photo = bool(update.message.photo) or (
-            update.message.document
-            and (update.message.document.mime_type or "").startswith("image/")
+        has_photo = bool(em.photo) or (
+            em.document
+            and (em.document.mime_type or "").startswith("image/")
         )
         if has_photo and username:
             ticket_number = _resolve_ticket_for_field_reply("", username, None)
