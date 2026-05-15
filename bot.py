@@ -313,19 +313,6 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         return bool(_ASSIGNMENT_PATTERN.search(blob))
 
 
-class _GroupFieldWorkFilter(filters.MessageFilter):
-    """Group field replies/completions — skip coordinator assignment posts (not replies)."""
-
-    def filter(self, message: Message) -> bool:
-        if not message.reply_to_message:
-            blob = _normalize_assignment_blob(
-                f"{message.text or ''}\n{message.caption or ''}"
-            )
-            if blob and _ASSIGNMENT_PATTERN.search(blob):
-                return False
-        return True
-
-
 def _is_sender_allowed(update: Update) -> bool:
     handles = _effective_allowed_handles()
     if handles is None:
@@ -1326,18 +1313,56 @@ async def _apply_field_completion(
         await _clear_active_ticket(update, context)
 
 
-async def _complete_field_work_if_allowed(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    ticket_number: str,
-    *,
-    username: str | None,
-) -> None:
-    """Resolve assignee + status, then persist field work."""
+async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Assignee completes by replying to the assignment message (original group flow).
+
+    Works for assignments posted by a coordinator in the group **or** by the
+  dashboard (bot account). Not gated on ``TELEGRAM_ALLOWED_USERNAMES``.
+    """
+    msg = update.message
+    if not msg or not msg.reply_to_message:
+        return
+
+    username = update.effective_user.username if update.effective_user else None
+    parent = msg.reply_to_message
+    parent_blob = _parent_assignment_blob(parent) if isinstance(parent, Message) else ""
+    reply_text = (msg.caption or msg.text or "").strip() or None
+
+    log.info(
+        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r",
+        _chat_id(update),
+        username,
+        (reply_text[:120] if reply_text else None),
+        parent_blob[:160],
+    )
+
+    ticket_number = _resolve_ticket_for_field_reply(parent_blob, username, reply_text)
+    if not ticket_number:
+        log.warning(
+            "field_reply no ticket match chat=%s user=@%s parent_head=%r",
+            _chat_id(update),
+            username,
+            parent_blob[:400],
+        )
+        if not username:
+            await _reply(
+                update,
+                "Could not match this reply. Set a Telegram @username that matches "
+                "assigned_to on the ticket.",
+            )
+        elif _is_group_chat(update):
+            await _group_field_nudge(
+                update,
+                context,
+                f"@{username}: swipe-reply to the bot assignment line "
+                f"(@user Category ticket_number), or include the ticket number in your message.",
+            )
+        return
+
     try:
         row = _db_get_ticket(ticket_number)
     except Exception:
-        log.exception("tickets lookup failed for field work: %s", ticket_number)
+        log.exception("tickets lookup failed for field reply: %s", ticket_number)
         await _reply(update, f"Database error while loading ticket {ticket_number}.")
         return
 
@@ -1347,7 +1372,7 @@ async def _complete_field_work_if_allowed(
 
     if not _sender_matches_assigned_to(row.get("assigned_to"), username):
         log.warning(
-            "field work assignee mismatch ticket=%s db=%r replier=@%s",
+            "field_reply assignee mismatch ticket=%s db=%r replier=@%s",
             ticket_number,
             row.get("assigned_to"),
             username,
@@ -1355,75 +1380,7 @@ async def _complete_field_work_if_allowed(
         await _reply(update, "You are not the assignee for that ticket.")
         return
 
-    status = str(row.get("status") or "").strip()
-    if status not in ("Pending", "Open"):
-        log.info("field work skipped ticket=%s status=%s", ticket_number, status)
-        return
-
     await _apply_field_completion(update, context, ticket_number, username=username)
-
-
-async def handle_group_field_work(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Assignee completes a task in the field group (reply or standalone message)."""
-    if not _is_group_chat(update):
-        return
-    msg = update.message
-    if not msg:
-        return
-    if update.effective_user and update.effective_user.id == context.bot.id:
-        return
-
-    username = update.effective_user.username if update.effective_user else None
-    body = (msg.text or msg.caption or "").strip()
-    parent_blob = ""
-    if msg.reply_to_message:
-        parent = msg.reply_to_message
-        parent_blob = _parent_assignment_blob(parent) if isinstance(parent, Message) else ""
-
-    log.info(
-        "handle_group_field_work: chat=%s user=@%s reply=%s text=%r",
-        _chat_id(update),
-        username,
-        bool(msg.reply_to_message),
-        (body[:120] if body else None),
-    )
-
-    ticket_number = _resolve_ticket_for_field_reply(parent_blob, username, body or None)
-    if not ticket_number:
-        log.warning(
-            "field work no ticket match chat=%s user=@%s parent_head=%r",
-            _chat_id(update),
-            username,
-            parent_blob[:200],
-        )
-        if not username:
-            await _reply(
-                update,
-                "Could not match this reply. Set a Telegram @username that matches "
-                "the assignee on the ticket.",
-            )
-            return
-        pending = _pending_tickets_for_assignee(username)
-        if len(pending) > 1:
-            ids = ", ".join(str(r.get("ticket_number")) for r in pending[:8])
-            await _group_field_nudge(
-                update,
-                context,
-                f"@{username}: swipe-reply to the assignment for one ticket, or send your "
-                f"update with that ticket number (each id is unique: {ids}).",
-            )
-        elif not msg.reply_to_message:
-            await _group_field_nudge(
-                update,
-                context,
-                f"@{username}: reply to the assignment message or include the ticket number "
-                "(each ticket number is unique).",
-            )
-        return
-
-    await _complete_field_work_if_allowed(
-        update, context, ticket_number, username=username
-    )
 
 
 async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1515,6 +1472,29 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message:
         return
 
+    if _is_group_chat(update) and not update.message.reply_to_message:
+        username = update.effective_user.username if update.effective_user else None
+        has_photo = bool(update.message.photo) or (
+            update.message.document
+            and (update.message.document.mime_type or "").startswith("image/")
+        )
+        if has_photo and username:
+            ticket_number = _resolve_ticket_for_field_reply("", username, None)
+            if ticket_number:
+                try:
+                    row = _db_get_ticket(ticket_number)
+                except Exception:
+                    row = None
+                if row and _sender_matches_assigned_to(row.get("assigned_to"), username):
+                    log.info(
+                        "handle_non_text: group photo completion for %s",
+                        ticket_number,
+                    )
+                    await _apply_field_completion(
+                        update, context, ticket_number, username=username
+                    )
+                    return
+
     if _is_group_chat(update):
         return
 
@@ -1584,18 +1564,10 @@ def _build_bot_app() -> Application:
         | filters.Document.MimeType("image/png")
         | filters.Document.MimeType("image/webp")
     )
-    _group_chats = filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP
-    _group_field_filter = (
-        _group_chats
-        & ~filters.COMMAND
-        & _field_reply_media
-        & _GroupFieldWorkFilter()
-    )
-    # Priority group -1: field replies before assignment / catch-all handlers.
-    bot_app.add_handler(
-        MessageHandler(_group_field_filter, handle_group_field_work),
-        group=-1,
-    )
+    # Original flow (pre–Command Center): swipe-reply to the assignment message.
+    # Registered before assignment + handle_input so field work is never swallowed.
+    _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
+    bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
     # Assignment messages take priority over the generic /respond text flow.
     # Within a handler group only the first matching handler runs, so this must
     # be registered before the catch-all text handler below.
