@@ -205,6 +205,9 @@ ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
+# Latest ``ticket_attendance_logs.timestamp`` the dashboard has already "seen"
+# (for toast when Telegram/bot appends a new row).
+_DASH_LAST_ATTENDANCE_TS_KEY = "_dash_last_seen_attendance_ts"
 _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 
@@ -658,6 +661,63 @@ def _fetch_attendance(
     return pd.DataFrame(rows)
 
 
+def _fetch_latest_attendance_timestamp() -> datetime | None:
+    """Return newest log row timestamp, or None if table empty / unreadable."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    client = _get_supabase_client()
+    try:
+        res = (
+            client.table(ATTENDANCE_LOGS_TABLE)
+            .select("timestamp")
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return None
+    rows = res.data or []
+    if not rows:
+        return None
+    raw = rows[0].get("timestamp")
+    if raw is None:
+        return None
+    ts = pd.to_datetime(raw, utc=True, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.to_pydatetime()
+
+
+def _maybe_toast_new_telegram_activity() -> None:
+    """Toast when ``ticket_attendance_logs`` grows (assignments + field replies)."""
+    try:
+        latest = _fetch_latest_attendance_timestamp()
+    except Exception:
+        return
+    if latest is None:
+        return
+    prev_raw = st.session_state.get(_DASH_LAST_ATTENDANCE_TS_KEY)
+    latest_iso = latest.isoformat()
+    if prev_raw is None:
+        st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
+        return
+    try:
+        prev = pd.to_datetime(prev_raw, utc=True, errors="coerce")
+    except Exception:
+        st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
+        return
+    if pd.isna(prev):
+        st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
+        return
+    prev_dt = prev.to_pydatetime()
+    if latest > prev_dt:
+        st.toast(
+            "New activity — check **Pending**, **Open**, or **Log**.",
+            icon="📥",
+        )
+        st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
+
+
 def _parse_ts(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, utc=True, errors="coerce")
 
@@ -1027,12 +1087,6 @@ def _sidebar_command_center() -> None:
         st.success(flash)
 
     st.header("Command Center")
-    st.caption(
-        f"Telegram posts **one** assignment message ({NOTIFY_BUILD_ID}). "
-        "If you still see **Additional_info** or a second **reply HERE** line, "
-        "restart this dashboard (`run-dashboard.ps1`) or redeploy Streamlit Cloud from **main** — "
-        "redeploying only the Railway bot is not enough."
-    )
     token_env = (
         _read_setting("TG_BOT_TOKEN").strip()
         or _read_setting("TELEGRAM_BOT_TOKEN").strip()
@@ -1229,7 +1283,11 @@ def _sidebar_controls() -> tuple[bool, int, int]:
         auto = st.toggle(
             "Auto-refresh",
             value=True,
-            help=f"Re-fetch from Supabase on a timer ({LOCAL_TZ_LABEL}).",
+            help=(
+                f"Re-fetch from Supabase on a timer ({LOCAL_TZ_LABEL}). "
+                "When new rows appear in the attendance log (Telegram or Command Center), "
+                "you get a short toast so the field group can stay quiet."
+            ),
         )
         interval_minutes = st.slider(
             "Interval (minutes)",
@@ -1241,6 +1299,7 @@ def _sidebar_controls() -> tuple[bool, int, int]:
         )
         if st.button("Refresh Data", use_container_width=True):
             _get_supabase_client.clear()
+            st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
             st.rerun()
         st.caption(
             f"After a field reply in Telegram, tickets move **Pending → Open**. "
@@ -1571,6 +1630,7 @@ def _render_dashboard(
 
     try:
         df_all = _fetch_tickets()
+        _maybe_toast_new_telegram_activity()
     except _TableMissingError as missing:
         _render_missing_table_help(missing.table)
         return

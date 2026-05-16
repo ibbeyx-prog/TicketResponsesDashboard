@@ -47,9 +47,14 @@ Database expectations
    ``@user <Category> <ticket_number>`` (normal spaces) so the same reply
    listener matches and updates Supabase.
 
-   Operators run ``/chatid`` in the field group (as an allowed user when
-   ``TELEGRAM_ALLOWED_USERNAMES`` is set) to print ``TELEGRAM_GROUP_CHAT_ID`` /
-   ``TG_GROUP_ID`` for Railway or Streamlit secrets.
+   Operators run ``/chatid`` in the field group to print ``TELEGRAM_GROUP_CHAT_ID`` /
+   ``TG_GROUP_ID`` for Railway or Streamlit secrets (group chats do not require
+   ``TELEGRAM_ALLOWED_USERNAMES``).
+
+   Optional short replies in the field **Telegram** group (assignment saved, field
+   hints) are **off** by default so the chat stays quiet; set
+   ``TELEGRAM_GROUP_ACK_MESSAGES=true`` to restore them. The Streamlit dashboard
+   shows the same data under Pending / Open / Log and can toast on new log rows.
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row
@@ -82,6 +87,7 @@ import secrets
 import string
 import sys
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -174,6 +180,18 @@ def _truthy_env(key: str) -> bool:
     return (os.getenv(key) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+if TICKETS_TABLE.casefold() == "tickets" and not _truthy_env("ALLOW_LEGACY_TICKETS_TABLE"):
+    log.warning(
+        "TICKETS_TABLE is set to the legacy name %r. The dashboard defaults to "
+        "`tickets_active`; the bot will write a different table until you set "
+        "TICKETS_TABLE=tickets_active on Railway (or remove it), redeploy, and "
+        "run the Supabase migration `20260518_sync_legacy_tickets_into_tickets_active.sql` "
+        "if you need rows merged. To silence this warning while you migrate, set "
+        "ALLOW_LEGACY_TICKETS_TABLE=1.",
+        TICKETS_TABLE,
+    )
+
+
 # Reasonable bounds for a ticket identifier carried in a Telegram command.
 _MAX_TICKET_ID_LEN = 128
 
@@ -246,10 +264,13 @@ _NEXT_ASSIGNMENT_HEAD = rf"(?:{_ASSIGNMENT_HANDLE})\s+(?:{_CATEGORY_ALTS})\s+[0-
 # `[\s\S]*?` is the canonical "match anything, including newlines, non-greedy"
 # pattern; we don't use `re.DOTALL` so the rest of the pattern keeps its
 # default semantics.
+# IGNORECASE so ``femto installation`` / ``COVERAGE CHECK`` match; handler then
+# normalizes category text to DB enum via ``_canonical_task_category``.
 _ASSIGNMENT_PATTERN: re.Pattern[str] = re.compile(
     rf"({_ASSIGNMENT_HANDLE})\s+({_CATEGORY_ALTS})\s+((?:[0-9]{{16}})|(?:[0-9]{{9}}))"
     rf"(?P<info>[\s\S]*?)"
-    rf"(?=(?:{_NEXT_ASSIGNMENT_HEAD})|\Z)"
+    rf"(?=(?:{_NEXT_ASSIGNMENT_HEAD})|\Z)",
+    re.IGNORECASE,
 )
 
 
@@ -268,6 +289,9 @@ def _normalize_assignment_blob(blob: str) -> str:
         return ""
     s = str(blob).replace("\ufeff", "")
     s = html.unescape(s)
+    # Full-width / compatibility digits (Excel, some keyboards) → ASCII so
+    # ``[0-9]{9}`` / ``{16}`` ticket captures work.
+    s = unicodedata.normalize("NFKC", s)
     s = re.sub(r"<[^>]+>", " ", s)
     # Command Center uses U+00BB (») between @handle, category, and ticket on line 1.
     s = s.replace("\u00bb", " ")
@@ -413,6 +437,16 @@ def _is_group_chat(update: Update) -> bool:
     return bool(chat and chat.type in ("group", "supergroup", "channel"))
 
 
+def _telegram_group_ack_messages_enabled() -> bool:
+    """Optional in-group bot messages (assignment ack, field nudges, etc.).
+
+    Default **off** so the field Telegram group is not flooded; operators rely on
+    the Streamlit dashboard (Log / queues + toasts). Set ``TELEGRAM_GROUP_ACK_MESSAGES``
+    to ``1`` / ``true`` to restore the old Telegram confirmations.
+    """
+    return _truthy_env("TELEGRAM_GROUP_ACK_MESSAGES")
+
+
 async def _reply(update: Update, text: str, **kwargs) -> None:
     """Send a reply, but stay silent in group chats to avoid noise.
 
@@ -434,6 +468,8 @@ async def _group_assignment_ack(
     assigned_to: str,
 ) -> None:
     """Confirm in the group that Supabase + dashboard received the assignment."""
+    if not _telegram_group_ack_messages_enabled():
+        return
     if not _is_group_chat(update):
         return
     msg = update.effective_message
@@ -459,6 +495,8 @@ async def _group_field_nudge(
     text: str,
 ) -> None:
     """Tell the assignee how to complete a task when we cannot match a ticket."""
+    if not _telegram_group_ack_messages_enabled():
+        return
     if not _is_group_chat(update):
         return
     msg = update.effective_message
@@ -479,6 +517,8 @@ async def _group_field_ack(
     update: Update, context: ContextTypes.DEFAULT_TYPE, ticket_number: str
 ) -> None:
     """Short in-group confirmation so assignees know the dashboard was updated."""
+    if not _telegram_group_ack_messages_enabled():
+        return
     if not _is_group_chat(update):
         return
     msg = update.effective_message
@@ -1085,24 +1125,25 @@ async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not msg:
         return
     if _is_group_chat(update):
-        try:
-            who = (
-                f"@{update.effective_user.username}"
-                if update.effective_user and update.effective_user.username
-                else "You"
-            )
-            await context.bot.send_message(
-                chat_id=msg.chat_id,
-                text=(
-                    f"{who}: for private commands (/respond, etc.) this bot checks "
-                    "TELEGRAM_ALLOWED_USERNAMES in Railway. Add your @username, or remove "
-                    "that env var. Group assignment lines do not use that list."
-                ),
-                reply_to_message_id=msg.message_id,
-                disable_notification=True,
-            )
-        except Exception:
-            log.warning("could not send group unauthorized notice", exc_info=True)
+        if _telegram_group_ack_messages_enabled():
+            try:
+                who = (
+                    f"@{update.effective_user.username}"
+                    if update.effective_user and update.effective_user.username
+                    else "You"
+                )
+                await context.bot.send_message(
+                    chat_id=msg.chat_id,
+                    text=(
+                        f"{who}: for private commands (/respond, etc.) this bot checks "
+                        "TELEGRAM_ALLOWED_USERNAMES in Railway. Add your @username, or remove "
+                        "that env var. Group assignment lines do not use that list."
+                    ),
+                    reply_to_message_id=msg.message_id,
+                    disable_notification=True,
+                )
+            except Exception:
+                log.warning("could not send group unauthorized notice", exc_info=True)
         return
     await _reply(update, "This chat is not available.")
 
@@ -1141,13 +1182,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     see no usable reply in private — they think the bot is dead. Operator
     commands stay gated separately.
     """
-    if update.message:
+    if update.effective_message:
         await _reply(update, _HELP_TEXT)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Same as ``/start`` — always available so help works in private."""
-    if update.message:
+    if update.effective_message:
         await _reply(update, _HELP_TEXT)
 
 
@@ -1155,7 +1196,7 @@ async def active_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message:
+    if not update.effective_message:
         return
     ticket_id = await _get_active_ticket(update, context)
     if ticket_id:
@@ -1172,7 +1213,7 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     had_ticket = await _get_active_ticket(update, context)
     await _clear_active_ticket(update, context)
-    if update.message:
+    if update.effective_message:
         if had_ticket:
             await _reply(update, f"Cleared active ticket: {had_ticket}")
         else:
@@ -1214,7 +1255,7 @@ async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message:
+    if not update.effective_message:
         return
     if not context.args:
         await _reply(update, "Usage: /respond <ticket_id>")
@@ -1238,16 +1279,17 @@ async def respond_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if _is_group_chat(update):
         return
+    em = update.effective_message
     log.info(
         "handle_input fired: chat=%s user=@%s text=%r",
         _chat_id(update),
         (update.effective_user.username if update.effective_user else None),
-        (update.message.text[:120] if update.message and update.message.text else None),
+        ((em.text or "")[:120] if em else None),
     )
     if not _is_sender_allowed(update):
         await _reply_unauthorized(update, context)
         return
-    if not update.message:
+    if not em:
         return
 
     ticket_id = await _get_active_ticket(update, context)
@@ -1255,7 +1297,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _reply(update, "Start with /respond <ticket_id>.")
         return
 
-    text = (update.message.text or "").strip()
+    text = (em.text or "").strip()
     if not text:
         await _reply(update, "Empty message — send some text to save as the response.")
         return
@@ -1265,7 +1307,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if not _is_group_chat(update):
         try:
-            await context.bot.send_chat_action(chat_id=update.message.chat_id, action=ChatAction.TYPING)
+            await context.bot.send_chat_action(chat_id=em.chat_id, action=ChatAction.TYPING)
         except Exception:
             # Non-fatal — typing indicator is purely cosmetic.
             pass
@@ -1563,13 +1605,13 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         task_category = _canonical_task_category(task_category_raw)
         if not task_category:
-            msg = (
+            cat_err = (
                 f"Unknown category {task_category_raw!r} for ticket {ticket_number}. "
                 f"Use one of: {', '.join(_ASSIGNMENT_TASK_CATEGORIES)}."
             )
-            lines.append(f"• {msg}")
+            lines.append(f"• {cat_err}")
             if _is_group_chat(update):
-                await _group_field_nudge(update, context, msg[:350])
+                await _group_field_nudge(update, context, cat_err[:350])
             continue
 
         try:

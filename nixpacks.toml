@@ -1,0 +1,7 @@
+# Railway builds with Nixpacks from this repo. Variables here become process
+# environment variables so the bot matches the Streamlit dashboard default
+# (`tickets_active`). If you also set `TICKETS_TABLE` in the Railway dashboard,
+# remove the old `tickets` value there — dashboard variables usually override
+# image defaults, and `tickets` was the common misconfiguration.
+[variables]
+TICKETS_TABLE = "tickets_active"
