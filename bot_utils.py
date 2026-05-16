@@ -44,6 +44,8 @@ def _build_assignment_notify_text(
     ticket_id: str,
     category: str,
     additional_info: str | None = None,
+    *,
+    assigned_by: str | None = None,
 ) -> str:
     """Plain-text assignment body for the field Telegram group (Command Center).
 
@@ -52,9 +54,12 @@ def _build_assignment_notify_text(
     handle = _at_username(assigned_to)
     line1 = f"{handle} {category} {ticket_id}"
     note = (additional_info or "").strip()
+    who = (assigned_by or "").strip()
     parts: list[str] = [line1]
     if note:
         parts.append(note)
+    if who:
+        parts.append(f"Assigned by dashboard: {who}")
     parts.append("")
     parts.append("Field team: reply to THIS message with your update (text or photo).")
     return "\n".join(parts)
@@ -142,6 +147,7 @@ async def notify_telegram_group(
     category: str,
     *,
     additional_info: str | None = None,
+    assigned_by: str | None = None,
     api_id: str | int | None = None,
     api_hash: str | None = None,
     bot_token: str | None = None,
@@ -174,7 +180,11 @@ async def notify_telegram_group(
     api_hash_res = (api_hash or "").strip() or _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
 
     text = _build_assignment_notify_text(
-        username, ticket_id, category, additional_info=additional_info
+        username,
+        ticket_id,
+        category,
+        additional_info=additional_info,
+        assigned_by=assigned_by,
     )
     entity = _parse_group_entity(group_raw)
     _log.info(

@@ -39,8 +39,13 @@ Database expectations
    Field engineers submit work by **replying** to an assignment message with
    plain text and/or a photo. Photos are stored in the Storage bucket
    ``ticket-photos`` (override with ``TICKET_PHOTOS_BUCKET``). A field reply
-   moves the ticket to ``status='Open'`` (admin review queue); only the
-   admin/ops team marks tickets ``'Completed'`` (or sends them back to
+   moves the ticket to ``status='Open'`` (admin review queue).
+
+   **Wrong reply within ~1 hour:** delete the Telegram message (Telethon listener
+   when ``TG_API_ID``/``TG_API_HASH`` are set) or reply ``UNDO`` to that message;
+   the dashboard clears the response and sets the ticket back to ``Pending``.
+
+   Only the admin/ops team marks tickets ``'Completed'`` (or sends them back to
    ``'Open'``) from the dashboard.
 
    Dashboard Command Center posts are **plain text**: line 1 is
@@ -89,7 +94,7 @@ import time
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +138,12 @@ ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
+FIELD_RESPONSE_UNDO_MINUTES = max(
+    1,
+    int((os.getenv("FIELD_RESPONSE_UNDO_MINUTES") or "60").strip() or "60"),
+)
+FIELD_RESPONSE_UNDO_WINDOW = timedelta(minutes=FIELD_RESPONSE_UNDO_MINUTES)
+_UNDO_TRIGGER_RE = re.compile(r"^(/undo|undo)$", re.IGNORECASE)
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     missing = [k for k, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
@@ -861,6 +872,131 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_db_timestamptz(raw: object) -> datetime | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _within_field_response_undo_window(responded_at_raw: object) -> bool:
+    responded = _parse_db_timestamptz(responded_at_raw)
+    if responded is None:
+        return True
+    return datetime.now(timezone.utc) - responded <= FIELD_RESPONSE_UNDO_WINDOW
+
+
+def _db_undo_field_response_by_telegram_message(chat_id: int, message_id: int) -> bool:
+    """Clear a field reply from Supabase if it matches a Telegram message within the undo window."""
+    cid = int(chat_id)
+    mid = int(message_id)
+
+    res = (
+        supabase.table(TICKETS_TABLE)
+        .select("*")
+        .eq("last_response_telegram_chat_id", cid)
+        .eq("last_response_telegram_message_id", mid)
+        .limit(1)
+        .execute()
+    )
+    row = (res.data or [None])[0]
+    ticket_number: str | None = str(row.get("ticket_number")) if row else None
+
+    if not row:
+        log_res = (
+            supabase.table(ATTENDANCE_LOGS_TABLE)
+            .select("ticket_number, timestamp")
+            .eq("telegram_chat_id", cid)
+            .eq("telegram_message_id", mid)
+            .eq("action_type", "Response")
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+        )
+        log_row = (log_res.data or [None])[0]
+        if not log_row:
+            return False
+        ticket_number = str(log_row.get("ticket_number") or "").strip() or None
+        if not ticket_number:
+            return False
+        ticket_res = (
+            supabase.table(TICKETS_TABLE)
+            .select("*")
+            .eq("ticket_number", ticket_number)
+            .limit(1)
+            .execute()
+        )
+        row = (ticket_res.data or [None])[0]
+        if not row:
+            return False
+        if row.get("last_response_telegram_message_id") not in (mid, None):
+            pinned = row.get("last_response_telegram_message_id")
+            if pinned is not None and int(pinned) != mid:
+                return False
+
+    if not row or not ticket_number:
+        return False
+
+    if not _within_field_response_undo_window(row.get("responded_at")):
+        log.info(
+            "field response undo expired ticket=%s chat=%s msg=%s",
+            ticket_number,
+            cid,
+            mid,
+        )
+        return False
+
+    now_iso = _utc_now_iso()
+    updates = {
+        "status": "Pending",
+        "field_response": None,
+        "photo_url": None,
+        "responded_at": None,
+        "updated_at": now_iso,
+        "last_response_telegram_chat_id": None,
+        "last_response_telegram_message_id": None,
+    }
+    _execute_ticket_update(updates, ticket_number)
+
+    try:
+        supabase.table(ATTENDANCE_LOGS_TABLE).delete().eq(
+            "telegram_chat_id", cid
+        ).eq("telegram_message_id", mid).execute()
+    except Exception:
+        log.exception(
+            "Failed to delete attendance log for undone telegram message %s/%s",
+            cid,
+            mid,
+        )
+
+    _db_insert_attendance_log(
+        ticket_number=ticket_number,
+        member_username="@telegram-undo",
+        action_type="ResponseUndone",
+        note=(
+            f"Field reply removed (Telegram message {mid} deleted or UNDO) "
+            f"within {FIELD_RESPONSE_UNDO_MINUTES} minute window."
+        ),
+    )
+    log.info(
+        "field response undone ticket=%s chat=%s msg=%s",
+        ticket_number,
+        cid,
+        mid,
+    )
+    return True
+
+
 def _db_insert_attendance_log(
     *,
     ticket_number: str,
@@ -868,6 +1004,8 @@ def _db_insert_attendance_log(
     action_type: str,
     note: str | None = None,
     photo_url: str | None = None,
+    telegram_chat_id: int | None = None,
+    telegram_message_id: int | None = None,
 ) -> None:
     """Append a row to ``ticket_attendance_logs``.
 
@@ -884,6 +1022,10 @@ def _db_insert_attendance_log(
         "photo_url": photo_url,
         "timestamp": _utc_now_iso(),
     }
+    if telegram_chat_id is not None:
+        row["telegram_chat_id"] = int(telegram_chat_id)
+    if telegram_message_id is not None:
+        row["telegram_message_id"] = int(telegram_message_id)
     try:
         supabase.table(ATTENDANCE_LOGS_TABLE).insert(row).execute()
     except Exception:
@@ -902,6 +1044,8 @@ def _db_complete_ticket_field_response(
     photo_url: str | None = None,
     update_photo_url: bool = False,
     responder_username: str | None = None,
+    telegram_chat_id: int | None = None,
+    telegram_message_id: int | None = None,
 ) -> None:
     """Record a field response and move the ticket into the admin review queue.
 
@@ -919,6 +1063,10 @@ def _db_complete_ticket_field_response(
     }
     if update_photo_url:
         updates["photo_url"] = photo_url
+    if telegram_chat_id is not None:
+        updates["last_response_telegram_chat_id"] = int(telegram_chat_id)
+    if telegram_message_id is not None:
+        updates["last_response_telegram_message_id"] = int(telegram_message_id)
     _execute_ticket_update(updates, ticket_number)
     try:
         row = _db_get_ticket(ticket_number)
@@ -938,6 +1086,8 @@ def _db_complete_ticket_field_response(
             action_type="Response",
             note=field_response,
             photo_url=photo_url if update_photo_url else None,
+            telegram_chat_id=telegram_chat_id,
+            telegram_message_id=telegram_message_id,
         )
 
 
@@ -958,6 +1108,7 @@ def _db_insert_assignment(
         "photo_url": None,
         "last_assigned_at": now_iso,
         "additional_info": additional_info,
+        "dashboard_assigned_by": None,
     }
     # `last_assigned_at` and `additional_info` are recent additions; if the
     # column hasn't been migrated yet on a given environment, drop it and
@@ -1028,6 +1179,7 @@ def _db_reassign_ticket(
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "additional_info": additional_info,
+        "dashboard_assigned_by": None,
     }
     _execute_ticket_update(updates, ticket_number)
 
@@ -1080,6 +1232,8 @@ _HELP_TEXT = (
     "Field work (assignee):\n"
     "  Reply to your assignment message with text and/or a photo.\n"
     "  Text → saved as field_response; photo → uploaded to ticket-photos; ticket → Open (admin review).\n"
+    f"  Wrong reply within {FIELD_RESPONSE_UNDO_MINUTES} min: delete the message in Telegram "
+    "(when Telethon is configured) or reply UNDO to that message.\n"
     "\n"
     "Groups + Telegram bot privacy:\n"
     "  Coordinators: post ``@user <Category> <ticket>`` (new message or thread reply).\n"
@@ -1246,6 +1400,8 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 field_response=text,
                 update_photo_url=False,
                 responder_username=user_handle,
+                telegram_chat_id=int(em.chat_id),
+                telegram_message_id=int(em.message_id),
             )
         except Exception:
             log.exception("ticket field completion failed for /respond flow: %s", ticket_id)
@@ -1285,6 +1441,9 @@ async def _apply_field_completion(
     msg = update.effective_message
     if not msg:
         return
+
+    tg_chat_id = int(msg.chat_id)
+    tg_message_id = int(msg.message_id)
 
     has_photo = bool(msg.photo)
     image_doc = (
@@ -1333,6 +1492,8 @@ async def _apply_field_completion(
                 photo_url=upload_url,
                 update_photo_url=bool(upload_url),
                 responder_username=responder_handle,
+                telegram_chat_id=tg_chat_id,
+                telegram_message_id=tg_message_id,
             )
         except Exception:
             log.exception("ticket field completion update failed")
@@ -1376,6 +1537,8 @@ async def _apply_field_completion(
                 photo_url=upload_url,
                 update_photo_url=bool(upload_url),
                 responder_username=responder_handle,
+                telegram_chat_id=tg_chat_id,
+                telegram_message_id=tg_message_id,
             )
         except Exception:
             log.exception("ticket field completion update failed")
@@ -1398,6 +1561,8 @@ async def _apply_field_completion(
                 field_response=caption_or_text,
                 update_photo_url=False,
                 responder_username=responder_handle,
+                telegram_chat_id=tg_chat_id,
+                telegram_message_id=tg_message_id,
             )
         except Exception:
             log.exception("ticket field completion update failed")
@@ -1413,6 +1578,33 @@ async def _apply_field_completion(
 
     if await _get_active_ticket(update, context) == ticket_number:
         await _clear_active_ticket(update, context)
+
+
+async def handle_field_undo_reply(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reply ``UNDO`` to the field's own response message to clear the dashboard (1h window)."""
+    msg = update.effective_message
+    if not msg or not msg.reply_to_message:
+        return
+    text = (msg.text or "").strip()
+    if not _UNDO_TRIGGER_RE.match(text):
+        return
+
+    parent_id = int(msg.reply_to_message.message_id)
+    chat_id = int(msg.chat_id)
+    ok = _db_undo_field_response_by_telegram_message(chat_id, parent_id)
+    if ok:
+        await _reply(
+            update,
+            "Response removed from the dashboard. You can send a new reply to the assignment.",
+        )
+    else:
+        await _reply(
+            update,
+            f"Nothing to undo (wrong message, older than {FIELD_RESPONSE_UNDO_MINUTES} minutes, "
+            "or ticket already processed).",
+        )
 
 
 async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1732,6 +1924,12 @@ def _build_bot_app() -> Application:
         )
     )
     # Field swipe-reply to an assignment (works for coordinator or dashboard posts).
+    bot_app.add_handler(
+        MessageHandler(
+            filters.REPLY & filters.TEXT & filters.Regex(_UNDO_TRIGGER_RE),
+            handle_field_undo_reply,
+        )
+    )
     _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
     bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
@@ -1772,6 +1970,16 @@ bot_app = _build_bot_app()
 async def lifespan(_: FastAPI):
     await bot_app.initialize()
     await bot_app.start()
+
+    telethon_delete_client = None
+    try:
+        from telegram_delete_watcher import start_delete_listener
+
+        telethon_delete_client = await start_delete_listener(
+            _db_undo_field_response_by_telegram_message
+        )
+    except Exception:
+        log.exception("Telethon delete listener failed to start")
 
     webhook_url = resolve_telegram_webhook_url()
     if webhook_url:
@@ -1820,6 +2028,11 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        if telethon_delete_client is not None:
+            try:
+                await telethon_delete_client.disconnect()
+            except Exception:
+                log.exception("Telethon delete listener disconnect failed")
         # Never call ``delete_webhook`` by default: every local ``uvicorn``
         # shutdown (Ctrl+C, killing a duplicate process, IDE stop) would
         # clear Telegram's webhook for *this bot token*, so the next group

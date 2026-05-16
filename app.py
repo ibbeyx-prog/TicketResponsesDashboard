@@ -16,7 +16,11 @@ For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
 
     SUPABASE_URL = "https://<project>.supabase.co"
     SUPABASE_KEY = "<service-role-or-anon-key>"
-    DASHBOARD_PASSWORD = "<pick a strong password>"
+    # Apply migration 20260520_dashboard_users.sql — per-user login (recommended).
+    # Default seed: username admin / password ChangeMeNow! (change after first login).
+    # Legacy fallback if no users yet:
+    # DASHBOARD_PASSWORD = "<shared-password>"
+    # DASHBOARD_OPERATOR_ALLOWLIST = "alice,bob"
     TELEGRAM_TOKEN = "<same bot token as the webhook service>"
     TELEGRAM_GROUP_CHAT_ID = "-1001234567890"
     # Optional Telethon (see bot_utils.py); if set, outbound posts use Telethon:
@@ -45,9 +49,12 @@ applies if you are using ``getUpdates`` in a browser while a webhook is active
 update your bot already receives, an id bot in the group, or ``@groupusername``
 if the supergroup is public.
 
-Authentication: a single shared password gates the dashboard. It is read from
-``DASHBOARD_PASSWORD`` (env / ``st.secrets``). If unset, the app refuses to
-render -- never serve this dashboard unauthenticated.
+Authentication: per-user **username + password** in Supabase table
+``dashboard_users`` (see migration ``20260520_dashboard_users.sql``). Legacy
+shared ``DASHBOARD_PASSWORD`` is only used when no dashboard users exist yet.
+Command Center assignments store the signed-in **operator_id** in
+``dashboard_assigned_by``. Use **Forgot password** on the login screen to get a
+one-time reset code (15 minutes).
 """
 
 from __future__ import annotations
@@ -57,11 +64,12 @@ import hashlib
 import hmac
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 from bot_utils import (
     NOTIFY_BUILD_ID,
     normalize_telegram_group_id_paste,
@@ -208,13 +216,48 @@ _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
 # Latest ``ticket_attendance_logs.timestamp`` the dashboard has already "seen"
 # (for toast when Telegram/bot appends a new row).
 _DASH_LAST_ATTENDANCE_TS_KEY = "_dash_last_seen_attendance_ts"
+_DASH_RANGE_FROM_KEY = "_dash_range_from_utc"
+_DASH_RANGE_TO_KEY = "_dash_range_to_utc"
+_DASH_TIME_PRESET_KEY = "_dash_time_preset"
+_DASH_TIME_PRESET_OPTIONS: tuple[str, ...] = (
+    "Today",
+    "Last 7 days",
+    "Last 30 days",
+    "Pick dates",
+)
+_DASH_SEARCH_FROM_DATE_KEY = "_dash_search_from_date"
+_DASH_SEARCH_TO_DATE_KEY = "_dash_search_to_date"
+_DASH_PREV_PRESET_KEY = "_dash_prev_preset"
+_LEGACY_TIME_PRESET_MAP: dict[str, str] = {
+    "Last 24 hours": "Today",
+    "Single day": "Pick dates",
+    "Custom range": "Pick dates",
+}
+_DASH_MAIN_NAV_KEY = "_dash_main_nav"
+_DASH_TICKET_QUEUE_KEY = "_dash_ticket_queue"
+_DASH_PENDING_MAIN_NAV_KEY = "_dash_pending_main_nav"
+_DASH_PENDING_TICKET_QUEUE_KEY = "_dash_pending_ticket_queue"
+_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = ("Tickets", "Log", "Performance")
 _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
+_CC_NEW_TICKET_LABEL = "New ticket number…"
+_CC_FE_SELECT_KEY = "cc_fe_select"
+_CC_FE_MANUAL_KEY = "cc_fe_manual"
+_CC_TICKET_MODE_KEY = "_cc_ticket_input_mode"
+_CC_TICKET_PICK_KEY = "cc_ticket_pick"
+_CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
+_CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
 _AUTH_OK_KEY = "_ticket_dashboard_auth_ok"
 _AUTH_PWD_VER_KEY = "_ticket_dashboard_auth_pwd_ver"
+_AUTH_USERNAME_KEY = "_ticket_dashboard_auth_username"
+_OPERATOR_ID_KEY = "_ticket_dashboard_operator_id"
+_LOGIN_VIEW_KEY = "_ticket_dashboard_login_view"
+_MIN_DASHBOARD_PASSWORD_LEN = 8
+_MAX_OPERATOR_ID_LEN = 64
+_MAX_DASHBOARD_USERNAME_LEN = 48
 
 
 def _password_fingerprint(secret: str) -> str:
@@ -226,64 +269,748 @@ def _password_fingerprint(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _auth_session_fingerprint(*, username: str, operator_id: str) -> str:
+    pepper = (
+        _read_setting("DASHBOARD_SESSION_SECRET")
+        or _read_setting("SUPABASE_KEY")
+        or "ticket-dashboard-session"
+    )
+    payload = f"{username.casefold()}|{operator_id}|{pepper}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _clear_auth_session() -> None:
+    for key in (
+        _AUTH_OK_KEY,
+        _AUTH_PWD_VER_KEY,
+        _AUTH_USERNAME_KEY,
+        _OPERATOR_ID_KEY,
+    ):
+        st.session_state.pop(key, None)
+
+
+def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) -> None:
+    st.session_state[_AUTH_OK_KEY] = True
+    st.session_state[_AUTH_PWD_VER_KEY] = session_fp
+    st.session_state[_AUTH_USERNAME_KEY] = username
+    st.session_state[_OPERATOR_ID_KEY] = operator_id
+
+
+def _normalize_dashboard_username(raw: str) -> str:
+    s = "".join(
+        ch
+        for ch in (raw or "").strip().lower()
+        if ch.isalnum() or ch in "._-"
+    )
+    if not s:
+        raise ValueError("Enter a **username**.")
+    if len(s) > _MAX_DASHBOARD_USERNAME_LEN:
+        raise ValueError(
+            f"Username is too long (max {_MAX_DASHBOARD_USERNAME_LEN} characters)."
+        )
+    return s
+
+
+def _dashboard_users_configured() -> bool:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    try:
+        res = _get_supabase_client().rpc("dashboard_users_configured").execute()
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def _rpc_dashboard_verify_login(username: str, password: str) -> dict:
+    res = (
+        _get_supabase_client()
+        .rpc(
+            "dashboard_verify_login",
+            {"p_username": username, "p_password": password},
+        )
+        .execute()
+    )
+    data = res.data
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _rpc_dashboard_request_password_reset(username: str) -> dict:
+    res = (
+        _get_supabase_client()
+        .rpc(
+            "dashboard_request_password_reset",
+            {"p_username": username},
+        )
+        .execute()
+    )
+    data = res.data
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _rpc_dashboard_reset_password(
+    username: str, reset_code: str, new_password: str
+) -> dict:
+    res = (
+        _get_supabase_client()
+        .rpc(
+            "dashboard_reset_password",
+            {
+                "p_username": username,
+                "p_reset_code": reset_code,
+                "p_new_password": new_password,
+            },
+        )
+        .execute()
+    )
+    data = res.data
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _dashboard_admin_usernames() -> frozenset[str]:
+    raw = _read_setting("DASHBOARD_ADMIN_USERNAMES", "admin")
+    if not raw:
+        return frozenset({"admin"})
+    parts = {p.strip().lower() for p in raw.split(",") if p.strip()}
+    return frozenset(parts) if parts else frozenset({"admin"})
+
+
+def _session_dashboard_username() -> str | None:
+    raw = st.session_state.get(_AUTH_USERNAME_KEY)
+    if not raw:
+        return None
+    return str(raw).strip().lower()
+
+
+def _is_dashboard_admin() -> bool:
+    u = _session_dashboard_username()
+    return bool(u and u in _dashboard_admin_usernames())
+
+
+def _normalize_dashboard_operator_id(raw: str) -> str:
+    s = " ".join((raw or "").strip().split())
+    if not s:
+        raise ValueError("Enter an **operator display name**.")
+    if len(s) > _MAX_OPERATOR_ID_LEN:
+        raise ValueError(
+            f"Operator name is too long (max {_MAX_OPERATOR_ID_LEN} characters)."
+        )
+    if any(ord(ch) < 32 for ch in s):
+        raise ValueError("Operator name contains invalid characters.")
+    return s
+
+
+def _rpc_dashboard_admin_list_users(admin_username: str, admin_password: str) -> dict:
+    res = (
+        _get_supabase_client()
+        .rpc(
+            "dashboard_admin_list_users",
+            {
+                "p_admin_username": admin_username,
+                "p_admin_password": admin_password,
+            },
+        )
+        .execute()
+    )
+    data = res.data
+    return data if isinstance(data, dict) else {}
+
+
+def _rpc_dashboard_admin_create_user(
+    *,
+    admin_username: str,
+    admin_password: str,
+    new_username: str,
+    operator_id: str,
+    new_password: str,
+) -> dict:
+    res = (
+        _get_supabase_client()
+        .rpc(
+            "dashboard_admin_create_user",
+            {
+                "p_admin_username": admin_username,
+                "p_admin_password": admin_password,
+                "p_new_username": new_username,
+                "p_new_operator_id": operator_id,
+                "p_new_password": new_password,
+            },
+        )
+        .execute()
+    )
+    data = res.data
+    return data if isinstance(data, dict) else {}
+
+
+def _rpc_dashboard_admin_set_user_active(
+    *,
+    admin_username: str,
+    admin_password: str,
+    target_username: str,
+    is_active: bool,
+) -> dict:
+    res = (
+        _get_supabase_client()
+        .rpc(
+            "dashboard_admin_set_user_active",
+            {
+                "p_admin_username": admin_username,
+                "p_admin_password": admin_password,
+                "p_target_username": target_username,
+                "p_is_active": is_active,
+            },
+        )
+        .execute()
+    )
+    data = res.data
+    return data if isinstance(data, dict) else {}
+
+
+def _dashboard_admin_error_message(err: str) -> str:
+    messages = {
+        "forbidden": "Incorrect admin password.",
+        "invalid_username": "Invalid username (use lowercase letters, digits, . _ -).",
+        "invalid_operator_id": "Invalid operator display name.",
+        "weak_password": f"Password must be at least {_MIN_DASHBOARD_PASSWORD_LEN} characters.",
+        "username_taken": "That username already exists.",
+        "operator_id_taken": "That operator display name is already in use.",
+        "cannot_deactivate_self": "You cannot deactivate your own account while signed in.",
+        "last_active_user": "Cannot deactivate the last active account.",
+        "not_found": "User not found.",
+    }
+    return messages.get(err, f"Could not complete action ({err or 'unknown'}).")
+
+
+def _render_dashboard_team_accounts() -> None:
+    admin_user = _session_dashboard_username()
+    if not admin_user:
+        return
+
+    with st.expander("Team accounts (admin)", expanded=False):
+        st.caption(
+            "Create dashboard logins for your team. "
+            "Re-enter **your** password to confirm each action."
+        )
+        admin_pw = st.text_input(
+            "Your password (confirm)",
+            type="password",
+            key="dash_team_admin_pw",
+            autocomplete="current-password",
+        )
+
+        view_tab, add_tab = st.tabs(["Accounts", "Add user"])
+
+        with view_tab:
+            if st.button("Refresh list", key="dash_team_refresh", use_container_width=True):
+                if not admin_pw:
+                    st.warning("Enter your password first.")
+                else:
+                    try:
+                        payload = _rpc_dashboard_admin_list_users(
+                            admin_user, admin_pw
+                        )
+                    except Exception as exc:
+                        st.error(f"Could not load accounts: {exc}")
+                    else:
+                        if not payload.get("ok"):
+                            st.error(
+                                _dashboard_admin_error_message(
+                                    str(payload.get("error") or "")
+                                )
+                            )
+                        else:
+                            st.session_state["_dash_team_users_cache"] = (
+                                payload.get("users") or []
+                            )
+                            st.rerun()
+
+            users = st.session_state.get("_dash_team_users_cache")
+            if not users:
+                st.caption("Click **Refresh list** to load accounts.")
+            else:
+                for row in users:
+                    uname = str(row.get("username") or "")
+                    opid = str(row.get("operator_id") or "")
+                    active = bool(row.get("is_active", True))
+                    label = f"**{uname}** → {opid}"
+                    if not active:
+                        label += " _(disabled)_"
+                    c_info, c_act = st.columns([4, 1], gap="small")
+                    with c_info:
+                        st.markdown(label)
+                    with c_act:
+                        btn_label = "Enable" if not active else "Disable"
+                        hkey = hashlib.sha256(uname.encode("utf-8")).hexdigest()[:12]
+                        if st.button(
+                            btn_label,
+                            key=f"dash_team_toggle_{hkey}",
+                            use_container_width=True,
+                        ):
+                            if not admin_pw:
+                                st.warning("Enter your password first.")
+                            else:
+                                try:
+                                    payload = _rpc_dashboard_admin_set_user_active(
+                                        admin_username=admin_user,
+                                        admin_password=admin_pw,
+                                        target_username=uname,
+                                        is_active=not active,
+                                    )
+                                except Exception as exc:
+                                    st.error(str(exc))
+                                else:
+                                    if not payload.get("ok"):
+                                        st.error(
+                                            _dashboard_admin_error_message(
+                                                str(payload.get("error") or "")
+                                            )
+                                        )
+                                    else:
+                                        st.session_state.pop(
+                                            "_dash_team_users_cache", None
+                                        )
+                                        st.rerun()
+
+        with add_tab:
+            with st.form("dash_team_create_form", clear_on_submit=True):
+                new_user = st.text_input(
+                    "Username",
+                    placeholder="e.g. ali.ops",
+                    help="Lowercase login name.",
+                )
+                new_op = st.text_input(
+                    "Operator display name",
+                    placeholder="Shown on assignments (often same as username)",
+                )
+                new_pw = st.text_input("Temporary password", type="password")
+                confirm_pw = st.text_input("Confirm password", type="password")
+                submitted = st.form_submit_button(
+                    "Create account", use_container_width=True
+                )
+
+            if not submitted:
+                return
+            if not admin_pw:
+                st.error("Enter your password under **Your password (confirm)** first.")
+                return
+            try:
+                uname = _normalize_dashboard_username(new_user)
+            except ValueError as ve:
+                st.error(str(ve))
+                return
+            try:
+                opid = _normalize_dashboard_operator_id(new_op or uname)
+            except ValueError as ve:
+                st.error(str(ve))
+                return
+            if len(new_pw or "") < _MIN_DASHBOARD_PASSWORD_LEN:
+                st.error(
+                    f"Password must be at least {_MIN_DASHBOARD_PASSWORD_LEN} characters."
+                )
+                return
+            if new_pw != confirm_pw:
+                st.error("Passwords do not match.")
+                return
+            try:
+                payload = _rpc_dashboard_admin_create_user(
+                    admin_username=admin_user,
+                    admin_password=admin_pw,
+                    new_username=uname,
+                    operator_id=opid,
+                    new_password=new_pw,
+                )
+            except Exception as exc:
+                st.error(f"Could not create account: {exc}")
+                return
+            if not payload.get("ok"):
+                st.error(
+                    _dashboard_admin_error_message(str(payload.get("error") or ""))
+                )
+                return
+            st.session_state.pop("_dash_team_users_cache", None)
+            st.success(
+                f"Created **{uname}** (operator **{opid}**). "
+                "Share the temporary password securely; they can change it via "
+                "**Forgot password** on the login screen."
+            )
+
+
+def _render_login_page_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        /* Login page: same deep dark-black as dashboard */
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stHeader"],
+        [data-testid="stMain"],
+        [data-testid="stAppViewContainer"] section.main {
+            background-color: var(--bon-bg) !important;
+        }
+        [data-testid="stHeader"] {
+            border-bottom: none !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stAppViewContainer"] {
+            min-height: 100vh;
+        }
+        [data-testid="stMain"] {
+            min-height: 100vh;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        [data-testid="stAppViewContainer"] section.main {
+            width: 100%;
+            min-height: 100vh;
+            display: grid !important;
+            place-items: center !important;
+            padding: 0 !important;
+        }
+        [data-testid="stAppViewContainer"] section.main .block-container {
+            width: min(30rem, 92vw) !important;
+            max-width: 30rem !important;
+            margin: 0 auto !important;
+            padding: 0.5rem 0.75rem 1.5rem !important;
+        }
+        div.st-key-login_panel,
+        div.st-key-login_panel > div {
+            width: min(30rem, 92vw) !important;
+            max-width: 30rem !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        div.st-key-login_shell,
+        div.st-key-login_shell [data-testid="stVerticalBlockBorderWrapper"] {
+            width: 100% !important;
+            max-width: 30rem !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+            background-color: var(--bon-card) !important;
+        }
+        [data-testid="stAppViewContainer"] section.main .block-container [data-testid="stMarkdownContainer"] {
+            width: 100% !important;
+            text-align: center !important;
+        }
+        h2.bon-login-title {
+            font-size: 2.55rem !important;
+            font-weight: 700 !important;
+            color: #e8e6e3 !important;
+            text-align: center !important;
+            width: 100% !important;
+            margin: 0 auto 0.35rem auto !important;
+            padding: 0 !important;
+        }
+        p.bon-login-sub {
+            font-size: 0.9rem !important;
+            color: #a39e97 !important;
+            text-align: center !important;
+            width: 100% !important;
+            margin: 0 auto 0.85rem auto !important;
+        }
+        [data-testid="stAppViewContainer"] section.main .block-container [data-testid="stCaptionContainer"] {
+            text-align: center;
+        }
+        [data-testid="stAppViewContainer"] section.main [data-testid="stForm"] {
+            border: none !important;
+            padding: 0 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _operator_id_allowlist() -> frozenset[str] | None:
+    """If ``DASHBOARD_OPERATOR_ALLOWLIST`` is set, only those IDs may sign in."""
+    raw = _read_setting("DASHBOARD_OPERATOR_ALLOWLIST")
+    if not raw:
+        return None
+    parsed = {p.strip().casefold() for p in raw.split(",") if p.strip()}
+    return frozenset(parsed) if parsed else None
+
+
+def _normalize_operator_id(raw: str) -> str:
+    """Validate Operator ID from the login form (no newlines / control chars)."""
+    s = "".join(
+        ch for ch in (raw or "").strip() if ch.isprintable() and ch not in "\r\n\t\0"
+    )
+    if not s:
+        raise ValueError("Enter an **Operator ID** (your name or team login).")
+    if len(s) > _MAX_OPERATOR_ID_LEN:
+        raise ValueError(f"Operator ID is too long (max {_MAX_OPERATOR_ID_LEN} characters).")
+    allow = _operator_id_allowlist()
+    if allow is not None and s.casefold() not in allow:
+        raise ValueError(
+            "That Operator ID is not permitted. Check **DASHBOARD_OPERATOR_ALLOWLIST** "
+            "in `.env` or Streamlit Secrets."
+        )
+    return s
+
+
+def _session_operator_id() -> str | None:
+    raw = st.session_state.get(_OPERATOR_ID_KEY)
+    if raw in (None, ""):
+        return None
+    s = str(raw).strip()
+    return s or None
+
+
+def _cc_assignment_log_note(additional_info: str | None, operator_id: str) -> str | None:
+    """Prefix attendance-log note with who used Command Center."""
+    parts: list[str] = [f"Dashboard operator: {operator_id.strip()}"]
+    note = (additional_info or "").strip()
+    if note:
+        parts.append(note)
+    return "\n\n".join(parts)
+
+
 def _read_dashboard_password() -> str:
     """Read ``DASHBOARD_PASSWORD`` after Streamlit has started (env + secrets)."""
     return _read_setting("DASHBOARD_PASSWORD")
 
 
+def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
+    with st.container(border=True, key="login_shell"):
+        with st.form("login_form", clear_on_submit=False):
+            if per_user:
+                user = st.text_input(
+                    "Username",
+                    placeholder="your login name",
+                    autocomplete="username",
+                )
+                pwd = st.text_input(
+                    "Password",
+                    type="password",
+                    autocomplete="current-password",
+                )
+            else:
+                st.caption("Legacy mode: shared dashboard password.")
+                user = ""
+                pwd = st.text_input(
+                    "Password",
+                    type="password",
+                    autocomplete="current-password",
+                )
+                oid = st.text_input(
+                    "Operator ID",
+                    placeholder="e.g. ali.ops",
+                )
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
+
+    if not submitted:
+        return
+
+    if per_user:
+        try:
+            uname = _normalize_dashboard_username(user)
+        except ValueError as ve:
+            st.error(str(ve))
+            return
+        if not pwd:
+            st.error("Enter your password.")
+            return
+        try:
+            payload = _rpc_dashboard_verify_login(uname, pwd)
+        except Exception as exc:
+            st.error(f"Could not verify login: {exc}")
+            return
+        if not payload.get("ok"):
+            st.error("Incorrect username or password.")
+            return
+        op = str(payload.get("operator_id") or uname).strip()
+        fp = _auth_session_fingerprint(username=uname, operator_id=op)
+        _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
+        st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
+        st.rerun()
+        return
+
+    if not hmac.compare_digest(pwd, legacy_password):
+        st.error("Incorrect password.")
+        return
+    try:
+        op = _normalize_operator_id(oid)
+    except ValueError as ve:
+        st.error(str(ve))
+        return
+    fp = _password_fingerprint(legacy_password)
+    _complete_auth_session(username=op.casefold(), operator_id=op, session_fp=fp)
+    st.rerun()
+
+
+def _render_login_forgot_request() -> None:
+    with st.container(border=True, key="login_shell"):
+        st.caption("Enter your username. If the account exists, you will get a reset code.")
+        with st.form("login_forgot_request_form", clear_on_submit=False):
+            user = st.text_input("Username", placeholder="your login name")
+            submitted = st.form_submit_button("Get reset code", use_container_width=True)
+
+    if not submitted:
+        return
+    try:
+        uname = _normalize_dashboard_username(user)
+    except ValueError as ve:
+        st.error(str(ve))
+        return
+    try:
+        payload = _rpc_dashboard_request_password_reset(uname)
+    except Exception as exc:
+        st.error(f"Could not start reset: {exc}")
+        return
+
+    if payload.get("message") == "code_issued" and payload.get("reset_code"):
+        st.session_state["_dash_reset_username"] = uname
+        st.session_state["_dash_reset_code_display"] = str(payload["reset_code"])
+        st.session_state[_LOGIN_VIEW_KEY] = "forgot_reset"
+        st.rerun()
+        return
+
+    st.info(
+        "If that username exists, a reset code can be issued. "
+        "Check the spelling or contact your admin."
+    )
+
+
+def _render_login_forgot_reset() -> None:
+    uname = str(st.session_state.get("_dash_reset_username", ""))
+    shown_code = st.session_state.get("_dash_reset_code_display")
+    with st.container(border=True, key="login_shell"):
+        if shown_code:
+            st.success(
+                f"Reset code for **{uname}**: `{shown_code}` "
+                f"(valid **15 minutes**). Enter it below with your new password."
+            )
+        with st.form("login_forgot_reset_form", clear_on_submit=False):
+            user = st.text_input("Username", value=uname or "")
+            code = st.text_input("Reset code", placeholder="8-character code")
+            new_pw = st.text_input("New password", type="password")
+            confirm_pw = st.text_input("Confirm new password", type="password")
+            submitted = st.form_submit_button("Set new password", use_container_width=True)
+
+    if not submitted:
+        return
+    try:
+        uname_norm = _normalize_dashboard_username(user)
+    except ValueError as ve:
+        st.error(str(ve))
+        return
+    if len(new_pw or "") < _MIN_DASHBOARD_PASSWORD_LEN:
+        st.error(f"Password must be at least {_MIN_DASHBOARD_PASSWORD_LEN} characters.")
+        return
+    if new_pw != confirm_pw:
+        st.error("New passwords do not match.")
+        return
+    try:
+        payload = _rpc_dashboard_reset_password(
+            uname_norm,
+            (code or "").strip().upper(),
+            new_pw,
+        )
+    except Exception as exc:
+        st.error(f"Could not reset password: {exc}")
+        return
+    if not payload.get("ok"):
+        st.error("Invalid or expired reset code. Request a new code.")
+        return
+    st.session_state.pop("_dash_reset_username", None)
+    st.session_state.pop("_dash_reset_code_display", None)
+    st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
+    st.success("Password updated. Sign in with your new password.")
+    st.rerun()
+
+
 def _check_password() -> None:
-    """Block until the viewer has a valid password session.
+    """Block until the viewer has a valid session (per-user or legacy shared password)."""
+    per_user = _dashboard_users_configured()
+    legacy_pw = _read_dashboard_password() if not per_user else ""
 
-    ``main()`` must call ``st.set_page_config`` **before** this function so
-    Streamlit's "first command" rule is satisfied even when we read
-    ``st.session_state`` here.
+    if per_user:
+        auth_ready = True
+    elif legacy_pw:
+        auth_ready = True
+    else:
+        auth_ready = False
 
-    The shared password is read from ``DASHBOARD_PASSWORD`` (env / ``st.secrets``).
-    If unset, the dashboard refuses to render — failing closed.
-    """
-    configured_pw = _read_dashboard_password()
-    if not configured_pw:
-        st.error("`DASHBOARD_PASSWORD` is not configured — the dashboard is locked.")
+    if not auth_ready:
+        st.error("Dashboard login is not configured.")
         on_cloud = str(_ENV_PATH).startswith("/mount/src/")
         if on_cloud:
             st.info(
-                "Open *Manage app -> Settings -> Secrets* and add:\n\n"
-                "```toml\n"
-                'DASHBOARD_PASSWORD = "<pick a strong password>"\n'
-                "```\n"
-                "Save -- the app reboots automatically."
+                "Apply migration `supabase/migrations/20260520_dashboard_users.sql` "
+                "in Supabase, then sign in with a dashboard user. "
+                "Or set legacy `DASHBOARD_PASSWORD` in Secrets until users exist."
             )
         else:
             st.info(
-                "Add `DASHBOARD_PASSWORD=<password>` to your `.env` "
-                "(or export it in your shell) and restart the dashboard."
+                "Run migration `20260520_dashboard_users.sql` in Supabase SQL editor "
+                "and add users to `dashboard_users`, or set `DASHBOARD_PASSWORD` for "
+                "legacy shared-password mode."
             )
         st.stop()
 
-    fp = _password_fingerprint(configured_pw)
+    session_fp = st.session_state.get(_AUTH_PWD_VER_KEY)
     if (
         st.session_state.get(_AUTH_OK_KEY) is True
-        and st.session_state.get(_AUTH_PWD_VER_KEY) == fp
+        and session_fp
+        and _session_operator_id()
+        and st.session_state.get(_AUTH_USERNAME_KEY)
     ):
-        return
+        uname = str(st.session_state.get(_AUTH_USERNAME_KEY, ""))
+        op = str(st.session_state.get(_OPERATOR_ID_KEY, ""))
+        expected = (
+            _auth_session_fingerprint(username=uname, operator_id=op)
+            if per_user
+            else _password_fingerprint(legacy_pw)
+        )
+        if hmac.compare_digest(str(session_fp), expected):
+            return
 
-    st.session_state.pop(_AUTH_OK_KEY, None)
-    st.session_state.pop(_AUTH_PWD_VER_KEY, None)
+    _clear_auth_session()
 
-    st.title("Field Ticket Ops")
-    st.caption("Sign in to continue.")
+    _inject_bon_theme()
+    _render_login_page_styles()
 
-    with st.form("login_form", clear_on_submit=False):
-        pwd = st.text_input("Password", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+    view = st.session_state.get(_LOGIN_VIEW_KEY, "sign_in")
+    if view not in ("sign_in", "forgot_request", "forgot_reset"):
+        view = "sign_in"
 
-    if submitted:
-        if hmac.compare_digest(pwd, configured_pw):
-            st.session_state[_AUTH_OK_KEY] = True
-            st.session_state[_AUTH_PWD_VER_KEY] = fp
-            st.rerun()
+    with st.container(key="login_panel"):
+        st.markdown(
+            '<h2 class="bon-login-title">Field Ticket Ops</h2>'
+            '<p class="bon-login-sub">Sign in to continue.</p>',
+            unsafe_allow_html=True,
+        )
+
+        if per_user:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(
+                    "Sign in",
+                    use_container_width=True,
+                    type="primary" if view == "sign_in" else "secondary",
+                ):
+                    st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
+                    st.rerun()
+            with c2:
+                if st.button(
+                    "Forgot password",
+                    use_container_width=True,
+                    type="primary" if view != "sign_in" else "secondary",
+                ):
+                    st.session_state[_LOGIN_VIEW_KEY] = "forgot_request"
+                    st.rerun()
+
+        if view == "sign_in":
+            _render_login_sign_in(per_user=per_user, legacy_password=legacy_pw)
+        elif view == "forgot_reset":
+            _render_login_forgot_reset()
         else:
-            st.error("Incorrect password.")
+            _render_login_forgot_request()
 
     st.stop()
 
@@ -539,6 +1266,16 @@ def _ticket_options_for_admin(df: pd.DataFrame) -> list[str]:
     return [str(t) for t in ordered["ticket_number"].astype(str).tolist() if t]
 
 
+def _cc_assign_ticket_options(*, limit: int = 80) -> list[str]:
+    """Recent ticket numbers for the Command Center assign dropdown."""
+    try:
+        df = _fetch_tickets()
+    except Exception:
+        return []
+    opts = _ticket_options_for_admin(df)
+    return opts[:limit] if limit else opts
+
+
 def _delete_ticket_error_ui(picked: str, exc: Exception) -> None:
     err = str(exc).lower()
     if "42501" in str(exc) or "permission denied" in err or "row-level security" in err:
@@ -552,91 +1289,171 @@ def _delete_ticket_error_ui(picked: str, exc: Exception) -> None:
         st.error(f"Could not delete ticket {picked}: {exc}")
 
 
+def _apply_admin_ticket_action(
+    *,
+    picked: str,
+    choice: str,
+    confirm_del: bool,
+    status_actions: tuple[tuple[str, str, str], ...],
+) -> None:
+    if choice == "Delete row":
+        if not confirm_del:
+            st.warning("Check **Yes, remove permanently** first.")
+            return
+        try:
+            _delete_ticket(picked)
+        except Exception as exc:
+            _delete_ticket_error_ui(picked, exc)
+            return
+        st.success(f"{picked} deleted (history kept in Log).")
+        st.rerun()
+
+    matched = next((a for a in status_actions if a[0] == choice), None)
+    if not matched:
+        st.error("Unknown action.")
+        return
+    _, new_status, log_action = matched
+    try:
+        _set_ticket_status(
+            picked,
+            new_status=new_status,
+            log_action=log_action,
+        )
+    except Exception as exc:
+        st.error(f"Could not update {picked}: {exc}")
+        return
+    st.success(f"{picked} → **{new_status}**.")
+    st.rerun()
+
+
+def _render_ticket_delete_popover(
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str, str], ...],
+) -> None:
+    """Secondary remove flow — popover, confirm checkbox, disabled until checked."""
+    picked = str(st.session_state.get(f"{key_prefix}_sb_ticket", options[0]))
+    with st.popover("Remove…", use_container_width=True):
+        st.markdown(f"**{picked}**")
+        st.caption("Removes from queue · **Log** keeps history.")
+        confirm_del = st.checkbox(
+            "Yes, remove permanently",
+            value=False,
+            key=f"{key_prefix}_del_confirm",
+        )
+        if st.button(
+            "Delete",
+            key=f"{key_prefix}_del_btn",
+            type="secondary",
+            use_container_width=True,
+            disabled=not confirm_del,
+        ):
+            _apply_admin_ticket_action(
+                picked=picked,
+                choice="Delete row",
+                confirm_del=confirm_del,
+                status_actions=status_actions,
+            )
+
+
 def _render_admin_ticket_toolbar(
     df: pd.DataFrame,
     *,
     key_prefix: str,
-    title: str = "Admin — ticket",
     caption: str | None = None,
     status_actions: tuple[tuple[str, str, str], ...] = (),
     allow_delete: bool = True,
 ) -> None:
-    """One compact row: pick ticket → pick action → Apply.
-
-    ``status_actions`` entries are ``(radio_label, new_status, log_action)``.
-    Delete is optional; it requires the small confirm checkbox below the radio.
-    Everything lives in a **collapsed** expander so the main table stays clean.
-    """
+    """Ticket picker + primary action; remove lives in a small side popover."""
     options = _ticket_options_for_admin(df)
     if not options:
         return
 
-    radio_labels: list[str] = [a[0] for a in status_actions]
-    if allow_delete:
-        radio_labels.append("Delete row")
+    if caption:
+        st.caption(caption)
 
-    with st.expander(title, expanded=False):
-        if caption:
-            st.caption(caption)
-        picked = st.selectbox("Ticket", options=options, key=f"{key_prefix}_sb_ticket")
+    status_labels = [a[0] for a in status_actions]
+    del_col = 1 if allow_delete else 0
 
-        if not radio_labels:
-            return
-
-        if radio_labels == ["Delete row"]:
-            choice = "Delete row"
-            st.caption("Removes the active row; history stays in the Log tab.")
-        else:
-            choice = st.radio(
-                "Action",
-                options=radio_labels,
-                horizontal=True,
-                key=f"{key_prefix}_radio",
-            )
-
-        confirm_del = False
-        if choice == "Delete row":
-            confirm_del = st.checkbox(
-                "Confirm delete",
-                value=False,
-                key=f"{key_prefix}_del_confirm",
-            )
-
-        if st.button("Apply", key=f"{key_prefix}_apply", type="primary"):
-            if choice == "Delete row":
-                if not confirm_del:
-                    st.warning("Check **Confirm delete** first.")
-                    return
-                try:
-                    _delete_ticket(picked)
-                except Exception as exc:
-                    _delete_ticket_error_ui(picked, exc)
-                    return
-                st.success(f"{picked} deleted (history kept in Log).")
-                st.rerun()
-
-            matched = next((a for a in status_actions if a[0] == choice), None)
-            if not matched:
-                st.error("Unknown action.")
-                return
-            _, new_status, log_action = matched
-            try:
-                _set_ticket_status(
-                    picked,
-                    new_status=new_status,
-                    log_action=log_action,
+    with st.container(border=True):
+        if status_labels:
+            widths = [2, 1, del_col] if del_col else [2, 1]
+            cols = st.columns(widths, vertical_alignment="bottom")
+            c_ticket, c_action = cols[0], cols[1]
+            c_del = cols[2] if del_col else None
+            with c_ticket:
+                picked = st.selectbox(
+                    "Ticket",
+                    options=options,
+                    key=f"{key_prefix}_sb_ticket",
                 )
-            except Exception as exc:
-                st.error(f"Could not update {picked}: {exc}")
-                return
-            st.success(f"{picked} → **{new_status}**.")
-            st.rerun()
+            with c_action:
+                if len(status_labels) == 1:
+                    label = status_labels[0]
+                    if st.button(
+                        label,
+                        key=f"{key_prefix}_apply",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        _apply_admin_ticket_action(
+                            picked=picked,
+                            choice=label,
+                            confirm_del=False,
+                            status_actions=status_actions,
+                        )
+                else:
+                    choice = st.selectbox(
+                        "Action",
+                        options=status_labels,
+                        key=f"{key_prefix}_action_sel",
+                    )
+                    if st.button(
+                        "Apply",
+                        key=f"{key_prefix}_apply",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        _apply_admin_ticket_action(
+                            picked=picked,
+                            choice=choice,
+                            confirm_del=False,
+                            status_actions=status_actions,
+                        )
+            if c_del is not None:
+                with c_del:
+                    _render_ticket_delete_popover(
+                        key_prefix=key_prefix,
+                        options=options,
+                        status_actions=status_actions,
+                    )
+        else:
+            if del_col:
+                c_ticket, c_del = st.columns([3, 1], vertical_alignment="bottom")
+            else:
+                c_ticket, c_del = st.columns([1]), None
+            with c_ticket:
+                st.selectbox(
+                    "Ticket",
+                    options=options,
+                    key=f"{key_prefix}_sb_ticket",
+                )
+            if c_del is not None:
+                with c_del:
+                    _render_ticket_delete_popover(
+                        key_prefix=key_prefix,
+                        options=options,
+                        status_actions=status_actions,
+                    )
 
 
 def _fetch_attendance(
     *,
     ticket_number: str | None = None,
     member_query: str | None = None,
+    since_utc: pd.Timestamp | None = None,
+    until_utc: pd.Timestamp | None = None,
     limit: int = 500,
 ) -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -649,6 +1466,16 @@ def _fetch_attendance(
         cleaned = member_query.strip().lstrip("@")
         if cleaned:
             q = q.ilike("member_username", f"%{cleaned}%")
+    if since_utc is not None:
+        q = q.gte(
+            "timestamp",
+            since_utc.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    if until_utc is not None:
+        q = q.lte(
+            "timestamp",
+            until_utc.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
     try:
         res = q.order("timestamp", desc=True).limit(limit).execute()
     except Exception as exc:
@@ -659,6 +1486,145 @@ def _fetch_attendance(
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+
+def _perf_norm_member(raw: object) -> str:
+    """Normalize ``assigned_to`` / log ``member_username`` for chart labels."""
+
+    s = str(raw or "").strip()
+    if not s or s.lower() in ("unknown", "none", "null"):
+        return "(unknown)"
+    low = s.lstrip("@").lower()
+    return f"@{low}" if low else "(unknown)"
+
+
+def _local_date_start(d: date) -> pd.Timestamp:
+    return pd.Timestamp(datetime.combine(d, time.min), tz=LOCAL_TZ).tz_convert("UTC")
+
+
+def _local_date_end(d: date) -> pd.Timestamp:
+    return pd.Timestamp(datetime.combine(d, time.max), tz=LOCAL_TZ).tz_convert("UTC")
+
+
+def _sync_search_date_widgets(start: pd.Timestamp, end: pd.Timestamp) -> None:
+    st.session_state[_DASH_SEARCH_FROM_DATE_KEY] = start.tz_convert(LOCAL_TZ).date()
+    st.session_state[_DASH_SEARCH_TO_DATE_KEY] = end.tz_convert(LOCAL_TZ).date()
+
+
+def _preset_range_utc(preset: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    now = pd.Timestamp.now(tz="UTC")
+    if preset == "Today":
+        today = now.tz_convert(LOCAL_TZ).date()
+        return _local_date_start(today), now
+    if preset == "Last 30 days":
+        return now - pd.Timedelta(days=30), now
+    return now - pd.Timedelta(days=7), now
+
+
+def _store_dash_range(start: pd.Timestamp, end: pd.Timestamp) -> None:
+    st.session_state[_DASH_RANGE_FROM_KEY] = start.isoformat()
+    st.session_state[_DASH_RANGE_TO_KEY] = end.isoformat()
+
+
+def _get_dash_range() -> tuple[pd.Timestamp, pd.Timestamp]:
+    start = pd.to_datetime(st.session_state[_DASH_RANGE_FROM_KEY], utc=True)
+    end = pd.to_datetime(st.session_state[_DASH_RANGE_TO_KEY], utc=True)
+    return start, end
+
+
+def _format_dash_range_caption() -> str:
+    if _DASH_RANGE_FROM_KEY not in st.session_state:
+        return ""
+    start, end = _get_dash_range()
+    lo = start.tz_convert(LOCAL_TZ).strftime("%d %b")
+    hi = end.tz_convert(LOCAL_TZ).strftime("%d %b %Y")
+    return f"{lo} – {hi} · {LOCAL_TZ_LABEL}"
+
+
+def _ensure_dash_range_defaults() -> None:
+    if _DASH_RANGE_FROM_KEY not in st.session_state:
+        start, end = _preset_range_utc("Last 7 days")
+        _store_dash_range(start, end)
+        _sync_search_date_widgets(start, end)
+    if _DASH_TIME_PRESET_KEY not in st.session_state:
+        st.session_state[_DASH_TIME_PRESET_KEY] = "Last 7 days"
+
+
+def _sidebar_date_range() -> tuple[int, pd.Timestamp, pd.Timestamp]:
+    """Sidebar: presets or a simple From–To date pair (updates immediately)."""
+    _ensure_dash_range_defaults()
+    if _DASH_RANGE_FROM_KEY not in st.session_state:
+        start, end = _preset_range_utc("Last 7 days")
+        _store_dash_range(start, end)
+        _sync_search_date_widgets(start, end)
+    if _DASH_TIME_PRESET_KEY not in st.session_state:
+        st.session_state[_DASH_TIME_PRESET_KEY] = "Last 7 days"
+    cur = st.session_state.get(_DASH_TIME_PRESET_KEY)
+    if cur in _LEGACY_TIME_PRESET_MAP:
+        st.session_state[_DASH_TIME_PRESET_KEY] = _LEGACY_TIME_PRESET_MAP[cur]
+    elif cur not in _DASH_TIME_PRESET_OPTIONS:
+        st.session_state[_DASH_TIME_PRESET_KEY] = "Last 7 days"
+    if _DASH_SEARCH_FROM_DATE_KEY not in st.session_state:
+        _sync_search_date_widgets(*_get_dash_range())
+
+    preset = st.selectbox(
+        "Time range",
+        options=list(_DASH_TIME_PRESET_OPTIONS),
+        key=_DASH_TIME_PRESET_KEY,
+    )
+
+    prev_preset = st.session_state.get(_DASH_PREV_PRESET_KEY)
+    if preset != prev_preset:
+        st.session_state[_DASH_PREV_PRESET_KEY] = preset
+        if preset != "Pick dates":
+            start, end = _preset_range_utc(preset)
+            _store_dash_range(start, end)
+            _sync_search_date_widgets(start, end)
+
+    if preset == "Pick dates":
+        c1, c2 = st.columns(2)
+        with c1:
+            from_d = st.date_input(
+                "From",
+                format="YYYY-MM-DD",
+                key=_DASH_SEARCH_FROM_DATE_KEY,
+            )
+        with c2:
+            to_d = st.date_input(
+                "To",
+                format="YYYY-MM-DD",
+                key=_DASH_SEARCH_TO_DATE_KEY,
+            )
+        if from_d > to_d:
+            to_d = from_d
+        start = _local_date_start(from_d)
+        end = _local_date_end(to_d)
+        _store_dash_range(start, end)
+    else:
+        start, end = _preset_range_utc(preset)
+        _store_dash_range(start, end)
+
+    start, end = _get_dash_range()
+    lookback_days = max(
+        MIN_LOOKBACK_DAYS,
+        min(MAX_LOOKBACK_DAYS, int((end - start).total_seconds() // 86400) + 1),
+    )
+
+    cap = _format_dash_range_caption()
+    if cap:
+        st.caption(cap)
+
+    return lookback_days, start, end
+
+
+def _perf_bucket_settings(
+    start_utc: pd.Timestamp, end_utc: pd.Timestamp
+) -> tuple[str, str, str]:
+    """Return (bucket strftime, x-axis title, axis format) from range span."""
+    span = end_utc - start_utc
+    if span <= pd.Timedelta(hours=48):
+        return "%Y-%m-%d %H:00", "Hour (local)", "%b %d %H:%M"
+    return "%Y-%m-%d", "Day (local)", "%Y-%m-%d"
 
 
 def _fetch_latest_attendance_timestamp() -> datetime | None:
@@ -712,7 +1678,7 @@ def _maybe_toast_new_telegram_activity() -> None:
     prev_dt = prev.to_pydatetime()
     if latest > prev_dt:
         st.toast(
-            "New activity — check **Pending**, **Open**, or **Log**.",
+            "New activity — check **Pending**, **Open**, **Log**, or **Performance**.",
             icon="📥",
         )
         st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
@@ -857,6 +1823,7 @@ def _cc_insert_assignment(
     task_category: str,
     *,
     additional_info: str | None = None,
+    operator_id: str,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     row: dict = {
@@ -868,6 +1835,7 @@ def _cc_insert_assignment(
         "photo_url": None,
         "last_assigned_at": now_iso,
         "additional_info": additional_info,
+        "dashboard_assigned_by": operator_id,
     }
     for _ in range(4):
         try:
@@ -889,7 +1857,7 @@ def _cc_insert_assignment(
         ticket_number=ticket_number,
         member_username=assigned_to,
         action_type="Assignment",
-        note=additional_info,
+        note=_cc_assignment_log_note(additional_info, operator_id),
     )
 
 
@@ -900,6 +1868,7 @@ def _cc_reassign_ticket(
     task_category: str,
     *,
     additional_info: str | None = None,
+    operator_id: str,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     updates = {
@@ -911,6 +1880,7 @@ def _cc_reassign_ticket(
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "additional_info": additional_info,
+        "dashboard_assigned_by": operator_id,
     }
     _cc_execute_ticket_update(client, updates, ticket_number)
 
@@ -919,7 +1889,7 @@ def _cc_reassign_ticket(
         ticket_number=ticket_number,
         member_username=assigned_to,
         action_type="Assignment",
-        note=additional_info,
+        note=_cc_assignment_log_note(additional_info, operator_id),
     )
 
 
@@ -929,6 +1899,7 @@ def _cc_upsert_assignment(
     task_category: str,
     *,
     additional_info: str | None = None,
+    operator_id: str,
 ) -> str:
     """Insert or reassign; ``assigned_to`` is ``@username``. Returns a short summary."""
     client = _get_supabase_client()
@@ -940,6 +1911,7 @@ def _cc_upsert_assignment(
             assigned_to,
             task_category,
             additional_info=additional_info,
+            operator_id=operator_id,
         )
         return f"Created ticket **{ticket_number}** and logged assignment."
     _cc_reassign_ticket(
@@ -948,6 +1920,7 @@ def _cc_upsert_assignment(
         assigned_to,
         task_category,
         additional_info=additional_info,
+        operator_id=operator_id,
     )
     prev_assignee = existing.get("assigned_to") or "—"
     return (
@@ -1017,68 +1990,154 @@ def _delete_field_engineer(username: str) -> None:
     client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
 
 
-def _field_team_directory_ui() -> tuple[list[str], bool]:
-    """Field team directory in a collapsible expander; return ``(names, table_missing)``."""
-    names, missing = _try_fetch_field_engineer_usernames()
-    with st.expander("Field team", expanded=False):
-        if missing:
-            st.info(
-                f"Add table `{FIELD_ENGINEERS_TABLE}` in Supabase (see migration "
-                f"`supabase/migrations/20260515_dashboard_field_engineers.sql`), "
-                "then refresh. Until then, use the **Field engineer** box in the assign form."
+def _field_team_manage_popover(names: list[str], *, missing: bool) -> None:
+    """Compact add/remove handles list inside **Edit team** popover."""
+    if missing:
+        st.caption("Team table missing in Supabase.")
+        return
+
+    if not names:
+        st.caption("No handles yet.")
+    for u in names:
+        c_name, c_rm = st.columns([5, 1], gap="small", vertical_alignment="center")
+        with c_name:
+            st.markdown(
+                f'<p class="cc-team-handle">@{u}</p>',
+                unsafe_allow_html=True,
             )
-            return names, True
-        if not names:
-            st.caption("No handles yet — add below.")
-        for u in names:
-            c1, c2 = st.columns([14, 1])
-            with c1:
-                st.markdown(f"**@{u}**")
-            with c2:
-                hkey = hashlib.sha256(u.encode("utf-8")).hexdigest()[:16]
-                if st.button(
-                    "🗑",
-                    key=f"fe_rm_{hkey}",
-                    help=f"Remove @{u}",
-                    type="secondary",
-                ):
-                    try:
-                        _delete_field_engineer(u)
+        with c_rm:
+            hkey = hashlib.sha256(u.encode("utf-8")).hexdigest()[:16]
+            if st.button(
+                "×",
+                key=f"fe_rm_{hkey}",
+                help=f"Remove @{u}",
+                type="secondary",
+            ):
+                try:
+                    _delete_field_engineer(u)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    c_add, c_go = st.columns([5, 1], gap="small", vertical_alignment="bottom")
+    with c_add:
+        st.text_input(
+            "Add handle",
+            key="fe_new_handle",
+            placeholder="name",
+            label_visibility="collapsed",
+        )
+    with c_go:
+        if st.button("+", key="fe_add_btn", help="Add handle", type="secondary"):
+            raw = str(st.session_state.get("fe_new_handle") or "").strip()
+            if not raw:
+                st.warning("Type a handle first.")
+            else:
+                try:
+                    norm = _normalize_engineer_dir_handle(raw)
+                    existing, _ = _try_fetch_field_engineer_usernames()
+                    if any(e.lower() == norm.lower() for e in existing):
+                        st.warning(f"**@{norm}** is already listed.")
+                    else:
+                        _insert_field_engineer(norm)
+                        st.session_state.pop("fe_new_handle", None)
                         st.rerun()
-                    except Exception as exc:
+                except ValueError as ve:
+                    st.error(str(ve))
+                except Exception as exc:
+                    err = str(exc).lower()
+                    if "duplicate" in err or "23505" in str(exc) or "unique" in err:
+                        st.warning("Handle already exists.")
+                    else:
                         st.error(str(exc))
-        add_left, add_right = st.columns([6, 1])
-        with add_left:
-            st.text_input(
-                "New handle",
-                key="fe_new_handle",
-                placeholder="engineer_name",
-                label_visibility="collapsed",
-            )
-        with add_right:
-            if st.button("+", key="fe_add_btn", help="Add to team", type="secondary"):
-                raw = str(st.session_state.get("fe_new_handle") or "").strip()
-                if not raw:
-                    st.warning("Enter a handle first.")
-                else:
-                    try:
-                        norm = _normalize_engineer_dir_handle(raw)
-                        existing, _ = _try_fetch_field_engineer_usernames()
-                        if any(e.lower() == norm.lower() for e in existing):
-                            st.warning(f"**@{norm}** is already in the list (case-insensitive).")
-                        else:
-                            _insert_field_engineer(norm)
-                            st.session_state.pop("fe_new_handle", None)
-                            st.rerun()
-                    except ValueError as ve:
-                        st.error(str(ve))
-                    except Exception as exc:
-                        err = str(exc).lower()
-                        if "duplicate" in err or "23505" in str(exc) or "unique" in err:
-                            st.warning("That handle is already in the directory.")
-                        else:
-                            st.error(str(exc))
-    return names, False
+
+
+def _render_cc_engineer_row(names: list[str], *, missing: bool) -> None:
+    """Engineer picker + team list popover."""
+    if missing:
+        st.info(
+            f"Directory table missing — type a username below, or add "
+            f"`{FIELD_ENGINEERS_TABLE}` in Supabase."
+        )
+        st.text_input(
+            "Engineer",
+            placeholder="@ibeyx",
+            key=_CC_FE_MANUAL_KEY,
+        )
+        return
+
+    if names:
+        st.selectbox(
+            "Engineer",
+            options=[f"@{n}" for n in names],
+            key=_CC_FE_SELECT_KEY,
+        )
+    else:
+        st.text_input(
+            "Engineer",
+            placeholder="@ibeyx",
+            key=_CC_FE_MANUAL_KEY,
+        )
+
+    with st.popover("Edit team", key="cc_team_popover"):
+        _field_team_manage_popover(names, missing=missing)
+
+
+def _on_cc_ticket_pick_change() -> None:
+    if st.session_state.get(_CC_TICKET_PICK_KEY) == _CC_NEW_TICKET_LABEL:
+        st.session_state[_CC_TICKET_MODE_KEY] = "new"
+    else:
+        st.session_state.pop(_CC_TICKET_MODE_KEY, None)
+
+
+def _render_ticket_number_picker() -> None:
+    """Single ticket control: dropdown for existing, or type when **New ticket number…** is chosen."""
+    recent = _cc_assign_ticket_options()
+    extras: list[str] = st.session_state.setdefault(_CC_TICKET_EXTRAS_KEY, [])
+    all_tickets = list(dict.fromkeys([*extras, *recent]))
+    use_new = st.session_state.get(_CC_TICKET_MODE_KEY) == "new" or not all_tickets
+
+    if use_new:
+        st.text_input(
+            "Ticket",
+            placeholder="9 or 16 digits",
+            key=_CC_TICKET_NEW_VAL_KEY,
+        )
+        if all_tickets and st.button(
+            "Pick existing",
+            key="cc_ticket_use_list",
+            type="secondary",
+            use_container_width=True,
+        ):
+            st.session_state.pop(_CC_TICKET_MODE_KEY, None)
+            st.rerun()
+        return
+
+    st.selectbox(
+        "Ticket",
+        options=[_CC_NEW_TICKET_LABEL, *all_tickets],
+        key=_CC_TICKET_PICK_KEY,
+        on_change=_on_cc_ticket_pick_change,
+    )
+
+
+def _resolve_cc_ticket_number() -> str:
+    if st.session_state.get(_CC_TICKET_MODE_KEY) == "new":
+        return str(st.session_state.get(_CC_TICKET_NEW_VAL_KEY, "")).strip()
+    pick = st.session_state.get(_CC_TICKET_PICK_KEY, "")
+    if pick == _CC_NEW_TICKET_LABEL:
+        return str(st.session_state.get(_CC_TICKET_NEW_VAL_KEY, "")).strip()
+    return str(pick or "").strip()
+
+
+def _remember_cc_ticket_number(ticket_number: str) -> None:
+    tid = ticket_number.strip()
+    if not tid:
+        return
+    extras: list[str] = st.session_state.setdefault(_CC_TICKET_EXTRAS_KEY, [])
+    if tid not in extras:
+        st.session_state[_CC_TICKET_EXTRAS_KEY] = [tid, *extras][:80]
+    st.session_state.pop(_CC_TICKET_MODE_KEY, None)
 
 
 def _sidebar_command_center() -> None:
@@ -1086,7 +2145,7 @@ def _sidebar_command_center() -> None:
     if flash:
         st.success(flash)
 
-    st.header("Command Center")
+    st.markdown("##### Assign")
     token_env = (
         _read_setting("TG_BOT_TOKEN").strip()
         or _read_setting("TELEGRAM_BOT_TOKEN").strip()
@@ -1105,73 +2164,62 @@ def _sidebar_command_center() -> None:
             )
     env_group_ok = env_group_parsed is not None
 
-    fe_names, fe_missing = _field_team_directory_ui()
+    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
 
-    pick_choice: str | None = None
-    fe_handle_raw = ""
     token_session = ""
     chat_session = ""
-    with st.form("cc_assign_form"):
-        # Session token only when env/Secrets lack it.
-        if not token_env:
-            token_session = st.text_input(
-                "Bot token (this session only)",
-                type="password",
-                key=_CC_SESSION_TOKEN_KEY,
-                placeholder="Paste TELEGRAM_TOKEN if missing from .env / Secrets",
-                help="Not saved to disk. Prefer **TELEGRAM_TOKEN** in `.env` or Streamlit Secrets.",
+    additional_info_raw = ""
+    submitted = False
+
+    with st.container(border=True, key="cc_assign_block"):
+        _render_cc_engineer_row(fe_names, missing=fe_missing)
+        _render_ticket_number_picker()
+        with st.form("cc_assign_form"):
+            cat = st.selectbox(
+                "Category",
+                options=list(ASSIGNMENT_TASK_CATEGORIES),
             )
-        if not env_group_ok:
-            chat_session = st.text_input(
-                "Group chat id (only if missing from Secrets)",
-                key=_CC_SESSION_GROUP_KEY,
-                placeholder="-5149869288 or -100… or @YourPublicGroup",
-                help="Hidden when **TELEGRAM_GROUP_CHAT_ID** (or nested `[telegram]` keys) is valid. "
-                "Paste the group id here if the app still cannot read Secrets, then Assign.",
+            additional_info_raw = st.text_area(
+                "Notes (optional)",
+                placeholder="Context for the field team",
+                height=64,
             )
-        if fe_names and not fe_missing:
-            pick_choice = st.selectbox(
-                "Field engineer",
-                options=[f"@{n}" for n in fe_names],
-                index=0,
-                help="Pick a handle from the directory (expand **Field team** above to edit the list).",
+            if not token_env:
+                token_session = st.text_input(
+                    "Bot token (session only)",
+                    type="password",
+                    key=_CC_SESSION_TOKEN_KEY,
+                    placeholder="If missing from Secrets",
+                )
+            if not env_group_ok:
+                chat_session = st.text_input(
+                    "Group chat id",
+                    key=_CC_SESSION_GROUP_KEY,
+                    placeholder="-100… or @group",
+                )
+            submitted = st.form_submit_button(
+                "Assign",
+                type="primary",
+                use_container_width=True,
             )
-        else:
-            fe_handle_raw = st.text_input(
-                "Field engineer",
-                placeholder="ibeyx",
-                help="Telegram username (with or without @). "
-                "Add `dashboard_field_engineers` in Supabase to pick from a saved list instead.",
-            )
-        tid_raw = st.text_input(
-            "Ticket number",
-            placeholder="9 or 16 digits",
-            help="Unique per task (9 or 16 digits). Shown in Telegram line 1 and used to match field replies.",
-        )
-        cat = st.selectbox("Task category", options=list(ASSIGNMENT_TASK_CATEGORIES))
-        additional_info_raw = st.text_area(
-            "Additional info",
-            placeholder="Optional — site context, access details, etc.",
-            height=88,
-            help="Saved to the ticket's **additional_info** column and the same text appears in the Telegram assignment.",
-        )
-        submitted = st.form_submit_button("Assign", type="primary", use_container_width=True)
 
     if not submitted:
         return
 
     try:
         if fe_names and not fe_missing:
-            if pick_choice is None or not str(pick_choice).strip():
-                st.error("Pick a field engineer from the list.")
+            pick_choice = st.session_state.get(_CC_FE_SELECT_KEY)
+            if not pick_choice or not str(pick_choice).strip():
+                st.error("Pick an engineer from the list.")
                 return
-            handle = _cc_normalize_handle(pick_choice)
+            handle = _cc_normalize_handle(str(pick_choice))
         else:
-            if not fe_handle_raw.strip():
-                st.error("Enter a field engineer Telegram username.")
+            fe_handle_raw = str(st.session_state.get(_CC_FE_MANUAL_KEY, "")).strip()
+            if not fe_handle_raw:
+                st.error("Enter an engineer Telegram username.")
                 return
             handle = _cc_normalize_handle(fe_handle_raw)
-        tid = _cc_validate_ticket_number(tid_raw)
+        tid = _cc_validate_ticket_number(_resolve_cc_ticket_number())
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -1222,8 +2270,22 @@ def _sidebar_command_center() -> None:
         )
         return
 
+    op_assign = _session_operator_id()
+    if not op_assign:
+        st.error(
+            "Session is missing **Operator ID**. Use **Log out** and sign in again — "
+            "Operator ID is required before Command Center can assign."
+        )
+        return
+
     try:
-        summary = _cc_upsert_assignment(handle, tid, cat, additional_info=additional_info_val)
+        summary = _cc_upsert_assignment(
+            handle,
+            tid,
+            cat,
+            additional_info=additional_info_val,
+            operator_id=op_assign,
+        )
     except Exception as exc:
         st.error(f"Supabase upsert failed: {exc}")
         return
@@ -1235,6 +2297,7 @@ def _sidebar_command_center() -> None:
                 tid,
                 cat,
                 additional_info=additional_info_val,
+                assigned_by=op_assign,
                 api_id=_read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None,
                 api_hash=_read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None,
                 bot_token=token or None,
@@ -1245,6 +2308,7 @@ def _sidebar_command_center() -> None:
         st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
         return
 
+    _remember_cc_ticket_number(tid)
     st.session_state[_CC_FLASH_KEY] = (
         f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message)."
     )
@@ -1257,73 +2321,60 @@ MAX_REFRESH_MINUTES = 60
 
 DEFAULT_LOOKBACK_DAYS = 7
 MIN_LOOKBACK_DAYS = 1
-MAX_LOOKBACK_DAYS = 30
+MAX_LOOKBACK_DAYS = 365
 
 
 def _sidebar_controls() -> tuple[bool, int, int]:
     """Return (auto_enabled, interval_minutes, lookback_days)."""
     with st.sidebar:
-        _sidebar_command_center()
-        st.divider()
-        st.header("Filters")
-        lookback_days = st.slider(
-            "Days to Look Back",
-            min_value=MIN_LOOKBACK_DAYS,
-            max_value=MAX_LOOKBACK_DAYS,
-            value=DEFAULT_LOOKBACK_DAYS,
-            step=1,
-            help=(
-                "Only show tickets with **any activity** (assignment, field "
-                "response, admin update, or creation) within this window. "
-                "Counts and tabs honour this filter."
-            ),
-        )
+        st.markdown("### Field Ticket Ops")
+        op = _session_operator_id()
+        if op:
+            st.caption(f"Signed in as **{op}**")
 
-        st.header("Refresh")
-        auto = st.toggle(
-            "Auto-refresh",
-            value=True,
-            help=(
-                f"Re-fetch from Supabase on a timer ({LOCAL_TZ_LABEL}). "
-                "When new rows appear in the attendance log (Telegram or Command Center), "
-                "you get a short toast so the field group can stay quiet."
-            ),
-        )
-        interval_minutes = st.slider(
-            "Interval (minutes)",
-            min_value=MIN_REFRESH_MINUTES,
-            max_value=MAX_REFRESH_MINUTES,
-            value=DEFAULT_REFRESH_MINUTES,
-            step=1,
-            disabled=not auto,
-        )
-        if st.button("Refresh Data", use_container_width=True):
-            _get_supabase_client.clear()
-            st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
-            st.rerun()
-        st.caption(
-            f"After a field reply in Telegram, tickets move **Pending → Open**. "
-            f"Use the **Open** queue below (not Pending). Table: `{TICKETS_TABLE}`."
-        )
-        lookup = st.text_input(
-            "Look up ticket #",
-            placeholder="9 or 16 digits",
-            key="dash_ticket_lookup",
-        )
-        if lookup.strip():
-            row = _fetch_ticket_row(lookup.strip())
-            if row:
-                st.success(
-                    f"**{row.get('ticket_number')}** — status **{row.get('status')}**, "
-                    f"assigned **{row.get('assigned_to')}**, "
-                    f"responded_at={row.get('responded_at') or '—'}"
+        if _dashboard_users_configured() and _is_dashboard_admin():
+            _render_dashboard_team_accounts()
+
+        _sidebar_command_center()
+
+        st.markdown("**Time range**")
+        lookback_days, _range_start, _range_end = _sidebar_date_range()
+
+        with st.expander("More filters", expanded=False):
+            auto = st.toggle("Auto-refresh", value=True)
+            if auto:
+                interval_minutes = st.slider(
+                    "Every (minutes)",
+                    min_value=MIN_REFRESH_MINUTES,
+                    max_value=MAX_REFRESH_MINUTES,
+                    value=DEFAULT_REFRESH_MINUTES,
+                    step=1,
                 )
             else:
-                st.warning(f"No row in `{TICKETS_TABLE}` for that ticket number.")
-        st.divider()
+                interval_minutes = DEFAULT_REFRESH_MINUTES
+            if st.button("Refresh now", use_container_width=True):
+                _get_supabase_client.clear()
+                st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
+                st.rerun()
+            lookup = st.text_input(
+                "Look up ticket #",
+                placeholder="9 or 16 digits",
+                key="dash_ticket_lookup",
+            )
+            if lookup.strip():
+                row = _fetch_ticket_row(lookup.strip())
+                if row:
+                    st.success(
+                        f"**{row.get('ticket_number')}** — **{row.get('status')}**, "
+                        f"→ {row.get('assigned_to') or '—'}"
+                    )
+                else:
+                    st.warning("Not found.")
+
+        st.markdown("---")
         if st.button("Log out", use_container_width=True):
-            st.session_state.pop(_AUTH_OK_KEY, None)
-            st.session_state.pop(_AUTH_PWD_VER_KEY, None)
+            _clear_auth_session()
+            st.session_state.pop(_LOGIN_VIEW_KEY, None)
             st.rerun()
     return auto, int(interval_minutes), int(lookback_days)
 
@@ -1333,8 +2384,6 @@ def main() -> None:
     st.set_page_config(page_title="Field Ticket Ops", layout="wide")
 
     _check_password()
-
-    st.title("Field Ticket Ops")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
         missing = [k for k, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
@@ -1373,13 +2422,13 @@ def main() -> None:
 
 PHOTO_THUMB_WIDTH = 220  # px — tight enough that 3 fit per row on a laptop
 
-# BONFamily-inspired UI: charcoal base (#121212), Light Oak (#D7B491) accents.
+# BONFamily-inspired UI: deep dark-black base, Light Oak (#D7B491) accents.
 _BON_THEME_CSS = """
 <style>
     :root {
-        --bon-bg: #121212;
-        --bon-panel: #1a1a1a;
-        --bon-card: #1e1e1e;
+        --bon-bg: #0B0B0B;
+        --bon-panel: #0B0B0B;
+        --bon-card: #141414;
         --bon-oak: #D7B491;
         --bon-text: #e8e6e3;
         --bon-muted: #a39e97;
@@ -1417,17 +2466,40 @@ _BON_THEME_CSS = """
     .stButton > button {
         font-family: var(--bon-font) !important;
     }
+    html, body {
+        background-color: var(--bon-bg) !important;
+    }
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewContainer"] > section,
+    [data-testid="stAppViewContainer"] .main,
+    [data-testid="stAppViewContainer"] .main > div,
+    [data-testid="stMain"],
+    [data-testid="stMain"] > div,
+    section.main,
+    [data-testid="stMain"] [data-testid="block-container"],
+    [data-testid="stBottomBlockContainer"],
+    [data-testid="stBottom"] {
+        background-color: var(--bon-bg) !important;
+    }
+    [data-testid="stMain"] [data-testid="stVerticalBlock"],
+    [data-testid="stMain"] [data-testid="element-container"] {
+        background-color: transparent !important;
+    }
     .stApp {
-        background-color: var(--bon-bg);
         color: var(--bon-text);
     }
     [data-testid="stHeader"] {
-        background-color: rgba(18, 18, 18, 0.96);
+        background-color: var(--bon-bg) !important;
         border-bottom: 1px solid var(--bon-oak);
     }
+    [data-testid="stSidebar"],
+    [data-testid="stSidebar"] > div,
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        background-color: var(--bon-bg) !important;
+    }
     [data-testid="stSidebar"] {
-        background-color: var(--bon-panel);
-        border-right: 1px solid var(--bon-oak);
+        border-right: 1px solid rgba(215, 180, 145, 0.22);
     }
     [data-testid="stSidebar"] .stMarkdown,
     [data-testid="stSidebar"] label,
@@ -1435,9 +2507,28 @@ _BON_THEME_CSS = """
         color: var(--bon-text);
     }
     div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-color: var(--bon-oak) !important;
+        border: 1px solid var(--bon-oak) !important;
         border-radius: 14px !important;
         background-color: var(--bon-card) !important;
+    }
+    /* Assign block: one oak outline; form has no extra gray box */
+    [data-testid="stSidebar"] div.st-key-cc_assign_block [data-testid="stForm"] {
+        border: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        background: transparent !important;
+    }
+    [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
+    [data-testid="stSidebar"] .stTextInput input,
+    [data-testid="stSidebar"] .stTextArea textarea {
+        border: 1px solid rgba(215, 180, 145, 0.45) !important;
+        border-radius: 8px !important;
+    }
+    [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div:focus-within,
+    [data-testid="stSidebar"] .stTextInput input:focus,
+    [data-testid="stSidebar"] .stTextArea textarea:focus {
+        border-color: var(--bon-oak) !important;
+        box-shadow: 0 0 0 1px var(--bon-oak) !important;
     }
     .stTabs [data-baseweb="tab-list"] {
         background-color: var(--bon-panel);
@@ -1451,8 +2542,9 @@ _BON_THEME_CSS = """
         border-radius: 8px;
     }
     .stTabs [aria-selected="true"] {
-        background-color: var(--bon-oak) !important;
-        color: #121212 !important;
+        background-color: transparent !important;
+        color: var(--bon-text) !important;
+        box-shadow: inset 0 -2px 0 var(--bon-oak);
     }
     /* Queue switcher (segmented control): more space between choices than tabs */
     div[data-baseweb="segmented-control"] {
@@ -1463,16 +2555,49 @@ _BON_THEME_CSS = """
         padding: 10px 20px !important;
         min-height: 2.75rem !important;
     }
-    .stButton > button {
-        border-radius: 10px !important;
-        border: 1px solid var(--bon-oak) !important;
-        background-color: #2a2420 !important;
-        color: var(--bon-oak) !important;
-        font-weight: 600;
+    /* All buttons (secondary + primary): oak outline like tabs — not Streamlit red */
+    .stButton > button,
+    .stButton > button[kind="primary"],
+    .stButton > button[kind="secondary"],
+    [data-testid="stFormSubmitButton"] button,
+    [data-testid="stFormSubmitButton"] button[kind="primary"],
+    [data-testid="stFormSubmitButton"] button[kind="secondary"],
+    button[data-testid="stBaseButton-primary"],
+    button[data-testid="stBaseButton-secondary"] {
+        border-radius: 8px !important;
+        border: 1px solid rgba(215, 180, 145, 0.45) !important;
+        background-color: var(--bon-card) !important;
+        background-image: none !important;
+        color: var(--bon-muted) !important;
+        font-weight: 500;
+        box-shadow: none !important;
     }
-    .stButton > button:hover {
-        background-color: var(--bon-oak) !important;
-        color: #121212 !important;
+    .stButton > button[kind="primary"],
+    button[data-testid="stBaseButton-primary"] {
+        border-color: var(--bon-oak) !important;
+        color: var(--bon-oak) !important;
+        background-color: #34302c !important;
+    }
+    .stButton > button:hover,
+    .stButton > button:focus,
+    .stButton > button:active,
+    .stButton > button[kind="primary"]:hover,
+    .stButton > button[kind="primary"]:focus,
+    .stButton > button[kind="primary"]:active,
+    [data-testid="stFormSubmitButton"] button:hover,
+    [data-testid="stFormSubmitButton"] button:focus,
+    [data-testid="stFormSubmitButton"] button:active,
+    button[data-testid="stBaseButton-primary"]:hover,
+    button[data-testid="stBaseButton-primary"]:focus,
+    button[data-testid="stBaseButton-primary"]:active {
+        background-color: rgba(215, 180, 145, 0.12) !important;
+        color: var(--bon-oak) !important;
+        border-color: var(--bon-oak) !important;
+    }
+    div[data-baseweb="segmented-control"] button[aria-selected="true"] {
+        background-color: #3a342f !important;
+        color: var(--bon-oak) !important;
+        border-color: var(--bon-oak) !important;
     }
     div[data-testid="stExpander"] details {
         border: 1px solid var(--bon-oak);
@@ -1482,11 +2607,89 @@ _BON_THEME_CSS = """
     div[data-testid="stExpander"] summary {
         color: var(--bon-oak);
     }
+    /* Remove popover: muted trigger, not full-width primary styling */
+    [data-testid="stPopover"] > button {
+        font-size: 0.85rem !important;
+        color: var(--bon-muted) !important;
+        border-color: rgba(215, 180, 145, 0.22) !important;
+        background-color: transparent !important;
+    }
+    [data-testid="stPopover"] > button:hover {
+        color: var(--bon-text) !important;
+        border-color: rgba(215, 180, 145, 0.4) !important;
+        background-color: rgba(215, 180, 145, 0.06) !important;
+    }
+    [data-testid="stPopoverBody"] .stButton > button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+    /* Command Center: compact Team popover beside engineer dropdown */
+    [data-testid="stSidebar"] div.st-key-cc_team_popover > button {
+        font-size: 0.8rem !important;
+        padding: 0.15rem 0 !important;
+        min-height: unset !important;
+        width: auto !important;
+        color: var(--bon-muted) !important;
+        border: none !important;
+        background: transparent !important;
+        box-shadow: inset 0 -1px 0 rgba(215, 180, 145, 0.35) !important;
+    }
+    [data-testid="stSidebar"] div.st-key-cc_team_popover > button:hover {
+        color: var(--bon-oak) !important;
+        background: transparent !important;
+        box-shadow: inset 0 -1px 0 var(--bon-oak) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPopoverBody"] {
+        max-width: 13.5rem !important;
+        min-width: 11rem !important;
+        padding: 0.45rem 0.55rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {
+        gap: 0.35rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPopoverBody"] div[class*="st-key-fe_rm_"] .stButton > button,
+    [data-testid="stSidebar"] [data-testid="stPopoverBody"] div.st-key-fe_add_btn .stButton > button {
+        font-size: 0.95rem !important;
+        line-height: 1 !important;
+        width: 1.65rem !important;
+        min-width: 1.65rem !important;
+        max-width: 1.65rem !important;
+        height: 1.65rem !important;
+        min-height: 1.65rem !important;
+        padding: 0 !important;
+        color: var(--bon-muted) !important;
+        border-color: rgba(215, 180, 145, 0.25) !important;
+        white-space: nowrap !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPopoverBody"] p.cc-team-handle {
+        font-family: var(--bon-font) !important;
+        font-size: 0.875rem !important;
+        font-weight: 400 !important;
+        color: var(--bon-text) !important;
+        margin: 0 !important;
+        padding: 0.4rem 0 0.4rem 0.1rem !important;
+        line-height: 1.25 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPopoverBody"] .stTextInput input {
+        font-family: var(--bon-font) !important;
+        font-size: 0.875rem !important;
+        color: var(--bon-text) !important;
+        background-color: var(--bon-card) !important;
+        border: 1px solid rgba(215, 180, 145, 0.35) !important;
+        border-radius: 8px !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPopoverBody"] .stTextInput input::placeholder {
+        color: var(--bon-muted) !important;
+        opacity: 1 !important;
+    }
     [data-testid="stMetric"] {
         background: var(--bon-card);
-        padding: 10px 14px;
-        border-radius: 12px;
-        border: 1px solid rgba(215, 180, 145, 0.35);
+        padding: 8px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(215, 180, 145, 0.28);
+    }
+    [data-testid="stMetric"]:has([data-testid="stMetricDelta"]) {
+        border-color: rgba(215, 180, 145, 0.55);
     }
     [data-testid="stMetric"] label { color: var(--bon-muted) !important; }
     [data-testid="stMetric"] [data-testid="stMetricValue"] {
@@ -1494,6 +2697,91 @@ _BON_THEME_CSS = """
     }
     .stMarkdown a { color: var(--bon-oak); }
     [data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
+    /* Text-style nav radios (sidebar + main) */
+    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"],
+    [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] {
+        gap: 1.25rem !important;
+        background: transparent !important;
+        border: none !important;
+        padding: 0 0 0.5rem 0 !important;
+        margin-bottom: 0.25rem !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] > label,
+    [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] > label {
+        background: transparent !important;
+        border: none !important;
+        padding: 0.2rem 0 !important;
+        margin: 0 !important;
+        color: var(--bon-muted) !important;
+        font-weight: 500 !important;
+        min-height: unset !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] > label:hover,
+    [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] > label:hover {
+        color: var(--bon-text) !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] > label[data-checked="true"],
+    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked),
+    [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] > label[data-checked="true"],
+    [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) {
+        color: var(--bon-text) !important;
+        font-weight: 600 !important;
+        box-shadow: inset 0 -2px 0 var(--bon-oak) !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child,
+    [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
+        display: none !important;
+    }
+    /* Dashboard nav: one row (Tickets | Log | Performance) */
+    [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] {
+        flex-direction: row !important;
+        flex-wrap: wrap !important;
+        align-items: flex-end !important;
+        gap: 1.75rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    /* Clickable queue metrics (replace second nav row) */
+    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button {
+        background: var(--bon-card) !important;
+        border: 1px solid rgba(215, 180, 145, 0.28) !important;
+        border-radius: 10px !important;
+        color: var(--bon-muted) !important;
+        font-weight: 500 !important;
+        font-size: 0.8rem !important;
+        line-height: 1.35 !important;
+        white-space: pre-line !important;
+        min-height: 4.25rem !important;
+        padding: 0.55rem 0.65rem !important;
+        text-align: left !important;
+    }
+    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button:not(:disabled):hover {
+        color: var(--bon-text) !important;
+        border-color: rgba(215, 180, 145, 0.5) !important;
+        background: rgba(215, 180, 145, 0.08) !important;
+    }
+    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button:disabled {
+        opacity: 1 !important;
+        color: var(--bon-oak) !important;
+        border-color: var(--bon-oak) !important;
+        font-weight: 600 !important;
+        cursor: default !important;
+        box-shadow: inset 0 -2px 0 var(--bon-oak) !important;
+    }
+    /* Desktop: wider sidebar, roomier main nav radios, taller tables */
+    @media (min-width: 1100px) {
+        [data-testid="stSidebar"] {
+            min-width: 19rem !important;
+            max-width: 22rem !important;
+        }
+        [data-testid="stMain"] [data-testid="block-container"] {
+            padding-left: 2rem !important;
+            padding-right: 2rem !important;
+            max-width: 96rem !important;
+        }
+        [data-testid="stDataFrame"] {
+            min-height: 280px;
+        }
+    }
 </style>
 """
 
@@ -1611,13 +2899,184 @@ def _queue_segment_label(name: str, count: int) -> str:
 
 
 def _queue_segment_base(label: str | None) -> str:
-    """Map segmented-control label (with optional count) back to queue name."""
+    """Map queue label (with optional count) back to queue name."""
     if not label:
         return "Pending"
-    for base in ("Pending", "Open", "Completed", "Log"):
+    for base in ("Pending", "Open", "Completed", "Log", "Performance"):
         if label == base or label.startswith(f"{base} ("):
             return base
     return "Pending"
+
+
+def _migrate_legacy_queue_nav() -> None:
+    """Map old single segmented control session key to two-level nav."""
+    legacy = st.session_state.pop("dash_queue_segmented", None)
+    if not legacy:
+        return
+    base = _queue_segment_base(legacy)
+    if base in ("Log", "Performance"):
+        st.session_state[_DASH_MAIN_NAV_KEY] = base
+    else:
+        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
+        st.session_state[_DASH_TICKET_QUEUE_KEY] = legacy
+
+
+def _render_dashboard_header(*, refreshed_at: str) -> None:
+    """Desktop top bar: title and last refresh."""
+    st.markdown("## Dashboard")
+    st.caption(f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in sidebar **Time range**")
+
+
+def _apply_pending_dashboard_nav() -> None:
+    """Apply metric-click navigation before nav widgets are drawn."""
+    pending_main = st.session_state.pop(_DASH_PENDING_MAIN_NAV_KEY, None)
+    pending_queue = st.session_state.pop(_DASH_PENDING_TICKET_QUEUE_KEY, None)
+    if pending_main is not None:
+        st.session_state[_DASH_MAIN_NAV_KEY] = pending_main
+    if pending_queue is not None:
+        st.session_state[_DASH_TICKET_QUEUE_KEY] = pending_queue
+
+
+def _render_clickable_queue_metric(
+    col: object,
+    *,
+    title: str,
+    value: int,
+    queue_name: str,
+    option_label: str,
+) -> None:
+    """Metric-style control — click to open that ticket queue."""
+    main_nav = str(st.session_state.get(_DASH_MAIN_NAV_KEY, "Tickets"))
+    q_base = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
+    active = main_nav == "Tickets" and q_base == queue_name
+    label = f"{title}\n{value:,}"
+    with col:
+        if st.button(
+            label,
+            key=f"dash_metric_nav_{queue_name.lower()}",
+            type="secondary",
+            use_container_width=True,
+            disabled=active,
+        ):
+            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Tickets"
+            st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = option_label
+            st.rerun()
+
+
+def _render_queue_summary_metrics(
+    *,
+    total_pending: int,
+    total_open: int,
+    total_completed: int,
+    avg_seconds: float | None,
+    pending_label: str,
+    open_label: str,
+    completed_label: str,
+) -> None:
+    """Counts — click Pending / Needs review / Completed to switch queue."""
+    c1, c2, c3, c4 = st.columns(4)
+    _render_clickable_queue_metric(
+        c1,
+        title="Pending",
+        value=total_pending,
+        queue_name="Pending",
+        option_label=pending_label,
+    )
+    _render_clickable_queue_metric(
+        c2,
+        title="Needs review",
+        value=total_open,
+        queue_name="Open",
+        option_label=open_label,
+    )
+    _render_clickable_queue_metric(
+        c3,
+        title="Completed",
+        value=total_completed,
+        queue_name="Completed",
+        option_label=completed_label,
+    )
+    with c4:
+        st.metric("Avg completion", _format_duration(avg_seconds))
+
+
+_TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
+    "ticket_number",
+    "assigned_to",
+    "task_category",
+    "field_response",
+    "photo_url",
+    "responded_at",
+    "last_assigned_at",
+)
+
+
+def _sync_dashboard_nav_state(
+    *,
+    total_pending: int,
+    total_open: int,
+    total_completed: int,
+) -> tuple[str, str, str]:
+    """Keep queue session keys valid; return option labels for metrics."""
+    _migrate_legacy_queue_nav()
+
+    if st.session_state.get(_DASH_MAIN_NAV_KEY) not in _DASH_MAIN_NAV_OPTIONS:
+        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
+
+    pending_label = _queue_segment_label("Pending", total_pending)
+    open_label = _queue_segment_label("Open", total_open)
+    completed_label = _queue_segment_label("Completed", total_completed)
+    ticket_options = (pending_label, open_label, completed_label)
+
+    prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
+    if total_open > prev_open:
+        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
+        st.session_state[_DASH_TICKET_QUEUE_KEY] = open_label
+    elif st.session_state.get(_DASH_TICKET_QUEUE_KEY) not in ticket_options:
+        st.session_state[_DASH_TICKET_QUEUE_KEY] = (
+            open_label if total_open > 0 else pending_label
+        )
+    st.session_state["_dash_prev_open_count"] = total_open
+    return pending_label, open_label, completed_label
+
+
+def _render_main_navigation() -> str:
+    """Single row: Tickets | Log | Performance."""
+    return str(
+        st.radio(
+            "View",
+            options=list(_DASH_MAIN_NAV_OPTIONS),
+            horizontal=True,
+            key=_DASH_MAIN_NAV_KEY,
+            label_visibility="collapsed",
+        )
+    )
+
+
+def _sort_tickets_newest_first(df: pd.DataFrame) -> pd.DataFrame:
+    """Sort ticket rows for display (newest activity first)."""
+    if df.empty:
+        return df
+    sort_col = next(
+        (c for c in ("responded_at", "last_assigned_at", "updated_at", "created_at") if c in df.columns),
+        None,
+    )
+    if not sort_col:
+        return df
+    out = df.copy()
+    out["_sort"] = _parse_ts(out[sort_col])
+    return out.sort_values("_sort", ascending=False, na_position="last").drop(
+        columns=["_sort"], errors="ignore"
+    )
+
+
+def _ticket_queue_view(df: pd.DataFrame, cols: tuple[str, ...] = _TICKET_QUEUE_TABLE_COLS) -> pd.DataFrame:
+    """Subset and format ticket columns for queue tables."""
+    sorted_df = _sort_tickets_newest_first(df)
+    show = [c for c in cols if c in sorted_df.columns]
+    if not show:
+        return _format_local(sorted_df)
+    return _format_local(sorted_df[show].copy())
 
 
 def _render_dashboard(
@@ -1626,7 +3085,6 @@ def _render_dashboard(
 ) -> None:
     day_word = "day" if lookback_days == 1 else "days"
     refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    st.caption(f"Data from Supabase table `{TICKETS_TABLE}` · last refresh **{refreshed_at} {LOCAL_TZ_LABEL}**")
 
     try:
         df_all = _fetch_tickets()
@@ -1646,32 +3104,34 @@ def _render_dashboard(
         return
 
     if df_all.empty:
-        st.warning("No rows returned (empty table or connection issue).")
-        _render_attendance_tab()  # search still useful even with no active rows
-        return
-
-    if "status" not in df_all.columns:
+        st.warning(
+            "No ticket rows returned (empty ``tickets_active`` or connection issue). "
+            "Queue counts are zero — **Performance** and **Log** still use attendance history."
+        )
+        df = pd.DataFrame({"status": pd.Series(dtype=str)})
+    elif "status" not in df_all.columns:
         st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
         return
+    else:
+        df = _apply_lookback(df_all, lookback_days)
+        if len(df_all) > len(df):
+            st.caption(
+                f"Showing **{len(df)}** of **{len(df_all)}** tickets in the last "
+                f"{lookback_days} day(s). Widen **Time range** in the sidebar "
+                "if a Telegram assignment is missing."
+            )
 
-    df = _apply_lookback(df_all, lookback_days)
-    if len(df_all) > len(df):
-        st.caption(
-            f"Showing **{len(df)}** of **{len(df_all)}** tickets in the last "
-            f"{lookback_days} day(s). Increase **Days to Look Back** in the sidebar "
-            "if a Telegram assignment is missing."
-        )
+    if not df_all.empty and "status" in df_all.columns:
+        mismatches = _fetch_pending_with_response_mismatch()
+        if mismatches:
+            st.error(
+                f"**{len(mismatches)}** ticket(s) have a Response in the log but are still **Pending** "
+                f"in `{TICKETS_TABLE}` (e.g. {', '.join(mismatches[:5])}). "
+                "The Railway bot could not UPDATE the row — check bot logs and apply "
+                "`supabase/migrations/20260516_tickets_active_anon_policies.sql`."
+            )
 
-    mismatches = _fetch_pending_with_response_mismatch()
-    if mismatches:
-        st.error(
-            f"**{len(mismatches)}** ticket(s) have a Response in the log but are still **Pending** "
-            f"in `{TICKETS_TABLE}` (e.g. {', '.join(mismatches[:5])}). "
-            "The Railway bot could not UPDATE the row — check bot logs and apply "
-            "`supabase/migrations/20260516_tickets_active_anon_policies.sql`."
-        )
-
-    status = df["status"].astype(str).str.strip() if not df.empty else pd.Series(dtype=str)
+    status = df["status"].astype(str).str.strip() if not df.empty and "status" in df.columns else pd.Series(dtype=str)
     pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
     open_mask = status.eq("Open") if not df.empty else pd.Series(dtype=bool)
     completed_mask = status.eq("Completed") if not df.empty else pd.Series(dtype=bool)
@@ -1694,67 +3154,38 @@ def _render_dashboard(
                 delta = (r[valid] - c[valid]).dt.total_seconds()
                 avg_seconds = float(delta.mean())
 
-    st.header("Overview")
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("Total Pending", f"{total_pending:,}")
-    with m2:
-        st.metric("Awaiting admin review", f"{total_open:,}")
-    with m3:
-        st.metric("Avg completion time", _format_duration(avg_seconds))
-    with m4:
-        st.metric(f"Tickets in last {lookback_days} {day_word}", f"{len(df):,}")
-
-    st.divider()
-
-    if total_open > 0:
-        st.info(
-            f"**{total_open}** ticket(s) have a field reply and are in **Open** "
-            f"(awaiting your review). They leave **Pending** after the bot saves the response — "
-            f"switch the queue below to **Open ({total_open})**."
-        )
-
-    queue_options = [
-        _queue_segment_label("Pending", total_pending),
-        _queue_segment_label("Open", total_open),
-        _queue_segment_label("Completed", int(completed_mask.sum()) if not df.empty else 0),
-        "Log",
-    ]
-    open_label = _queue_segment_label("Open", total_open)
-    pending_label = _queue_segment_label("Pending", total_pending)
-    prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
-    if total_open > prev_open:
-        st.session_state["dash_queue_segmented"] = open_label
-    elif "dash_queue_segmented" not in st.session_state:
-        st.session_state["dash_queue_segmented"] = (
-            open_label if total_open > 0 else pending_label
-        )
-    current_seg = st.session_state.get("dash_queue_segmented")
-    if current_seg not in queue_options:
-        st.session_state["dash_queue_segmented"] = (
-            open_label if total_open > 0 else pending_label
-        )
-    st.session_state["_dash_prev_open_count"] = total_open
-
-    queue_picked = st.segmented_control(
-        "Ticket queues",
-        options=queue_options,
-        key="dash_queue_segmented",
-        help=(
-            "Pending = assigned, waiting on field. Open = field replied in Telegram, "
-            "needs your review. Use sidebar **Refresh now** if auto-refresh is off."
-        ),
+    total_completed = int(completed_mask.sum()) if not df.empty else 0
+    _apply_pending_dashboard_nav()
+    pending_label, open_label, completed_label = _sync_dashboard_nav_state(
+        total_pending=total_pending,
+        total_open=total_open,
+        total_completed=total_completed,
     )
-    queue_view = _queue_segment_base(queue_picked)
-    st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
+
+    _render_dashboard_header(refreshed_at=refreshed_at)
+    main_nav = _render_main_navigation()
+    if main_nav == "Tickets":
+        _render_queue_summary_metrics(
+            total_pending=total_pending,
+            total_open=total_open,
+            total_completed=total_completed,
+            avg_seconds=avg_seconds,
+            pending_label=pending_label,
+            open_label=open_label,
+            completed_label=completed_label,
+        )
+    queue_view = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
+
+    if main_nav == "Log":
+        _render_attendance_tab(lookback_days=lookback_days)
+        return
+
+    if main_nav == "Performance":
+        _render_field_performance_tab(lookback_days=lookback_days)
+        return
 
     if queue_view == "Pending":
-        st.subheader("Assigned tasks (pending)")
-        st.caption(
-            "Reassigned tickets reset to **Pending** here, even if they were "
-            "previously Completed, and remain pending until a new response is "
-            "logged in the attendance history."
-        )
+        st.markdown("##### Pending — waiting on field")
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -1765,8 +3196,6 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     pend,
                     key_prefix="assigned",
-                    title="Admin",
-                    caption="Delete removes the active row; history stays in the Log tab.",
                     status_actions=(),
                     allow_delete=True,
                 )
@@ -1780,8 +3209,18 @@ def _render_dashboard(
                 else:
                     pend["_stale"] = False
 
-                view_cols = [c for c in pend.columns if not c.startswith("_")]
-                view = _format_local(pend[view_cols])
+                show = [
+                    c
+                    for c in (
+                        "ticket_number",
+                        "assigned_to",
+                        "task_category",
+                        "created_at",
+                        "last_assigned_at",
+                    )
+                    if c in pend.columns
+                ]
+                view = _format_local(pend[show])
 
                 def _row_red(_row: pd.Series) -> list[str]:
                     stale = bool(pend.loc[_row.name, "_stale"]) if "_stale" in pend.columns else False
@@ -1793,18 +3232,13 @@ def _render_dashboard(
                     st.dataframe(styled, use_container_width=True, hide_index=True)
                 except Exception:
                     st.dataframe(view, use_container_width=True, hide_index=True)
-                st.caption(
-                    f"Rows with a **subtle oak tint** are pending for **more than 24 hours** "
-                    f"since `created_at` (compared against current {LOCAL_TZ_LABEL} time)."
-                )
+                if pend["_stale"].any():
+                    st.caption(
+                        "Oak-tinted rows have been pending **more than 24 hours**."
+                    )
 
     elif queue_view == "Open":
-        st.subheader("Open — awaiting admin review")
-        st.caption(
-            "Field team has responded. Review the response below and pick a "
-            "ticket to **Mark Completed** once it's verified, or leave it Open "
-            "for follow-up."
-        )
+        st.markdown("##### Open — needs your review")
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -1815,30 +3249,17 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     open_df,
                     key_prefix="open",
-                    title="Admin",
-                    caption="Mark reviewed as Completed, or delete the row.",
+                    caption="Mark **Completed** when verified.",
                     status_actions=(
                         ("Mark Completed", "Completed", "Completed"),
                     ),
                     allow_delete=True,
                 )
 
-                open_show = [
-                    c
-                    for c in [
-                        "ticket_number",
-                        "assigned_to",
-                        "task_category",
-                        "additional_info",
-                        "field_response",
-                        "photo_url",
-                        "created_at",
-                        "last_assigned_at",
-                        "responded_at",
-                    ]
-                    if c in open_df.columns
-                ]
-                open_view = _format_local(open_df[open_show].copy())
+                open_view = _ticket_queue_view(
+                    open_df,
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
+                )
                 st.dataframe(
                     open_view,
                     use_container_width=True,
@@ -1846,15 +3267,11 @@ def _render_dashboard(
                     column_config=_dataframe_column_config(open_view),
                 )
 
-                st.subheader("Gallery view — field photos awaiting review")
-                _render_field_photos_section(open_df)
+                with st.expander("Photo gallery", expanded=total_open <= 3):
+                    _render_field_photos_section(open_df)
 
     elif queue_view == "Completed":
-        st.subheader("Completed tickets")
-        st.caption(
-            "Only tickets the admin team has signed off on appear here. If "
-            "something needs another look, send it back to **Open**."
-        )
+        st.markdown("##### Completed")
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -1865,30 +3282,17 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     done,
                     key_prefix="completed",
-                    title="Admin",
-                    caption="Send back for more field work, or delete the row.",
+                    caption="Send back to **Open** for more field work.",
                     status_actions=(
                         ("Send back to Open", "Open", "Reopened"),
                     ),
                     allow_delete=True,
                 )
 
-                show_cols = [
-                    c
-                    for c in [
-                        "ticket_number",
-                        "assigned_to",
-                        "task_category",
-                        "additional_info",
-                        "field_response",
-                        "photo_url",
-                        "created_at",
-                        "last_assigned_at",
-                        "responded_at",
-                    ]
-                    if c in done.columns
-                ]
-                done_view = _format_local(done[show_cols])
+                done_view = _ticket_queue_view(
+                    done,
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
+                )
                 st.dataframe(
                     done_view,
                     use_container_width=True,
@@ -1896,13 +3300,8 @@ def _render_dashboard(
                     column_config=_dataframe_column_config(done_view),
                 )
 
-                st.subheader("Gallery view — completed field photos")
-                _render_field_photos_section(done)
-
-    elif queue_view == "Log":
-        _render_attendance_tab()
-    else:
-        st.warning("Unknown queue view; pick Pending, Open, Completed, or Log.")
+                with st.expander("Photo gallery", expanded=False):
+                    _render_field_photos_section(done)
 
 
 def _render_field_photos_section(done: pd.DataFrame) -> None:
@@ -1975,6 +3374,179 @@ def _render_field_photos_section(done: pd.DataFrame) -> None:
             _render_photo_grid(photos, cols_per_row=3)
 
 
+def _render_field_performance_tab(*, lookback_days: int) -> None:
+    """Completed-task counts from ``tickets_active`` (admin **Completed** status)."""
+    st.markdown("##### Field team performance")
+    st.caption(
+        f"**Completed** tickets · {_format_dash_range_caption() or 'sidebar time range'} · {LOCAL_TZ_LABEL}"
+    )
+
+    range_start, range_end = _get_dash_range()
+
+    try:
+        df_all = _fetch_tickets()
+    except Exception as exc:
+        st.error(f"Could not load tickets: {exc}")
+        return
+
+    if df_all.empty or "status" not in df_all.columns:
+        st.info("No ticket data to analyze.")
+        return
+
+    done = df_all[
+        df_all["status"].astype(str).str.strip().str.casefold() == "completed"
+    ].copy()
+    if done.empty:
+        st.info("No **Completed** tickets in the database yet.")
+        return
+
+    u_col = _parse_ts(done["updated_at"]) if "updated_at" in done.columns else pd.Series(pd.NaT, index=done.index)
+    r_col = _parse_ts(done["responded_at"]) if "responded_at" in done.columns else pd.Series(pd.NaT, index=done.index)
+    done["_ts"] = u_col.where(u_col.notna(), r_col)
+    done = done[done["_ts"].notna()]
+    if done.empty:
+        st.info("Completed tickets have no usable **updated_at** / **responded_at** timestamps.")
+        return
+
+    done = done[(done["_ts"] >= range_start) & (done["_ts"] <= range_end)]
+    if done.empty:
+        st.info(
+            "No **Completed** tickets in this time window. "
+            "Try **Last 30 days** or **Pick dates** in the sidebar."
+        )
+        return
+
+    done["_local"] = done["_ts"].dt.tz_convert(LOCAL_TZ)
+    if "assigned_to" in done.columns:
+        done["staff"] = done["assigned_to"].map(_perf_norm_member)
+    else:
+        done["staff"] = "(unknown)"
+
+    if "task_category" in done.columns:
+        cat_series = done["task_category"].fillna("").astype(str).str.strip()
+        done["category"] = cat_series.mask(cat_series.eq(""), "(uncategorized)")
+    else:
+        done["category"] = "(uncategorized)"
+
+    bucket_fmt, x_title, axis_format = _perf_bucket_settings(range_start, range_end)
+    view = done.copy()
+    view["bucket"] = view["_local"].dt.strftime(bucket_fmt)
+
+    # --- By assignee ---
+    by_staff = (
+        view.groupby(["bucket", "staff"], as_index=False)
+        .size()
+        .rename(columns={"size": "completions"})
+    )
+    by_staff["bucket_sort"] = pd.to_datetime(by_staff["bucket"], errors="coerce")
+    by_staff = by_staff.sort_values("bucket_sort")
+
+    chart_staff = (
+        alt.Chart(by_staff)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "bucket_sort:T",
+                title=x_title,
+                axis=alt.Axis(labelAngle=-30, format=axis_format),
+            ),
+            y=alt.Y("completions:Q", title="Completed tasks"),
+            color=alt.Color("staff:N", legend=alt.Legend(title="assigned_to")),
+            tooltip=[
+                alt.Tooltip("bucket:N", title="Bucket"),
+                alt.Tooltip("staff:N", title="assigned_to"),
+                alt.Tooltip("completions:Q", title="Count"),
+            ],
+        )
+        .properties(height=300)
+    )
+    st.markdown("##### Completions by **assigned_to** (stacked)")
+    st.altair_chart(chart_staff, use_container_width=True)
+
+    # --- By task category ---
+    by_cat = (
+        view.groupby(["bucket", "category"], as_index=False)
+        .size()
+        .rename(columns={"size": "completions"})
+    )
+    by_cat["bucket_sort"] = pd.to_datetime(by_cat["bucket"], errors="coerce")
+    by_cat = by_cat.sort_values("bucket_sort")
+
+    chart_cat = (
+        alt.Chart(by_cat)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "bucket_sort:T",
+                title=x_title,
+                axis=alt.Axis(labelAngle=-30, format=axis_format),
+            ),
+            y=alt.Y("completions:Q", title="Completed tasks"),
+            color=alt.Color("category:N", legend=alt.Legend(title="task_category")),
+            tooltip=[
+                alt.Tooltip("bucket:N", title="Bucket"),
+                alt.Tooltip("category:N", title="task_category"),
+                alt.Tooltip("completions:Q", title="Count"),
+            ],
+        )
+        .properties(height=300)
+    )
+    st.markdown("##### Completions by **task_category** (stacked)")
+    st.altair_chart(chart_cat, use_container_width=True)
+
+    with st.expander("Drill down by person", expanded=False):
+        staff_opts = sorted(view["staff"].unique().tolist())
+        pick = st.selectbox("Person", options=staff_opts, index=0)
+        one = view[view["staff"] == pick].copy()
+        solo = (
+            one.groupby(["bucket", "category"], as_index=False)
+            .size()
+            .rename(columns={"size": "completions"})
+        )
+        solo["bucket_sort"] = pd.to_datetime(solo["bucket"], errors="coerce")
+        solo = solo.sort_values("bucket_sort")
+
+        solo_chart = (
+            alt.Chart(solo)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "bucket_sort:T",
+                    title=x_title,
+                    axis=alt.Axis(labelAngle=-30, format=axis_format),
+                ),
+                y=alt.Y("completions:Q", title="Completed tasks"),
+                color=alt.Color("category:N", legend=alt.Legend(title="task_category")),
+                tooltip=[
+                    alt.Tooltip("bucket:N", title="Bucket"),
+                    alt.Tooltip("category:N", title="task_category"),
+                    alt.Tooltip("completions:Q", title="Count"),
+                ],
+            )
+            .properties(height=300, title=f"{pick}")
+        )
+        st.altair_chart(solo_chart, use_container_width=True)
+
+        show_cols = [
+            c
+            for c in (
+                "ticket_number",
+                "assigned_to",
+                "task_category",
+                "updated_at",
+                "responded_at",
+                "last_assigned_at",
+            )
+            if c in one.columns
+        ]
+        detail = one.sort_values("_ts", ascending=False)[show_cols].head(400)
+        st.dataframe(
+            _format_local(detail),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def _render_missing_table_help(table: str) -> None:
     """Friendly screen shown when a required Supabase table is missing.
 
@@ -2000,49 +3572,39 @@ def _render_missing_table_help(table: str) -> None:
     )
 
 
-def _render_attendance_tab() -> None:
-    """Search bar + timeline view backed by ``ticket_attendance_logs``."""
-    st.subheader("Log — search & timeline")
+def _render_attendance_tab(*, lookback_days: int) -> None:
+    """Attendance log table; optional filters; timeline in expander."""
+    range_start, range_end = _get_dash_range()
     st.caption(
-        "Search by **ticket number** (exact) or **@username** (case-insensitive, "
-        "partial). Leave both blank to see the 100 most recent log entries across "
-        "all tickets."
+        f"Attendance history · {_format_dash_range_caption() or 'sidebar time range'}"
     )
 
-    with st.form("attendance_search_form", clear_on_submit=False):
-        c1, c2 = st.columns([2, 2])
-        with c1:
-            ticket_q = st.text_input(
-                "Ticket number",
-                placeholder="e.g. 1234567890123567",
-                key="att_ticket_q",
-            )
-        with c2:
-            member_q = st.text_input(
-                "Member (@username)",
-                placeholder="e.g. @Mular_as",
-                key="att_member_q",
-            )
-        submitted = st.form_submit_button("Search", use_container_width=True)
-
-    ticket_clean = (ticket_q or "").strip()
-    member_clean = (member_q or "").strip()
-
-    if submitted and not ticket_clean and not member_clean:
-        st.info("Enter a ticket number or @username to refine the search.")
+    f1, f2 = st.columns(2)
+    ticket_clean = f1.text_input(
+        "Ticket #",
+        placeholder="optional",
+        key="att_ticket_q",
+    ).strip()
+    member_clean = f2.text_input(
+        "Member",
+        placeholder="@username",
+        key="att_member_q",
+    ).strip()
 
     try:
         logs = _fetch_attendance(
-            ticket_number=ticket_clean or None,
-            member_query=member_clean or None,
-            limit=100 if not ticket_clean and not member_clean else 500,
+            ticket_number=ticket_clean if ticket_clean else None,
+            member_query=member_clean if member_clean else None,
+            since_utc=range_start,
+            until_utc=range_end,
+            limit=2000,
         )
     except _TableMissingError as missing:
         _render_missing_table_help(missing.table)
         return
 
     if logs.empty:
-        st.info("No log entries match.")
+        st.info("No log entries for this time window. Widen **Time range** or clear filters.")
         return
 
     show_cols = [
@@ -2065,35 +3627,36 @@ def _render_attendance_tab() -> None:
         column_config=_dataframe_column_config(table),
     )
 
-    st.divider()
-    st.subheader("Timeline")
-    for _, row in logs.iterrows():
-        member = row.get("member_username") or "unknown"
-        action = row.get("action_type") or "?"
-        tid = row.get("ticket_number") or "—"
-        when_local = ""
-        ts_raw = row.get("timestamp")
-        if pd.notna(ts_raw):
-            try:
-                when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                when_local = str(ts_raw)
-
-        with st.container(border=True):
-            st.markdown(
-                f"**{member}** · `{action}` · ticket `{tid}` · "
-                f"{when_local} {LOCAL_TZ_LABEL}"
-            )
-            note = row.get("note")
-            if isinstance(note, str) and note.strip():
-                st.write(note)
-            photo = row.get("photo_url")
-            if isinstance(photo, str) and photo.startswith("http"):
+    with st.expander("Timeline (detail cards)", expanded=False):
+        for _, row in logs.iterrows():
+            member = row.get("member_username") or "unknown"
+            action = row.get("action_type") or "?"
+            tid = row.get("ticket_number") or "—"
+            when_local = ""
+            ts_raw = row.get("timestamp")
+            if pd.notna(ts_raw):
                 try:
-                    st.image(photo, width=PHOTO_THUMB_WIDTH)
-                except Exception as exc:
-                    st.warning(f"Could not load image: {exc}")
-                st.markdown(f"[Open photo in a new tab]({photo})")
+                    when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                except Exception:
+                    when_local = str(ts_raw)
+
+            with st.container(border=True):
+                st.markdown(
+                    f"**{member}** · `{action}` · ticket `{tid}` · "
+                    f"{when_local} {LOCAL_TZ_LABEL}"
+                )
+                note = row.get("note")
+                if isinstance(note, str) and note.strip():
+                    st.write(note)
+                photo = row.get("photo_url")
+                if isinstance(photo, str) and photo.startswith("http"):
+                    try:
+                        st.image(photo, width=PHOTO_THUMB_WIDTH)
+                    except Exception as exc:
+                        st.warning(f"Could not load image: {exc}")
+                    st.markdown(f"[Open photo in a new tab]({photo})")
 
 
 # Streamlit executes this file as the app script; do not hide ``main()`` behind
