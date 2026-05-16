@@ -51,6 +51,11 @@ Database expectations
    ``TG_GROUP_ID`` for Railway or Streamlit secrets (group chats do not require
    ``TELEGRAM_ALLOWED_USERNAMES``).
 
+   Optional short replies in the field **Telegram** group (assignment saved, field
+   hints) are **off** by default so the chat stays quiet; set
+   ``TELEGRAM_GROUP_ACK_MESSAGES=true`` to restore them. The Streamlit dashboard
+   shows the same data under Pending / Open / Log and can toast on new log rows.
+
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row
     (``action_type='Response'`` with ``note`` + optional ``photo_url``). Override
@@ -432,6 +437,16 @@ def _is_group_chat(update: Update) -> bool:
     return bool(chat and chat.type in ("group", "supergroup", "channel"))
 
 
+def _telegram_group_ack_messages_enabled() -> bool:
+    """Optional in-group bot messages (assignment ack, field nudges, etc.).
+
+    Default **off** so the field Telegram group is not flooded; operators rely on
+    the Streamlit dashboard (Log / queues + toasts). Set ``TELEGRAM_GROUP_ACK_MESSAGES``
+    to ``1`` / ``true`` to restore the old Telegram confirmations.
+    """
+    return _truthy_env("TELEGRAM_GROUP_ACK_MESSAGES")
+
+
 async def _reply(update: Update, text: str, **kwargs) -> None:
     """Send a reply, but stay silent in group chats to avoid noise.
 
@@ -453,6 +468,8 @@ async def _group_assignment_ack(
     assigned_to: str,
 ) -> None:
     """Confirm in the group that Supabase + dashboard received the assignment."""
+    if not _telegram_group_ack_messages_enabled():
+        return
     if not _is_group_chat(update):
         return
     msg = update.effective_message
@@ -478,6 +495,8 @@ async def _group_field_nudge(
     text: str,
 ) -> None:
     """Tell the assignee how to complete a task when we cannot match a ticket."""
+    if not _telegram_group_ack_messages_enabled():
+        return
     if not _is_group_chat(update):
         return
     msg = update.effective_message
@@ -498,6 +517,8 @@ async def _group_field_ack(
     update: Update, context: ContextTypes.DEFAULT_TYPE, ticket_number: str
 ) -> None:
     """Short in-group confirmation so assignees know the dashboard was updated."""
+    if not _telegram_group_ack_messages_enabled():
+        return
     if not _is_group_chat(update):
         return
     msg = update.effective_message
@@ -1104,24 +1125,25 @@ async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not msg:
         return
     if _is_group_chat(update):
-        try:
-            who = (
-                f"@{update.effective_user.username}"
-                if update.effective_user and update.effective_user.username
-                else "You"
-            )
-            await context.bot.send_message(
-                chat_id=msg.chat_id,
-                text=(
-                    f"{who}: for private commands (/respond, etc.) this bot checks "
-                    "TELEGRAM_ALLOWED_USERNAMES in Railway. Add your @username, or remove "
-                    "that env var. Group assignment lines do not use that list."
-                ),
-                reply_to_message_id=msg.message_id,
-                disable_notification=True,
-            )
-        except Exception:
-            log.warning("could not send group unauthorized notice", exc_info=True)
+        if _telegram_group_ack_messages_enabled():
+            try:
+                who = (
+                    f"@{update.effective_user.username}"
+                    if update.effective_user and update.effective_user.username
+                    else "You"
+                )
+                await context.bot.send_message(
+                    chat_id=msg.chat_id,
+                    text=(
+                        f"{who}: for private commands (/respond, etc.) this bot checks "
+                        "TELEGRAM_ALLOWED_USERNAMES in Railway. Add your @username, or remove "
+                        "that env var. Group assignment lines do not use that list."
+                    ),
+                    reply_to_message_id=msg.message_id,
+                    disable_notification=True,
+                )
+            except Exception:
+                log.warning("could not send group unauthorized notice", exc_info=True)
         return
     await _reply(update, "This chat is not available.")
 
