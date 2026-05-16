@@ -175,6 +175,18 @@ def _truthy_env(key: str) -> bool:
     return (os.getenv(key) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+if TICKETS_TABLE.casefold() == "tickets" and not _truthy_env("ALLOW_LEGACY_TICKETS_TABLE"):
+    log.warning(
+        "TICKETS_TABLE is set to the legacy name %r. The dashboard defaults to "
+        "`tickets_active`; the bot will write a different table until you set "
+        "TICKETS_TABLE=tickets_active on Railway (or remove it), redeploy, and "
+        "run the Supabase migration `20260518_sync_legacy_tickets_into_tickets_active.sql` "
+        "if you need rows merged. To silence this warning while you migrate, set "
+        "ALLOW_LEGACY_TICKETS_TABLE=1.",
+        TICKETS_TABLE,
+    )
+
+
 # Reasonable bounds for a ticket identifier carried in a Telegram command.
 _MAX_TICKET_ID_LEN = 128
 
