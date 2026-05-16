@@ -24,5 +24,6 @@ logs/
 bot.log.*
 bot.err.*
 telethon_bot_session.session
+telethon_delete_listener_session.session*
 .DS_Store
 Thumbs.db
