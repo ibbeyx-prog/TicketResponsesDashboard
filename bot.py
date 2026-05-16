@@ -51,10 +51,9 @@ Database expectations
    ``TG_GROUP_ID`` for Railway or Streamlit secrets (group chats do not require
    ``TELEGRAM_ALLOWED_USERNAMES``).
 
-   Optional short replies in the field **Telegram** group (assignment saved, field
-   hints) are **off** by default so the chat stays quiet; set
-   ``TELEGRAM_GROUP_ACK_MESSAGES=true`` to restore them. The Streamlit dashboard
-   shows the same data under Pending / Open / Log and can toast on new log rows.
+   The bot does **not** post operational confirmations in field groups (no
+   assignment/field-reply ack spam). Use the Streamlit dashboard (Pending / Open /
+   Log, plus toasts on new attendance-log rows) instead.
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row
@@ -437,16 +436,6 @@ def _is_group_chat(update: Update) -> bool:
     return bool(chat and chat.type in ("group", "supergroup", "channel"))
 
 
-def _telegram_group_ack_messages_enabled() -> bool:
-    """Optional in-group bot messages (assignment ack, field nudges, etc.).
-
-    Default **off** so the field Telegram group is not flooded; operators rely on
-    the Streamlit dashboard (Log / queues + toasts). Set ``TELEGRAM_GROUP_ACK_MESSAGES``
-    to ``1`` / ``true`` to restore the old Telegram confirmations.
-    """
-    return _truthy_env("TELEGRAM_GROUP_ACK_MESSAGES")
-
-
 async def _reply(update: Update, text: str, **kwargs) -> None:
     """Send a reply, but stay silent in group chats to avoid noise.
 
@@ -467,26 +456,9 @@ async def _group_assignment_ack(
     ticket_number: str,
     assigned_to: str,
 ) -> None:
-    """Confirm in the group that Supabase + dashboard received the assignment."""
-    if not _telegram_group_ack_messages_enabled():
-        return
-    if not _is_group_chat(update):
-        return
-    msg = update.effective_message
-    if msg is None:
-        return
-    try:
-        await context.bot.send_message(
-            chat_id=msg.chat_id,
-            text=(
-                f"Recorded {ticket_number} for {assigned_to} — "
-                "check the dashboard **Pending** queue."
-            ),
-            reply_to_message_id=msg.message_id,
-            disable_notification=True,
-        )
-    except Exception:
-        log.warning("could not send group assignment ack for %s", ticket_number)
+    """Reserved: we intentionally do not post assignment confirmations in groups."""
+
+    return
 
 
 async def _group_field_nudge(
@@ -494,45 +466,17 @@ async def _group_field_nudge(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
 ) -> None:
-    """Tell the assignee how to complete a task when we cannot match a ticket."""
-    if not _telegram_group_ack_messages_enabled():
-        return
-    if not _is_group_chat(update):
-        return
-    msg = update.effective_message
-    if msg is None:
-        return
-    try:
-        await context.bot.send_message(
-            chat_id=msg.chat_id,
-            text=text,
-            reply_to_message_id=msg.message_id,
-            disable_notification=True,
-        )
-    except Exception:
-        log.warning("could not send group field nudge")
+    """Reserved: field hints stay off the group chat (check dashboard / logs)."""
+
+    return
 
 
 async def _group_field_ack(
     update: Update, context: ContextTypes.DEFAULT_TYPE, ticket_number: str
 ) -> None:
-    """Short in-group confirmation so assignees know the dashboard was updated."""
-    if not _telegram_group_ack_messages_enabled():
-        return
-    if not _is_group_chat(update):
-        return
-    msg = update.effective_message
-    if msg is None:
-        return
-    try:
-        await context.bot.send_message(
-            chat_id=msg.chat_id,
-            text=f"✓ Ticket {ticket_number} received — moved to Open for review.",
-            reply_to_message_id=msg.message_id,
-            disable_notification=True,
-        )
-    except Exception:
-        log.warning("could not send group ack for ticket %s", ticket_number)
+    """Reserved: field-reply confirmations are dashboard-only (no group spam)."""
+
+    return
 
 
 def _disable_db_sessions(reason: str) -> None:
@@ -1125,25 +1069,7 @@ async def _reply_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not msg:
         return
     if _is_group_chat(update):
-        if _telegram_group_ack_messages_enabled():
-            try:
-                who = (
-                    f"@{update.effective_user.username}"
-                    if update.effective_user and update.effective_user.username
-                    else "You"
-                )
-                await context.bot.send_message(
-                    chat_id=msg.chat_id,
-                    text=(
-                        f"{who}: for private commands (/respond, etc.) this bot checks "
-                        "TELEGRAM_ALLOWED_USERNAMES in Railway. Add your @username, or remove "
-                        "that env var. Group assignment lines do not use that list."
-                    ),
-                    reply_to_message_id=msg.message_id,
-                    disable_notification=True,
-                )
-            except Exception:
-                log.warning("could not send group unauthorized notice", exc_info=True)
+        # Never lecture the field group about allowlists — operators use the dashboard.
         return
     await _reply(update, "This chat is not available.")
 
