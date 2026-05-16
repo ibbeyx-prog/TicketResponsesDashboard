@@ -1857,6 +1857,10 @@ async def health() -> dict[str, str]:
         # getWebhookInfo.url if you still see 404 — they must match exactly.
         "telegram_callback_url": url or "",
         "tickets_table": TICKETS_TABLE,
+        # Assignment / field-reply confirmations are never posted to group chats;
+        # use the Streamlit dashboard (queues + Log + toasts). If you still see
+        # old "Recorded …" / "✓ Ticket …" lines in Telegram, redeploy this service.
+        "group_operational_replies": "off",
     }
 
 
