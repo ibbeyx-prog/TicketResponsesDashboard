@@ -255,10 +255,14 @@ _CC_TICKET_PICK_KEY = "cc_ticket_pick"
 _CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
 _CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
-_PENDING_EDIT_ENGINEER_KEY = "pending_edit_engineer"
-_PENDING_EDIT_CATEGORY_KEY = "pending_edit_category"
-_PENDING_EDIT_NOTES_KEY = "pending_edit_notes"
-_PENDING_EDIT_SYNC_TG_KEY = "pending_edit_sync_tg"
+def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
+    return {
+        "engineer": f"{prefix}_edit_engineer",
+        "category": f"{prefix}_edit_category",
+        "notes": f"{prefix}_edit_notes",
+        "sync_tg": f"{prefix}_edit_sync_tg",
+        "show": f"{prefix}_show_assignment_edit",
+    }
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -1376,6 +1380,7 @@ def _render_admin_ticket_toolbar(
     caption: str | None = None,
     status_actions: tuple[tuple[str, str, str], ...] = (),
     allow_delete: bool = True,
+    allow_edit_assignment: bool = False,
 ) -> None:
     """Ticket picker + primary action; remove lives in a small side popover."""
     options = _ticket_options_for_admin(df)
@@ -1387,54 +1392,74 @@ def _render_admin_ticket_toolbar(
 
     status_labels = [a[0] for a in status_actions]
     del_col = 1 if allow_delete else 0
+    edit_col = 1 if allow_edit_assignment else 0
+    edit_keys = _assignment_edit_session_keys(key_prefix)
 
     with st.container(border=True):
-        if status_labels:
-            widths = [2, 1, del_col] if del_col else [2, 1]
+        if status_labels or edit_col:
+            widths: list[int] = [2]
+            if status_labels:
+                widths.append(1)
+            if edit_col:
+                widths.append(1)
+            if del_col:
+                widths.append(1)
             cols = st.columns(widths, vertical_alignment="bottom")
-            c_ticket, c_action = cols[0], cols[1]
-            c_del = cols[2] if del_col else None
-            with c_ticket:
+            idx = 0
+            with cols[idx]:
                 picked = st.selectbox(
                     "Ticket",
                     options=options,
                     key=f"{key_prefix}_sb_ticket",
                 )
-            with c_action:
-                if len(status_labels) == 1:
-                    label = status_labels[0]
+            idx += 1
+            if status_labels:
+                with cols[idx]:
+                    if len(status_labels) == 1:
+                        label = status_labels[0]
+                        if st.button(
+                            label,
+                            key=f"{key_prefix}_apply",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            _apply_admin_ticket_action(
+                                picked=picked,
+                                choice=label,
+                                confirm_del=False,
+                                status_actions=status_actions,
+                            )
+                    else:
+                        choice = st.selectbox(
+                            "Action",
+                            options=status_labels,
+                            key=f"{key_prefix}_action_sel",
+                        )
+                        if st.button(
+                            "Apply",
+                            key=f"{key_prefix}_apply",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            _apply_admin_ticket_action(
+                                picked=picked,
+                                choice=choice,
+                                confirm_del=False,
+                                status_actions=status_actions,
+                            )
+                idx += 1
+            if edit_col:
+                with cols[idx]:
                     if st.button(
-                        label,
-                        key=f"{key_prefix}_apply",
-                        type="primary",
+                        "Edit assignment",
+                        key=f"{key_prefix}_edit_btn",
                         use_container_width=True,
                     ):
-                        _apply_admin_ticket_action(
-                            picked=picked,
-                            choice=label,
-                            confirm_del=False,
-                            status_actions=status_actions,
-                        )
-                else:
-                    choice = st.selectbox(
-                        "Action",
-                        options=status_labels,
-                        key=f"{key_prefix}_action_sel",
-                    )
-                    if st.button(
-                        "Apply",
-                        key=f"{key_prefix}_apply",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        _apply_admin_ticket_action(
-                            picked=picked,
-                            choice=choice,
-                            confirm_del=False,
-                            status_actions=status_actions,
-                        )
-            if c_del is not None:
-                with c_del:
+                        st.session_state[edit_keys["show"]] = True
+                        st.rerun()
+                idx += 1
+            if del_col:
+                with cols[idx]:
                     _render_ticket_delete_popover(
                         key_prefix=key_prefix,
                         options=options,
@@ -1963,21 +1988,23 @@ def _cc_save_assignment_telegram_ref(
         )
 
 
-def _cc_patch_pending_assignment(
+def _cc_patch_assignment_fields(
     ticket_number: str,
     *,
+    required_status: str,
     assigned_to: str,
     task_category: str,
     additional_info: str | None,
     operator_id: str,
 ) -> dict:
-    """Update a Pending ticket's assignment fields (dashboard edit)."""
+    """Update assignment fields for a ticket in the given status (dashboard edit)."""
     client = _get_supabase_client()
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
-    if str(row.get("status") or "").strip() != "Pending":
-        raise ValueError("Only **Pending** tickets can be edited here.")
+    status = str(row.get("status") or "").strip()
+    if status != required_status:
+        raise ValueError(f"Only **{required_status}** tickets can be edited here.")
 
     now_iso = _cc_utc_now_iso()
     _cc_execute_ticket_update(
@@ -2087,18 +2114,22 @@ async def _cc_sync_assignment_to_telegram(
     )
 
 
-def _render_pending_assignment_editor(
+def _render_assignment_editor(
     *,
+    required_status: str,
+    ticket_picker_key: str,
+    edit_key_prefix: str,
     cat_names: list[str],
     fe_names: list[str],
     fe_missing: bool,
     ticket_options: list[str],
 ) -> None:
-    """Edit Pending assignment + optional Telegram sync (admin/ops)."""
+    """Edit assignment fields + optional Telegram sync (Pending or Open)."""
     if not ticket_options:
         return
 
-    picked = str(st.session_state.get("assigned_sb_ticket") or ticket_options[0])
+    keys = _assignment_edit_session_keys(edit_key_prefix)
+    picked = str(st.session_state.get(ticket_picker_key) or ticket_options[0])
     if picked not in ticket_options:
         picked = ticket_options[0]
 
@@ -2106,8 +2137,8 @@ def _render_pending_assignment_editor(
     if not row:
         st.warning("Ticket not found.")
         return
-    if str(row.get("status") or "").strip() != "Pending":
-        st.info("Pick a **Pending** ticket to edit its assignment.")
+    if str(row.get("status") or "").strip() != required_status:
+        st.info(f"Pick a **{required_status}** ticket to edit its assignment.")
         return
 
     linked = (
@@ -2132,7 +2163,7 @@ def _render_pending_assignment_editor(
     if current_cat and current_cat not in cats:
         cats = [current_cat, *cats]
 
-    with st.form("pending_assignment_edit_form", clear_on_submit=False):
+    with st.form(f"{edit_key_prefix}_assignment_edit_form", clear_on_submit=False):
         if fe_names and not fe_missing:
             fe_opts = [f"@{n}" for n in fe_names]
             default_fe = (
@@ -2145,31 +2176,31 @@ def _render_pending_assignment_editor(
                 "Engineer",
                 options=fe_opts,
                 index=fe_opts.index(default_fe) if default_fe in fe_opts else 0,
-                key=_PENDING_EDIT_ENGINEER_KEY,
+                key=keys["engineer"],
             )
         else:
             st.text_input(
                 "Engineer",
                 value=current_handle,
                 placeholder="username",
-                key=_PENDING_EDIT_ENGINEER_KEY,
+                key=keys["engineer"],
             )
         st.selectbox(
             "Category",
             options=cats,
             index=cats.index(current_cat) if current_cat in cats else 0,
-            key=_PENDING_EDIT_CATEGORY_KEY,
+            key=keys["category"],
         )
         st.text_area(
             "Notes (additional info)",
             value=current_notes,
             height=80,
-            key=_PENDING_EDIT_NOTES_KEY,
+            key=keys["notes"],
         )
         st.checkbox(
             "Update Telegram assignment message",
             value=True,
-            key=_PENDING_EDIT_SYNC_TG_KEY,
+            key=keys["sync_tg"],
         )
         submitted = st.form_submit_button("Save assignment changes", use_container_width=True)
 
@@ -2179,17 +2210,17 @@ def _render_pending_assignment_editor(
     try:
         if fe_names and not fe_missing:
             handle = _cc_normalize_handle(
-                str(st.session_state.get(_PENDING_EDIT_ENGINEER_KEY, ""))
+                str(st.session_state.get(keys["engineer"], ""))
             )
         else:
-            raw = str(st.session_state.get(_PENDING_EDIT_ENGINEER_KEY, "")).strip()
+            raw = str(st.session_state.get(keys["engineer"], "")).strip()
             handle = _cc_normalize_handle(raw) if raw else ""
             if not handle:
                 raise ValueError("Enter an engineer username.")
-        cat = str(st.session_state.get(_PENDING_EDIT_CATEGORY_KEY, "")).strip()
+        cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
-        notes = str(st.session_state.get(_PENDING_EDIT_NOTES_KEY, "")).strip() or None
+        notes = str(st.session_state.get(keys["notes"], "")).strip() or None
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -2200,8 +2231,9 @@ def _render_pending_assignment_editor(
         return
 
     try:
-        updated = _cc_patch_pending_assignment(
+        updated = _cc_patch_assignment_fields(
             picked,
+            required_status=required_status,
             assigned_to=handle,
             task_category=cat,
             additional_info=notes,
@@ -2212,7 +2244,7 @@ def _render_pending_assignment_editor(
         return
 
     tg_note = ""
-    if st.session_state.get(_PENDING_EDIT_SYNC_TG_KEY):
+    if st.session_state.get(keys["sync_tg"]):
         token, chat_id = _cc_resolve_telegram_credentials()
         if not token or chat_id is None:
             st.warning(
@@ -2236,8 +2268,9 @@ def _render_pending_assignment_editor(
                 st.warning(f"Saved in dashboard. Telegram update failed: {exc}")
                 tg_note = ""
 
+    st.session_state[keys["show"]] = False
     st.session_state[_CC_FLASH_KEY] = (
-        f"Updated pending assignment **{picked}**."
+        f"Updated **{required_status}** assignment **{picked}**."
         + (f" {tg_note}" if tg_note else "")
     )
     st.rerun()
@@ -3639,12 +3672,18 @@ def _render_dashboard(
                     key_prefix="assigned",
                     status_actions=(),
                     allow_delete=True,
+                    allow_edit_assignment=True,
                 )
 
-                cat_names, _cat_missing = _try_fetch_task_categories()
-                fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                with st.expander("Edit pending assignment", expanded=False):
-                    _render_pending_assignment_editor(
+                if st.session_state.get(
+                    _assignment_edit_session_keys("assigned")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_assignment_editor(
+                        required_status="Pending",
+                        ticket_picker_key="assigned_sb_ticket",
+                        edit_key_prefix="assigned",
                         cat_names=cat_names,
                         fe_names=fe_names,
                         fe_missing=fe_missing,
@@ -3706,7 +3745,23 @@ def _render_dashboard(
                         ("Mark Completed", "Completed", "Completed"),
                     ),
                     allow_delete=True,
+                    allow_edit_assignment=True,
                 )
+
+                if st.session_state.get(
+                    _assignment_edit_session_keys("open")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_assignment_editor(
+                        required_status="Open",
+                        ticket_picker_key="open_sb_ticket",
+                        edit_key_prefix="open",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(open_df),
+                    )
 
                 open_view = _ticket_queue_view(
                     open_df,
