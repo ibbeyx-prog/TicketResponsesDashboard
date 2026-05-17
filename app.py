@@ -200,9 +200,13 @@ FIELD_ENGINEERS_TABLE = (
     _read_setting("FIELD_ENGINEERS_TABLE", "dashboard_field_engineers")
     or "dashboard_field_engineers"
 )
+TASK_CATEGORIES_TABLE = (
+    _read_setting("TASK_CATEGORIES_TABLE", "dashboard_task_categories")
+    or "dashboard_task_categories"
+)
 
-# Keep in sync with ``_ASSIGNMENT_TASK_CATEGORIES`` in ``bot.py``.
-ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
+# Fallback when ``dashboard_task_categories`` is empty or missing.
+DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
     "Coverage Check",
     "Femto Installation",
     "Repeater Installation",
@@ -247,6 +251,7 @@ _CC_TICKET_MODE_KEY = "_cc_ticket_input_mode"
 _CC_TICKET_PICK_KEY = "cc_ticket_pick"
 _CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
 _CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
+_CC_CATEGORY_SELECT_KEY = "cc_category_select"
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -1990,6 +1995,122 @@ def _delete_field_engineer(username: str) -> None:
     client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
 
 
+def _normalize_task_category_name(raw: str) -> str:
+    s = " ".join((raw or "").strip().split())
+    if not s:
+        raise ValueError("Enter a **category** name.")
+    if len(s) > 64:
+        raise ValueError("Category name is too long (max 64 characters).")
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9 \-/&]*$", s):
+        raise ValueError(
+            "Use letters, digits, spaces, and - / & only (must start with a letter or digit)."
+        )
+    return s
+
+
+def _try_fetch_task_categories() -> tuple[list[str], bool]:
+    """Return ``(category names, table_missing)`` ordered for the assign picker."""
+    client = _get_supabase_client()
+    try:
+        res = (
+            client.table(TASK_CATEGORIES_TABLE)
+            .select("name")
+            .order("sort_order")
+            .order("name")
+            .execute()
+        )
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            return [], True
+        raise
+    names = [str(r["name"]) for r in (res.data or []) if r.get("name")]
+    if not names:
+        return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
+    return names, False
+
+
+def _insert_task_category(name: str) -> None:
+    client = _get_supabase_client()
+    client.table(TASK_CATEGORIES_TABLE).insert(
+        {"name": name, "sort_order": 0}
+    ).execute()
+
+
+def _delete_task_category(name: str) -> None:
+    client = _get_supabase_client()
+    client.table(TASK_CATEGORIES_TABLE).delete().eq("name", name).execute()
+
+
+def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
+    if missing:
+        st.caption(f"Category table missing — apply `{TASK_CATEGORIES_TABLE}` migration.")
+        return
+
+    if not categories:
+        st.caption("No categories yet.")
+    for cat in categories:
+        c_name, c_rm = st.columns([5, 1], gap="small", vertical_alignment="center")
+        with c_name:
+            st.markdown(f"**{cat}**")
+        with c_rm:
+            hkey = hashlib.sha256(cat.encode("utf-8")).hexdigest()[:16]
+            if st.button(
+                "×",
+                key=f"cat_rm_{hkey}",
+                help=f"Remove {cat}",
+                type="secondary",
+            ):
+                try:
+                    _delete_task_category(cat)
+                    st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    c_add, c_go = st.columns([5, 1], gap="small", vertical_alignment="bottom")
+    with c_add:
+        st.text_input(
+            "Add category",
+            key="cc_new_category",
+            placeholder="e.g. Site Survey",
+            label_visibility="collapsed",
+        )
+    with c_go:
+        if st.button("+", key="cc_cat_add_btn", help="Add category", type="secondary"):
+            raw = str(st.session_state.get("cc_new_category") or "").strip()
+            if not raw:
+                st.warning("Type a category name first.")
+            else:
+                try:
+                    norm = _normalize_task_category_name(raw)
+                    existing, _ = _try_fetch_task_categories()
+                    if any(c.lower() == norm.lower() for c in existing):
+                        st.warning(f"**{norm}** is already listed.")
+                    else:
+                        _insert_task_category(norm)
+                        st.session_state.pop("cc_new_category", None)
+                        st.session_state[_CC_CATEGORY_SELECT_KEY] = norm
+                        st.rerun()
+                except ValueError as ve:
+                    st.error(str(ve))
+                except Exception as exc:
+                    err = str(exc).lower()
+                    if "duplicate" in err or "23505" in str(exc) or "unique" in err:
+                        st.warning("Category already exists.")
+                    else:
+                        st.error(str(exc))
+
+
+def _render_cc_category_row(categories: list[str], *, missing: bool) -> None:
+    opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
+    if current not in opts:
+        st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+    st.selectbox("Category", options=opts, key=_CC_CATEGORY_SELECT_KEY)
+    with st.popover("Edit categories", key="cc_categories_popover"):
+        _categories_manage_popover(categories or opts, missing=missing)
+
+
 def _field_team_manage_popover(names: list[str], *, missing: bool) -> None:
     """Compact add/remove handles list inside **Edit team** popover."""
     if missing:
@@ -2165,6 +2286,7 @@ def _sidebar_command_center() -> None:
     env_group_ok = env_group_parsed is not None
 
     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+    cat_names, cat_missing = _try_fetch_task_categories()
 
     token_session = ""
     chat_session = ""
@@ -2174,11 +2296,8 @@ def _sidebar_command_center() -> None:
     with st.container(border=True, key="cc_assign_block"):
         _render_cc_engineer_row(fe_names, missing=fe_missing)
         _render_ticket_number_picker()
+        _render_cc_category_row(cat_names, missing=cat_missing)
         with st.form("cc_assign_form"):
-            cat = st.selectbox(
-                "Category",
-                options=list(ASSIGNMENT_TASK_CATEGORIES),
-            )
             additional_info_raw = st.text_area(
                 "Notes (optional)",
                 placeholder="Context for the field team",
@@ -2225,6 +2344,10 @@ def _sidebar_command_center() -> None:
         return
 
     additional_info_val = (additional_info_raw or "").strip() or None
+    cat = str(st.session_state.get(_CC_CATEGORY_SELECT_KEY, "")).strip()
+    if not cat:
+        st.error("Pick a **Category**.")
+        return
 
     # Form widgets with ``key=`` sometimes leave return values empty on submit;
     # merge ``st.session_state`` (updated when the form posts).
