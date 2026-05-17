@@ -72,8 +72,11 @@ import streamlit as st
 import altair as alt
 from bot_utils import (
     NOTIFY_BUILD_ID,
+    AssignmentTelegramRef,
+    find_assignment_telegram_ref,
     normalize_telegram_group_id_paste,
     notify_telegram_group,
+    update_telegram_assignment_message,
 )
 from dotenv import load_dotenv
 from supabase import create_client
@@ -252,6 +255,10 @@ _CC_TICKET_PICK_KEY = "cc_ticket_pick"
 _CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
 _CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
+_PENDING_EDIT_ENGINEER_KEY = "pending_edit_engineer"
+_PENDING_EDIT_CATEGORY_KEY = "pending_edit_category"
+_PENDING_EDIT_NOTES_KEY = "pending_edit_notes"
+_PENDING_EDIT_SYNC_TG_KEY = "pending_edit_sync_tg"
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -1934,6 +1941,308 @@ def _cc_upsert_assignment(
     )
 
 
+def _cc_save_assignment_telegram_ref(
+    client,
+    ticket_number: str,
+    ref: AssignmentTelegramRef,
+) -> None:
+    _cc_execute_ticket_update(
+        client,
+        {
+            "assignment_telegram_chat_id": int(ref.chat_id),
+            "assignment_telegram_message_id": int(ref.message_id),
+            "updated_at": _cc_utc_now_iso(),
+        },
+        ticket_number,
+    )
+    verify = _fetch_ticket_row(ticket_number)
+    if not verify or verify.get("assignment_telegram_message_id") is None:
+        raise RuntimeError(
+            "Could not save Telegram message link on the ticket. "
+            "Apply migration `20260524_assignment_telegram_message.sql` in Supabase."
+        )
+
+
+def _cc_patch_pending_assignment(
+    ticket_number: str,
+    *,
+    assigned_to: str,
+    task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+) -> dict:
+    """Update a Pending ticket's assignment fields (dashboard edit)."""
+    client = _get_supabase_client()
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    if str(row.get("status") or "").strip() != "Pending":
+        raise ValueError("Only **Pending** tickets can be edited here.")
+
+    now_iso = _cc_utc_now_iso()
+    _cc_execute_ticket_update(
+        client,
+        {
+            "assigned_to": assigned_to,
+            "task_category": task_category,
+            "additional_info": additional_info,
+            "dashboard_assigned_by": operator_id,
+            "updated_at": now_iso,
+        },
+        ticket_number,
+    )
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=f"@{operator_id.lstrip('@')}",
+        action_type="AssignmentUpdated",
+        note=_cc_assignment_log_note(additional_info, operator_id),
+    )
+    updated = _fetch_ticket_row(ticket_number)
+    return updated or row
+
+
+def _cc_resolve_telegram_credentials() -> tuple[str | None, int | str | None]:
+    """Bot token + group chat id from env / secrets (Command Center)."""
+    token = (
+        _read_setting("TG_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_TOKEN").strip()
+    )
+    chat_raw = _read_telegram_group_chat_raw()
+    chat_id: int | str | None = None
+    if chat_raw:
+        chat_id, _warn = _parse_telegram_group_chat_id(chat_raw)
+    return token or None, chat_id
+
+
+async def _cc_sync_assignment_to_telegram(
+    *,
+    row: dict,
+    assigned_to: str,
+    task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+    token: str,
+    chat_id: int | str,
+) -> str:
+    """Edit linked Telegram message or post a new one. Returns user-facing status text."""
+    ticket_number = str(row.get("ticket_number") or "")
+    tg_chat = row.get("assignment_telegram_chat_id")
+    tg_msg = row.get("assignment_telegram_message_id")
+    assigned_by = f"{operator_id} (updated)"
+    api_id = _read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None
+    api_hash = _read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None
+    client = _get_supabase_client()
+
+    if tg_chat is None or tg_msg is None:
+        found = await find_assignment_telegram_ref(
+            ticket_number,
+            group_id=chat_id,
+            bot_token=token,
+            api_id=api_id,
+            api_hash=api_hash,
+        )
+        if found:
+            tg_chat, tg_msg = found.chat_id, found.message_id
+            _cc_save_assignment_telegram_ref(client, ticket_number, found)
+
+    if tg_chat is not None and tg_msg is not None:
+        try:
+            await update_telegram_assignment_message(
+                int(tg_chat),
+                int(tg_msg),
+                assigned_to,
+                ticket_number,
+                task_category,
+                additional_info=additional_info,
+                assigned_by=assigned_by,
+                api_id=api_id,
+                api_hash=api_hash,
+                bot_token=token,
+            )
+            return (
+                "The **same** Telegram assignment message was updated in the group "
+                "(scroll to the original post)."
+            )
+        except Exception:
+            pass
+
+    ref = await notify_telegram_group(
+        assigned_to,
+        ticket_number,
+        task_category,
+        additional_info=additional_info,
+        assigned_by=assigned_by,
+        updated=True,
+        api_id=api_id,
+        api_hash=api_hash,
+        bot_token=token,
+        group_id=chat_id,
+    )
+    _cc_save_assignment_telegram_ref(client, ticket_number, ref)
+    return (
+        "Posted a **new** assignment message at the bottom of the group "
+        "(starts with “Assignment updated”). Use that message for field replies."
+    )
+
+
+def _render_pending_assignment_editor(
+    *,
+    cat_names: list[str],
+    fe_names: list[str],
+    fe_missing: bool,
+    ticket_options: list[str],
+) -> None:
+    """Edit Pending assignment + optional Telegram sync (admin/ops)."""
+    if not ticket_options:
+        return
+
+    picked = str(st.session_state.get("assigned_sb_ticket") or ticket_options[0])
+    if picked not in ticket_options:
+        picked = ticket_options[0]
+
+    row = _fetch_ticket_row(picked)
+    if not row:
+        st.warning("Ticket not found.")
+        return
+    if str(row.get("status") or "").strip() != "Pending":
+        st.info("Pick a **Pending** ticket to edit its assignment.")
+        return
+
+    linked = (
+        row.get("assignment_telegram_message_id") is not None
+        and row.get("assignment_telegram_chat_id") is not None
+    )
+    st.caption(
+        f"Editing **{picked}** — saves to the dashboard. "
+        + (
+            "Telegram: will try to **edit the original** bot assignment message."
+            if linked
+            else "Telegram: no message link yet — will **post a new** assignment message "
+            "(look for “Assignment updated” at the bottom of the group)."
+        )
+    )
+
+    current_handle = str(row.get("assigned_to") or "").strip().lstrip("@")
+    current_cat = str(row.get("task_category") or "").strip()
+    current_notes = str(row.get("additional_info") or "")
+
+    cats = cat_names if cat_names else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    if current_cat and current_cat not in cats:
+        cats = [current_cat, *cats]
+
+    with st.form("pending_assignment_edit_form", clear_on_submit=False):
+        if fe_names and not fe_missing:
+            fe_opts = [f"@{n}" for n in fe_names]
+            default_fe = (
+                f"@{current_handle}"
+                if current_handle
+                and f"@{current_handle}" in fe_opts
+                else (fe_opts[0] if fe_opts else "")
+            )
+            st.selectbox(
+                "Engineer",
+                options=fe_opts,
+                index=fe_opts.index(default_fe) if default_fe in fe_opts else 0,
+                key=_PENDING_EDIT_ENGINEER_KEY,
+            )
+        else:
+            st.text_input(
+                "Engineer",
+                value=current_handle,
+                placeholder="username",
+                key=_PENDING_EDIT_ENGINEER_KEY,
+            )
+        st.selectbox(
+            "Category",
+            options=cats,
+            index=cats.index(current_cat) if current_cat in cats else 0,
+            key=_PENDING_EDIT_CATEGORY_KEY,
+        )
+        st.text_area(
+            "Notes (additional info)",
+            value=current_notes,
+            height=80,
+            key=_PENDING_EDIT_NOTES_KEY,
+        )
+        st.checkbox(
+            "Update Telegram assignment message",
+            value=True,
+            key=_PENDING_EDIT_SYNC_TG_KEY,
+        )
+        submitted = st.form_submit_button("Save assignment changes", use_container_width=True)
+
+    if not submitted:
+        return
+
+    try:
+        if fe_names and not fe_missing:
+            handle = _cc_normalize_handle(
+                str(st.session_state.get(_PENDING_EDIT_ENGINEER_KEY, ""))
+            )
+        else:
+            raw = str(st.session_state.get(_PENDING_EDIT_ENGINEER_KEY, "")).strip()
+            handle = _cc_normalize_handle(raw) if raw else ""
+            if not handle:
+                raise ValueError("Enter an engineer username.")
+        cat = str(st.session_state.get(_PENDING_EDIT_CATEGORY_KEY, "")).strip()
+        if not cat:
+            raise ValueError("Pick a category.")
+        notes = str(st.session_state.get(_PENDING_EDIT_NOTES_KEY, "")).strip() or None
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    op = _session_operator_id()
+    if not op:
+        st.error("Sign in again — operator session is missing.")
+        return
+
+    try:
+        updated = _cc_patch_pending_assignment(
+            picked,
+            assigned_to=handle,
+            task_category=cat,
+            additional_info=notes,
+            operator_id=op,
+        )
+    except Exception as exc:
+        st.error(f"Could not save: {exc}")
+        return
+
+    tg_note = ""
+    if st.session_state.get(_PENDING_EDIT_SYNC_TG_KEY):
+        token, chat_id = _cc_resolve_telegram_credentials()
+        if not token or chat_id is None:
+            st.warning(
+                "Saved in dashboard. Telegram not updated — set **TELEGRAM_TOKEN** and "
+                "**TELEGRAM_GROUP_CHAT_ID** in `.env` / Secrets."
+            )
+        else:
+            try:
+                tg_note = asyncio.run(
+                    _cc_sync_assignment_to_telegram(
+                        row=updated,
+                        assigned_to=handle,
+                        task_category=cat,
+                        additional_info=notes,
+                        operator_id=op,
+                        token=token,
+                        chat_id=chat_id,
+                    )
+                )
+            except Exception as exc:
+                st.warning(f"Saved in dashboard. Telegram update failed: {exc}")
+                tg_note = ""
+
+    st.session_state[_CC_FLASH_KEY] = (
+        f"Updated pending assignment **{picked}**."
+        + (f" {tg_note}" if tg_note else "")
+    )
+    st.rerun()
+
+
 def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | None]:
     """Return a ``chat_id`` for ``send_message`` (int or ``@public_group``).
 
@@ -2414,7 +2723,7 @@ def _sidebar_command_center() -> None:
         return
 
     try:
-        asyncio.run(
+        tg_ref = asyncio.run(
             notify_telegram_group(
                 handle,
                 tid,
@@ -2427,6 +2736,15 @@ def _sidebar_command_center() -> None:
                 group_id=chat_id,
             )
         )
+        try:
+            _cc_save_assignment_telegram_ref(_get_supabase_client(), tid, tg_ref)
+        except Exception as link_exc:
+            st.warning(
+                f"{summary} Posted to Telegram but could not link message for edits: {link_exc}"
+            )
+            _remember_cc_ticket_number(tid)
+            st.rerun()
+            return
     except Exception as exc:
         st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
         return
@@ -3323,6 +3641,16 @@ def _render_dashboard(
                     allow_delete=True,
                 )
 
+                cat_names, _cat_missing = _try_fetch_task_categories()
+                fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                with st.expander("Edit pending assignment", expanded=False):
+                    _render_pending_assignment_editor(
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(pend),
+                    )
+
                 if "created_at" in pend.columns:
                     pend["_created"] = _parse_ts(pend["created_at"])
                     now_utc = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")
@@ -3338,6 +3666,7 @@ def _render_dashboard(
                         "ticket_number",
                         "assigned_to",
                         "task_category",
+                        "additional_info",
                         "created_at",
                         "last_assigned_at",
                     )
