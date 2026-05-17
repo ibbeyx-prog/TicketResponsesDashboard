@@ -263,7 +263,39 @@ def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
         "notes": f"{prefix}_edit_notes",
         "sync_tg": f"{prefix}_edit_sync_tg",
         "show": f"{prefix}_show_assignment_edit",
+        "synced_ticket": f"{prefix}_edit_synced_ticket",
     }
+
+
+def _sync_assignment_edit_widgets(
+    *,
+    keys: dict[str, str],
+    picked: str,
+    current_handle: str,
+    current_cat: str,
+    current_notes: str,
+    cats: list[str],
+    fe_names: list[str],
+    fe_missing: bool,
+) -> None:
+    """Push the selected ticket's values into edit widgets (Streamlit keeps stale keys)."""
+    if st.session_state.get(keys["synced_ticket"]) == picked:
+        return
+    st.session_state[keys["synced_ticket"]] = picked
+    if fe_names and not fe_missing:
+        fe_opts = [f"@{n}" for n in fe_names]
+        default_fe = (
+            f"@{current_handle}"
+            if current_handle and f"@{current_handle}" in fe_opts
+            else (fe_opts[0] if fe_opts else "")
+        )
+        st.session_state[keys["engineer"]] = default_fe
+    else:
+        st.session_state[keys["engineer"]] = current_handle
+    st.session_state[keys["category"]] = (
+        current_cat if current_cat in cats else (cats[0] if cats else "")
+    )
+    st.session_state[keys["notes"]] = current_notes
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -2164,37 +2196,38 @@ def _render_assignment_editor(
     if current_cat and current_cat not in cats:
         cats = [current_cat, *cats]
 
+    _sync_assignment_edit_widgets(
+        keys=keys,
+        picked=picked,
+        current_handle=current_handle,
+        current_cat=current_cat,
+        current_notes=current_notes,
+        cats=cats,
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+    )
+
     with st.form(f"{edit_key_prefix}_assignment_edit_form", clear_on_submit=False):
         if fe_names and not fe_missing:
             fe_opts = [f"@{n}" for n in fe_names]
-            default_fe = (
-                f"@{current_handle}"
-                if current_handle
-                and f"@{current_handle}" in fe_opts
-                else (fe_opts[0] if fe_opts else "")
-            )
             st.selectbox(
                 "Engineer",
                 options=fe_opts,
-                index=fe_opts.index(default_fe) if default_fe in fe_opts else 0,
                 key=keys["engineer"],
             )
         else:
             st.text_input(
                 "Engineer",
-                value=current_handle,
                 placeholder="username",
                 key=keys["engineer"],
             )
         st.selectbox(
             "Category",
             options=cats,
-            index=cats.index(current_cat) if current_cat in cats else 0,
             key=keys["category"],
         )
         st.text_area(
             "Notes (additional info)",
-            value=current_notes,
             height=80,
             key=keys["notes"],
         )
