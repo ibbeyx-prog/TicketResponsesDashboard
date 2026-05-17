@@ -82,6 +82,15 @@ from bot_utils import (
     notify_telegram_group,
     update_telegram_assignment_message,
 )
+from task_categories import (
+    DEFAULT_ASSIGNMENT_TASK_CATEGORIES,
+    delete_task_category,
+    fetch_task_category_names,
+    normalize_task_category_name,
+    sync_ticket_categories_into_table,
+    task_categories_table,
+    upsert_task_category,
+)
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -207,20 +216,8 @@ FIELD_ENGINEERS_TABLE = (
     _read_setting("FIELD_ENGINEERS_TABLE", "dashboard_field_engineers")
     or "dashboard_field_engineers"
 )
-TASK_CATEGORIES_TABLE = (
-    _read_setting("TASK_CATEGORIES_TABLE", "dashboard_task_categories")
-    or "dashboard_task_categories"
-)
-
-# Fallback when ``dashboard_task_categories`` is empty or missing.
-DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
-    "Coverage Check",
-    "Femto Installation",
-    "Repeater Installation",
-    "Femto Recover",
-    "Femto Fault",
-    "Repeater Fault",
-)
+TASK_CATEGORIES_TABLE = task_categories_table()
+_CATEGORIES_SYNCED_ONCE_KEY = "_dashboard_categories_synced_once"
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
@@ -2497,50 +2494,31 @@ def _delete_field_engineer(username: str) -> None:
     client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
 
 
-def _normalize_task_category_name(raw: str) -> str:
-    s = " ".join((raw or "").strip().split())
-    if not s:
-        raise ValueError("Enter a **category** name.")
-    if len(s) > 64:
-        raise ValueError("Category name is too long (max 64 characters).")
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9 \-/&]*$", s):
-        raise ValueError(
-            "Use letters, digits, spaces, and - / & only (must start with a letter or digit)."
+def _ensure_task_categories_synced(client) -> None:
+    """Backfill ``dashboard_task_categories`` from ticket rows (once per session)."""
+    if st.session_state.get(_CATEGORIES_SYNCED_ONCE_KEY):
+        return
+    try:
+        sync_ticket_categories_into_table(
+            client,
+            tickets_table=TICKETS_TABLE,
+            categories_table=TASK_CATEGORIES_TABLE,
         )
-    return s
+    except Exception:
+        pass
+    st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = True
 
 
 def _try_fetch_task_categories() -> tuple[list[str], bool]:
-    """Return ``(category names, table_missing)`` ordered for the assign picker."""
+    """Return ``(category names, table_missing)`` from Supabase."""
     client = _get_supabase_client()
+    _ensure_task_categories_synced(client)
     try:
-        res = (
-            client.table(TASK_CATEGORIES_TABLE)
-            .select("name")
-            .order("sort_order")
-            .order("name")
-            .execute()
-        )
+        return fetch_task_category_names(client)
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             return [], True
         raise
-    names = [str(r["name"]) for r in (res.data or []) if r.get("name")]
-    if not names:
-        return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
-    return names, False
-
-
-def _insert_task_category(name: str) -> None:
-    client = _get_supabase_client()
-    client.table(TASK_CATEGORIES_TABLE).insert(
-        {"name": name, "sort_order": 0}
-    ).execute()
-
-
-def _delete_task_category(name: str) -> None:
-    client = _get_supabase_client()
-    client.table(TASK_CATEGORIES_TABLE).delete().eq("name", name).execute()
 
 
 def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
@@ -2563,8 +2541,9 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
                 type="secondary",
             ):
                 try:
-                    _delete_task_category(cat)
+                    delete_task_category(_get_supabase_client(), cat)
                     st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
+                    st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
@@ -2584,14 +2563,19 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
                 st.warning("Type a category name first.")
             else:
                 try:
-                    norm = _normalize_task_category_name(raw)
+                    norm = normalize_task_category_name(raw)
                     existing, _ = _try_fetch_task_categories()
                     if any(c.lower() == norm.lower() for c in existing):
                         st.warning(f"**{norm}** is already listed.")
                     else:
-                        _insert_task_category(norm)
+                        upsert_task_category(_get_supabase_client(), norm)
                         st.session_state.pop("cc_new_category", None)
                         st.session_state[_CC_CATEGORY_SELECT_PENDING_KEY] = norm
+                        st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
+                        st.session_state[_CC_FLASH_KEY] = (
+                            f"Category **{norm}** saved to Supabase — "
+                            "assign picker and Telegram bot use it on the next assignment."
+                        )
                         st.rerun()
                 except ValueError as ve:
                     st.error(str(ve))

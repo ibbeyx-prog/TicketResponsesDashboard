@@ -106,6 +106,13 @@ from telegram.ext import (
     filters,
 )
 
+from task_categories import (
+    DEFAULT_ASSIGNMENT_TASK_CATEGORIES,
+    fetch_task_category_names,
+    resolve_task_category,
+    sync_ticket_categories_into_table,
+    task_categories_table,
+)
 from webhook_config import resolve_telegram_webhook_url
 
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -131,9 +138,7 @@ ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
-TASK_CATEGORIES_TABLE = (
-    os.getenv("TASK_CATEGORIES_TABLE") or "dashboard_task_categories"
-).strip()
+TASK_CATEGORIES_TABLE = task_categories_table().strip()
 FIELD_RESPONSE_UNDO_MINUTES = max(
     1,
     int((os.getenv("FIELD_RESPONSE_UNDO_MINUTES") or "60").strip() or "60"),
@@ -234,16 +239,6 @@ def _validate_ticket_id(raw: str) -> str | None:
     return cleaned
 
 
-# Default categories when ``dashboard_task_categories`` is empty or unreachable.
-_DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
-    "Coverage Check",
-    "Femto Installation",
-    "Repeater Installation",
-    "Femto Recover",
-    "Femto Fault",
-    "Repeater Fault",
-)
-
 # Extra spellings accepted in Telegram text; normalized to a canonical DB value.
 _ASSIGNMENT_CATEGORY_SYNONYMS: dict[str, str] = {
     "Femto Recovery": "Femto Recover",
@@ -254,7 +249,7 @@ _ASSIGNMENT_HANDLE = r"@[A-Za-z][A-Za-z0-9_]{3,31}"
 _assignment_categories_cache: tuple[str, ...] = _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
 _assignment_pattern_cache: re.Pattern[str] | None = None
 _categories_cache_at: float = 0.0
-_CATEGORIES_CACHE_TTL_SEC = 45.0
+_CATEGORIES_CACHE_TTL_SEC = 3.0
 
 # Coordinator line: @user, any category text, then a 9/16-digit ticket (may be on the next line).
 _COORDINATOR_ASSIGNMENT_HINT = re.compile(
@@ -267,18 +262,14 @@ _TICKET_IN_ASSIGNMENT_RE = re.compile(r"(?<!\d)(\d{16}|\d{9})(?!\d)")
 
 def _fetch_task_categories_from_db() -> tuple[str, ...] | None:
     try:
-        res = (
-            supabase.table(TASK_CATEGORIES_TABLE)
-            .select("name")
-            .order("sort_order")
-            .order("name")
-            .execute()
+        names, missing = fetch_task_category_names(
+            supabase, include_defaults_if_empty=False
         )
     except Exception:
         log.exception("Failed to load task categories from %s", TASK_CATEGORIES_TABLE)
         return None
-    names = [str(r["name"]).strip() for r in (res.data or []) if r.get("name")]
-    names = [n for n in names if n]
+    if missing:
+        return None
     return tuple(names) if names else None
 
 
@@ -306,8 +297,7 @@ def _refresh_assignment_categories(*, force: bool = False) -> tuple[str, ...]:
         return _assignment_categories_cache
     loaded = _fetch_task_categories_from_db()
     if loaded:
-        # Keep built-in labels available for canonicalization even if removed from DB.
-        categories = tuple(dict.fromkeys((*loaded, *_DEFAULT_ASSIGNMENT_TASK_CATEGORIES)))
+        categories = loaded
     else:
         categories = _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
     _assignment_categories_cache = categories
@@ -887,21 +877,27 @@ def _is_duplicate_key_error(exc: Exception) -> bool:
 
 def _canonical_task_category(raw: str) -> str | None:
     """Map synonym / typo labels to canonical ``task_category`` values from Supabase."""
-    s = (raw or "").strip()
+    s = re.sub(r"\s+", " ", (raw or "").strip())
     if not s:
         return None
-    categories = _assignment_task_categories()
-    if s in categories:
-        return s
     if s in _ASSIGNMENT_CATEGORY_SYNONYMS:
-        return _ASSIGNMENT_CATEGORY_SYNONYMS[s]
-    key_lower = s.lower()
-    for cat in categories:
-        if cat.lower() == key_lower:
-            return cat
-    for syn, canonical in _ASSIGNMENT_CATEGORY_SYNONYMS.items():
-        if syn.lower() == key_lower:
-            return canonical
+        s = _ASSIGNMENT_CATEGORY_SYNONYMS[s]
+
+    hit = resolve_task_category(s, _assignment_task_categories())
+    if hit:
+        return hit
+
+    _refresh_assignment_categories(force=True)
+    hit = resolve_task_category(s, _assignment_task_categories())
+    if hit:
+        return hit
+
+    loaded = _fetch_task_categories_from_db()
+    if loaded:
+        hit = resolve_task_category(s, loaded)
+        if hit:
+            return hit
+
     aliases = {
         "femto recovery": "Femto Recover",
         "femto-installation": "Femto Installation",
@@ -910,7 +906,7 @@ def _canonical_task_category(raw: str) -> str | None:
         "coverage": "Coverage Check",
         "coverage check": "Coverage Check",
     }
-    return aliases.get(key_lower)
+    return aliases.get(s.lower())
 
 
 def _parse_missing_column(message: str) -> str | None:
@@ -1858,9 +1854,16 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         task_category = _canonical_task_category(task_category_raw)
         if not task_category:
+            log.warning(
+                "unknown task_category %r for ticket %s (categories=%s)",
+                task_category_raw,
+                ticket_number,
+                _assignment_task_categories(),
+            )
             cat_err = (
                 f"Unknown category {task_category_raw!r} for ticket {ticket_number}. "
-                f"Use one of: {', '.join(_assignment_task_categories())}."
+                f"Add it under **Edit categories** on the dashboard, then retry. "
+                f"Known: {', '.join(_assignment_task_categories())}."
             )
             lines.append(f"• {cat_err}")
             if _is_group_chat(update):
@@ -2112,6 +2115,11 @@ async def lifespan(_: FastAPI):
     await bot_app.start()
 
     try:
+        sync_ticket_categories_into_table(
+            supabase,
+            tickets_table=TICKETS_TABLE,
+            categories_table=TASK_CATEGORIES_TABLE,
+        )
         _refresh_assignment_categories(force=True)
     except Exception:
         log.exception("Initial task category load failed")
