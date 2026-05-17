@@ -255,6 +255,7 @@ _CC_TICKET_PICK_KEY = "cc_ticket_pick"
 _CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
 _CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
+_CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
     return {
         "engineer": f"{prefix}_edit_engineer",
@@ -2431,7 +2432,7 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
                     else:
                         _insert_task_category(norm)
                         st.session_state.pop("cc_new_category", None)
-                        st.session_state[_CC_CATEGORY_SELECT_KEY] = norm
+                        st.session_state[_CC_CATEGORY_SELECT_PENDING_KEY] = norm
                         st.rerun()
                 except ValueError as ve:
                     st.error(str(ve))
@@ -2445,9 +2446,13 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
 
 def _render_cc_category_row(categories: list[str], *, missing: bool) -> None:
     opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
-    if current not in opts:
-        st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+    pending = st.session_state.pop(_CC_CATEGORY_SELECT_PENDING_KEY, None)
+    if pending is not None and pending in opts:
+        st.session_state[_CC_CATEGORY_SELECT_KEY] = pending
+    else:
+        current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
+        if current not in opts:
+            st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
     st.selectbox("Category", options=opts, key=_CC_CATEGORY_SELECT_KEY)
     with st.popover("Edit categories", key="cc_categories_popover"):
         _categories_manage_popover(categories or opts, missing=missing)

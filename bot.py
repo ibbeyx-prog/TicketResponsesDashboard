@@ -12,14 +12,7 @@ Database expectations
        create table if not exists public.tickets_active (
          ticket_number text primary key,
          assigned_to text,
-         task_category text check (task_category in (
-           'Coverage Check',
-           'Femto Installation',
-           'Repeater Installation',
-           'Femto Recover',
-           'Femto Fault',
-           'Repeater Fault'
-         )),
+         task_category text not null,
          status text default 'Pending',
          field_response text,
          photo_url text,
@@ -263,6 +256,14 @@ _assignment_pattern_cache: re.Pattern[str] | None = None
 _categories_cache_at: float = 0.0
 _CATEGORIES_CACHE_TTL_SEC = 45.0
 
+# Coordinator line: @user, any category text, then a 9/16-digit ticket (may be on the next line).
+_COORDINATOR_ASSIGNMENT_HINT = re.compile(
+    rf"{_ASSIGNMENT_HANDLE}[\s\S]+?(?<!\d)(?:\d{{16}}|\d{{9}})(?!\d)",
+    re.IGNORECASE,
+)
+_ASSIGNMENT_HANDLE_PATTERN = re.compile(_ASSIGNMENT_HANDLE, re.IGNORECASE)
+_TICKET_IN_ASSIGNMENT_RE = re.compile(r"(?<!\d)(\d{16}|\d{9})(?!\d)")
+
 
 def _fetch_task_categories_from_db() -> tuple[str, ...] | None:
     try:
@@ -283,7 +284,9 @@ def _fetch_task_categories_from_db() -> tuple[str, ...] | None:
 
 def _compile_assignment_pattern(categories: tuple[str, ...]) -> re.Pattern[str]:
     spellings = categories + tuple(_ASSIGNMENT_CATEGORY_SYNONYMS.keys())
-    category_alts = "|".join(re.escape(cat) for cat in spellings)
+    # Longest labels first so e.g. "Femto Installation" wins over "Femto Fault".
+    ordered = sorted(spellings, key=len, reverse=True)
+    category_alts = "|".join(re.escape(cat) for cat in ordered)
     next_head = rf"(?:{_ASSIGNMENT_HANDLE})\s+(?:{category_alts})\s+[0-9]"
     return re.compile(
         rf"({_ASSIGNMENT_HANDLE})\s+({category_alts})\s+((?:[0-9]{{16}})|(?:[0-9]{{9}}))"
@@ -317,6 +320,57 @@ def _assignment_pattern() -> re.Pattern[str]:
     _refresh_assignment_categories()
     assert _assignment_pattern_cache is not None
     return _assignment_pattern_cache
+
+
+def _looks_like_coordinator_assignment(blob: str) -> bool:
+    """True when text resembles ``@user <Category> <ticket>`` (category not in regex)."""
+    return bool(blob and _COORDINATOR_ASSIGNMENT_HINT.search(blob))
+
+
+def _refresh_assignment_categories_if_plausible(blob: str) -> None:
+    """Reload category list when text looks like a coordinator assignment.
+
+    The assignment MessageHandler filter runs before ``handle_assignment``. If we
+    only refresh categories inside the handler, a category added in the dashboard
+    can be invisible to the filter for up to ``_CATEGORIES_CACHE_TTL_SEC``.
+    """
+    if _looks_like_coordinator_assignment(blob):
+        _refresh_assignment_categories(force=True)
+
+
+def _parse_coordinator_assignments(
+    blob: str,
+) -> list[tuple[str, str, str, str | None]]:
+    """Parse ``@user``, category label, ticket id, and trailing notes from one message.
+
+    Does not require the category to appear in the assignment regex alternation —
+    new dashboard categories and line breaks between category and ticket still work.
+    """
+    blob = _normalize_assignment_blob(blob)
+    if not blob:
+        return []
+    parsed: list[tuple[str, str, str, str | None]] = []
+    pos = 0
+    while pos < len(blob):
+        hm = _ASSIGNMENT_HANDLE_PATTERN.search(blob, pos)
+        if not hm:
+            break
+        assigned_to = hm.group(0)
+        after = hm.end()
+        tm = _TICKET_IN_ASSIGNMENT_RE.search(blob, after)
+        if not tm:
+            break
+        category_raw = re.sub(r"\s+", " ", blob[after : tm.start()].strip())
+        if not category_raw:
+            pos = hm.end() + 1
+            continue
+        ticket_number = tm.group(1)
+        next_hm = _ASSIGNMENT_HANDLE_PATTERN.search(blob, tm.end())
+        info_end = next_hm.start() if next_hm else len(blob)
+        additional_info = _clean_assignment_info(blob[tm.end() : info_end])
+        parsed.append((assigned_to, category_raw, ticket_number, additional_info))
+        pos = tm.end()
+    return parsed
 
 
 def _normalize_assignment_blob(blob: str) -> str:
@@ -388,7 +442,8 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         if not parent:
             return False
         blob = _parent_assignment_blob(parent)
-        return bool(_assignment_pattern().search(blob))
+        _refresh_assignment_categories_if_plausible(blob)
+        return _looks_like_coordinator_assignment(blob)
 
 
 class _CoordinatorAssignmentFilter(filters.MessageFilter):
@@ -402,7 +457,8 @@ class _CoordinatorAssignmentFilter(filters.MessageFilter):
         if not (t.strip() or cap.strip()):
             return False
         blob = _normalize_assignment_blob(f"{t}\n{cap}")
-        return bool(_assignment_pattern().search(blob))
+        _refresh_assignment_categories_if_plausible(blob)
+        return _looks_like_coordinator_assignment(blob)
 
 
 def _is_sender_allowed(update: Update) -> bool:
@@ -450,7 +506,10 @@ def _skip_bot_own_assignment_echo(update: Update) -> bool:
     if user.id != bot_id:
         return False
     blob = _normalize_assignment_blob(f"{msg.text or ''}\n{msg.caption or ''}")
-    return bool(blob and _assignment_pattern().search(blob))
+    if not blob:
+        return False
+    _refresh_assignment_categories_if_plausible(blob)
+    return _looks_like_coordinator_assignment(blob)
 
 
 def _log_incoming_update(update: Update) -> None:
@@ -600,16 +659,16 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
 def _resolve_ticket_from_assignment_reply(parent_blob: str, replier_username: str | None) -> str | None:
     """Pick the ticket_number from the parent assignment message for this replier."""
     parent_blob = _normalize_assignment_blob(parent_blob)
-    matches = list(_assignment_pattern().finditer(parent_blob))
-    if not matches:
+    _refresh_assignment_categories_if_plausible(parent_blob)
+    parsed = _parse_coordinator_assignments(parent_blob)
+    if not parsed:
         return None
     if not replier_username:
         return None
     replier_key = _normalize_username(replier_username)
     if not replier_key:
         return None
-    for m in matches:
-        ticket_number = m.group(3)
+    for assigned_to, _category_raw, ticket_number, _info in parsed:
         try:
             row = _db_get_ticket(ticket_number)
         except Exception:
@@ -617,10 +676,10 @@ def _resolve_ticket_from_assignment_reply(parent_blob: str, replier_username: st
             continue
         if row and _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
             return ticket_number
-    if len(matches) == 1:
-        m = matches[0]
-        if _normalize_username(m.group(1)) == replier_key:
-            return m.group(3)
+    if len(parsed) == 1:
+        assigned_to, _category_raw, ticket_number, _info = parsed[0]
+        if _normalize_username(assigned_to) == replier_key:
+            return ticket_number
     return None
 
 
@@ -797,7 +856,7 @@ def _is_duplicate_key_error(exc: Exception) -> bool:
 
 
 def _canonical_task_category(raw: str) -> str | None:
-    """Map synonym / typo labels to allowed ``task_category`` values (DB check constraint)."""
+    """Map synonym / typo labels to canonical ``task_category`` values from Supabase."""
     s = (raw or "").strip()
     if not s:
         return None
@@ -1745,18 +1804,14 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if update.effective_user and update.effective_user.id == context.bot.id:
         return
 
-    _refresh_assignment_categories()
     text = _normalize_assignment_blob(f"{t}\n{cap}")
-    matches = list(_assignment_pattern().finditer(text))
-    if not matches:
+    _refresh_assignment_categories_if_plausible(text)
+    parsed = _parse_coordinator_assignments(text)
+    if not parsed:
         return  # Filter shouldn't have triggered, but be defensive.
 
     lines: list[str] = []
-    for m in matches:
-        assigned_to = m.group(1)        # e.g. "@john"
-        task_category_raw = m.group(2)  # e.g. "Femto Installation"
-        ticket_number = m.group(3)      # 16- or 9-digit string
-        additional_info = _clean_assignment_info(m.group("info"))
+    for assigned_to, task_category_raw, ticket_number, additional_info in parsed:
 
         task_category = _canonical_task_category(task_category_raw)
         if not task_category:
