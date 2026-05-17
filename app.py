@@ -60,8 +60,10 @@ one-time reset code (15 minutes).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 from datetime import date, datetime, time, timedelta, timezone
@@ -69,6 +71,8 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+from cryptography.fernet import Fernet
 import altair as alt
 from bot_utils import (
     NOTIFY_BUILD_ID,
@@ -304,9 +308,114 @@ _AUTH_PWD_VER_KEY = "_ticket_dashboard_auth_pwd_ver"
 _AUTH_USERNAME_KEY = "_ticket_dashboard_auth_username"
 _OPERATOR_ID_KEY = "_ticket_dashboard_operator_id"
 _LOGIN_VIEW_KEY = "_ticket_dashboard_login_view"
+_LOGIN_USER_WIDGET_KEY = "login_username_widget"
+_LOGIN_PWD_WIDGET_KEY = "login_password_widget"
+_LOGIN_OID_WIDGET_KEY = "login_operator_id_widget"
+_LOGIN_SAVE_PW_KEY = "login_save_password"
+_LOGIN_REMEMBER_BOOT_KEY = "_login_remember_bootstrapped"
 _MIN_DASHBOARD_PASSWORD_LEN = 8
 _MAX_OPERATOR_ID_LEN = 64
 _MAX_DASHBOARD_USERNAME_LEN = 48
+
+
+def _remember_login_fernet() -> Fernet:
+    pepper = (
+        _read_setting("DASHBOARD_SESSION_SECRET")
+        or _read_setting("SUPABASE_KEY")
+        or "ticket-dashboard-remember"
+    )
+    key = base64.urlsafe_b64encode(hashlib.sha256(pepper.encode()).digest())
+    return Fernet(key)
+
+
+def _encode_remembered_login(*, username: str, password: str) -> str:
+    payload = json.dumps({"u": username, "p": password})
+    return _remember_login_fernet().encrypt(payload.encode()).decode()
+
+
+def _decode_remembered_login(token: str) -> tuple[str, str] | None:
+    try:
+        raw = _remember_login_fernet().decrypt(token.encode())
+        data = json.loads(raw.decode())
+        username = str(data.get("u", "")).strip()
+        password = str(data.get("p", ""))
+        if username and password:
+            return username, password
+    except Exception:
+        pass
+    return None
+
+
+def _login_remember_bootstrap() -> None:
+    """Load saved credentials from browser localStorage (encrypted token)."""
+    if st.session_state.get(_LOGIN_REMEMBER_BOOT_KEY):
+        return
+
+    qp = st.query_params
+    if qp.get("_lr") == "1":
+        token = str(qp.get("_lt") or "")
+        pair = _decode_remembered_login(token) if token else None
+        if pair:
+            st.session_state[_LOGIN_USER_WIDGET_KEY] = pair[0]
+            st.session_state[_LOGIN_OID_WIDGET_KEY] = pair[0]
+            st.session_state[_LOGIN_PWD_WIDGET_KEY] = pair[1]
+            st.session_state[_LOGIN_SAVE_PW_KEY] = True
+        st.session_state[_LOGIN_REMEMBER_BOOT_KEY] = True
+        try:
+            del st.query_params["_lr"]
+            del st.query_params["_lt"]
+        except Exception:
+            pass
+        return
+
+    if st.session_state.get("_login_remember_js_ran"):
+        st.session_state[_LOGIN_REMEMBER_BOOT_KEY] = True
+        return
+    st.session_state["_login_remember_js_ran"] = True
+
+    components.html(
+        """
+        <script>
+        (function () {
+          const KEY = "fto_remember_v1";
+          const loc = window.parent.location;
+          const params = new URLSearchParams(loc.search);
+          if (params.get("_lr") === "1") return;
+          const token = localStorage.getItem(KEY);
+          if (!token) return;
+          const u = new URL(loc.href);
+          u.searchParams.set("_lr", "1");
+          u.searchParams.set("_lt", token);
+          window.parent.location.replace(u.toString());
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _login_remember_persist(*, username: str, password: str) -> None:
+    token = _encode_remembered_login(username=username, password=password)
+    safe = json.dumps(token)
+    components.html(
+        f"""
+        <script>
+        localStorage.setItem("fto_remember_v1", {safe});
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _login_remember_clear() -> None:
+    components.html(
+        """
+        <script>
+        localStorage.removeItem("fto_remember_v1");
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _password_fingerprint(secret: str) -> str:
@@ -334,6 +443,8 @@ def _clear_auth_session() -> None:
         _AUTH_PWD_VER_KEY,
         _AUTH_USERNAME_KEY,
         _OPERATOR_ID_KEY,
+        _LOGIN_REMEMBER_BOOT_KEY,
+        "_login_remember_js_ran",
     ):
         st.session_state.pop(key, None)
 
@@ -825,6 +936,8 @@ def _read_dashboard_password() -> str:
 
 
 def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
+    _login_remember_bootstrap()
+
     with st.container(border=True, key="login_shell"):
         with st.form("login_form", clear_on_submit=False):
             if per_user:
@@ -832,11 +945,13 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     "Username",
                     placeholder="your login name",
                     autocomplete="username",
+                    key=_LOGIN_USER_WIDGET_KEY,
                 )
                 pwd = st.text_input(
                     "Password",
                     type="password",
                     autocomplete="current-password",
+                    key=_LOGIN_PWD_WIDGET_KEY,
                 )
             else:
                 st.caption("Legacy mode: shared dashboard password.")
@@ -845,11 +960,18 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     "Password",
                     type="password",
                     autocomplete="current-password",
+                    key=_LOGIN_PWD_WIDGET_KEY,
                 )
                 oid = st.text_input(
                     "Operator ID",
                     placeholder="e.g. ali.ops",
+                    key=_LOGIN_OID_WIDGET_KEY,
                 )
+            st.checkbox(
+                "Save password on this device",
+                key=_LOGIN_SAVE_PW_KEY,
+                help="Stores an encrypted login token in this browser only.",
+            )
             submitted = st.form_submit_button("Sign in", use_container_width=True)
 
     if not submitted:
@@ -875,6 +997,10 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
         op = str(payload.get("operator_id") or uname).strip()
         fp = _auth_session_fingerprint(username=uname, operator_id=op)
         _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
+        if st.session_state.get(_LOGIN_SAVE_PW_KEY):
+            _login_remember_persist(username=uname, password=pwd)
+        else:
+            _login_remember_clear()
         st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
         st.rerun()
         return

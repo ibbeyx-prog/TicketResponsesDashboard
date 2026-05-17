@@ -95,7 +95,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from supabase import create_client
-from telegram import BotCommand, Message, Update
+from telegram import BotCommand, Message, MessageEntity, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -305,7 +305,11 @@ def _refresh_assignment_categories(*, force: bool = False) -> tuple[str, ...]:
     ):
         return _assignment_categories_cache
     loaded = _fetch_task_categories_from_db()
-    categories = loaded if loaded else _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
+    if loaded:
+        # Keep built-in labels available for canonicalization even if removed from DB.
+        categories = tuple(dict.fromkeys((*loaded, *_DEFAULT_ASSIGNMENT_TASK_CATEGORIES)))
+    else:
+        categories = _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
     _assignment_categories_cache = categories
     _assignment_pattern_cache = _compile_assignment_pattern(categories)
     _categories_cache_at = time.monotonic()
@@ -373,6 +377,25 @@ def _parse_coordinator_assignments(
     return parsed
 
 
+def _message_to_assignment_blob(msg: Message | None) -> str:
+    """Build assignment text from message body, normalizing Telegram mention entities."""
+    if not msg:
+        return ""
+    text = msg.text or ""
+    cap = msg.caption or ""
+    if msg.entities and text:
+        for ent in sorted(msg.entities, key=lambda e: e.offset, reverse=True):
+            if ent.type != MessageEntity.TEXT_MENTION or not ent.user:
+                continue
+            username = (ent.user.username or "").strip()
+            if not username:
+                continue
+            start = ent.offset
+            end = ent.offset + ent.length
+            text = text[:start] + f"@{username}" + text[end:]
+    return _normalize_assignment_blob(f"{text}\n{cap}")
+
+
 def _normalize_assignment_blob(blob: str) -> str:
     """Make coordinator / Telegram punctuation friendlier for regex matching.
 
@@ -401,6 +424,13 @@ def _normalize_assignment_blob(blob: str) -> str:
     # Emoji / variation selectors sometimes attach to the category token.
     s = re.sub(r"[\uFE00-\uFE0F]", "", s)
     s = re.sub(r"[ \t]+", " ", s)
+    # Put ticket numbers that start a line onto the same line as the category when
+    # coordinators paste "@user Category" then "123456789 details" on the next line.
+    s = re.sub(
+        r"(?<=\S)\n(?=(?:\d{16}|\d{9})(?:\s|$))",
+        " ",
+        s,
+    )
     return s
 
 
@@ -412,9 +442,9 @@ def _parent_assignment_blob(parent: object) -> str:
     """
     if parent is None or not isinstance(parent, Message):
         return ""
-    return _normalize_assignment_blob(
-        f"{parent.text or ''}\n{parent.caption or ''}"
-    )
+    if isinstance(parent, Message):
+        return _message_to_assignment_blob(parent)
+    return ""
 
 
 def _clean_assignment_info(raw: str | None) -> str | None:
@@ -456,7 +486,7 @@ class _CoordinatorAssignmentFilter(filters.MessageFilter):
         cap = message.caption or ""
         if not (t.strip() or cap.strip()):
             return False
-        blob = _normalize_assignment_blob(f"{t}\n{cap}")
+        blob = _message_to_assignment_blob(message)
         _refresh_assignment_categories_if_plausible(blob)
         return _looks_like_coordinator_assignment(blob)
 
@@ -505,7 +535,7 @@ def _skip_bot_own_assignment_echo(update: Update) -> bool:
         return False
     if user.id != bot_id:
         return False
-    blob = _normalize_assignment_blob(f"{msg.text or ''}\n{msg.caption or ''}")
+    blob = _message_to_assignment_blob(msg)
     if not blob:
         return False
     _refresh_assignment_categories_if_plausible(blob)
@@ -1804,11 +1834,24 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if update.effective_user and update.effective_user.id == context.bot.id:
         return
 
-    text = _normalize_assignment_blob(f"{t}\n{cap}")
+    text = _message_to_assignment_blob(msg)
     _refresh_assignment_categories_if_plausible(text)
     parsed = _parse_coordinator_assignments(text)
     if not parsed:
-        return  # Filter shouldn't have triggered, but be defensive.
+        if _looks_like_coordinator_assignment(text):
+            log.warning(
+                "assignment-shaped message did not parse: chat=%s body=%r",
+                _chat_id(update),
+                text[:200],
+            )
+            if _is_group_chat(update):
+                await _group_field_nudge(
+                    update,
+                    context,
+                    "Could not parse that assignment. Use: "
+                    "@engineer Category 9-or-16-digit-ticket (ticket may be on the next line).",
+                )
+        return
 
     lines: list[str] = []
     for assigned_to, task_category_raw, ticket_number, additional_info in parsed:
@@ -2009,12 +2052,17 @@ def _build_bot_app() -> Application:
     )
     # Assignment lines can be plain text, a photo/document **caption**, or a channel post.
     # Do not restrict to ``filters.TEXT`` only — that misses most caption-only assignments.
-    bot_app.add_handler(
-        MessageHandler(
-            ~filters.COMMAND & _CoordinatorAssignmentFilter(),
-            handle_assignment,
+    _assignment_msg_filter = (
+        (
+            filters.UpdateType.MESSAGE
+            | filters.UpdateType.EDITED_MESSAGE
+            | filters.UpdateType.CHANNEL_POST
+            | filters.UpdateType.EDITED_CHANNEL_POST
         )
+        & ~filters.COMMAND
+        & _CoordinatorAssignmentFilter()
     )
+    bot_app.add_handler(MessageHandler(_assignment_msg_filter, handle_assignment))
     # Field swipe-reply to an assignment (works for coordinator or dashboard posts).
     bot_app.add_handler(
         MessageHandler(
