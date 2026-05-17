@@ -138,6 +138,9 @@ ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
+TASK_CATEGORIES_TABLE = (
+    os.getenv("TASK_CATEGORIES_TABLE") or "dashboard_task_categories"
+).strip()
 FIELD_RESPONSE_UNDO_MINUTES = max(
     1,
     int((os.getenv("FIELD_RESPONSE_UNDO_MINUTES") or "60").strip() or "60"),
@@ -238,10 +241,8 @@ def _validate_ticket_id(raw: str) -> str | None:
     return cleaned
 
 
-# Pattern: "@user <Category> <ticket_number>" where ticket_number is 16 or 9
-# digits. Used both by the message filter (filters.Regex) and by the handler to
-# iterate over multiple assignments inside a single message.
-_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
+# Default categories when ``dashboard_task_categories`` is empty or unreachable.
+_DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
     "Coverage Check",
     "Femto Installation",
     "Repeater Installation",
@@ -255,33 +256,67 @@ _ASSIGNMENT_CATEGORY_SYNONYMS: dict[str, str] = {
     "Femto Recovery": "Femto Recover",
 }
 
-_ASSIGNMENT_CATEGORY_SPELLINGS: tuple[str, ...] = _ASSIGNMENT_TASK_CATEGORIES + tuple(
-    _ASSIGNMENT_CATEGORY_SYNONYMS.keys()
-)
-
-_CATEGORY_ALTS: str = "|".join(re.escape(cat) for cat in _ASSIGNMENT_CATEGORY_SPELLINGS)
-
-# Telegram usernames: 5–32 chars, [A-Za-z0-9_], must start with a letter. Avoid
-# ``\\w`` (Unicode "letters") so odd scripts cannot steal the @-capture.
+# Pattern: "@user <Category> <ticket_number>" — rebuilt when categories change in Supabase.
 _ASSIGNMENT_HANDLE = r"@[A-Za-z][A-Za-z0-9_]{3,31}"
-_NEXT_ASSIGNMENT_HEAD = rf"(?:{_ASSIGNMENT_HANDLE})\s+(?:{_CATEGORY_ALTS})\s+[0-9]"
+_assignment_categories_cache: tuple[str, ...] = _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
+_assignment_pattern_cache: re.Pattern[str] | None = None
+_categories_cache_at: float = 0.0
+_CATEGORIES_CACHE_TTL_SEC = 45.0
 
-# Groups:
-#   1 = @username, 2 = category, 3 = ticket_number (9 or 16 digits),
-#   4 / named "info" = any additional text after the ticket number, up to
-#       the next assignment header (so multi-assignment messages still
-#       split cleanly) or the end of the message.
-# `[\s\S]*?` is the canonical "match anything, including newlines, non-greedy"
-# pattern; we don't use `re.DOTALL` so the rest of the pattern keeps its
-# default semantics.
-# IGNORECASE so ``femto installation`` / ``COVERAGE CHECK`` match; handler then
-# normalizes category text to DB enum via ``_canonical_task_category``.
-_ASSIGNMENT_PATTERN: re.Pattern[str] = re.compile(
-    rf"({_ASSIGNMENT_HANDLE})\s+({_CATEGORY_ALTS})\s+((?:[0-9]{{16}})|(?:[0-9]{{9}}))"
-    rf"(?P<info>[\s\S]*?)"
-    rf"(?=(?:{_NEXT_ASSIGNMENT_HEAD})|\Z)",
-    re.IGNORECASE,
-)
+
+def _fetch_task_categories_from_db() -> tuple[str, ...] | None:
+    try:
+        res = (
+            supabase.table(TASK_CATEGORIES_TABLE)
+            .select("name")
+            .order("sort_order")
+            .order("name")
+            .execute()
+        )
+    except Exception:
+        log.exception("Failed to load task categories from %s", TASK_CATEGORIES_TABLE)
+        return None
+    names = [str(r["name"]).strip() for r in (res.data or []) if r.get("name")]
+    names = [n for n in names if n]
+    return tuple(names) if names else None
+
+
+def _compile_assignment_pattern(categories: tuple[str, ...]) -> re.Pattern[str]:
+    spellings = categories + tuple(_ASSIGNMENT_CATEGORY_SYNONYMS.keys())
+    category_alts = "|".join(re.escape(cat) for cat in spellings)
+    next_head = rf"(?:{_ASSIGNMENT_HANDLE})\s+(?:{category_alts})\s+[0-9]"
+    return re.compile(
+        rf"({_ASSIGNMENT_HANDLE})\s+({category_alts})\s+((?:[0-9]{{16}})|(?:[0-9]{{9}}))"
+        rf"(?P<info>[\s\S]*?)"
+        rf"(?=(?:{next_head})|\Z)",
+        re.IGNORECASE,
+    )
+
+
+def _refresh_assignment_categories(*, force: bool = False) -> tuple[str, ...]:
+    global _assignment_categories_cache, _assignment_pattern_cache, _categories_cache_at
+    if (
+        not force
+        and _assignment_pattern_cache is not None
+        and (time.monotonic() - _categories_cache_at) < _CATEGORIES_CACHE_TTL_SEC
+    ):
+        return _assignment_categories_cache
+    loaded = _fetch_task_categories_from_db()
+    categories = loaded if loaded else _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
+    _assignment_categories_cache = categories
+    _assignment_pattern_cache = _compile_assignment_pattern(categories)
+    _categories_cache_at = time.monotonic()
+    return _assignment_categories_cache
+
+
+def _assignment_task_categories() -> tuple[str, ...]:
+    return _refresh_assignment_categories()
+
+
+def _assignment_pattern() -> re.Pattern[str]:
+    _refresh_assignment_categories()
+    assert _assignment_pattern_cache is not None
+    return _assignment_pattern_cache
 
 
 def _normalize_assignment_blob(blob: str) -> str:
@@ -353,7 +388,7 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         if not parent:
             return False
         blob = _parent_assignment_blob(parent)
-        return bool(_ASSIGNMENT_PATTERN.search(blob))
+        return bool(_assignment_pattern().search(blob))
 
 
 class _CoordinatorAssignmentFilter(filters.MessageFilter):
@@ -367,7 +402,7 @@ class _CoordinatorAssignmentFilter(filters.MessageFilter):
         if not (t.strip() or cap.strip()):
             return False
         blob = _normalize_assignment_blob(f"{t}\n{cap}")
-        return bool(_ASSIGNMENT_PATTERN.search(blob))
+        return bool(_assignment_pattern().search(blob))
 
 
 def _is_sender_allowed(update: Update) -> bool:
@@ -415,7 +450,7 @@ def _skip_bot_own_assignment_echo(update: Update) -> bool:
     if user.id != bot_id:
         return False
     blob = _normalize_assignment_blob(f"{msg.text or ''}\n{msg.caption or ''}")
-    return bool(blob and _ASSIGNMENT_PATTERN.search(blob))
+    return bool(blob and _assignment_pattern().search(blob))
 
 
 def _log_incoming_update(update: Update) -> None:
@@ -565,7 +600,7 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
 def _resolve_ticket_from_assignment_reply(parent_blob: str, replier_username: str | None) -> str | None:
     """Pick the ticket_number from the parent assignment message for this replier."""
     parent_blob = _normalize_assignment_blob(parent_blob)
-    matches = list(_ASSIGNMENT_PATTERN.finditer(parent_blob))
+    matches = list(_assignment_pattern().finditer(parent_blob))
     if not matches:
         return None
     if not replier_username:
@@ -766,12 +801,13 @@ def _canonical_task_category(raw: str) -> str | None:
     s = (raw or "").strip()
     if not s:
         return None
-    if s in _ASSIGNMENT_TASK_CATEGORIES:
+    categories = _assignment_task_categories()
+    if s in categories:
         return s
     if s in _ASSIGNMENT_CATEGORY_SYNONYMS:
         return _ASSIGNMENT_CATEGORY_SYNONYMS[s]
     key_lower = s.lower()
-    for cat in _ASSIGNMENT_TASK_CATEGORIES:
+    for cat in categories:
         if cat.lower() == key_lower:
             return cat
     for syn, canonical in _ASSIGNMENT_CATEGORY_SYNONYMS.items():
@@ -1709,8 +1745,9 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if update.effective_user and update.effective_user.id == context.bot.id:
         return
 
+    _refresh_assignment_categories()
     text = _normalize_assignment_blob(f"{t}\n{cap}")
-    matches = list(_ASSIGNMENT_PATTERN.finditer(text))
+    matches = list(_assignment_pattern().finditer(text))
     if not matches:
         return  # Filter shouldn't have triggered, but be defensive.
 
@@ -1725,7 +1762,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if not task_category:
             cat_err = (
                 f"Unknown category {task_category_raw!r} for ticket {ticket_number}. "
-                f"Use one of: {', '.join(_ASSIGNMENT_TASK_CATEGORIES)}."
+                f"Use one of: {', '.join(_assignment_task_categories())}."
             )
             lines.append(f"• {cat_err}")
             if _is_group_chat(update):
@@ -1970,6 +2007,11 @@ bot_app = _build_bot_app()
 async def lifespan(_: FastAPI):
     await bot_app.initialize()
     await bot_app.start()
+
+    try:
+        _refresh_assignment_categories(force=True)
+    except Exception:
+        log.exception("Initial task category load failed")
 
     telethon_delete_client = None
     try:

@@ -72,8 +72,11 @@ import streamlit as st
 import altair as alt
 from bot_utils import (
     NOTIFY_BUILD_ID,
+    AssignmentTelegramRef,
+    find_assignment_telegram_ref,
     normalize_telegram_group_id_paste,
     notify_telegram_group,
+    update_telegram_assignment_message,
 )
 from dotenv import load_dotenv
 from supabase import create_client
@@ -200,9 +203,13 @@ FIELD_ENGINEERS_TABLE = (
     _read_setting("FIELD_ENGINEERS_TABLE", "dashboard_field_engineers")
     or "dashboard_field_engineers"
 )
+TASK_CATEGORIES_TABLE = (
+    _read_setting("TASK_CATEGORIES_TABLE", "dashboard_task_categories")
+    or "dashboard_task_categories"
+)
 
-# Keep in sync with ``_ASSIGNMENT_TASK_CATEGORIES`` in ``bot.py``.
-ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
+# Fallback when ``dashboard_task_categories`` is empty or missing.
+DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
     "Coverage Check",
     "Femto Installation",
     "Repeater Installation",
@@ -247,6 +254,15 @@ _CC_TICKET_MODE_KEY = "_cc_ticket_input_mode"
 _CC_TICKET_PICK_KEY = "cc_ticket_pick"
 _CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
 _CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
+_CC_CATEGORY_SELECT_KEY = "cc_category_select"
+def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
+    return {
+        "engineer": f"{prefix}_edit_engineer",
+        "category": f"{prefix}_edit_category",
+        "notes": f"{prefix}_edit_notes",
+        "sync_tg": f"{prefix}_edit_sync_tg",
+        "show": f"{prefix}_show_assignment_edit",
+    }
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -1364,6 +1380,7 @@ def _render_admin_ticket_toolbar(
     caption: str | None = None,
     status_actions: tuple[tuple[str, str, str], ...] = (),
     allow_delete: bool = True,
+    allow_edit_assignment: bool = False,
 ) -> None:
     """Ticket picker + primary action; remove lives in a small side popover."""
     options = _ticket_options_for_admin(df)
@@ -1375,54 +1392,74 @@ def _render_admin_ticket_toolbar(
 
     status_labels = [a[0] for a in status_actions]
     del_col = 1 if allow_delete else 0
+    edit_col = 1 if allow_edit_assignment else 0
+    edit_keys = _assignment_edit_session_keys(key_prefix)
 
     with st.container(border=True):
-        if status_labels:
-            widths = [2, 1, del_col] if del_col else [2, 1]
+        if status_labels or edit_col:
+            widths: list[int] = [2]
+            if status_labels:
+                widths.append(1)
+            if edit_col:
+                widths.append(1)
+            if del_col:
+                widths.append(1)
             cols = st.columns(widths, vertical_alignment="bottom")
-            c_ticket, c_action = cols[0], cols[1]
-            c_del = cols[2] if del_col else None
-            with c_ticket:
+            idx = 0
+            with cols[idx]:
                 picked = st.selectbox(
                     "Ticket",
                     options=options,
                     key=f"{key_prefix}_sb_ticket",
                 )
-            with c_action:
-                if len(status_labels) == 1:
-                    label = status_labels[0]
+            idx += 1
+            if status_labels:
+                with cols[idx]:
+                    if len(status_labels) == 1:
+                        label = status_labels[0]
+                        if st.button(
+                            label,
+                            key=f"{key_prefix}_apply",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            _apply_admin_ticket_action(
+                                picked=picked,
+                                choice=label,
+                                confirm_del=False,
+                                status_actions=status_actions,
+                            )
+                    else:
+                        choice = st.selectbox(
+                            "Action",
+                            options=status_labels,
+                            key=f"{key_prefix}_action_sel",
+                        )
+                        if st.button(
+                            "Apply",
+                            key=f"{key_prefix}_apply",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            _apply_admin_ticket_action(
+                                picked=picked,
+                                choice=choice,
+                                confirm_del=False,
+                                status_actions=status_actions,
+                            )
+                idx += 1
+            if edit_col:
+                with cols[idx]:
                     if st.button(
-                        label,
-                        key=f"{key_prefix}_apply",
-                        type="primary",
+                        "Edit assignment",
+                        key=f"{key_prefix}_edit_btn",
                         use_container_width=True,
                     ):
-                        _apply_admin_ticket_action(
-                            picked=picked,
-                            choice=label,
-                            confirm_del=False,
-                            status_actions=status_actions,
-                        )
-                else:
-                    choice = st.selectbox(
-                        "Action",
-                        options=status_labels,
-                        key=f"{key_prefix}_action_sel",
-                    )
-                    if st.button(
-                        "Apply",
-                        key=f"{key_prefix}_apply",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        _apply_admin_ticket_action(
-                            picked=picked,
-                            choice=choice,
-                            confirm_del=False,
-                            status_actions=status_actions,
-                        )
-            if c_del is not None:
-                with c_del:
+                        st.session_state[edit_keys["show"]] = True
+                        st.rerun()
+                idx += 1
+            if del_col:
+                with cols[idx]:
                     _render_ticket_delete_popover(
                         key_prefix=key_prefix,
                         options=options,
@@ -1929,6 +1966,316 @@ def _cc_upsert_assignment(
     )
 
 
+def _cc_save_assignment_telegram_ref(
+    client,
+    ticket_number: str,
+    ref: AssignmentTelegramRef,
+) -> None:
+    _cc_execute_ticket_update(
+        client,
+        {
+            "assignment_telegram_chat_id": int(ref.chat_id),
+            "assignment_telegram_message_id": int(ref.message_id),
+            "updated_at": _cc_utc_now_iso(),
+        },
+        ticket_number,
+    )
+    verify = _fetch_ticket_row(ticket_number)
+    if not verify or verify.get("assignment_telegram_message_id") is None:
+        raise RuntimeError(
+            "Could not save Telegram message link on the ticket. "
+            "Apply migration `20260524_assignment_telegram_message.sql` in Supabase."
+        )
+
+
+def _cc_patch_assignment_fields(
+    ticket_number: str,
+    *,
+    required_status: str,
+    assigned_to: str,
+    task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+) -> dict:
+    """Update assignment fields for a ticket in the given status (dashboard edit)."""
+    client = _get_supabase_client()
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    status = str(row.get("status") or "").strip()
+    if status != required_status:
+        raise ValueError(f"Only **{required_status}** tickets can be edited here.")
+
+    now_iso = _cc_utc_now_iso()
+    _cc_execute_ticket_update(
+        client,
+        {
+            "assigned_to": assigned_to,
+            "task_category": task_category,
+            "additional_info": additional_info,
+            "dashboard_assigned_by": operator_id,
+            "updated_at": now_iso,
+        },
+        ticket_number,
+    )
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=f"@{operator_id.lstrip('@')}",
+        action_type="AssignmentUpdated",
+        note=_cc_assignment_log_note(additional_info, operator_id),
+    )
+    updated = _fetch_ticket_row(ticket_number)
+    return updated or row
+
+
+def _cc_resolve_telegram_credentials() -> tuple[str | None, int | str | None]:
+    """Bot token + group chat id from env / secrets (Command Center)."""
+    token = (
+        _read_setting("TG_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_TOKEN").strip()
+    )
+    chat_raw = _read_telegram_group_chat_raw()
+    chat_id: int | str | None = None
+    if chat_raw:
+        chat_id, _warn = _parse_telegram_group_chat_id(chat_raw)
+    return token or None, chat_id
+
+
+async def _cc_sync_assignment_to_telegram(
+    *,
+    row: dict,
+    assigned_to: str,
+    task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+    token: str,
+    chat_id: int | str,
+) -> str:
+    """Edit linked Telegram message or post a new one. Returns user-facing status text."""
+    ticket_number = str(row.get("ticket_number") or "")
+    tg_chat = row.get("assignment_telegram_chat_id")
+    tg_msg = row.get("assignment_telegram_message_id")
+    assigned_by = f"{operator_id} (updated)"
+    api_id = _read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None
+    api_hash = _read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None
+    client = _get_supabase_client()
+
+    if tg_chat is None or tg_msg is None:
+        found = await find_assignment_telegram_ref(
+            ticket_number,
+            group_id=chat_id,
+            bot_token=token,
+            api_id=api_id,
+            api_hash=api_hash,
+        )
+        if found:
+            tg_chat, tg_msg = found.chat_id, found.message_id
+            _cc_save_assignment_telegram_ref(client, ticket_number, found)
+
+    if tg_chat is not None and tg_msg is not None:
+        try:
+            await update_telegram_assignment_message(
+                int(tg_chat),
+                int(tg_msg),
+                assigned_to,
+                ticket_number,
+                task_category,
+                additional_info=additional_info,
+                assigned_by=assigned_by,
+                api_id=api_id,
+                api_hash=api_hash,
+                bot_token=token,
+            )
+            return (
+                "The **same** Telegram assignment message was updated in the group "
+                "(scroll to the original post)."
+            )
+        except Exception:
+            pass
+
+    ref = await notify_telegram_group(
+        assigned_to,
+        ticket_number,
+        task_category,
+        additional_info=additional_info,
+        assigned_by=assigned_by,
+        updated=True,
+        api_id=api_id,
+        api_hash=api_hash,
+        bot_token=token,
+        group_id=chat_id,
+    )
+    _cc_save_assignment_telegram_ref(client, ticket_number, ref)
+    return (
+        "Posted a **new** assignment message at the bottom of the group "
+        "(starts with “Assignment updated”). Use that message for field replies."
+    )
+
+
+def _render_assignment_editor(
+    *,
+    required_status: str,
+    ticket_picker_key: str,
+    edit_key_prefix: str,
+    cat_names: list[str],
+    fe_names: list[str],
+    fe_missing: bool,
+    ticket_options: list[str],
+) -> None:
+    """Edit assignment fields + optional Telegram sync (Pending or Open)."""
+    if not ticket_options:
+        return
+
+    keys = _assignment_edit_session_keys(edit_key_prefix)
+    picked = str(st.session_state.get(ticket_picker_key) or ticket_options[0])
+    if picked not in ticket_options:
+        picked = ticket_options[0]
+
+    row = _fetch_ticket_row(picked)
+    if not row:
+        st.warning("Ticket not found.")
+        return
+    if str(row.get("status") or "").strip() != required_status:
+        st.info(f"Pick a **{required_status}** ticket to edit its assignment.")
+        return
+
+    linked = (
+        row.get("assignment_telegram_message_id") is not None
+        and row.get("assignment_telegram_chat_id") is not None
+    )
+    st.caption(
+        f"Editing **{picked}** — saves to the dashboard. "
+        + (
+            "Telegram: will try to **edit the original** bot assignment message."
+            if linked
+            else "Telegram: no message link yet — will **post a new** assignment message "
+            "(look for “Assignment updated” at the bottom of the group)."
+        )
+    )
+
+    current_handle = str(row.get("assigned_to") or "").strip().lstrip("@")
+    current_cat = str(row.get("task_category") or "").strip()
+    current_notes = str(row.get("additional_info") or "")
+
+    cats = cat_names if cat_names else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    if current_cat and current_cat not in cats:
+        cats = [current_cat, *cats]
+
+    with st.form(f"{edit_key_prefix}_assignment_edit_form", clear_on_submit=False):
+        if fe_names and not fe_missing:
+            fe_opts = [f"@{n}" for n in fe_names]
+            default_fe = (
+                f"@{current_handle}"
+                if current_handle
+                and f"@{current_handle}" in fe_opts
+                else (fe_opts[0] if fe_opts else "")
+            )
+            st.selectbox(
+                "Engineer",
+                options=fe_opts,
+                index=fe_opts.index(default_fe) if default_fe in fe_opts else 0,
+                key=keys["engineer"],
+            )
+        else:
+            st.text_input(
+                "Engineer",
+                value=current_handle,
+                placeholder="username",
+                key=keys["engineer"],
+            )
+        st.selectbox(
+            "Category",
+            options=cats,
+            index=cats.index(current_cat) if current_cat in cats else 0,
+            key=keys["category"],
+        )
+        st.text_area(
+            "Notes (additional info)",
+            value=current_notes,
+            height=80,
+            key=keys["notes"],
+        )
+        st.checkbox(
+            "Update Telegram assignment message",
+            value=True,
+            key=keys["sync_tg"],
+        )
+        submitted = st.form_submit_button("Save assignment changes", use_container_width=True)
+
+    if not submitted:
+        return
+
+    try:
+        if fe_names and not fe_missing:
+            handle = _cc_normalize_handle(
+                str(st.session_state.get(keys["engineer"], ""))
+            )
+        else:
+            raw = str(st.session_state.get(keys["engineer"], "")).strip()
+            handle = _cc_normalize_handle(raw) if raw else ""
+            if not handle:
+                raise ValueError("Enter an engineer username.")
+        cat = str(st.session_state.get(keys["category"], "")).strip()
+        if not cat:
+            raise ValueError("Pick a category.")
+        notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    op = _session_operator_id()
+    if not op:
+        st.error("Sign in again — operator session is missing.")
+        return
+
+    try:
+        updated = _cc_patch_assignment_fields(
+            picked,
+            required_status=required_status,
+            assigned_to=handle,
+            task_category=cat,
+            additional_info=notes,
+            operator_id=op,
+        )
+    except Exception as exc:
+        st.error(f"Could not save: {exc}")
+        return
+
+    tg_note = ""
+    if st.session_state.get(keys["sync_tg"]):
+        token, chat_id = _cc_resolve_telegram_credentials()
+        if not token or chat_id is None:
+            st.warning(
+                "Saved in dashboard. Telegram not updated — set **TELEGRAM_TOKEN** and "
+                "**TELEGRAM_GROUP_CHAT_ID** in `.env` / Secrets."
+            )
+        else:
+            try:
+                tg_note = asyncio.run(
+                    _cc_sync_assignment_to_telegram(
+                        row=updated,
+                        assigned_to=handle,
+                        task_category=cat,
+                        additional_info=notes,
+                        operator_id=op,
+                        token=token,
+                        chat_id=chat_id,
+                    )
+                )
+            except Exception as exc:
+                st.warning(f"Saved in dashboard. Telegram update failed: {exc}")
+                tg_note = ""
+
+    st.session_state[keys["show"]] = False
+    st.session_state[_CC_FLASH_KEY] = (
+        f"Updated **{required_status}** assignment **{picked}**."
+        + (f" {tg_note}" if tg_note else "")
+    )
+    st.rerun()
+
+
 def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | None]:
     """Return a ``chat_id`` for ``send_message`` (int or ``@public_group``).
 
@@ -1988,6 +2335,122 @@ def _insert_field_engineer(username: str) -> None:
 def _delete_field_engineer(username: str) -> None:
     client = _get_supabase_client()
     client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
+
+
+def _normalize_task_category_name(raw: str) -> str:
+    s = " ".join((raw or "").strip().split())
+    if not s:
+        raise ValueError("Enter a **category** name.")
+    if len(s) > 64:
+        raise ValueError("Category name is too long (max 64 characters).")
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9 \-/&]*$", s):
+        raise ValueError(
+            "Use letters, digits, spaces, and - / & only (must start with a letter or digit)."
+        )
+    return s
+
+
+def _try_fetch_task_categories() -> tuple[list[str], bool]:
+    """Return ``(category names, table_missing)`` ordered for the assign picker."""
+    client = _get_supabase_client()
+    try:
+        res = (
+            client.table(TASK_CATEGORIES_TABLE)
+            .select("name")
+            .order("sort_order")
+            .order("name")
+            .execute()
+        )
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            return [], True
+        raise
+    names = [str(r["name"]) for r in (res.data or []) if r.get("name")]
+    if not names:
+        return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
+    return names, False
+
+
+def _insert_task_category(name: str) -> None:
+    client = _get_supabase_client()
+    client.table(TASK_CATEGORIES_TABLE).insert(
+        {"name": name, "sort_order": 0}
+    ).execute()
+
+
+def _delete_task_category(name: str) -> None:
+    client = _get_supabase_client()
+    client.table(TASK_CATEGORIES_TABLE).delete().eq("name", name).execute()
+
+
+def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
+    if missing:
+        st.caption(f"Category table missing — apply `{TASK_CATEGORIES_TABLE}` migration.")
+        return
+
+    if not categories:
+        st.caption("No categories yet.")
+    for cat in categories:
+        c_name, c_rm = st.columns([5, 1], gap="small", vertical_alignment="center")
+        with c_name:
+            st.markdown(f"**{cat}**")
+        with c_rm:
+            hkey = hashlib.sha256(cat.encode("utf-8")).hexdigest()[:16]
+            if st.button(
+                "×",
+                key=f"cat_rm_{hkey}",
+                help=f"Remove {cat}",
+                type="secondary",
+            ):
+                try:
+                    _delete_task_category(cat)
+                    st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    c_add, c_go = st.columns([5, 1], gap="small", vertical_alignment="bottom")
+    with c_add:
+        st.text_input(
+            "Add category",
+            key="cc_new_category",
+            placeholder="e.g. Site Survey",
+            label_visibility="collapsed",
+        )
+    with c_go:
+        if st.button("+", key="cc_cat_add_btn", help="Add category", type="secondary"):
+            raw = str(st.session_state.get("cc_new_category") or "").strip()
+            if not raw:
+                st.warning("Type a category name first.")
+            else:
+                try:
+                    norm = _normalize_task_category_name(raw)
+                    existing, _ = _try_fetch_task_categories()
+                    if any(c.lower() == norm.lower() for c in existing):
+                        st.warning(f"**{norm}** is already listed.")
+                    else:
+                        _insert_task_category(norm)
+                        st.session_state.pop("cc_new_category", None)
+                        st.session_state[_CC_CATEGORY_SELECT_KEY] = norm
+                        st.rerun()
+                except ValueError as ve:
+                    st.error(str(ve))
+                except Exception as exc:
+                    err = str(exc).lower()
+                    if "duplicate" in err or "23505" in str(exc) or "unique" in err:
+                        st.warning("Category already exists.")
+                    else:
+                        st.error(str(exc))
+
+
+def _render_cc_category_row(categories: list[str], *, missing: bool) -> None:
+    opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
+    if current not in opts:
+        st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+    st.selectbox("Category", options=opts, key=_CC_CATEGORY_SELECT_KEY)
+    with st.popover("Edit categories", key="cc_categories_popover"):
+        _categories_manage_popover(categories or opts, missing=missing)
 
 
 def _field_team_manage_popover(names: list[str], *, missing: bool) -> None:
@@ -2165,6 +2628,7 @@ def _sidebar_command_center() -> None:
     env_group_ok = env_group_parsed is not None
 
     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+    cat_names, cat_missing = _try_fetch_task_categories()
 
     token_session = ""
     chat_session = ""
@@ -2174,11 +2638,8 @@ def _sidebar_command_center() -> None:
     with st.container(border=True, key="cc_assign_block"):
         _render_cc_engineer_row(fe_names, missing=fe_missing)
         _render_ticket_number_picker()
+        _render_cc_category_row(cat_names, missing=cat_missing)
         with st.form("cc_assign_form"):
-            cat = st.selectbox(
-                "Category",
-                options=list(ASSIGNMENT_TASK_CATEGORIES),
-            )
             additional_info_raw = st.text_area(
                 "Notes (optional)",
                 placeholder="Context for the field team",
@@ -2225,6 +2686,10 @@ def _sidebar_command_center() -> None:
         return
 
     additional_info_val = (additional_info_raw or "").strip() or None
+    cat = str(st.session_state.get(_CC_CATEGORY_SELECT_KEY, "")).strip()
+    if not cat:
+        st.error("Pick a **Category**.")
+        return
 
     # Form widgets with ``key=`` sometimes leave return values empty on submit;
     # merge ``st.session_state`` (updated when the form posts).
@@ -2291,7 +2756,7 @@ def _sidebar_command_center() -> None:
         return
 
     try:
-        asyncio.run(
+        tg_ref = asyncio.run(
             notify_telegram_group(
                 handle,
                 tid,
@@ -2304,6 +2769,15 @@ def _sidebar_command_center() -> None:
                 group_id=chat_id,
             )
         )
+        try:
+            _cc_save_assignment_telegram_ref(_get_supabase_client(), tid, tg_ref)
+        except Exception as link_exc:
+            st.warning(
+                f"{summary} Posted to Telegram but could not link message for edits: {link_exc}"
+            )
+            _remember_cc_ticket_number(tid)
+            st.rerun()
+            return
     except Exception as exc:
         st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
         return
@@ -3198,7 +3672,23 @@ def _render_dashboard(
                     key_prefix="assigned",
                     status_actions=(),
                     allow_delete=True,
+                    allow_edit_assignment=True,
                 )
+
+                if st.session_state.get(
+                    _assignment_edit_session_keys("assigned")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_assignment_editor(
+                        required_status="Pending",
+                        ticket_picker_key="assigned_sb_ticket",
+                        edit_key_prefix="assigned",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(pend),
+                    )
 
                 if "created_at" in pend.columns:
                     pend["_created"] = _parse_ts(pend["created_at"])
@@ -3215,6 +3705,7 @@ def _render_dashboard(
                         "ticket_number",
                         "assigned_to",
                         "task_category",
+                        "additional_info",
                         "created_at",
                         "last_assigned_at",
                     )
@@ -3254,7 +3745,23 @@ def _render_dashboard(
                         ("Mark Completed", "Completed", "Completed"),
                     ),
                     allow_delete=True,
+                    allow_edit_assignment=True,
                 )
+
+                if st.session_state.get(
+                    _assignment_edit_session_keys("open")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_assignment_editor(
+                        required_status="Open",
+                        ticket_picker_key="open_sb_ticket",
+                        edit_key_prefix="open",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(open_df),
+                    )
 
                 open_view = _ticket_queue_view(
                     open_df,

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 _log = logging.getLogger("bot_utils")
@@ -34,6 +35,12 @@ _SESSION_BASE = Path(__file__).resolve().parent / "telethon_bot_session"
 NOTIFY_BUILD_ID = "2026-05-16-single"
 
 
+@dataclass(frozen=True)
+class AssignmentTelegramRef:
+    chat_id: int
+    message_id: int
+
+
 def _at_username(username: str) -> str:
     u = username.strip()
     return u if u.startswith("@") else f"@{u}"
@@ -46,6 +53,7 @@ def _build_assignment_notify_text(
     additional_info: str | None = None,
     *,
     assigned_by: str | None = None,
+    updated: bool = False,
 ) -> str:
     """Plain-text assignment body for the field Telegram group (Command Center).
 
@@ -55,7 +63,10 @@ def _build_assignment_notify_text(
     line1 = f"{handle} {category} {ticket_id}"
     note = (additional_info or "").strip()
     who = (assigned_by or "").strip()
-    parts: list[str] = [line1]
+    parts: list[str] = []
+    if updated:
+        parts.append("— Assignment updated (dashboard) —")
+    parts.append(line1)
     if note:
         parts.append(note)
     if who:
@@ -114,13 +125,17 @@ async def _send_via_ptb(
     group_entity: int | str,
     text: str,
     parse_mode: str | None,
-) -> None:
+) -> AssignmentTelegramRef:
     async with Bot(bot_token) as bot:
-        await bot.send_message(
+        msg = await bot.send_message(
             chat_id=group_entity,
             text=text,
             parse_mode=parse_mode,
         )
+    return AssignmentTelegramRef(
+        chat_id=int(msg.chat_id),
+        message_id=int(msg.message_id),
+    )
 
 
 async def _send_via_telethon(
@@ -131,14 +146,95 @@ async def _send_via_telethon(
     group_entity: int | str,
     text: str,
     parse_mode: str | None,
+) -> AssignmentTelegramRef:
+    client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
+    try:
+        await client.start(bot_token=bot_token)
+        msg = await client.send_message(group_entity, text, parse_mode=parse_mode)
+    finally:
+        if client.is_connected():
+            await client.disconnect()
+    return AssignmentTelegramRef(chat_id=int(msg.chat_id), message_id=int(msg.id))
+
+
+async def _edit_via_ptb(
+    *,
+    bot_token: str,
+    chat_id: int,
+    message_id: int,
+    text: str,
+) -> None:
+    async with Bot(bot_token) as bot:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+        )
+
+
+async def _edit_via_telethon(
+    *,
+    api_id: int,
+    api_hash: str,
+    bot_token: str,
+    chat_id: int,
+    message_id: int,
+    text: str,
 ) -> None:
     client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
     try:
         await client.start(bot_token=bot_token)
-        await client.send_message(group_entity, text, parse_mode=parse_mode)
+        await client.edit_message(int(chat_id), int(message_id), text=text)
     finally:
         if client.is_connected():
             await client.disconnect()
+
+
+async def find_assignment_telegram_ref(
+    ticket_id: str,
+    *,
+    group_id: int | str | None = None,
+    bot_token: str | None = None,
+    api_id: str | int | None = None,
+    api_hash: str | None = None,
+    search_limit: int = 50,
+) -> AssignmentTelegramRef | None:
+    """Find the bot's recent assignment message for ``ticket_id`` in the field group."""
+    token = (bot_token or "").strip() or _env_str(
+        "TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"
+    )
+    group_raw = _coalesce_group_id(group_id)
+    api_id_res = api_id
+    if api_id_res is None or (isinstance(api_id_res, str) and not str(api_id_res).strip()):
+        api_id_res = _env_str("TG_API_ID", "TELEGRAM_API_ID") or None
+    api_hash_res = (api_hash or "").strip() or _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
+    if not token or not group_raw or not api_id_res or not api_hash_res:
+        return None
+
+    tid = (ticket_id or "").strip()
+    if not tid:
+        return None
+
+    entity = _parse_group_entity(group_raw)
+    client = TelegramClient(str(_SESSION_BASE), int(str(api_id_res).strip()), api_hash_res)
+    try:
+        await client.start(bot_token=token)
+        async for message in client.iter_messages(entity, limit=search_limit):
+            if not getattr(message, "out", False):
+                continue
+            blob = (message.text or message.message or "").strip()
+            if tid not in blob:
+                continue
+            if message.chat_id is None or message.id is None:
+                continue
+            return AssignmentTelegramRef(
+                chat_id=int(message.chat_id),
+                message_id=int(message.id),
+            )
+    finally:
+        if client.is_connected():
+            await client.disconnect()
+    return None
 
 
 async def notify_telegram_group(
@@ -148,11 +244,12 @@ async def notify_telegram_group(
     *,
     additional_info: str | None = None,
     assigned_by: str | None = None,
+    updated: bool = False,
     api_id: str | int | None = None,
     api_hash: str | None = None,
     bot_token: str | None = None,
     group_id: int | str | None = None,
-) -> None:
+) -> AssignmentTelegramRef:
     """Notify the field Telegram group after a dashboard assignment upsert.
 
     Uses **Telethon** when ``TG_API_ID`` + ``TG_API_HASH`` are set; otherwise
@@ -185,6 +282,7 @@ async def notify_telegram_group(
         category,
         additional_info=additional_info,
         assigned_by=assigned_by,
+        updated=updated,
     )
     entity = _parse_group_entity(group_raw)
     _log.info(
@@ -206,7 +304,7 @@ async def notify_telegram_group(
 
     if use_telethon:
         api_int = int(str(api_id_res).strip())
-        await _send_via_telethon(
+        return await _send_via_telethon(
             api_id=api_int,
             api_hash=api_hash_res,
             bot_token=token,
@@ -214,14 +312,76 @@ async def notify_telegram_group(
             text=text,
             parse_mode=None,
         )
-        return
 
-    await _send_via_ptb(
+    return await _send_via_ptb(
         bot_token=token,
         group_entity=entity,
         text=text,
         parse_mode=None,
     )
+
+
+async def update_telegram_assignment_message(
+    chat_id: int,
+    message_id: int,
+    username: str,
+    ticket_id: str,
+    category: str,
+    *,
+    additional_info: str | None = None,
+    assigned_by: str | None = None,
+    updated: bool = True,
+    api_id: str | int | None = None,
+    api_hash: str | None = None,
+    bot_token: str | None = None,
+) -> None:
+    """Edit the existing assignment post in the field Telegram group."""
+    token = (bot_token or "").strip() or _env_str(
+        "TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"
+    )
+    if not token:
+        raise ValueError("Missing bot token for Telegram edit.")
+
+    api_id_res = api_id
+    if api_id_res is None or (isinstance(api_id_res, str) and not str(api_id_res).strip()):
+        api_id_res = _env_str("TG_API_ID", "TELEGRAM_API_ID") or None
+    api_hash_res = (api_hash or "").strip() or _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
+
+    text = _build_assignment_notify_text(
+        username,
+        ticket_id,
+        category,
+        additional_info=additional_info,
+        assigned_by=assigned_by,
+        updated=updated,
+    )
+
+    use_telethon = bool(
+        api_id_res is not None and str(api_id_res).strip() and api_hash_res
+    )
+    try:
+        if use_telethon:
+            await _edit_via_telethon(
+                api_id=int(str(api_id_res).strip()),
+                api_hash=api_hash_res,
+                bot_token=token,
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                text=text,
+            )
+            return
+
+        await _edit_via_ptb(
+            bot_token=token,
+            chat_id=int(chat_id),
+            message_id=int(message_id),
+            text=text,
+        )
+    except Exception as exc:
+        err = str(exc).lower()
+        if "message is not modified" in err or "message_not_modified" in err:
+            return
+        raise
 
 
 # Backward-compatible name used by earlier commits.
