@@ -3120,14 +3120,15 @@ async def _cc_sync_assignment_to_telegram(
                 ticket_number,
                 task_category,
                 additional_info=additional_info,
-                assigned_by=assigned_by,
+                assigned_by=None,
+                updated=False,
                 api_id=api_id,
                 api_hash=api_hash,
                 bot_token=token,
             )
             return (
                 "The **same** Telegram assignment message was updated in the group "
-                "(scroll to the original post)."
+                "(no new post; notes refreshed in place)."
             )
         except Exception:
             pass
@@ -3187,10 +3188,10 @@ def _render_assignment_editor(
     st.caption(
         f"Editing **{picked}** — saves to the dashboard. "
         + (
-            "Telegram: will try to **edit the original** bot assignment message."
+            "Telegram: will **edit the original** post in place (no “Assignment updated” banner)."
             if linked
-            else "Telegram: no message link yet — will **post a new** assignment message "
-            "(look for “Assignment updated” at the bottom of the group)."
+            else "Telegram: no message link yet — will **post a new** message with "
+            "“Assignment updated” at the bottom of the group."
         )
     )
 

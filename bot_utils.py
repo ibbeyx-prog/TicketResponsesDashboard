@@ -330,12 +330,17 @@ async def update_telegram_assignment_message(
     *,
     additional_info: str | None = None,
     assigned_by: str | None = None,
-    updated: bool = True,
+    updated: bool = False,
     api_id: str | int | None = None,
     api_hash: str | None = None,
     bot_token: str | None = None,
 ) -> None:
-    """Edit the existing assignment post in the field Telegram group."""
+    """Edit the existing assignment post in the field Telegram group.
+
+    Default ``updated=False`` so in-place edits match a normal assignment line
+    (no “Assignment updated” banner). Callers that post a *new* message should
+    use ``notify_telegram_group(..., updated=True)`` instead.
+    """
     token = (bot_token or "").strip() or _env_str(
         "TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"
     )
