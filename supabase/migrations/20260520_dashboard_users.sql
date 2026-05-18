@@ -168,7 +168,9 @@ grant execute on function public.dashboard_verify_login(text, text) to anon, aut
 grant execute on function public.dashboard_request_password_reset(text) to anon, authenticated, service_role;
 grant execute on function public.dashboard_reset_password(text, text, text) to anon, authenticated, service_role;
 
--- First admin (change password after deploy via Forgot password on login screen).
+-- First admins (change passwords after deploy via Forgot password on login screen).
 insert into public.dashboard_users (username, operator_id, password_hash)
-values ('admin', 'admin', crypt('ChangeMeNow!', gen_salt('bf')))
+values
+  ('admin', 'admin', crypt('ChangeMeNow!', gen_salt('bf'))),
+  ('ibeyx', 'ibeyx', crypt('ChangeMeNow!', gen_salt('bf')))
 on conflict (username) do nothing;

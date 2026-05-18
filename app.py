@@ -17,7 +17,7 @@ For Streamlit Cloud, paste this TOML in *Manage app -> Settings -> Secrets*::
     SUPABASE_URL = "https://<project>.supabase.co"
     SUPABASE_KEY = "<service-role-or-anon-key>"
     # Apply migration 20260520_dashboard_users.sql — per-user login (recommended).
-    # Default seed: username admin / password ChangeMeNow! (change after first login).
+    # Default seed users: admin & ibeyx / password ChangeMeNow! (change after first login).
     # Legacy fallback if no users yet:
     # DASHBOARD_PASSWORD = "<shared-password>"
     # DASHBOARD_OPERATOR_ALLOWLIST = "alice,bob"
@@ -570,12 +570,15 @@ def _rpc_dashboard_reset_password(
     return {}
 
 
+_DEFAULT_DASHBOARD_ADMIN_USERNAMES = "admin,ibeyx"
+
+
 def _dashboard_admin_usernames() -> frozenset[str]:
-    raw = _read_setting("DASHBOARD_ADMIN_USERNAMES", "admin")
+    raw = _read_setting("DASHBOARD_ADMIN_USERNAMES", _DEFAULT_DASHBOARD_ADMIN_USERNAMES)
     if not raw:
-        return frozenset({"admin"})
+        return frozenset({"admin", "ibeyx"})
     parts = {p.strip().lower() for p in raw.split(",") if p.strip()}
-    return frozenset(parts) if parts else frozenset({"admin"})
+    return frozenset(parts) if parts else frozenset({"admin", "ibeyx"})
 
 
 def _session_dashboard_username() -> str | None:
@@ -1604,6 +1607,194 @@ def _ticket_options_for_admin(df: pd.DataFrame) -> list[str]:
     return [str(t) for t in ordered["ticket_number"].astype(str).tolist() if t]
 
 
+def _ticket_search_session_key(key_prefix: str) -> str:
+    return f"{key_prefix}_ticket_search"
+
+
+def _ticket_pick_session_key(key_prefix: str) -> str:
+    return f"{key_prefix}_ticket_pick"
+
+
+_TICKET_PICK_PLACEHOLDER = "__choose_ticket__"
+
+
+def _ticket_row_map(df: pd.DataFrame) -> dict[str, dict]:
+    if df.empty or "ticket_number" not in df.columns:
+        return {}
+    out: dict[str, dict] = {}
+    for _, row in df.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if tn:
+            out[tn] = row.to_dict()
+    return out
+
+
+def _ticket_display_label(ticket_number: str, row: dict | None) -> str:
+    """One-line label: ticket · assignee · category · site note."""
+    if not row:
+        return ticket_number
+    assignee = str(row.get("assigned_to") or "—").strip()
+    cat = str(row.get("task_category") or "").strip()
+    extra = str(
+        row.get("additional_info") or row.get("field_response") or ""
+    ).strip()
+    extra = re.sub(r"\s+", " ", extra)
+    if len(extra) > 48:
+        extra = extra[:45] + "…"
+    parts = [ticket_number, assignee]
+    if cat:
+        parts.append(cat)
+    if extra:
+        parts.append(extra)
+    return " · ".join(parts)
+
+
+def _filter_ticket_df_for_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    raw = (query or "").strip()
+    if not raw or df.empty:
+        return df
+    lower = raw.lower()
+    digits = re.sub(r"\D", "", raw)
+
+    def _row_matches(row: pd.Series) -> bool:
+        tn = str(row.get("ticket_number") or "")
+        if lower in tn.lower() or (digits and digits in tn):
+            return True
+        blob = " ".join(
+            [
+                str(row.get("assigned_to") or ""),
+                str(row.get("task_category") or ""),
+                str(row.get("additional_info") or ""),
+                str(row.get("field_response") or ""),
+            ]
+        ).lower()
+        return lower in blob or bool(digits and digits in blob)
+
+    return df[df.apply(_row_matches, axis=1)]
+
+
+def _render_admin_ticket_picker(df: pd.DataFrame, *, key_prefix: str) -> list[str]:
+    """Search + readable pick list (no ticket pre-selected)."""
+    options = _ticket_options_for_admin(df)
+    if not options:
+        return options
+
+    row_map = _ticket_row_map(df)
+    search_key = _ticket_search_session_key(key_prefix)
+    pick_key = _ticket_pick_session_key(key_prefix)
+
+    st.text_input(
+        "Search",
+        placeholder="Ticket #, @engineer, category, site…",
+        key=search_key,
+    )
+    query = str(st.session_state.get(search_key, ""))
+    filtered_df = _filter_ticket_df_for_search(df, query) if query.strip() else df
+    filtered_ids = _ticket_options_for_admin(filtered_df)
+    if not filtered_ids:
+        st.caption("No match — try fewer characters or check the table below.")
+        return options
+
+    pick_ids = [_TICKET_PICK_PLACEHOLDER, *filtered_ids]
+    current = str(st.session_state.get(pick_key, _TICKET_PICK_PLACEHOLDER))
+    if current not in pick_ids and current in options:
+        pick_ids = [_TICKET_PICK_PLACEHOLDER, current, *filtered_ids]
+
+    def _fmt(ticket_id: str) -> str:
+        if ticket_id == _TICKET_PICK_PLACEHOLDER:
+            return "— Choose ticket —"
+        return _ticket_display_label(ticket_id, row_map.get(ticket_id))
+
+    st.selectbox(
+        "Ticket",
+        options=pick_ids,
+        format_func=_fmt,
+        key=pick_key,
+    )
+    chosen = str(st.session_state.get(pick_key, _TICKET_PICK_PLACEHOLDER))
+    if chosen and chosen != _TICKET_PICK_PLACEHOLDER and chosen in options:
+        st.caption(f"Selected **{chosen}**")
+    elif len(filtered_ids) == 1:
+        st.caption(f"1 match — choose **{filtered_ids[0]}** in the list.")
+    return options
+
+
+def _resolve_picked_ticket(*, key_prefix: str, options: list[str]) -> str | None:
+    """Ticket chosen in the picker, or resolved from search text alone."""
+    pick_key = _ticket_pick_session_key(key_prefix)
+    chosen = str(st.session_state.get(pick_key, _TICKET_PICK_PLACEHOLDER))
+    if chosen and chosen != _TICKET_PICK_PLACEHOLDER and chosen in options:
+        return chosen
+    query = str(st.session_state.get(_ticket_search_session_key(key_prefix), ""))
+    return _resolve_ticket_in_queue(query, options)
+
+
+def _resolve_ticket_in_queue(query: str, options: list[str]) -> str | None:
+    """Match ticket # against this queue (exact or trailing digits)."""
+    raw = (query or "").strip()
+    if not raw or not options:
+        return None
+    if raw in options:
+        return raw
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return None
+    if digits in options:
+        return digits
+    # Prefer unique suffix match (e.g. last 9 digits).
+    suffix_hits = [o for o in options if o.endswith(digits)]
+    if len(suffix_hits) == 1:
+        return suffix_hits[0]
+    if len(digits) >= 9:
+        full_hits = [o for o in options if digits in o]
+        if len(full_hits) == 1:
+            return full_hits[0]
+    return None
+
+
+def _filter_tickets_for_search(query: str, options: list[str], *, limit: int = 12) -> list[str]:
+    """Suggestions while typing (subset of queue options)."""
+    raw = (query or "").strip()
+    if not raw:
+        return []
+    lower = raw.lower()
+    digits = re.sub(r"\D", "", raw)
+    hits: list[str] = []
+    for o in options:
+        if o in hits:
+            continue
+        if lower in o.lower() or (digits and digits in o):
+            hits.append(o)
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _require_queue_ticket(*, key_prefix: str, options: list[str]) -> str | None:
+    """Validated ticket from search + pick list, or None after showing an error."""
+    picked = _resolve_picked_ticket(key_prefix=key_prefix, options=options)
+    if picked:
+        return picked
+    st.error(
+        "Search if needed, then choose a ticket from the list "
+        "(not “— Choose ticket —”). Nothing changes until you pick one."
+    )
+    return None
+
+
+def _picked_ticket_from_search(
+    *,
+    key_prefix: str,
+    ticket_options: list[str],
+) -> str | None:
+    """Ticket for sub-forms (edit / reassign / record response)."""
+    picked = _resolve_picked_ticket(key_prefix=key_prefix, options=ticket_options)
+    if picked:
+        return picked
+    st.info("Search and **choose a ticket** in the list above to continue.")
+    return None
+
+
 def _cc_assign_ticket_options(*, limit: int = 80) -> list[str]:
     """Recent ticket numbers for the Command Center assign dropdown."""
     try:
@@ -1671,8 +1862,11 @@ def _render_ticket_delete_popover(
     status_actions: tuple[tuple[str, str, str], ...],
 ) -> None:
     """Secondary remove flow — popover, confirm checkbox, disabled until checked."""
-    picked = str(st.session_state.get(f"{key_prefix}_sb_ticket", options[0]))
     with st.popover("Remove…", use_container_width=True):
+        picked = _resolve_picked_ticket(key_prefix=key_prefix, options=options)
+        if not picked:
+            st.caption("Choose a ticket in the list above, then open Remove again.")
+            return
         st.markdown(f"**{picked}**")
         st.caption("Removes from queue · **Log** keeps history.")
         confirm_del = st.checkbox(
@@ -1711,7 +1905,7 @@ def _sync_manual_field_response_widgets(
 
 def _render_manual_field_response_editor(
     *,
-    ticket_picker_key: str,
+    key_prefix: str,
     edit_key_prefix: str,
     ticket_options: list[str],
     allowed_statuses: tuple[str, ...] = ("Pending", "Open"),
@@ -1722,12 +1916,11 @@ def _render_manual_field_response_editor(
     if not st.session_state.get(keys["show"]):
         return
 
-    picked = str(
-        st.session_state.get(ticket_picker_key)
-        or (ticket_options[0] if ticket_options else "")
+    picked = _picked_ticket_from_search(
+        key_prefix=key_prefix, ticket_options=ticket_options
     )
-    if picked not in ticket_options and ticket_options:
-        picked = ticket_options[0]
+    if not picked:
+        return
 
     row = _fetch_ticket_row(picked)
     if not row:
@@ -1841,11 +2034,7 @@ def _render_admin_ticket_toolbar(
             cols = st.columns(widths, vertical_alignment="bottom")
             idx = 0
             with cols[idx]:
-                picked = st.selectbox(
-                    "Ticket",
-                    options=options,
-                    key=f"{key_prefix}_sb_ticket",
-                )
+                _render_admin_ticket_picker(df, key_prefix=key_prefix)
             idx += 1
             if status_labels:
                 with cols[idx]:
@@ -1857,12 +2046,16 @@ def _render_admin_ticket_toolbar(
                             type="primary",
                             use_container_width=True,
                         ):
-                            _apply_admin_ticket_action(
-                                picked=picked,
-                                choice=label,
-                                confirm_del=False,
-                                status_actions=status_actions,
+                            picked = _require_queue_ticket(
+                                key_prefix=key_prefix, options=options
                             )
+                            if picked:
+                                _apply_admin_ticket_action(
+                                    picked=picked,
+                                    choice=label,
+                                    confirm_del=False,
+                                    status_actions=status_actions,
+                                )
                     else:
                         choice = st.selectbox(
                             "Action",
@@ -1875,12 +2068,16 @@ def _render_admin_ticket_toolbar(
                             type="primary",
                             use_container_width=True,
                         ):
-                            _apply_admin_ticket_action(
-                                picked=picked,
-                                choice=choice,
-                                confirm_del=False,
-                                status_actions=status_actions,
+                            picked = _require_queue_ticket(
+                                key_prefix=key_prefix, options=options
                             )
+                            if picked:
+                                _apply_admin_ticket_action(
+                                    picked=picked,
+                                    choice=choice,
+                                    confirm_del=False,
+                                    status_actions=status_actions,
+                                )
                 idx += 1
             if mfr_col:
                 with cols[idx]:
@@ -1925,11 +2122,7 @@ def _render_admin_ticket_toolbar(
             else:
                 c_ticket, c_del = st.columns([1]), None
             with c_ticket:
-                st.selectbox(
-                    "Ticket",
-                    options=options,
-                    key=f"{key_prefix}_sb_ticket",
-                )
+                _render_admin_ticket_picker(df, key_prefix=key_prefix)
             if c_del is not None:
                 with c_del:
                     _render_ticket_delete_popover(
@@ -2629,7 +2822,7 @@ async def _cc_sync_assignment_to_telegram(
 def _render_assignment_editor(
     *,
     required_status: str,
-    ticket_picker_key: str,
+    key_prefix: str,
     edit_key_prefix: str,
     cat_names: list[str],
     fe_names: list[str],
@@ -2641,9 +2834,11 @@ def _render_assignment_editor(
         return
 
     keys = _assignment_edit_session_keys(edit_key_prefix)
-    picked = str(st.session_state.get(ticket_picker_key) or ticket_options[0])
-    if picked not in ticket_options:
-        picked = ticket_options[0]
+    picked = _picked_ticket_from_search(
+        key_prefix=key_prefix, ticket_options=ticket_options
+    )
+    if not picked:
+        return
 
     row = _fetch_ticket_row(picked)
     if not row:
@@ -2792,7 +2987,7 @@ def _render_assignment_editor(
 def _render_reassign_editor(
     *,
     from_status: str,
-    ticket_picker_key: str,
+    key_prefix: str,
     edit_key_prefix: str,
     cat_names: list[str],
     fe_names: list[str],
@@ -2804,9 +2999,11 @@ def _render_reassign_editor(
         return
 
     keys = _reassign_session_keys(edit_key_prefix)
-    picked = str(st.session_state.get(ticket_picker_key) or ticket_options[0])
-    if picked not in ticket_options:
-        picked = ticket_options[0]
+    picked = _picked_ticket_from_search(
+        key_prefix=key_prefix, ticket_options=ticket_options
+    )
+    if not picked:
+        return
 
     row = _fetch_ticket_row(picked)
     if not row:
@@ -3229,9 +3426,17 @@ def _render_ticket_number_picker() -> None:
             st.rerun()
         return
 
+    row_map = _ticket_row_map(_fetch_tickets()) if all_tickets else {}
+
+    def _cc_ticket_fmt(ticket_id: str) -> str:
+        if ticket_id == _CC_NEW_TICKET_LABEL:
+            return _CC_NEW_TICKET_LABEL
+        return _ticket_display_label(ticket_id, row_map.get(ticket_id))
+
     st.selectbox(
         "Ticket",
         options=[_CC_NEW_TICKET_LABEL, *all_tickets],
+        format_func=_cc_ticket_fmt,
         key=_CC_TICKET_PICK_KEY,
         on_change=_on_cc_ticket_pick_change,
     )
@@ -4404,7 +4609,7 @@ def _render_dashboard(
                     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
                     _render_reassign_editor(
                         from_status="Pending",
-                        ticket_picker_key="assigned_sb_ticket",
+                        key_prefix="assigned",
                         edit_key_prefix="assigned",
                         cat_names=cat_names,
                         fe_names=fe_names,
@@ -4419,7 +4624,7 @@ def _render_dashboard(
                     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
                     _render_assignment_editor(
                         required_status="Pending",
-                        ticket_picker_key="assigned_sb_ticket",
+                        key_prefix="assigned",
                         edit_key_prefix="assigned",
                         cat_names=cat_names,
                         fe_names=fe_names,
@@ -4431,7 +4636,7 @@ def _render_dashboard(
                     _manual_field_response_session_keys("assigned")["show"]
                 ):
                     _render_manual_field_response_editor(
-                        ticket_picker_key="assigned_sb_ticket",
+                        key_prefix="assigned",
                         edit_key_prefix="assigned",
                         ticket_options=_ticket_options_for_admin(pend),
                         allowed_statuses=("Pending",),
@@ -4545,7 +4750,7 @@ def _render_dashboard(
                     _manual_field_response_session_keys("open")["show"]
                 ):
                     _render_manual_field_response_editor(
-                        ticket_picker_key="open_sb_ticket",
+                        key_prefix="open",
                         edit_key_prefix="open",
                         ticket_options=_ticket_options_for_admin(open_df),
                         allowed_statuses=("Open",),
@@ -4559,7 +4764,7 @@ def _render_dashboard(
                     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
                     _render_assignment_editor(
                         required_status="Open",
-                        ticket_picker_key="open_sb_ticket",
+                        key_prefix="open",
                         edit_key_prefix="open",
                         cat_names=cat_names,
                         fe_names=fe_names,
@@ -4572,7 +4777,7 @@ def _render_dashboard(
                     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
                     _render_reassign_editor(
                         from_status="Open",
-                        ticket_picker_key="open_sb_ticket",
+                        key_prefix="open",
                         edit_key_prefix="open",
                         cat_names=cat_names,
                         fe_names=fe_names,
