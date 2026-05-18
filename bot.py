@@ -12,14 +12,7 @@ Database expectations
        create table if not exists public.tickets_active (
          ticket_number text primary key,
          assigned_to text,
-         task_category text check (task_category in (
-           'Coverage Check',
-           'Femto Installation',
-           'Repeater Installation',
-           'Femto Recover',
-           'Femto Fault',
-           'Repeater Fault'
-         )),
+         task_category text not null,
          status text default 'Pending',
          field_response text,
          photo_url text,
@@ -102,7 +95,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from supabase import create_client
-from telegram import BotCommand, Message, Update
+from telegram import BotCommand, Message, MessageEntity, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -113,6 +106,19 @@ from telegram.ext import (
     filters,
 )
 
+from task_categories import (
+    DEFAULT_ASSIGNMENT_TASK_CATEGORIES,
+    fetch_task_category_names,
+    resolve_task_category,
+    sync_ticket_categories_into_table,
+    task_categories_table,
+)
+from unattended import (
+    CRON_SECRET,
+    nudge_message,
+    run_unattended_close,
+    run_unattended_nudges,
+)
 from webhook_config import resolve_telegram_webhook_url
 
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -138,9 +144,7 @@ ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
-TASK_CATEGORIES_TABLE = (
-    os.getenv("TASK_CATEGORIES_TABLE") or "dashboard_task_categories"
-).strip()
+TASK_CATEGORIES_TABLE = task_categories_table().strip()
 FIELD_RESPONSE_UNDO_MINUTES = max(
     1,
     int((os.getenv("FIELD_RESPONSE_UNDO_MINUTES") or "60").strip() or "60"),
@@ -241,16 +245,6 @@ def _validate_ticket_id(raw: str) -> str | None:
     return cleaned
 
 
-# Default categories when ``dashboard_task_categories`` is empty or unreachable.
-_DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
-    "Coverage Check",
-    "Femto Installation",
-    "Repeater Installation",
-    "Femto Recover",
-    "Femto Fault",
-    "Repeater Fault",
-)
-
 # Extra spellings accepted in Telegram text; normalized to a canonical DB value.
 _ASSIGNMENT_CATEGORY_SYNONYMS: dict[str, str] = {
     "Femto Recovery": "Femto Recover",
@@ -258,32 +252,39 @@ _ASSIGNMENT_CATEGORY_SYNONYMS: dict[str, str] = {
 
 # Pattern: "@user <Category> <ticket_number>" — rebuilt when categories change in Supabase.
 _ASSIGNMENT_HANDLE = r"@[A-Za-z][A-Za-z0-9_]{3,31}"
-_assignment_categories_cache: tuple[str, ...] = _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
+_assignment_categories_cache: tuple[str, ...] = DEFAULT_ASSIGNMENT_TASK_CATEGORIES
 _assignment_pattern_cache: re.Pattern[str] | None = None
 _categories_cache_at: float = 0.0
-_CATEGORIES_CACHE_TTL_SEC = 45.0
+_CATEGORIES_CACHE_TTL_SEC = 3.0
+
+# Coordinator line: @user, any category text, then a 9/16-digit ticket (may be on the next line).
+_COORDINATOR_ASSIGNMENT_HINT = re.compile(
+    rf"{_ASSIGNMENT_HANDLE}[\s\S]+?(?<!\d)(?:\d{{16}}|\d{{9}})(?!\d)",
+    re.IGNORECASE,
+)
+_ASSIGNMENT_HANDLE_PATTERN = re.compile(_ASSIGNMENT_HANDLE, re.IGNORECASE)
+_TICKET_IN_ASSIGNMENT_RE = re.compile(r"(?<!\d)(\d{16}|\d{9})(?!\d)")
+_STANDALONE_FIELD_TICKET_RE = re.compile(r"^\s*(\d{16}|\d{9})\b")
 
 
 def _fetch_task_categories_from_db() -> tuple[str, ...] | None:
     try:
-        res = (
-            supabase.table(TASK_CATEGORIES_TABLE)
-            .select("name")
-            .order("sort_order")
-            .order("name")
-            .execute()
+        names, missing = fetch_task_category_names(
+            supabase, include_defaults_if_empty=False
         )
     except Exception:
         log.exception("Failed to load task categories from %s", TASK_CATEGORIES_TABLE)
         return None
-    names = [str(r["name"]).strip() for r in (res.data or []) if r.get("name")]
-    names = [n for n in names if n]
+    if missing:
+        return None
     return tuple(names) if names else None
 
 
 def _compile_assignment_pattern(categories: tuple[str, ...]) -> re.Pattern[str]:
     spellings = categories + tuple(_ASSIGNMENT_CATEGORY_SYNONYMS.keys())
-    category_alts = "|".join(re.escape(cat) for cat in spellings)
+    # Longest labels first so e.g. "Femto Installation" wins over "Femto Fault".
+    ordered = sorted(spellings, key=len, reverse=True)
+    category_alts = "|".join(re.escape(cat) for cat in ordered)
     next_head = rf"(?:{_ASSIGNMENT_HANDLE})\s+(?:{category_alts})\s+[0-9]"
     return re.compile(
         rf"({_ASSIGNMENT_HANDLE})\s+({category_alts})\s+((?:[0-9]{{16}})|(?:[0-9]{{9}}))"
@@ -302,7 +303,10 @@ def _refresh_assignment_categories(*, force: bool = False) -> tuple[str, ...]:
     ):
         return _assignment_categories_cache
     loaded = _fetch_task_categories_from_db()
-    categories = loaded if loaded else _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
+    if loaded:
+        categories = loaded
+    else:
+        categories = _DEFAULT_ASSIGNMENT_TASK_CATEGORIES
     _assignment_categories_cache = categories
     _assignment_pattern_cache = _compile_assignment_pattern(categories)
     _categories_cache_at = time.monotonic()
@@ -317,6 +321,105 @@ def _assignment_pattern() -> re.Pattern[str]:
     _refresh_assignment_categories()
     assert _assignment_pattern_cache is not None
     return _assignment_pattern_cache
+
+
+def _category_phrase_in_blob(norm: str) -> bool:
+    """Match full category labels only (avoid ``recover`` inside ``responded``)."""
+    lower = norm.lower()
+    for cat in _assignment_task_categories():
+        phrase = re.escape(cat.lower())
+        if re.search(rf"(?<![a-z0-9]){phrase}(?![a-z0-9])", lower):
+            return True
+    return False
+
+
+def _looks_like_coordinator_assignment(blob: str) -> bool:
+    """True when text resembles ``@user <Category> <ticket>`` (category not in regex).
+
+    Also accepts coordinator lines where the handle is only a Telegram **mention**
+    (no literal ``@`` in ``message`` text) but a known category and ticket id are present —
+    common for two-line posts like ``Coverage Check`` then ``100625230 …``.
+
+    Messages that **start with a ticket id** (field status updates) are never assignments.
+    """
+    if not blob:
+        return False
+    if _COORDINATOR_ASSIGNMENT_HINT.search(blob):
+        return True
+    norm = _normalize_assignment_blob(blob)
+    if _STANDALONE_FIELD_TICKET_RE.match(norm):
+        return False
+    ticket_m = _TICKET_IN_ASSIGNMENT_RE.search(norm)
+    if not ticket_m:
+        return False
+    if not _category_phrase_in_blob(norm):
+        return False
+    return bool(norm[: ticket_m.start()].strip())
+
+
+def _refresh_assignment_categories_if_plausible(blob: str) -> None:
+    """Reload category list when text looks like a coordinator assignment.
+
+    The assignment MessageHandler filter runs before ``handle_assignment``. If we
+    only refresh categories inside the handler, a category added in the dashboard
+    can be invisible to the filter for up to ``_CATEGORIES_CACHE_TTL_SEC``.
+    """
+    if _looks_like_coordinator_assignment(blob):
+        _refresh_assignment_categories(force=True)
+
+
+def _parse_coordinator_assignments(
+    blob: str,
+) -> list[tuple[str, str, str, str | None]]:
+    """Parse ``@user``, category label, ticket id, and trailing notes from one message.
+
+    Does not require the category to appear in the assignment regex alternation —
+    new dashboard categories and line breaks between category and ticket still work.
+    """
+    blob = _normalize_assignment_blob(blob)
+    if not blob:
+        return []
+    parsed: list[tuple[str, str, str, str | None]] = []
+    pos = 0
+    while pos < len(blob):
+        hm = _ASSIGNMENT_HANDLE_PATTERN.search(blob, pos)
+        if not hm:
+            break
+        assigned_to = hm.group(0)
+        after = hm.end()
+        tm = _TICKET_IN_ASSIGNMENT_RE.search(blob, after)
+        if not tm:
+            break
+        category_raw = re.sub(r"\s+", " ", blob[after : tm.start()].strip())
+        if not category_raw:
+            pos = hm.end() + 1
+            continue
+        ticket_number = tm.group(1)
+        next_hm = _ASSIGNMENT_HANDLE_PATTERN.search(blob, tm.end())
+        info_end = next_hm.start() if next_hm else len(blob)
+        additional_info = _clean_assignment_info(blob[tm.end() : info_end])
+        parsed.append((assigned_to, category_raw, ticket_number, additional_info))
+        pos = tm.end()
+    return parsed
+
+
+def _message_to_assignment_blob(msg: Message | None) -> str:
+    """Build assignment text from message body, normalizing Telegram mention entities."""
+    if not msg:
+        return ""
+    text = msg.text or ""
+    cap = msg.caption or ""
+    if msg.entities and text:
+        for ent in sorted(msg.entities, key=lambda e: e.offset, reverse=True):
+            if ent.type != MessageEntity.TEXT_MENTION or not ent.user:
+                continue
+            username = (ent.user.username or "").strip()
+            if not username:
+                continue
+            start = ent.offset
+            end = ent.offset + ent.length
+            text = text[:start] + f"@{username}" + text[end:]
+    return _normalize_assignment_blob(f"{text}\n{cap}")
 
 
 def _normalize_assignment_blob(blob: str) -> str:
@@ -347,6 +450,13 @@ def _normalize_assignment_blob(blob: str) -> str:
     # Emoji / variation selectors sometimes attach to the category token.
     s = re.sub(r"[\uFE00-\uFE0F]", "", s)
     s = re.sub(r"[ \t]+", " ", s)
+    # Put ticket numbers that start a line onto the same line as the category when
+    # coordinators paste "@user Category" then "123456789 details" on the next line.
+    s = re.sub(
+        r"(?<=\S)\n(?=(?:\d{16}|\d{9})(?:\s|$))",
+        " ",
+        s,
+    )
     return s
 
 
@@ -358,9 +468,9 @@ def _parent_assignment_blob(parent: object) -> str:
     """
     if parent is None or not isinstance(parent, Message):
         return ""
-    return _normalize_assignment_blob(
-        f"{parent.text or ''}\n{parent.caption or ''}"
-    )
+    if isinstance(parent, Message):
+        return _message_to_assignment_blob(parent)
+    return ""
 
 
 def _clean_assignment_info(raw: str | None) -> str | None:
@@ -380,6 +490,18 @@ def _clean_assignment_info(raw: str | None) -> str | None:
     return cleaned
 
 
+class _StandaloneFieldReplyFilter(filters.MessageFilter):
+    """Group text starting with a ticket id + notes (no swipe-reply)."""
+
+    def filter(self, message: Message) -> bool:
+        if not message or message.reply_to_message:
+            return False
+        text = (message.text or "").strip()
+        if not text:
+            return False
+        return _parse_standalone_field_response(text) is not None
+
+
 class _ReplyToAssignmentFilter(filters.MessageFilter):
     """True when the message is a reply and the parent contains an assignment pattern."""
 
@@ -388,7 +510,8 @@ class _ReplyToAssignmentFilter(filters.MessageFilter):
         if not parent:
             return False
         blob = _parent_assignment_blob(parent)
-        return bool(_assignment_pattern().search(blob))
+        _refresh_assignment_categories_if_plausible(blob)
+        return _looks_like_coordinator_assignment(blob)
 
 
 class _CoordinatorAssignmentFilter(filters.MessageFilter):
@@ -401,8 +524,9 @@ class _CoordinatorAssignmentFilter(filters.MessageFilter):
         cap = message.caption or ""
         if not (t.strip() or cap.strip()):
             return False
-        blob = _normalize_assignment_blob(f"{t}\n{cap}")
-        return bool(_assignment_pattern().search(blob))
+        blob = _message_to_assignment_blob(message)
+        _refresh_assignment_categories_if_plausible(blob)
+        return _looks_like_coordinator_assignment(blob)
 
 
 def _is_sender_allowed(update: Update) -> bool:
@@ -432,6 +556,40 @@ def _telegram_user_id(update: Update) -> int | None:
     return int(user.id) if user else None
 
 
+def _telegram_replier_label(update: Update) -> str:
+    """Best-effort label for who sent a message (works without a public @username)."""
+    user = update.effective_user
+    if not user:
+        return "unknown"
+    if user.username:
+        return f"@{user.username}"
+    parts = [user.first_name or "", user.last_name or ""]
+    name = " ".join(p for p in parts if p).strip()
+    if name:
+        return name
+    return f"Telegram user {user.id}"
+
+
+def _field_responded_by_value(*, assigned_to: object, replier_label: str) -> str | None:
+    """Set only when the Telegram **sender** is not the ticket assignee.
+
+    ``@mentions`` inside the message body (e.g. tagging assigner ``@ibeyx``) are
+    ignored — they stay in ``field_response`` only.
+    """
+    assignee = str(assigned_to or "").strip()
+    if not assignee or replier_label in ("", "unknown"):
+        return None
+    assignee_at = assignee if assignee.startswith("@") else f"@{assignee.lstrip('@')}"
+    if _normalize_username(replier_label) == _normalize_username(assignee_at):
+        return None
+    if replier_label.lower() == assignee_at.lower():
+        return None
+    if replier_label.lower() == assignee_at.lstrip("@").lower():
+        return None
+    label = replier_label.strip()
+    return label if label.startswith("@") else f"@{label.lstrip('@')}"
+
+
 def _chat_id(update: Update) -> int | None:
     chat = update.effective_chat
     return int(chat.id) if chat else None
@@ -449,8 +607,80 @@ def _skip_bot_own_assignment_echo(update: Update) -> bool:
         return False
     if user.id != bot_id:
         return False
-    blob = _normalize_assignment_blob(f"{msg.text or ''}\n{msg.caption or ''}")
-    return bool(blob and _assignment_pattern().search(blob))
+    blob = _message_to_assignment_blob(msg)
+    if not blob:
+        return False
+    _refresh_assignment_categories_if_plausible(blob)
+    return _looks_like_coordinator_assignment(blob)
+
+
+_MESSAGE_DEDUP: dict[tuple[int, int, int], float] = {}
+_MESSAGE_DEDUP_TTL_SEC = 180.0
+
+
+def _message_dedup_key(
+    chat_id: int, message_id: int, edit_date: int | None
+) -> tuple[int, int, int]:
+    return (chat_id, message_id, int(edit_date or 0))
+
+
+def _prune_message_dedup(now: float) -> None:
+    stale = [
+        k
+        for k, t in _MESSAGE_DEDUP.items()
+        if now - t > _MESSAGE_DEDUP_TTL_SEC
+    ]
+    for k in stale:
+        _MESSAGE_DEDUP.pop(k, None)
+
+
+def _claim_telegram_message(
+    chat_id: int, message_id: int, edit_date: int | None
+) -> bool:
+    """Return True if this (chat, message, edit) was not processed recently."""
+    now = time.monotonic()
+    _prune_message_dedup(now)
+    key = _message_dedup_key(chat_id, message_id, edit_date)
+    if key in _MESSAGE_DEDUP:
+        return False
+    _MESSAGE_DEDUP[key] = now
+    return True
+
+
+async def ingest_telegram_update(update: Update) -> None:
+    """Single entry for webhook + Telethon group ingest (with deduplication)."""
+    msg = update.effective_message
+    if msg and msg.chat_id and msg.message_id:
+        if not _claim_telegram_message(
+            int(msg.chat_id), int(msg.message_id), msg.edit_date
+        ):
+            log.debug(
+                "skip duplicate telegram message chat=%s msg=%s edit=%s",
+                msg.chat_id,
+                msg.message_id,
+                msg.edit_date,
+            )
+            return
+
+    if _skip_bot_own_assignment_echo(update):
+        log.info(
+            "skip bot-own assignment echo update_id=%s (dashboard already posted)",
+            update.update_id,
+        )
+        return
+
+    msg = update.effective_message
+    if msg and _is_group_chat(update):
+        blob = _message_to_assignment_blob(msg) if isinstance(msg, Message) else ""
+        if blob and _looks_like_coordinator_assignment(blob):
+            log.info(
+                "ingest assignment-shaped group message chat=%s msg=%s head=%r",
+                getattr(msg, "chat_id", None),
+                getattr(msg, "message_id", None),
+                blob[:100],
+            )
+
+    await bot_app.process_update(update)
 
 
 def _log_incoming_update(update: Update) -> None:
@@ -597,30 +827,67 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
     return bool(db_key and db_key == _normalize_username(replier_username))
 
 
-def _resolve_ticket_from_assignment_reply(parent_blob: str, replier_username: str | None) -> str | None:
-    """Pick the ticket_number from the parent assignment message for this replier."""
+def _ticket_field_reply_eligible(ticket_number: str) -> bool:
+    """Pending/Open tickets can receive a field completion."""
+    try:
+        row = _db_get_ticket(ticket_number)
+    except Exception:
+        log.exception("tickets lookup failed for field reply: %s", ticket_number)
+        return False
+    if not row:
+        return False
+    return str(row.get("status") or "").strip() in ("Pending", "Open")
+
+
+def _resolve_ticket_from_assignment_reply(
+    parent_blob: str,
+    reply_text: str | None,
+) -> str | None:
+    """Pick ticket from the replied-to assignment; trust ``@user`` on that line.
+
+    Field staff often reply from rotating test phones (different Telegram accounts).
+    A swipe-reply to ``@Dissiby … ticket`` counts as Dissiby's response regardless
+    of the replier's @username.
+    """
     parent_blob = _normalize_assignment_blob(parent_blob)
-    matches = list(_assignment_pattern().finditer(parent_blob))
-    if not matches:
+    _refresh_assignment_categories_if_plausible(parent_blob)
+    parsed = _parse_coordinator_assignments(parent_blob)
+    if not parsed:
         return None
-    if not replier_username:
+
+    ids_in_reply = _extract_ticket_ids(reply_text) if reply_text else []
+    if ids_in_reply:
+        for tid in ids_in_reply:
+            for _assigned_to, _category_raw, ticket_number, _info in parsed:
+                if ticket_number == tid and _ticket_field_reply_eligible(ticket_number):
+                    return ticket_number
+        if len(ids_in_reply) == 1 and _ticket_field_reply_eligible(ids_in_reply[0]):
+            return ids_in_reply[0]
         return None
-    replier_key = _normalize_username(replier_username)
-    if not replier_key:
+
+    if len(parsed) == 1:
+        _assigned_to, _category_raw, ticket_number, _info = parsed[0]
+        if _ticket_field_reply_eligible(ticket_number):
+            return ticket_number
         return None
-    for m in matches:
-        ticket_number = m.group(3)
+
+    pending_on_parent: list[str] = []
+    for _assigned_to, _category_raw, ticket_number, _info in parsed:
         try:
             row = _db_get_ticket(ticket_number)
         except Exception:
-            log.exception("tickets lookup failed during field-reply resolution: %s", ticket_number)
             continue
-        if row and _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
-            return ticket_number
-    if len(matches) == 1:
-        m = matches[0]
-        if _normalize_username(m.group(1)) == replier_key:
-            return m.group(3)
+        if row and str(row.get("status") or "").strip() == "Pending":
+            pending_on_parent.append(ticket_number)
+    if len(pending_on_parent) == 1:
+        return pending_on_parent[0]
+    if len(pending_on_parent) > 1:
+        log.warning(
+            "field_reply ambiguous: %s assignment lines, %s still Pending; "
+            "include ticket number in reply",
+            len(parsed),
+            len(pending_on_parent),
+        )
     return None
 
 
@@ -647,12 +914,38 @@ def _resolve_ticket_by_unique_id(
     parent_blob: str,
     reply_text: str | None,
     replier_username: str | None,
+    *,
+    trust_assignment_parent: bool = False,
 ) -> str | None:
     """Resolve using ticket_number (globally unique) from parent and/or reply text."""
-    if not replier_username:
-        return None
     ids = _extract_ticket_ids(parent_blob, reply_text)
     if not ids:
+        return None
+
+    if trust_assignment_parent:
+        existing = [tid for tid in ids if _ticket_field_reply_eligible(tid)]
+        if len(existing) == 1:
+            return existing[0]
+        pending = []
+        for tid in ids:
+            try:
+                row = _db_get_ticket(tid)
+            except Exception:
+                continue
+            if row and str(row.get("status") or "").strip() == "Pending":
+                pending.append(tid)
+        if len(pending) == 1:
+            return pending[0]
+        if len(existing) > 1:
+            log.info(
+                "field_reply: multiple ticket ids on assignment parent, using %s among %s",
+                existing[0],
+                existing,
+            )
+            return existing[0]
+        return None
+
+    if not replier_username:
         return None
 
     matched: list[str] = []
@@ -670,7 +963,6 @@ def _resolve_ticket_by_unique_id(
     if len(matched) == 1:
         return matched[0]
     if len(matched) > 1:
-        # Rare: two ticket ids in one message; first assignee match wins.
         log.info(
             "field_reply: multiple ticket ids for @%s, using %s among %s",
             replier_username,
@@ -722,17 +1014,74 @@ def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) ->
     return None
 
 
+def _parse_standalone_field_response(text: str) -> tuple[str, str] | None:
+    """Parse ``<ticket_id> <notes>`` when the engineer posts without swipe-reply.
+
+    Field staff often reply with the ticket number first::
+
+        2020051772000001 was responded for this task
+        @ibeyx need to attend tomorrow …
+
+  The ``@ibeyx`` here tags the **assigner/coordinator** in the note — it is kept in
+  ``field_response`` text. ``field_responded_by`` is only the **Telegram account**
+  that sent the message (when different from ``assigned_to``).
+    """
+    norm = _normalize_assignment_blob(text)
+    if not norm:
+        return None
+    m = _STANDALONE_FIELD_TICKET_RE.match(norm)
+    if not m:
+        return None
+    ticket_number = m.group(1)
+    field_text = norm[m.end() :].strip()
+    if not field_text:
+        return None
+    if not _ticket_field_reply_eligible(ticket_number):
+        return None
+    return ticket_number, field_text
+
+
 def _resolve_ticket_for_field_reply(
     parent_blob: str,
     replier_username: str | None,
     reply_text: str | None,
 ) -> str | None:
     """Match a field reply to exactly one ticket (ticket_number is unique in the DB)."""
+    if reply_text:
+        ids_in_reply = _extract_ticket_ids(reply_text)
+        if len(ids_in_reply) == 1 and _ticket_field_reply_eligible(ids_in_reply[0]):
+            log.info(
+                "field_reply matched ticket %s via ticket id in reply (any phone)",
+                ids_in_reply[0],
+            )
+            return ids_in_reply[0]
+
+    norm_parent = _normalize_assignment_blob(parent_blob)
+    trust_parent = _looks_like_coordinator_assignment(norm_parent)
+
+    if trust_parent:
+        ticket = _resolve_ticket_from_assignment_reply(norm_parent, reply_text)
+        if ticket:
+            log.info(
+                "field_reply matched ticket %s via assignment parent (trust assignee line)",
+                ticket,
+            )
+            return ticket
+        ticket = _resolve_ticket_by_unique_id(
+            parent_blob,
+            reply_text,
+            replier_username,
+            trust_assignment_parent=True,
+        )
+        if ticket:
+            log.info("field_reply matched ticket %s via id on assignment parent", ticket)
+        return ticket
+
     ticket = _resolve_ticket_by_unique_id(parent_blob, reply_text, replier_username)
     if ticket:
         log.info("field_reply matched unique ticket_number %s", ticket)
         return ticket
-    ticket = _resolve_ticket_from_assignment_reply(parent_blob, replier_username)
+    ticket = _resolve_ticket_from_assignment_reply(parent_blob, reply_text)
     if ticket:
         return ticket
     ticket = _resolve_ticket_single_pending_for_assignee(replier_username)
@@ -797,22 +1146,28 @@ def _is_duplicate_key_error(exc: Exception) -> bool:
 
 
 def _canonical_task_category(raw: str) -> str | None:
-    """Map synonym / typo labels to allowed ``task_category`` values (DB check constraint)."""
-    s = (raw or "").strip()
+    """Map synonym / typo labels to canonical ``task_category`` values from Supabase."""
+    s = re.sub(r"\s+", " ", (raw or "").strip())
     if not s:
         return None
-    categories = _assignment_task_categories()
-    if s in categories:
-        return s
     if s in _ASSIGNMENT_CATEGORY_SYNONYMS:
-        return _ASSIGNMENT_CATEGORY_SYNONYMS[s]
-    key_lower = s.lower()
-    for cat in categories:
-        if cat.lower() == key_lower:
-            return cat
-    for syn, canonical in _ASSIGNMENT_CATEGORY_SYNONYMS.items():
-        if syn.lower() == key_lower:
-            return canonical
+        s = _ASSIGNMENT_CATEGORY_SYNONYMS[s]
+
+    hit = resolve_task_category(s, _assignment_task_categories())
+    if hit:
+        return hit
+
+    _refresh_assignment_categories(force=True)
+    hit = resolve_task_category(s, _assignment_task_categories())
+    if hit:
+        return hit
+
+    loaded = _fetch_task_categories_from_db()
+    if loaded:
+        hit = resolve_task_category(s, loaded)
+        if hit:
+            return hit
+
     aliases = {
         "femto recovery": "Femto Recover",
         "femto-installation": "Femto Installation",
@@ -821,7 +1176,7 @@ def _canonical_task_category(raw: str) -> str | None:
         "coverage": "Coverage Check",
         "coverage check": "Coverage Check",
     }
-    return aliases.get(key_lower)
+    return aliases.get(s.lower())
 
 
 def _parse_missing_column(message: str) -> str | None:
@@ -996,6 +1351,7 @@ def _db_undo_field_response_by_telegram_message(chat_id: int, message_id: int) -
     updates = {
         "status": "Pending",
         "field_response": None,
+        "field_responded_by": None,
         "photo_url": None,
         "responded_at": None,
         "updated_at": now_iso,
@@ -1080,6 +1436,7 @@ def _db_complete_ticket_field_response(
     photo_url: str | None = None,
     update_photo_url: bool = False,
     responder_username: str | None = None,
+    field_responded_by: str | None = None,
     telegram_chat_id: int | None = None,
     telegram_message_id: int | None = None,
 ) -> None:
@@ -1103,6 +1460,10 @@ def _db_complete_ticket_field_response(
         updates["last_response_telegram_chat_id"] = int(telegram_chat_id)
     if telegram_message_id is not None:
         updates["last_response_telegram_message_id"] = int(telegram_message_id)
+    if field_responded_by:
+        updates["field_responded_by"] = field_responded_by
+    else:
+        updates["field_responded_by"] = None
     _execute_ticket_update(updates, ticket_number)
     try:
         row = _db_get_ticket(ticket_number)
@@ -1116,15 +1477,27 @@ def _db_complete_ticket_field_response(
         log.exception("post-update verify failed for ticket %s", ticket_number)
 
     if responder_username:
+        log_note = field_response
+        if field_responded_by:
+            prefix = f"Responded by {field_responded_by}"
+            log_note = f"{prefix}: {field_response}" if field_response else prefix
         _db_insert_attendance_log(
             ticket_number=ticket_number,
             member_username=responder_username,
             action_type="Response",
-            note=field_response,
+            note=log_note,
             photo_url=photo_url if update_photo_url else None,
             telegram_chat_id=telegram_chat_id,
             telegram_message_id=telegram_message_id,
         )
+
+
+def _assignment_telegram_refs(update: Update) -> tuple[int | None, int | None]:
+    """Store group assignment message ids (for edits / future tooling)."""
+    msg = update.effective_message
+    if not msg or not _is_group_chat(update):
+        return None, None
+    return int(msg.chat_id), int(msg.message_id)
 
 
 def _db_insert_assignment(
@@ -1133,6 +1506,8 @@ def _db_insert_assignment(
     task_category: str,
     *,
     additional_info: str | None = None,
+    assignment_telegram_chat_id: int | None = None,
+    assignment_telegram_message_id: int | None = None,
 ) -> None:
     now_iso = _utc_now_iso()
     row = {
@@ -1141,11 +1516,17 @@ def _db_insert_assignment(
         "task_category": task_category,
         "status": "Pending",
         "field_response": None,
+        "field_responded_by": None,
         "photo_url": None,
         "last_assigned_at": now_iso,
         "additional_info": additional_info,
         "dashboard_assigned_by": None,
+        "unattended_nudge_sent_at": None,
     }
+    if assignment_telegram_chat_id is not None:
+        row["assignment_telegram_chat_id"] = int(assignment_telegram_chat_id)
+    if assignment_telegram_message_id is not None:
+        row["assignment_telegram_message_id"] = int(assignment_telegram_message_id)
     # `last_assigned_at` and `additional_info` are recent additions; if the
     # column hasn't been migrated yet on a given environment, drop it and
     # retry. Each missing column gets one strip-and-retry, so we cope with
@@ -1195,6 +1576,8 @@ def _db_reassign_ticket(
     task_category: str,
     *,
     additional_info: str | None = None,
+    assignment_telegram_chat_id: int | None = None,
+    assignment_telegram_message_id: int | None = None,
 ) -> None:
     """Overwrite assigned_to / task_category and reset prior work for a re-assignment.
 
@@ -1211,12 +1594,19 @@ def _db_reassign_ticket(
         "task_category": task_category,
         "status": "Pending",
         "field_response": None,
+        "field_responded_by": None,
         "photo_url": None,
+        "responded_at": None,
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "additional_info": additional_info,
         "dashboard_assigned_by": None,
+        "unattended_nudge_sent_at": None,
     }
+    if assignment_telegram_chat_id is not None:
+        updates["assignment_telegram_chat_id"] = int(assignment_telegram_chat_id)
+    if assignment_telegram_message_id is not None:
+        updates["assignment_telegram_message_id"] = int(assignment_telegram_message_id)
     _execute_ticket_update(updates, ticket_number)
 
     _db_insert_attendance_log(
@@ -1225,6 +1615,92 @@ def _db_reassign_ticket(
         action_type="Assignment",
         note=additional_info,
     )
+
+
+def _same_assignment_target(
+    existing: dict,
+    *,
+    assigned_to: str,
+    task_category: str,
+) -> bool:
+    ex_a = str(existing.get("assigned_to") or "").strip().lstrip("@").lower()
+    new_a = assigned_to.strip().lstrip("@").lower()
+    ex_c = str(existing.get("task_category") or "").strip().lower()
+    new_c = task_category.strip().lower()
+    return ex_a == new_a and ex_c == new_c
+
+
+def _db_update_assignment_from_telegram(
+    ticket_number: str,
+    *,
+    assigned_to: str,
+    task_category: str,
+    additional_info: str | None = None,
+    assignment_telegram_chat_id: int | None = None,
+    assignment_telegram_message_id: int | None = None,
+) -> None:
+    """Refresh assignment notes and Telegram refs without clearing a field response."""
+    now_iso = _utc_now_iso()
+    updates: dict[str, Any] = {
+        "assigned_to": assigned_to,
+        "task_category": task_category,
+        "additional_info": additional_info,
+        "updated_at": now_iso,
+        "last_assigned_at": now_iso,
+    }
+    if assignment_telegram_chat_id is not None:
+        updates["assignment_telegram_chat_id"] = int(assignment_telegram_chat_id)
+    if assignment_telegram_message_id is not None:
+        updates["assignment_telegram_message_id"] = int(assignment_telegram_message_id)
+    _execute_ticket_update(updates, ticket_number)
+    _db_insert_attendance_log(
+        ticket_number=ticket_number,
+        member_username=assigned_to,
+        action_type="AssignmentUpdated",
+        note=additional_info,
+    )
+
+
+def _resolve_field_group_chat_id() -> int | str | None:
+    raw = (
+        os.getenv("TELEGRAM_GROUP_CHAT_ID")
+        or os.getenv("TG_GROUP_ID")
+        or os.getenv("TELEGRAM_GROUP_ID")
+        or ""
+    ).strip()
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        return raw
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+async def _send_unattended_nudge_telegram(row: dict) -> None:
+    chat_id = _resolve_field_group_chat_id()
+    if chat_id is None:
+        log.warning("skip telegram nudge: TELEGRAM_GROUP_CHAT_ID not set")
+        return
+    text = nudge_message(
+        assigned_to=str(row.get("assigned_to") or ""),
+        ticket_number=str(row.get("ticket_number") or ""),
+        task_category=str(row.get("task_category") or ""),
+    )
+    await bot_app.bot.send_message(chat_id=chat_id, text=text)
+
+
+def _verify_cron_secret(request: Request) -> None:
+    if not CRON_SECRET:
+        raise HTTPException(status_code=503, detail="CRON_SECRET not configured")
+    header = (request.headers.get("X-Cron-Secret") or "").strip()
+    if not header:
+        auth = (request.headers.get("Authorization") or "").strip()
+        if auth.lower().startswith("bearer "):
+            header = auth[7:].strip()
+    if not hmac.compare_digest(header.encode("utf-8"), CRON_SECRET.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
 
 
 async def _get_active_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -1272,9 +1748,10 @@ _HELP_TEXT = (
     "(when Telethon is configured) or reply UNDO to that message.\n"
     "\n"
     "Groups + Telegram bot privacy:\n"
-    "  Coordinators: post ``@user <Category> <ticket>`` (new message or thread reply).\n"
-    "  Field team: swipe-reply to that assignment. If the bot never sees messages,\n"
-    "  turn privacy OFF in @BotFather or @mention the bot on assignments.\n"
+    "  Coordinators: post ``@user <Category> <ticket>`` (ticket may be on the next line).\n"
+    "  Field team: swipe-reply to that assignment (any phone; assignee from the line).\n"
+    "  Set TG_API_ID + TG_API_HASH + TELEGRAM_GROUP_CHAT_ID so Telethon reads the group\n"
+    "  even when @BotFather privacy mode is ON; or turn privacy OFF for webhook-only.\n"
     "\n"
     "Operator /respond workflow:\n"
     "  1) /respond <ticket_id> — pick the ticket you want to reply to\n"
@@ -1466,17 +1943,38 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _reply(update, f"Saved response for ticket {ticket_id} (legacy log only).")
 
 
+def _assignee_handle(assigned_to: object) -> str:
+    assignee = str(assigned_to or "").strip()
+    if not assignee:
+        return "@unknown"
+    return assignee if assignee.startswith("@") else f"@{assignee.lstrip('@')}"
+
+
 async def _apply_field_completion(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     ticket_number: str,
     *,
     username: str | None,
+    assigned_to: str | None = None,
+    field_response_override: str | None = None,
 ) -> None:
     """Save text/photo for ``ticket_number`` and set status Open (admin review)."""
     msg = update.effective_message
     if not msg:
         return
+
+    try:
+        ticket_row = _db_get_ticket(ticket_number)
+    except Exception:
+        ticket_row = None
+    db_assignee = assigned_to or (ticket_row or {}).get("assigned_to")
+    assignee_handle = _assignee_handle(db_assignee)
+    replier_label = _telegram_replier_label(update)
+    responded_by = _field_responded_by_value(
+        assigned_to=db_assignee,
+        replier_label=replier_label,
+    )
 
     tg_chat_id = int(msg.chat_id)
     tg_message_id = int(msg.message_id)
@@ -1487,7 +1985,7 @@ async def _apply_field_completion(
         if msg.document and (msg.document.mime_type or "").startswith("image/")
         else None
     )
-    caption_or_text = (msg.caption or msg.text or "").strip() or None
+    caption_or_text = (field_response_override or msg.caption or msg.text or "").strip() or None
 
     if not has_photo and not image_doc and not caption_or_text:
         await _reply(update, 
@@ -1520,14 +2018,14 @@ async def _apply_field_completion(
                 "saving text-only field response for %s after photo upload failed",
                 ticket_number,
             )
-        responder_handle = f"@{username}" if username else "@unknown"
         try:
             _db_complete_ticket_field_response(
                 ticket_number,
                 field_response=caption_or_text,
                 photo_url=upload_url,
                 update_photo_url=bool(upload_url),
-                responder_username=responder_handle,
+                responder_username=assignee_handle,
+                field_responded_by=responded_by,
                 telegram_chat_id=tg_chat_id,
                 telegram_message_id=tg_message_id,
             )
@@ -1538,9 +2036,10 @@ async def _apply_field_completion(
             )
             return
         log.info(
-            "field response saved ticket=%s chat=%s photo=1",
+            "field response saved ticket=%s chat=%s photo=1 responded_by=%s",
             ticket_number,
             _chat_id(update),
+            responded_by or assignee_handle,
         )
         await _group_field_ack(update, context, ticket_number)
         await _reply(update, f"Ticket {ticket_number} sent for admin review (photo saved).")
@@ -1565,14 +2064,14 @@ async def _apply_field_completion(
             if not caption_or_text:
                 await _reply(update, "Could not upload the image. Try again or send text.")
                 return
-        responder_handle = f"@{username}" if username else "@unknown"
         try:
             _db_complete_ticket_field_response(
                 ticket_number,
                 field_response=caption_or_text,
                 photo_url=upload_url,
                 update_photo_url=bool(upload_url),
-                responder_username=responder_handle,
+                responder_username=assignee_handle,
+                field_responded_by=responded_by,
                 telegram_chat_id=tg_chat_id,
                 telegram_message_id=tg_message_id,
             )
@@ -1586,17 +2085,18 @@ async def _apply_field_completion(
             "field response saved ticket=%s chat=%s document_image=1",
             ticket_number,
             _chat_id(update),
+            responded_by or assignee_handle,
         )
         await _group_field_ack(update, context, ticket_number)
         await _reply(update, f"Ticket {ticket_number} sent for admin review (image saved).")
     else:
-        responder_handle = f"@{username}" if username else "@unknown"
         try:
             _db_complete_ticket_field_response(
                 ticket_number,
                 field_response=caption_or_text,
                 update_photo_url=False,
-                responder_username=responder_handle,
+                responder_username=assignee_handle,
+                field_responded_by=responded_by,
                 telegram_chat_id=tg_chat_id,
                 telegram_message_id=tg_message_id,
             )
@@ -1605,15 +2105,197 @@ async def _apply_field_completion(
             await _reply(update, f"Could not update ticket {ticket_number}.")
             return
         log.info(
-            "field response saved ticket=%s chat=%s photo=0",
+            "field response saved ticket=%s chat=%s photo=0 responded_by=%s",
             ticket_number,
             _chat_id(update),
+            responded_by or assignee_handle,
         )
         await _group_field_ack(update, context, ticket_number)
         await _reply(update, f"Ticket {ticket_number} sent for admin review.")
 
     if await _get_active_ticket(update, context) == ticket_number:
         await _clear_active_ticket(update, context)
+
+
+async def _telethon_message_plain_text(msg: object) -> str:
+    """Telethon message body with ``MessageEntityMentionName`` expanded to ``@username``."""
+    text = (getattr(msg, "message", None) or "").strip()
+    entities = getattr(msg, "entities", None) or []
+    if not text or not entities:
+        return text
+    try:
+        from telethon.tl.types import MessageEntityMentionName
+    except ImportError:
+        return text
+    for ent in sorted(entities, key=lambda e: e.offset, reverse=True):
+        if not isinstance(ent, MessageEntityMentionName):
+            continue
+        user = getattr(ent, "user", None)
+        if user is None and getattr(ent, "user_id", None):
+            client = getattr(msg, "_client", None) or getattr(msg, "client", None)
+            if client is not None:
+                try:
+                    user = await client.get_entity(int(ent.user_id))
+                except Exception:
+                    user = None
+        username = getattr(user, "username", None) if user else None
+        if not username:
+            continue
+        start, end = int(ent.offset), int(ent.offset + ent.length)
+        text = text[:start] + f"@{username}" + text[end:]
+    return text
+
+
+def _replier_label_from_username(username: str | None, *, first_name: str = "", last_name: str = "", user_id: int | None = None) -> str:
+    if username:
+        u = username.strip().lstrip("@")
+        return f"@{u}" if u else "unknown"
+    name = " ".join(p for p in (first_name, last_name) if p).strip()
+    if name:
+        return name
+    return f"Telegram user {user_id}" if user_id is not None else "unknown"
+
+
+def _telethon_reply_media_content_type(msg: object) -> str:
+    """Best-effort MIME for Telethon photo/document field replies."""
+    if getattr(msg, "photo", None):
+        return "image/jpeg"
+    doc = getattr(msg, "document", None)
+    if doc is not None:
+        mime = (getattr(doc, "mime_type", None) or "").strip()
+        if mime.startswith("image/"):
+            return mime
+    return "image/jpeg"
+
+
+def _resolve_ticket_for_media_reply(
+    parent_blob: str,
+    replier_username: str | None,
+    reply_text: str | None,
+) -> str | None:
+    """Match swipe-reply photos (incl. alternate phones) to one ticket."""
+    ticket_number = _resolve_ticket_for_field_reply(
+        parent_blob, replier_username, reply_text
+    )
+    if ticket_number:
+        return ticket_number
+    ids = _extract_ticket_ids(parent_blob, reply_text)
+    eligible = [tid for tid in ids if _ticket_field_reply_eligible(tid)]
+    if len(eligible) == 1:
+        log.info(
+            "media reply matched ticket %s via ticket id on parent/caption",
+            eligible[0],
+        )
+        return eligible[0]
+    return None
+
+
+async def ingest_telethon_field_media_reply(event: object) -> bool:
+    """Handle swipe-reply photos from test phones when sidecar cannot build PTB photo updates."""
+    from telethon.tl.types import Message as TLMessage
+
+    msg = getattr(event, "message", None)
+    if not isinstance(msg, TLMessage) or not getattr(msg, "reply_to", None):
+        return False
+    has_photo = bool(getattr(msg, "photo", None))
+    doc = getattr(msg, "document", None)
+    has_image_doc = bool(
+        doc and (getattr(doc, "mime_type", None) or "").startswith("image/")
+    )
+    if not has_photo and not has_image_doc:
+        return False
+
+    parent = await msg.get_reply_message()
+    if not parent:
+        log.warning("telethon media reply: could not load parent message")
+        return False
+    parent_blob = _normalize_assignment_blob(await _telethon_message_plain_text(parent))
+
+    sender = await msg.get_sender()
+    username = getattr(sender, "username", None) if sender else None
+    replier_label = _replier_label_from_username(
+        str(username) if username else None,
+        first_name=str(getattr(sender, "first_name", None) or "") if sender else "",
+        last_name=str(getattr(sender, "last_name", None) or "") if sender else "",
+        user_id=int(getattr(sender, "id", 0)) if sender else None,
+    )
+    reply_text = (getattr(msg, "message", None) or "").strip() or None
+    ticket_number = _resolve_ticket_for_media_reply(parent_blob, username, reply_text)
+    if not ticket_number:
+        log.warning(
+            "telethon media reply: no ticket match user=%s parent=%r caption=%r",
+            replier_label,
+            parent_blob[:200],
+            (reply_text or "")[:80],
+        )
+        return False
+
+    try:
+        row = _db_get_ticket(ticket_number)
+    except Exception:
+        log.exception("telethon media reply: db lookup failed %s", ticket_number)
+        return False
+    if not row or str(row.get("status") or "").strip() not in ("Pending", "Open"):
+        return False
+
+    client = getattr(event, "client", None)
+    image_bytes = b""
+    if client is not None:
+        try:
+            raw = await client.download_media(msg, bytes)
+            image_bytes = bytes(raw) if raw else b""
+        except Exception:
+            log.exception("telethon media download failed ticket=%s", ticket_number)
+
+    upload_url: str | None = None
+    if image_bytes:
+        content_type = _telethon_reply_media_content_type(msg)
+        try:
+            upload_url = _storage_upload_ticket_photo(
+                ticket_number, image_bytes, content_type
+            )
+        except Exception:
+            log.exception("telethon media storage upload failed ticket=%s", ticket_number)
+
+    if not upload_url and not reply_text:
+        log.warning(
+            "telethon media reply: no bytes and no caption ticket=%s replier=%s",
+            ticket_number,
+            replier_label,
+        )
+        return False
+
+    assignee_handle = _assignee_handle(row.get("assigned_to"))
+    responded_by = _field_responded_by_value(
+        assigned_to=row.get("assigned_to"),
+        replier_label=replier_label,
+    )
+    if not responded_by and row.get("field_responded_by"):
+        responded_by = str(row.get("field_responded_by") or "").strip() or None
+    field_response = reply_text
+    if not field_response:
+        existing = str(row.get("field_response") or "").strip()
+        field_response = existing or None
+    if not field_response and upload_url:
+        field_response = "(photo)"
+    chat_id = int(getattr(event, "chat_id", 0) or 0)
+    _db_complete_ticket_field_response(
+        ticket_number,
+        field_response=field_response,
+        photo_url=upload_url,
+        update_photo_url=bool(upload_url),
+        responder_username=assignee_handle,
+        field_responded_by=responded_by,
+        telegram_chat_id=chat_id or None,
+        telegram_message_id=int(msg.id),
+    )
+    log.info(
+        "telethon media field reply saved ticket=%s replier=%s assignee=%s",
+        ticket_number,
+        responded_by or replier_label,
+        assignee_handle,
+    )
+    return True
 
 
 async def handle_field_undo_reply(
@@ -1643,6 +2325,59 @@ async def handle_field_undo_reply(
         )
 
 
+async def handle_group_standalone_field_reply(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Group message ``<ticket_id> <notes>`` without swipe-reply (common field habit)."""
+    if not _is_group_chat(update):
+        return
+    msg = update.effective_message
+    if not msg or msg.reply_to_message:
+        return
+    text = (msg.text or "").strip()
+    if not text:
+        return
+
+    parsed = _parse_standalone_field_response(text)
+    if not parsed:
+        return
+
+    ticket_number, field_text = parsed
+    username = update.effective_user.username if update.effective_user else None
+    log.info(
+        "standalone field_reply chat=%s user=@%s ticket=%s text=%r",
+        _chat_id(update),
+        username,
+        ticket_number,
+        field_text[:120],
+    )
+
+    try:
+        row = _db_get_ticket(ticket_number)
+    except Exception:
+        log.exception("standalone field_reply db lookup failed %s", ticket_number)
+        return
+    if not row:
+        log.warning("standalone field_reply: ticket %s not in dashboard", ticket_number)
+        return
+    if str(row.get("status") or "").strip() not in ("Pending", "Open"):
+        log.info(
+            "standalone field_reply: ticket %s status=%s — skip",
+            ticket_number,
+            row.get("status"),
+        )
+        return
+
+    await _apply_field_completion(
+        update,
+        context,
+        ticket_number,
+        username=username,
+        assigned_to=str(row.get("assigned_to") or ""),
+        field_response_override=field_text,
+    )
+
+
 async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Assignee completes by replying to the assignment message (original group flow).
 
@@ -1659,14 +2394,29 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     reply_text = (msg.caption or msg.text or "").strip() or None
 
     log.info(
-        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r",
+        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r trust_assignee_line=%s",
         _chat_id(update),
         username,
         (reply_text[:120] if reply_text else None),
         parent_blob[:160],
+        _looks_like_coordinator_assignment(_normalize_assignment_blob(parent_blob)),
     )
 
-    ticket_number = _resolve_ticket_for_field_reply(parent_blob, username, reply_text)
+    trust_assignment = _looks_like_coordinator_assignment(
+        _normalize_assignment_blob(parent_blob)
+    )
+    has_reply_photo = bool(msg.photo) or (
+        msg.document
+        and (msg.document.mime_type or "").startswith("image/")
+    )
+    if has_reply_photo:
+        ticket_number = _resolve_ticket_for_media_reply(
+            parent_blob, username, reply_text
+        )
+    else:
+        ticket_number = _resolve_ticket_for_field_reply(
+            parent_blob, username, reply_text
+        )
     if not ticket_number:
         log.warning(
             "field_reply no ticket match chat=%s user=@%s parent_head=%r",
@@ -1674,18 +2424,18 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             username,
             parent_blob[:400],
         )
-        if not username:
-            await _reply(
-                update,
-                "Could not match this reply. Set a Telegram @username that matches "
-                "assigned_to on the ticket.",
-            )
-        elif _is_group_chat(update):
+        if _is_group_chat(update):
             await _group_field_nudge(
                 update,
                 context,
-                f"@{username}: swipe-reply to the bot assignment line "
-                f"(@user Category ticket_number), or include the ticket number in your message.",
+                "Swipe-reply to the assignment line (@user Category ticket_number). "
+                "If several tickets are in one message, include the ticket number in your reply.",
+            )
+        else:
+            await _reply(
+                update,
+                "Could not match this reply. Swipe-reply to the assignment message, "
+                "or include the ticket number.",
             )
         return
 
@@ -1700,7 +2450,22 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _reply(update, f"No ticket record found for {ticket_number}.")
         return
 
-    if not _sender_matches_assigned_to(row.get("assigned_to"), username):
+    ticket_status = str(row.get("status") or "").strip()
+    if ticket_status not in ("Pending", "Open"):
+        await _reply(
+            update,
+            f"Ticket {ticket_number} is already {ticket_status} — no new field reply needed.",
+        )
+        return
+
+    ids_in_reply = _extract_ticket_ids(reply_text) if reply_text else []
+    explicit_ticket_in_reply = ticket_number in ids_in_reply
+    allow_any_phone = (
+        trust_assignment or explicit_ticket_in_reply or has_reply_photo
+    )
+    if not allow_any_phone and not _sender_matches_assigned_to(
+        row.get("assigned_to"), username
+    ):
         log.warning(
             "field_reply assignee mismatch ticket=%s db=%r replier=@%s",
             ticket_number,
@@ -1710,7 +2475,19 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _reply(update, "You are not the assignee for that ticket.")
         return
 
-    await _apply_field_completion(update, context, ticket_number, username=username)
+    standalone_parsed = (
+        _parse_standalone_field_response(reply_text) if reply_text else None
+    )
+    field_override = standalone_parsed[1] if standalone_parsed else None
+
+    await _apply_field_completion(
+        update,
+        context,
+        ticket_number,
+        username=username,
+        assigned_to=str(row.get("assigned_to") or ""),
+        field_response_override=field_override,
+    )
 
 
 async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1745,24 +2522,41 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if update.effective_user and update.effective_user.id == context.bot.id:
         return
 
-    _refresh_assignment_categories()
-    text = _normalize_assignment_blob(f"{t}\n{cap}")
-    matches = list(_assignment_pattern().finditer(text))
-    if not matches:
-        return  # Filter shouldn't have triggered, but be defensive.
+    text = _message_to_assignment_blob(msg)
+    _refresh_assignment_categories_if_plausible(text)
+    parsed = _parse_coordinator_assignments(text)
+    tg_chat_id, tg_msg_id = _assignment_telegram_refs(update)
+    if not parsed:
+        if _looks_like_coordinator_assignment(text):
+            log.warning(
+                "assignment-shaped message did not parse: chat=%s body=%r",
+                _chat_id(update),
+                text[:200],
+            )
+            if _is_group_chat(update):
+                await _group_field_nudge(
+                    update,
+                    context,
+                    "Could not parse that assignment. Use: "
+                    "@engineer Category 9-or-16-digit-ticket (ticket may be on the next line).",
+                )
+        return
 
     lines: list[str] = []
-    for m in matches:
-        assigned_to = m.group(1)        # e.g. "@john"
-        task_category_raw = m.group(2)  # e.g. "Femto Installation"
-        ticket_number = m.group(3)      # 16- or 9-digit string
-        additional_info = _clean_assignment_info(m.group("info"))
+    for assigned_to, task_category_raw, ticket_number, additional_info in parsed:
 
         task_category = _canonical_task_category(task_category_raw)
         if not task_category:
+            log.warning(
+                "unknown task_category %r for ticket %s (categories=%s)",
+                task_category_raw,
+                ticket_number,
+                _assignment_task_categories(),
+            )
             cat_err = (
                 f"Unknown category {task_category_raw!r} for ticket {ticket_number}. "
-                f"Use one of: {', '.join(_assignment_task_categories())}."
+                f"Add it under **Edit categories** on the dashboard, then retry. "
+                f"Known: {', '.join(_assignment_task_categories())}."
             )
             lines.append(f"• {cat_err}")
             if _is_group_chat(update):
@@ -1786,6 +2580,8 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         assigned_to,
                         task_category,
                         additional_info=additional_info,
+                        assignment_telegram_chat_id=tg_chat_id,
+                        assignment_telegram_message_id=tg_msg_id,
                     )
                 except Exception as insert_exc:
                     if _is_duplicate_key_error(insert_exc):
@@ -1802,6 +2598,8 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             assigned_to,
                             task_category,
                             additional_info=additional_info,
+                            assignment_telegram_chat_id=tg_chat_id,
+                            assignment_telegram_message_id=tg_msg_id,
                         )
                         prev_assignee = existing.get("assigned_to") or "—"
                         prev_status = existing.get("status") or "—"
@@ -1820,20 +2618,48 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     )
                 await _group_assignment_ack(update, context, ticket_number, assigned_to)
             else:
-                _db_reassign_ticket(
-                    ticket_number,
-                    assigned_to,
-                    task_category,
-                    additional_info=additional_info,
-                )
-                prev_assignee = existing.get("assigned_to") or "—"
-                prev_status = existing.get("status") or "—"
-                lines.append(
-                    f"• Re-assigned ticket {ticket_number} ({task_category}) "
-                    f"from {prev_assignee} to {assigned_to}{info_suffix}. "
-                    f"Status reset to Pending (was {prev_status}); "
-                    "previous response and photo cleared."
-                )
+                prev_status = str(existing.get("status") or "").strip()
+                has_field_work = bool(
+                    str(existing.get("field_response") or "").strip()
+                ) or prev_status in ("Open", "Completed")
+                if _same_assignment_target(
+                    existing,
+                    assigned_to=assigned_to,
+                    task_category=task_category,
+                ) and has_field_work:
+                    _db_update_assignment_from_telegram(
+                        ticket_number,
+                        assigned_to=assigned_to,
+                        task_category=task_category,
+                        additional_info=additional_info,
+                        assignment_telegram_chat_id=tg_chat_id,
+                        assignment_telegram_message_id=tg_msg_id,
+                    )
+                    log.info(
+                        "assignment notes updated ticket=%s status=%s (field work kept)",
+                        ticket_number,
+                        prev_status,
+                    )
+                    lines.append(
+                        f"• Updated assignment notes for {ticket_number} "
+                        f"({task_category}) — kept **{prev_status}** and field response."
+                    )
+                else:
+                    _db_reassign_ticket(
+                        ticket_number,
+                        assigned_to,
+                        task_category,
+                        additional_info=additional_info,
+                        assignment_telegram_chat_id=tg_chat_id,
+                        assignment_telegram_message_id=tg_msg_id,
+                    )
+                    prev_assignee = existing.get("assigned_to") or "—"
+                    lines.append(
+                        f"• Re-assigned ticket {ticket_number} ({task_category}) "
+                        f"from {prev_assignee} to {assigned_to}{info_suffix}. "
+                        f"Status reset to Pending (was {prev_status}); "
+                        "previous response and photo cleared."
+                    )
                 await _group_assignment_ack(update, context, ticket_number, assigned_to)
         except Exception as exc:
             log.exception("tickets upsert failed for %s: %s", ticket_number, exc)
@@ -1862,10 +2688,32 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if _is_group_chat(update) and not em.reply_to_message:
         username = update.effective_user.username if update.effective_user else None
+        caption = (em.caption or "").strip()
+        standalone = _parse_standalone_field_response(caption) if caption else None
         has_photo = bool(em.photo) or (
             em.document
             and (em.document.mime_type or "").startswith("image/")
         )
+        if has_photo and standalone:
+            ticket_number, field_text = standalone
+            try:
+                row = _db_get_ticket(ticket_number)
+            except Exception:
+                row = None
+            if row and str(row.get("status") or "").strip() in ("Pending", "Open"):
+                log.info(
+                    "handle_non_text: group photo+caption standalone for %s",
+                    ticket_number,
+                )
+                await _apply_field_completion(
+                    update,
+                    context,
+                    ticket_number,
+                    username=username,
+                    assigned_to=str(row.get("assigned_to") or ""),
+                    field_response_override=field_text,
+                )
+                return
         if has_photo and username:
             ticket_number = _resolve_ticket_for_field_reply("", username, None)
             if ticket_number:
@@ -1954,12 +2802,17 @@ def _build_bot_app() -> Application:
     )
     # Assignment lines can be plain text, a photo/document **caption**, or a channel post.
     # Do not restrict to ``filters.TEXT`` only — that misses most caption-only assignments.
-    bot_app.add_handler(
-        MessageHandler(
-            ~filters.COMMAND & _CoordinatorAssignmentFilter(),
-            handle_assignment,
+    _assignment_msg_filter = (
+        (
+            filters.UpdateType.MESSAGE
+            | filters.UpdateType.EDITED_MESSAGE
+            | filters.UpdateType.CHANNEL_POST
+            | filters.UpdateType.EDITED_CHANNEL_POST
         )
+        & ~filters.COMMAND
+        & _CoordinatorAssignmentFilter()
     )
+    bot_app.add_handler(MessageHandler(_assignment_msg_filter, handle_assignment))
     # Field swipe-reply to an assignment (works for coordinator or dashboard posts).
     bot_app.add_handler(
         MessageHandler(
@@ -1969,6 +2822,12 @@ def _build_bot_app() -> Application:
     )
     _field_reply_filter = filters.REPLY & ~filters.COMMAND & _field_reply_media
     bot_app.add_handler(MessageHandler(_field_reply_filter, handle_field_reply))
+    bot_app.add_handler(
+        MessageHandler(
+            ~filters.REPLY & ~filters.COMMAND & _StandaloneFieldReplyFilter(),
+            handle_group_standalone_field_reply,
+        )
+    )
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
     # Anything else (photos, documents, voice, stickers, ...) gets a friendly fallback.
     bot_app.add_handler(
@@ -2009,19 +2868,38 @@ async def lifespan(_: FastAPI):
     await bot_app.start()
 
     try:
+        sync_ticket_categories_into_table(
+            supabase,
+            tickets_table=TICKETS_TABLE,
+            categories_table=TASK_CATEGORIES_TABLE,
+        )
         _refresh_assignment_categories(force=True)
     except Exception:
         log.exception("Initial task category load failed")
 
-    telethon_delete_client = None
-    try:
-        from telegram_delete_watcher import start_delete_listener
+    telethon_sidecar_client = None
 
-        telethon_delete_client = await start_delete_listener(
-            _db_undo_field_response_by_telegram_message
+    async def _on_telethon_group_update(data: dict[str, object]) -> None:
+        update = Update.de_json(data, bot_app.bot)
+        if not update:
+            log.warning("Telethon sidecar: could not build Update from message")
+            return
+        _log_incoming_update(update)
+        try:
+            await ingest_telegram_update(update)
+        except Exception:
+            log.exception("ingest_telegram_update failed (telethon sidecar)")
+
+    try:
+        from telethon_sidecar import start_telethon_sidecar
+
+        telethon_sidecar_client = await start_telethon_sidecar(
+            undo_callback=_db_undo_field_response_by_telegram_message,
+            on_update_dict=_on_telethon_group_update,
+            on_media_field_reply=ingest_telethon_field_media_reply,
         )
     except Exception:
-        log.exception("Telethon delete listener failed to start")
+        log.exception("Telethon sidecar failed to start")
 
     webhook_url = resolve_telegram_webhook_url()
     if webhook_url:
@@ -2070,11 +2948,11 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        if telethon_delete_client is not None:
+        if telethon_sidecar_client is not None:
             try:
-                await telethon_delete_client.disconnect()
+                await telethon_sidecar_client.disconnect()
             except Exception:
-                log.exception("Telethon delete listener disconnect failed")
+                log.exception("Telethon sidecar disconnect failed")
         # Never call ``delete_webhook`` by default: every local ``uvicorn``
         # shutdown (Ctrl+C, killing a duplicate process, IDE stop) would
         # clear Telegram's webhook for *this bot token*, so the next group
@@ -2116,7 +2994,48 @@ async def health() -> dict[str, str]:
         # use the Streamlit dashboard (queues + Log + toasts). If you still see
         # old "Recorded …" / "✓ Ticket …" lines in Telegram, redeploy this service.
         "group_operational_replies": "off",
+        "unattended_nudge_hours": str(os.getenv("UNATTENDED_NUDGE_HOURS", "6")),
+        "telethon_group_ingest": (
+            "on"
+            if _env_str("TG_API_ID", "TELEGRAM_API_ID")
+            and _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
+            and _env_str("TELEGRAM_GROUP_CHAT_ID", "TG_GROUP_ID")
+            else "off"
+        ),
     }
+
+
+def _env_str(*names: str) -> str:
+    for n in names:
+        v = (os.getenv(n) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+@app.post("/cron/unattended-nudge")
+async def cron_unattended_nudge(request: Request) -> dict[str, object]:
+    """Send 6h reminders for Pending tickets (Railway cron / external scheduler)."""
+    _verify_cron_secret(request)
+    stats = await run_unattended_nudges(
+        supabase,
+        tickets_table=TICKETS_TABLE,
+        attendance_table=ATTENDANCE_LOGS_TABLE,
+        send_telegram=_send_unattended_nudge_telegram,
+    )
+    return {"status": "ok", **stats}
+
+
+@app.post("/cron/unattended-close")
+async def cron_unattended_close(request: Request) -> dict[str, object]:
+    """Close same-day Pending tickets with no field response as Unattended."""
+    _verify_cron_secret(request)
+    stats = run_unattended_close(
+        supabase,
+        tickets_table=TICKETS_TABLE,
+        attendance_table=ATTENDANCE_LOGS_TABLE,
+    )
+    return {"status": "ok", **stats}
 
 
 @app.post("/webhook")
@@ -2135,17 +3054,10 @@ async def webhook_handler(request: Request) -> dict[str, str]:
 
     _log_incoming_update(update)
 
-    if _skip_bot_own_assignment_echo(update):
-        log.info(
-            "skip bot-own assignment echo update_id=%s (dashboard already posted)",
-            update.update_id,
-        )
-        return {"status": "ok"}
-
     # Always ack with 200 so Telegram does not endlessly retry on transient
     # handler failures. The handler logs the exception via error_handler.
     try:
-        await bot_app.process_update(update)
+        await ingest_telegram_update(update)
     except Exception:
         log.exception("process_update failed for update_id=%s", getattr(update, "update_id", None))
 

@@ -60,8 +60,10 @@ one-time reset code (15 minutes).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 from datetime import date, datetime, time, timedelta, timezone
@@ -69,6 +71,8 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+from cryptography.fernet import Fernet
 import altair as alt
 from bot_utils import (
     NOTIFY_BUILD_ID,
@@ -77,6 +81,20 @@ from bot_utils import (
     normalize_telegram_group_id_paste,
     notify_telegram_group,
     update_telegram_assignment_message,
+)
+from task_categories import (
+    DEFAULT_ASSIGNMENT_TASK_CATEGORIES,
+    delete_task_category,
+    fetch_task_category_names,
+    normalize_task_category_name,
+    sync_ticket_categories_into_table,
+    task_categories_table,
+    upsert_task_category,
+)
+from unattended import (
+    OPS_TZ,
+    STATUS_UNATTENDED,
+    UNATTENDED_NUDGE_HOURS,
 )
 from dotenv import load_dotenv
 from supabase import create_client
@@ -203,20 +221,8 @@ FIELD_ENGINEERS_TABLE = (
     _read_setting("FIELD_ENGINEERS_TABLE", "dashboard_field_engineers")
     or "dashboard_field_engineers"
 )
-TASK_CATEGORIES_TABLE = (
-    _read_setting("TASK_CATEGORIES_TABLE", "dashboard_task_categories")
-    or "dashboard_task_categories"
-)
-
-# Fallback when ``dashboard_task_categories`` is empty or missing.
-DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
-    "Coverage Check",
-    "Femto Installation",
-    "Repeater Installation",
-    "Femto Recover",
-    "Femto Fault",
-    "Repeater Fault",
-)
+TASK_CATEGORIES_TABLE = task_categories_table()
+_CATEGORIES_SYNCED_ONCE_KEY = "_dashboard_categories_synced_once"
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
@@ -255,6 +261,7 @@ _CC_TICKET_PICK_KEY = "cc_ticket_pick"
 _CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
 _CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
+_CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
     return {
         "engineer": f"{prefix}_edit_engineer",
@@ -262,7 +269,75 @@ def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
         "notes": f"{prefix}_edit_notes",
         "sync_tg": f"{prefix}_edit_sync_tg",
         "show": f"{prefix}_show_assignment_edit",
+        "synced_ticket": f"{prefix}_edit_synced_ticket",
     }
+
+
+def _reassign_session_keys(prefix: str) -> dict[str, str]:
+    return {
+        "engineer": f"{prefix}_reassign_engineer",
+        "category": f"{prefix}_reassign_category",
+        "notes": f"{prefix}_reassign_notes",
+        "sync_tg": f"{prefix}_reassign_sync_tg",
+        "show": f"{prefix}_show_reassign",
+        "synced_ticket": f"{prefix}_reassign_synced_ticket",
+    }
+
+
+def _manual_field_response_session_keys(prefix: str) -> dict[str, str]:
+    return {
+        "show": f"{prefix}_show_manual_field_response",
+        "text": f"{prefix}_mfr_text",
+        "responded_by": f"{prefix}_mfr_responded_by",
+        "synced_ticket": f"{prefix}_mfr_synced_ticket",
+    }
+
+
+def _dash_normalize_handle(handle: str) -> str:
+    return handle.strip().lstrip("@").lower()
+
+
+def _resolve_field_responded_by(assigned_to: object, replier_label: str) -> str | None:
+    """Set only when the replier is not the ticket assignee (matches bot.py)."""
+    assignee = str(assigned_to or "").strip()
+    label = (replier_label or "").strip()
+    if not assignee or not label:
+        return None
+    assignee_at = assignee if assignee.startswith("@") else f"@{assignee.lstrip('@')}"
+    if _dash_normalize_handle(label) == _dash_normalize_handle(assignee_at):
+        return None
+    return label if label.startswith("@") else f"@{label.lstrip('@')}"
+
+
+def _sync_assignment_edit_widgets(
+    *,
+    keys: dict[str, str],
+    picked: str,
+    current_handle: str,
+    current_cat: str,
+    current_notes: str,
+    cats: list[str],
+    fe_names: list[str],
+    fe_missing: bool,
+) -> None:
+    """Push the selected ticket's values into edit widgets (Streamlit keeps stale keys)."""
+    if st.session_state.get(keys["synced_ticket"]) == picked:
+        return
+    st.session_state[keys["synced_ticket"]] = picked
+    if fe_names and not fe_missing:
+        fe_opts = [f"@{n}" for n in fe_names]
+        default_fe = (
+            f"@{current_handle}"
+            if current_handle and f"@{current_handle}" in fe_opts
+            else (fe_opts[0] if fe_opts else "")
+        )
+        st.session_state[keys["engineer"]] = default_fe
+    else:
+        st.session_state[keys["engineer"]] = current_handle
+    st.session_state[keys["category"]] = (
+        current_cat if current_cat in cats else (cats[0] if cats else "")
+    )
+    st.session_state[keys["notes"]] = current_notes
 
 # Session keys — namespaced so we never collide with other widgets / demos,
 # and so a stale boolean from an older app version cannot bypass the gate.
@@ -271,9 +346,114 @@ _AUTH_PWD_VER_KEY = "_ticket_dashboard_auth_pwd_ver"
 _AUTH_USERNAME_KEY = "_ticket_dashboard_auth_username"
 _OPERATOR_ID_KEY = "_ticket_dashboard_operator_id"
 _LOGIN_VIEW_KEY = "_ticket_dashboard_login_view"
+_LOGIN_USER_WIDGET_KEY = "login_username_widget"
+_LOGIN_PWD_WIDGET_KEY = "login_password_widget"
+_LOGIN_OID_WIDGET_KEY = "login_operator_id_widget"
+_LOGIN_SAVE_PW_KEY = "login_save_password"
+_LOGIN_REMEMBER_BOOT_KEY = "_login_remember_bootstrapped"
 _MIN_DASHBOARD_PASSWORD_LEN = 8
 _MAX_OPERATOR_ID_LEN = 64
 _MAX_DASHBOARD_USERNAME_LEN = 48
+
+
+def _remember_login_fernet() -> Fernet:
+    pepper = (
+        _read_setting("DASHBOARD_SESSION_SECRET")
+        or _read_setting("SUPABASE_KEY")
+        or "ticket-dashboard-remember"
+    )
+    key = base64.urlsafe_b64encode(hashlib.sha256(pepper.encode()).digest())
+    return Fernet(key)
+
+
+def _encode_remembered_login(*, username: str, password: str) -> str:
+    payload = json.dumps({"u": username, "p": password})
+    return _remember_login_fernet().encrypt(payload.encode()).decode()
+
+
+def _decode_remembered_login(token: str) -> tuple[str, str] | None:
+    try:
+        raw = _remember_login_fernet().decrypt(token.encode())
+        data = json.loads(raw.decode())
+        username = str(data.get("u", "")).strip()
+        password = str(data.get("p", ""))
+        if username and password:
+            return username, password
+    except Exception:
+        pass
+    return None
+
+
+def _login_remember_bootstrap() -> None:
+    """Load saved credentials from browser localStorage (encrypted token)."""
+    if st.session_state.get(_LOGIN_REMEMBER_BOOT_KEY):
+        return
+
+    qp = st.query_params
+    if qp.get("_lr") == "1":
+        token = str(qp.get("_lt") or "")
+        pair = _decode_remembered_login(token) if token else None
+        if pair:
+            st.session_state[_LOGIN_USER_WIDGET_KEY] = pair[0]
+            st.session_state[_LOGIN_OID_WIDGET_KEY] = pair[0]
+            st.session_state[_LOGIN_PWD_WIDGET_KEY] = pair[1]
+            st.session_state[_LOGIN_SAVE_PW_KEY] = True
+        st.session_state[_LOGIN_REMEMBER_BOOT_KEY] = True
+        try:
+            del st.query_params["_lr"]
+            del st.query_params["_lt"]
+        except Exception:
+            pass
+        return
+
+    if st.session_state.get("_login_remember_js_ran"):
+        st.session_state[_LOGIN_REMEMBER_BOOT_KEY] = True
+        return
+    st.session_state["_login_remember_js_ran"] = True
+
+    components.html(
+        """
+        <script>
+        (function () {
+          const KEY = "fto_remember_v1";
+          const loc = window.parent.location;
+          const params = new URLSearchParams(loc.search);
+          if (params.get("_lr") === "1") return;
+          const token = localStorage.getItem(KEY);
+          if (!token) return;
+          const u = new URL(loc.href);
+          u.searchParams.set("_lr", "1");
+          u.searchParams.set("_lt", token);
+          window.parent.location.replace(u.toString());
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _login_remember_persist(*, username: str, password: str) -> None:
+    token = _encode_remembered_login(username=username, password=password)
+    safe = json.dumps(token)
+    components.html(
+        f"""
+        <script>
+        localStorage.setItem("fto_remember_v1", {safe});
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _login_remember_clear() -> None:
+    components.html(
+        """
+        <script>
+        localStorage.removeItem("fto_remember_v1");
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _password_fingerprint(secret: str) -> str:
@@ -301,6 +481,8 @@ def _clear_auth_session() -> None:
         _AUTH_PWD_VER_KEY,
         _AUTH_USERNAME_KEY,
         _OPERATOR_ID_KEY,
+        _LOGIN_REMEMBER_BOOT_KEY,
+        "_login_remember_js_ran",
     ):
         st.session_state.pop(key, None)
 
@@ -792,6 +974,8 @@ def _read_dashboard_password() -> str:
 
 
 def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
+    _login_remember_bootstrap()
+
     with st.container(border=True, key="login_shell"):
         with st.form("login_form", clear_on_submit=False):
             if per_user:
@@ -799,11 +983,13 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     "Username",
                     placeholder="your login name",
                     autocomplete="username",
+                    key=_LOGIN_USER_WIDGET_KEY,
                 )
                 pwd = st.text_input(
                     "Password",
                     type="password",
                     autocomplete="current-password",
+                    key=_LOGIN_PWD_WIDGET_KEY,
                 )
             else:
                 st.caption("Legacy mode: shared dashboard password.")
@@ -812,11 +998,18 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     "Password",
                     type="password",
                     autocomplete="current-password",
+                    key=_LOGIN_PWD_WIDGET_KEY,
                 )
                 oid = st.text_input(
                     "Operator ID",
                     placeholder="e.g. ali.ops",
+                    key=_LOGIN_OID_WIDGET_KEY,
                 )
+            st.checkbox(
+                "Save password on this device",
+                key=_LOGIN_SAVE_PW_KEY,
+                help="Stores an encrypted login token in this browser only.",
+            )
             submitted = st.form_submit_button("Sign in", use_container_width=True)
 
     if not submitted:
@@ -842,6 +1035,10 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
         op = str(payload.get("operator_id") or uname).strip()
         fp = _auth_session_fingerprint(username=uname, operator_id=op)
         _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
+        if st.session_state.get(_LOGIN_SAVE_PW_KEY):
+            _login_remember_persist(username=uname, password=pwd)
+        else:
+            _login_remember_clear()
         st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
         st.rerun()
         return
@@ -1107,31 +1304,154 @@ def _fetch_ticket_row(ticket_number: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def _apply_manual_field_response(
+    ticket_number: str,
+    *,
+    field_response: str,
+    responded_by_input: str | None = None,
+) -> None:
+    """Record a field reply from the dashboard when Telegram ingest missed it."""
+    text = (field_response or "").strip()
+    if not text:
+        raise ValueError("Field response text is required.")
+
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket {ticket_number} not found.")
+    status = str(row.get("status") or "").strip()
+    if status not in ("Pending", "Open"):
+        raise ValueError(
+            f"Ticket is {status}; manual response is only allowed while Pending or Open."
+        )
+
+    assignee_raw = str(row.get("assigned_to") or "").strip()
+    assignee = (
+        assignee_raw
+        if assignee_raw.startswith("@")
+        else (f"@{assignee_raw.lstrip('@')}" if assignee_raw else "@unknown")
+    )
+    field_responded_by = _resolve_field_responded_by(
+        assignee_raw, (responded_by_input or "").strip()
+    )
+
+    client = _get_supabase_client()
+    now_iso = _cc_utc_now_iso()
+    payload: dict[str, object] = {
+        "field_response": text,
+        "updated_at": now_iso,
+        "field_responded_by": field_responded_by,
+    }
+    if status == "Pending":
+        payload["status"] = "Open"
+        payload["responded_at"] = now_iso
+    elif not row.get("responded_at"):
+        payload["responded_at"] = now_iso
+
+    _cc_execute_ticket_update(client, payload, ticket_number)
+
+    op = _session_operator_id() or _session_dashboard_username() or "dashboard-admin"
+    action = "entry" if status == "Pending" else "update"
+    log_note = text
+    if field_responded_by:
+        log_note = f"Responded by {field_responded_by}: {text}"
+    log_note = f"Manual dashboard {action} by {op}: {log_note}"
+
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=assignee,
+        action_type="Response",
+        note=log_note,
+    )
+
+
+def _parse_ts_value(value: object) -> datetime | None:
+    """Parse one ISO timestamp from Supabase (UTC-aware)."""
+    if value is None:
+        return None
+    try:
+        ts = pd.to_datetime(value, utc=True, errors="coerce")
+        if pd.isna(ts):
+            return None
+        py = ts.to_pydatetime()
+        if py.tzinfo is None:
+            return py.replace(tzinfo=timezone.utc)
+        return py
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch_pending_with_response_mismatch() -> list[str]:
-    """Tickets still Pending but with a recent Response log (bot update likely failed)."""
+    """Pending tickets that look stuck after a field reply (bot UPDATE likely failed).
+
+    Ignores **old** Response log rows from before ``last_assigned_at`` — e.g. after
+    **Reassign** for next-day work, when history is kept but the active row was reset.
+    """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
     client = _get_supabase_client()
     try:
         pending = (
             client.table(TICKETS_TABLE)
-            .select("ticket_number")
+            .select(
+                "ticket_number, field_response, photo_url, responded_at, last_assigned_at"
+            )
             .eq("status", "Pending")
             .limit(200)
             .execute()
         ).data or []
         if not pending:
             return []
-        ids = [str(r["ticket_number"]) for r in pending if r.get("ticket_number")]
+        mismatches: list[str] = []
+        needs_log_check: list[dict] = []
+        for row in pending:
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn:
+                continue
+            if str(row.get("field_response") or "").strip():
+                mismatches.append(tn)
+                continue
+            if row.get("photo_url") or row.get("responded_at"):
+                mismatches.append(tn)
+                continue
+            needs_log_check.append(row)
+
+        if not needs_log_check:
+            return sorted(set(mismatches))
+
+        ids = [str(r["ticket_number"]) for r in needs_log_check if r.get("ticket_number")]
         logs = (
             client.table(ATTENDANCE_LOGS_TABLE)
-            .select("ticket_number")
+            .select("ticket_number, timestamp")
             .eq("action_type", "Response")
             .in_("ticket_number", ids)
             .execute()
         ).data or []
-        logged = {str(r["ticket_number"]) for r in logs if r.get("ticket_number")}
-        return sorted(logged)
+        resp_by_ticket: dict[str, list[datetime]] = {}
+        for entry in logs:
+            tn = str(entry.get("ticket_number") or "").strip()
+            if not tn:
+                continue
+            ts = _parse_ts_value(entry.get("timestamp"))
+            if ts is not None:
+                resp_by_ticket.setdefault(tn, []).append(ts)
+
+        for row in needs_log_check:
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn or tn in mismatches:
+                continue
+            assigned_at = _parse_ts_value(row.get("last_assigned_at"))
+            resp_times = resp_by_ticket.get(tn) or []
+            if assigned_at is None:
+                if resp_times:
+                    mismatches.append(tn)
+                continue
+            for resp_at in resp_times:
+                if resp_at >= assigned_at:
+                    mismatches.append(tn)
+                    break
+
+        return sorted(set(mismatches))
     except Exception:
         return []
 
@@ -1220,7 +1540,9 @@ def _set_ticket_status(
     """
     client = _get_supabase_client()
     now_iso = datetime.now(timezone.utc).isoformat()
-    payload = {"status": new_status, "updated_at": now_iso}
+    payload: dict[str, object] = {"status": new_status, "updated_at": now_iso}
+    if new_status == "Pending":
+        payload["unattended_nudge_sent_at"] = None
     client.table(TICKETS_TABLE).update(payload).eq(
         "ticket_number", str(ticket_number)
     ).execute()
@@ -1373,6 +1695,108 @@ def _render_ticket_delete_popover(
             )
 
 
+def _sync_manual_field_response_widgets(
+    *,
+    keys: dict[str, str],
+    picked: str,
+    row: dict,
+) -> None:
+    if st.session_state.get(keys["synced_ticket"]) == picked:
+        return
+    st.session_state[keys["text"]] = str(row.get("field_response") or "")
+    responded = str(row.get("field_responded_by") or "").strip()
+    st.session_state[keys["responded_by"]] = responded
+    st.session_state[keys["synced_ticket"]] = picked
+
+
+def _render_manual_field_response_editor(
+    *,
+    ticket_picker_key: str,
+    edit_key_prefix: str,
+    ticket_options: list[str],
+    allowed_statuses: tuple[str, ...] = ("Pending", "Open"),
+    save_label: str = "Save",
+) -> None:
+    """Admin form: record or correct a field reply (Pending → Open, or update Open)."""
+    keys = _manual_field_response_session_keys(edit_key_prefix)
+    if not st.session_state.get(keys["show"]):
+        return
+
+    picked = str(
+        st.session_state.get(ticket_picker_key)
+        or (ticket_options[0] if ticket_options else "")
+    )
+    if picked not in ticket_options and ticket_options:
+        picked = ticket_options[0]
+
+    row = _fetch_ticket_row(picked)
+    if not row:
+        st.warning("Ticket not found.")
+        return
+    status = str(row.get("status") or "").strip()
+    if status not in allowed_statuses:
+        labels = " or **".join(allowed_statuses)
+        st.info(f"Pick a **{labels}** ticket to record a field response.")
+        return
+
+    _sync_manual_field_response_widgets(keys=keys, picked=picked, row=row)
+
+    assignee = str(row.get("assigned_to") or "—")
+    if status == "Pending":
+        st.caption(
+            f"Record a field reply for **{picked}** (assignee {assignee}). "
+            "Use when the bot did not capture the Telegram reply. Saves to **Open**."
+        )
+    else:
+        st.caption(
+            f"Update field response for **{picked}** (assignee {assignee}). "
+            "Corrects text or **Responded by** on an Open ticket."
+        )
+
+    with st.form(f"{edit_key_prefix}_mfr_form", border=True):
+        st.text_area(
+            "Field response",
+            placeholder="Paste or type what the engineer replied in Telegram",
+            height=120,
+            key=keys["text"],
+        )
+        st.text_input(
+            "Responded by (optional)",
+            placeholder="e.g. @DHRTemsX6 if they used a test phone",
+            help="Leave empty when the assignee replied from their own account.",
+            key=keys["responded_by"],
+        )
+        c_save, c_cancel = st.columns(2)
+        with c_save:
+            submit = st.form_submit_button(
+                save_label, type="primary", use_container_width=True
+            )
+        with c_cancel:
+            cancel = st.form_submit_button("Cancel", use_container_width=True)
+
+    if cancel:
+        st.session_state[keys["show"]] = False
+        st.rerun()
+    if submit:
+        try:
+            _apply_manual_field_response(
+                picked,
+                field_response=str(st.session_state.get(keys["text"]) or ""),
+                responded_by_input=str(st.session_state.get(keys["responded_by"]) or "")
+                or None,
+            )
+        except Exception as exc:
+            st.error(str(exc))
+            return
+        st.session_state[keys["show"]] = False
+        if status == "Pending":
+            st.success(f"{picked} → **Open** (field response saved).")
+        else:
+            st.success(f"{picked}: field response updated.")
+        _get_supabase_client.clear()
+        st.rerun()
+
+
 def _render_admin_ticket_toolbar(
     df: pd.DataFrame,
     *,
@@ -1381,6 +1805,8 @@ def _render_admin_ticket_toolbar(
     status_actions: tuple[tuple[str, str, str], ...] = (),
     allow_delete: bool = True,
     allow_edit_assignment: bool = False,
+    allow_manual_field_response: bool = False,
+    allow_reassign: bool = False,
 ) -> None:
     """Ticket picker + primary action; remove lives in a small side popover."""
     options = _ticket_options_for_admin(df)
@@ -1393,12 +1819,20 @@ def _render_admin_ticket_toolbar(
     status_labels = [a[0] for a in status_actions]
     del_col = 1 if allow_delete else 0
     edit_col = 1 if allow_edit_assignment else 0
+    mfr_col = 1 if allow_manual_field_response else 0
+    reassign_col = 1 if allow_reassign else 0
     edit_keys = _assignment_edit_session_keys(key_prefix)
+    mfr_keys = _manual_field_response_session_keys(key_prefix)
+    reassign_keys = _reassign_session_keys(key_prefix)
 
     with st.container(border=True):
-        if status_labels or edit_col:
+        if status_labels or edit_col or mfr_col or reassign_col:
             widths: list[int] = [2]
             if status_labels:
+                widths.append(1)
+            if mfr_col:
+                widths.append(1)
+            if reassign_col:
                 widths.append(1)
             if edit_col:
                 widths.append(1)
@@ -1447,6 +1881,26 @@ def _render_admin_ticket_toolbar(
                                 confirm_del=False,
                                 status_actions=status_actions,
                             )
+                idx += 1
+            if mfr_col:
+                with cols[idx]:
+                    if st.button(
+                        "Record response",
+                        key=f"{key_prefix}_mfr_btn",
+                        use_container_width=True,
+                    ):
+                        st.session_state[mfr_keys["show"]] = True
+                        st.rerun()
+                idx += 1
+            if reassign_col:
+                with cols[idx]:
+                    if st.button(
+                        "Reassign",
+                        key=f"{key_prefix}_reassign_btn",
+                        use_container_width=True,
+                    ):
+                        st.session_state[reassign_keys["show"]] = True
+                        st.rerun()
                 idx += 1
             if edit_col:
                 with cols[idx]:
@@ -1869,8 +2323,10 @@ def _cc_insert_assignment(
         "task_category": task_category,
         "status": "Pending",
         "field_response": None,
+        "field_responded_by": None,
         "photo_url": None,
         "last_assigned_at": now_iso,
+        "unattended_nudge_sent_at": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
@@ -1913,9 +2369,12 @@ def _cc_reassign_ticket(
         "task_category": task_category,
         "status": "Pending",
         "field_response": None,
+        "field_responded_by": None,
         "photo_url": None,
+        "responded_at": None,
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
+        "unattended_nudge_sent_at": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
@@ -2025,6 +2484,59 @@ def _cc_patch_assignment_fields(
         action_type="AssignmentUpdated",
         note=_cc_assignment_log_note(additional_info, operator_id),
     )
+    updated = _fetch_ticket_row(ticket_number)
+    return updated or row
+
+
+def _cc_dashboard_reassign_ticket(
+    ticket_number: str,
+    *,
+    assigned_to: str,
+    task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+    from_status: str,
+) -> dict:
+    """Reassign for next-day field work: reset to Pending and clear prior response."""
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    status = str(row.get("status") or "").strip()
+    if status != from_status:
+        raise ValueError(f"Only **{from_status}** tickets can be reassigned here.")
+
+    client = _get_supabase_client()
+    _cc_reassign_ticket(
+        client,
+        ticket_number,
+        assigned_to,
+        task_category,
+        additional_info=additional_info,
+        operator_id=operator_id,
+    )
+    if from_status in ("Open", "Pending"):
+        action_type = (
+            "ReassignedFromOpen"
+            if from_status == "Open"
+            else "ReassignedFromPending"
+        )
+        note = (
+            "Moved back to Pending for next-day field work."
+            if from_status == "Open"
+            else "Reassigned while Pending; prior response cleared for a fresh visit."
+        )
+        try:
+            client.table(ATTENDANCE_LOGS_TABLE).insert(
+                {
+                    "ticket_number": ticket_number,
+                    "member_username": f"@{operator_id.lstrip('@')}",
+                    "action_type": action_type,
+                    "note": _cc_assignment_log_note(note, operator_id),
+                    "timestamp": _cc_utc_now_iso(),
+                }
+            ).execute()
+        except Exception:
+            pass
     updated = _fetch_ticket_row(ticket_number)
     return updated or row
 
@@ -2163,37 +2675,38 @@ def _render_assignment_editor(
     if current_cat and current_cat not in cats:
         cats = [current_cat, *cats]
 
+    _sync_assignment_edit_widgets(
+        keys=keys,
+        picked=picked,
+        current_handle=current_handle,
+        current_cat=current_cat,
+        current_notes=current_notes,
+        cats=cats,
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+    )
+
     with st.form(f"{edit_key_prefix}_assignment_edit_form", clear_on_submit=False):
         if fe_names and not fe_missing:
             fe_opts = [f"@{n}" for n in fe_names]
-            default_fe = (
-                f"@{current_handle}"
-                if current_handle
-                and f"@{current_handle}" in fe_opts
-                else (fe_opts[0] if fe_opts else "")
-            )
             st.selectbox(
                 "Engineer",
                 options=fe_opts,
-                index=fe_opts.index(default_fe) if default_fe in fe_opts else 0,
                 key=keys["engineer"],
             )
         else:
             st.text_input(
                 "Engineer",
-                value=current_handle,
                 placeholder="username",
                 key=keys["engineer"],
             )
         st.selectbox(
             "Category",
             options=cats,
-            index=cats.index(current_cat) if current_cat in cats else 0,
             key=keys["category"],
         )
         st.text_area(
             "Notes (additional info)",
-            value=current_notes,
             height=80,
             key=keys["notes"],
         )
@@ -2276,6 +2789,155 @@ def _render_assignment_editor(
     st.rerun()
 
 
+def _render_reassign_editor(
+    *,
+    from_status: str,
+    ticket_picker_key: str,
+    edit_key_prefix: str,
+    cat_names: list[str],
+    fe_names: list[str],
+    fe_missing: bool,
+    ticket_options: list[str],
+) -> None:
+    """Reassign a Pending or Open ticket: fresh Pending row, optional new Telegram post."""
+    if not ticket_options:
+        return
+
+    keys = _reassign_session_keys(edit_key_prefix)
+    picked = str(st.session_state.get(ticket_picker_key) or ticket_options[0])
+    if picked not in ticket_options:
+        picked = ticket_options[0]
+
+    row = _fetch_ticket_row(picked)
+    if not row:
+        st.warning("Ticket not found.")
+        return
+    if str(row.get("status") or "").strip() != from_status:
+        st.info(f"Pick a **{from_status}** ticket to reassign.")
+        return
+
+    st.caption(
+        f"Reassign **{picked}** for next-day field work → **Pending**. "
+        "Clears the previous field response and photo. "
+        "Posts a **new** assignment line in Telegram (when enabled below)."
+    )
+
+    current_handle = str(row.get("assigned_to") or "").strip().lstrip("@")
+    current_cat = str(row.get("task_category") or "").strip()
+    current_notes = str(row.get("additional_info") or "")
+
+    cats = cat_names if cat_names else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    if current_cat and current_cat not in cats:
+        cats = [current_cat, *cats]
+
+    _sync_assignment_edit_widgets(
+        keys=keys,
+        picked=picked,
+        current_handle=current_handle,
+        current_cat=current_cat,
+        current_notes=current_notes,
+        cats=cats,
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+    )
+
+    with st.form(f"{edit_key_prefix}_reassign_form", clear_on_submit=False):
+        if fe_names and not fe_missing:
+            st.selectbox("Engineer", options=[f"@{n}" for n in fe_names], key=keys["engineer"])
+        else:
+            st.text_input("Engineer", placeholder="username", key=keys["engineer"])
+        st.selectbox("Category", options=cats, key=keys["category"])
+        st.text_area("Notes (additional info)", height=80, key=keys["notes"])
+        st.checkbox(
+            "Post new Telegram assignment",
+            value=True,
+            key=keys["sync_tg"],
+        )
+        submitted = st.form_submit_button(
+            "Reassign → Pending", type="primary", use_container_width=True
+        )
+
+    if not submitted:
+        return
+
+    try:
+        if fe_names and not fe_missing:
+            handle = _cc_normalize_handle(str(st.session_state.get(keys["engineer"], "")))
+        else:
+            raw = str(st.session_state.get(keys["engineer"], "")).strip()
+            handle = _cc_normalize_handle(raw) if raw else ""
+            if not handle:
+                raise ValueError("Enter an engineer username.")
+        cat = str(st.session_state.get(keys["category"], "")).strip()
+        if not cat:
+            raise ValueError("Pick a category.")
+        notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    op = _session_operator_id()
+    if not op:
+        st.error("Sign in again — operator session is missing.")
+        return
+
+    try:
+        updated = _cc_dashboard_reassign_ticket(
+            picked,
+            assigned_to=handle,
+            task_category=cat,
+            additional_info=notes,
+            operator_id=op,
+            from_status=from_status,
+        )
+    except Exception as exc:
+        st.error(f"Could not reassign: {exc}")
+        return
+
+    tg_note = ""
+    if st.session_state.get(keys["sync_tg"]):
+        token, chat_id = _cc_resolve_telegram_credentials()
+        if not token or chat_id is None:
+            st.warning(
+                "Reassigned in dashboard. Telegram not posted — set **TELEGRAM_TOKEN** and "
+                "**TELEGRAM_GROUP_CHAT_ID**."
+            )
+        else:
+            try:
+                ref = asyncio.run(
+                    notify_telegram_group(
+                        handle,
+                        picked,
+                        cat,
+                        additional_info=notes,
+                        assigned_by=f"{op} (reassigned)",
+                        api_id=_read_setting("TG_API_ID")
+                        or _read_setting("TELEGRAM_API_ID")
+                        or None,
+                        api_hash=_read_setting("TG_API_HASH")
+                        or _read_setting("TELEGRAM_API_HASH")
+                        or None,
+                        bot_token=token,
+                        group_id=chat_id,
+                    )
+                )
+                _cc_save_assignment_telegram_ref(_get_supabase_client(), picked, ref)
+                tg_note = (
+                    "Posted a **new** assignment message in the group — "
+                    "field must swipe-reply to that line."
+                )
+            except Exception as exc:
+                st.warning(f"Reassigned in dashboard. Telegram post failed: {exc}")
+
+    st.session_state[keys["show"]] = False
+    st.session_state[_CC_FLASH_KEY] = (
+        f"**{picked}** reassigned → **Pending** ({handle}, {cat})."
+        + (f" {tg_note}" if tg_note else "")
+    )
+    _get_supabase_client.clear()
+    st.rerun()
+
+
 def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | None]:
     """Return a ``chat_id`` for ``send_message`` (int or ``@public_group``).
 
@@ -2337,50 +2999,31 @@ def _delete_field_engineer(username: str) -> None:
     client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
 
 
-def _normalize_task_category_name(raw: str) -> str:
-    s = " ".join((raw or "").strip().split())
-    if not s:
-        raise ValueError("Enter a **category** name.")
-    if len(s) > 64:
-        raise ValueError("Category name is too long (max 64 characters).")
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9 \-/&]*$", s):
-        raise ValueError(
-            "Use letters, digits, spaces, and - / & only (must start with a letter or digit)."
+def _ensure_task_categories_synced(client) -> None:
+    """Backfill ``dashboard_task_categories`` from ticket rows (once per session)."""
+    if st.session_state.get(_CATEGORIES_SYNCED_ONCE_KEY):
+        return
+    try:
+        sync_ticket_categories_into_table(
+            client,
+            tickets_table=TICKETS_TABLE,
+            categories_table=TASK_CATEGORIES_TABLE,
         )
-    return s
+    except Exception:
+        pass
+    st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = True
 
 
 def _try_fetch_task_categories() -> tuple[list[str], bool]:
-    """Return ``(category names, table_missing)`` ordered for the assign picker."""
+    """Return ``(category names, table_missing)`` from Supabase."""
     client = _get_supabase_client()
+    _ensure_task_categories_synced(client)
     try:
-        res = (
-            client.table(TASK_CATEGORIES_TABLE)
-            .select("name")
-            .order("sort_order")
-            .order("name")
-            .execute()
-        )
+        return fetch_task_category_names(client)
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             return [], True
         raise
-    names = [str(r["name"]) for r in (res.data or []) if r.get("name")]
-    if not names:
-        return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
-    return names, False
-
-
-def _insert_task_category(name: str) -> None:
-    client = _get_supabase_client()
-    client.table(TASK_CATEGORIES_TABLE).insert(
-        {"name": name, "sort_order": 0}
-    ).execute()
-
-
-def _delete_task_category(name: str) -> None:
-    client = _get_supabase_client()
-    client.table(TASK_CATEGORIES_TABLE).delete().eq("name", name).execute()
 
 
 def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
@@ -2403,8 +3046,9 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
                 type="secondary",
             ):
                 try:
-                    _delete_task_category(cat)
+                    delete_task_category(_get_supabase_client(), cat)
                     st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
+                    st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
@@ -2424,14 +3068,19 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
                 st.warning("Type a category name first.")
             else:
                 try:
-                    norm = _normalize_task_category_name(raw)
+                    norm = normalize_task_category_name(raw)
                     existing, _ = _try_fetch_task_categories()
                     if any(c.lower() == norm.lower() for c in existing):
                         st.warning(f"**{norm}** is already listed.")
                     else:
-                        _insert_task_category(norm)
+                        upsert_task_category(_get_supabase_client(), norm)
                         st.session_state.pop("cc_new_category", None)
-                        st.session_state[_CC_CATEGORY_SELECT_KEY] = norm
+                        st.session_state[_CC_CATEGORY_SELECT_PENDING_KEY] = norm
+                        st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
+                        st.session_state[_CC_FLASH_KEY] = (
+                            f"Category **{norm}** saved to Supabase — "
+                            "assign picker and Telegram bot use it on the next assignment."
+                        )
                         st.rerun()
                 except ValueError as ve:
                     st.error(str(ve))
@@ -2445,9 +3094,13 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
 
 def _render_cc_category_row(categories: list[str], *, missing: bool) -> None:
     opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
-    if current not in opts:
-        st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+    pending = st.session_state.pop(_CC_CATEGORY_SELECT_PENDING_KEY, None)
+    if pending is not None and pending in opts:
+        st.session_state[_CC_CATEGORY_SELECT_KEY] = pending
+    else:
+        current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
+        if current not in opts:
+            st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
     st.selectbox("Category", options=opts, key=_CC_CATEGORY_SELECT_KEY)
     with st.popover("Edit categories", key="cc_categories_popover"):
         _categories_manage_popover(categories or opts, missing=missing)
@@ -3318,32 +3971,41 @@ def _dataframe_column_config(df: pd.DataFrame) -> dict:
     Falls back to no config if Streamlit is too old to support
     ``column_config.LinkColumn`` (rare, but keeps the table viewable).
     """
-    if "photo_url" not in df.columns:
-        return {}
+    cfg: dict = {}
     try:
-        return {
-            "photo_url": st.column_config.LinkColumn(
+        if "photo_url" in df.columns:
+            cfg["photo_url"] = st.column_config.LinkColumn(
                 "photo_url",
                 help="Click to open the field photo in a new tab.",
                 display_text="Open photo",
-            ),
-        }
+            )
+        if "field_response" in df.columns:
+            cfg["field_response"] = st.column_config.TextColumn(
+                "Field response",
+                help="Engineer’s reply text. ``@mentions`` here often tag the assigner/coordinator, not who sent the message.",
+            )
+        if "field_responded_by" in df.columns:
+            cfg["field_responded_by"] = st.column_config.TextColumn(
+                "Responded by",
+                help="Telegram account that **sent** the reply (test phone), when different from assignee. Not ``@`` names inside the note.",
+            )
     except Exception:
         return {}
+    return cfg
 
 
-def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
-    """Return rows with **any recent activity** within the lookback window.
+def _apply_dash_time_range(
+    df: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Keep rows whose latest activity falls in the sidebar **Time range**.
 
-    We used to filter on ``last_assigned_at`` only whenever that column
-    existed. That hid tickets whose assignment was old but which had a
-    fresh field response (``Open``), admin status change, or DB
-    ``updated_at`` — making the dashboard look "stuck" even though
-    Supabase had new data.
-
-    Now each row is kept if the **latest** of the available activity
-    timestamps (assignment, response, generic update, or creation) falls
-    inside the window.
+    Uses ``last_assigned_at``, ``responded_at``, ``updated_at``, and
+    ``created_at`` (whichever is latest). Matches the From–To / preset
+    range — not a rolling "last N days from now" window (that hid valid
+    tickets when the preset span did not align with ``now()``).
     """
     if df.empty:
         return df
@@ -3361,10 +4023,9 @@ def _apply_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
         return df
     stacked = pd.concat([_parse_ts(df[c]) for c in cols], axis=1)
     ref = stacked.max(axis=1, skipna=True)
-    cutoff = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC") - pd.Timedelta(days=lookback_days)
     # Keep rows with no parseable timestamps so a bad/legacy cell does not wipe
     # the whole dashboard (everything became NaT → empty frame).
-    mask = ref.isna() | (ref >= cutoff)
+    mask = ref.isna() | ((ref >= range_start) & (ref <= range_end))
     return df[mask].copy()
 
 
@@ -3376,7 +4037,7 @@ def _queue_segment_base(label: str | None) -> str:
     """Map queue label (with optional count) back to queue name."""
     if not label:
         return "Pending"
-    for base in ("Pending", "Open", "Completed", "Log", "Performance"):
+    for base in ("Pending", "Open", "Unattended", "Completed", "Log", "Performance"):
         if label == base or label.startswith(f"{base} ("):
             return base
     return "Pending"
@@ -3437,17 +4098,52 @@ def _render_clickable_queue_metric(
             st.rerun()
 
 
+def _render_assign_day_metrics(df_all: pd.DataFrame) -> None:
+    """Today's assignment funnel (ops timezone, UTC+5)."""
+    if df_all.empty:
+        return
+    today = datetime.now(OPS_TZ).date()
+    start = _local_date_start(today)
+    end = _local_date_end(today)
+    assigned_today = 0
+    responded_today = 0
+    unattended_today = 0
+    pending_now = 0
+    if "last_assigned_at" in df_all.columns:
+        la = _parse_ts(df_all["last_assigned_at"])
+        assigned_today = int(((la >= start) & (la <= end)).sum())
+    if "responded_at" in df_all.columns:
+        rp = _parse_ts(df_all["responded_at"])
+        responded_today = int(((rp >= start) & (rp <= end)).sum())
+    if "status" in df_all.columns:
+        st_series = df_all["status"].astype(str).str.strip()
+        unattended_today = int(st_series.eq(STATUS_UNATTENDED).sum())
+        pending_now = int(st_series.eq("Pending").sum())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Assigned today", assigned_today)
+    c2.metric("Responded today", responded_today)
+    c3.metric("Pending now", pending_now)
+    c4.metric("Unattended (total)", unattended_today)
+    nudge_h = int(UNATTENDED_NUDGE_HOURS) if UNATTENDED_NUDGE_HOURS == int(UNATTENDED_NUDGE_HOURS) else UNATTENDED_NUDGE_HOURS
+    st.caption(
+        f"Assign day ends {os.getenv('ASSIGN_DAY_CUTOFF_HOUR', '23')}:{os.getenv('ASSIGN_DAY_CUTOFF_MINUTE', '59').zfill(2)} "
+        f"{LOCAL_TZ_LABEL}. Auto nudge after **{nudge_h}h** with no field reply; "
+        "no same-day response → **Unattended**."
+    )
+
+
 def _render_queue_summary_metrics(
     *,
     total_pending: int,
     total_open: int,
+    total_unattended: int,
     total_completed: int,
-    avg_seconds: float | None,
     pending_label: str,
     open_label: str,
+    unattended_label: str,
     completed_label: str,
 ) -> None:
-    """Counts — click Pending / Needs review / Completed to switch queue."""
+    """Counts — click a queue to switch view."""
     c1, c2, c3, c4 = st.columns(4)
     _render_clickable_queue_metric(
         c1,
@@ -3465,18 +4161,24 @@ def _render_queue_summary_metrics(
     )
     _render_clickable_queue_metric(
         c3,
+        title="Unattended",
+        value=total_unattended,
+        queue_name="Unattended",
+        option_label=unattended_label,
+    )
+    _render_clickable_queue_metric(
+        c4,
         title="Completed",
         value=total_completed,
         queue_name="Completed",
         option_label=completed_label,
     )
-    with c4:
-        st.metric("Avg completion", _format_duration(avg_seconds))
 
 
 _TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
     "ticket_number",
     "assigned_to",
+    "field_responded_by",
     "task_category",
     "field_response",
     "photo_url",
@@ -3489,8 +4191,9 @@ def _sync_dashboard_nav_state(
     *,
     total_pending: int,
     total_open: int,
+    total_unattended: int,
     total_completed: int,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Keep queue session keys valid; return option labels for metrics."""
     _migrate_legacy_queue_nav()
 
@@ -3499,8 +4202,9 @@ def _sync_dashboard_nav_state(
 
     pending_label = _queue_segment_label("Pending", total_pending)
     open_label = _queue_segment_label("Open", total_open)
+    unattended_label = _queue_segment_label("Unattended", total_unattended)
     completed_label = _queue_segment_label("Completed", total_completed)
-    ticket_options = (pending_label, open_label, completed_label)
+    ticket_options = (pending_label, open_label, unattended_label, completed_label)
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
     if total_open > prev_open:
@@ -3511,7 +4215,7 @@ def _sync_dashboard_nav_state(
             open_label if total_open > 0 else pending_label
         )
     st.session_state["_dash_prev_open_count"] = total_open
-    return pending_label, open_label, completed_label
+    return pending_label, open_label, unattended_label, completed_label
 
 
 def _render_main_navigation() -> str:
@@ -3587,65 +4291,59 @@ def _render_dashboard(
         st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
         return
     else:
-        df = _apply_lookback(df_all, lookback_days)
+        range_start, range_end = _get_dash_range()
+        df = _apply_dash_time_range(
+            df_all, range_start=range_start, range_end=range_end
+        )
         if len(df_all) > len(df):
+            range_hint = _format_dash_range_caption() or f"the last {lookback_days} day(s)"
             st.caption(
-                f"Showing **{len(df)}** of **{len(df_all)}** tickets in the last "
-                f"{lookback_days} day(s). Widen **Time range** in the sidebar "
-                "if a Telegram assignment is missing."
+                f"Showing **{len(df)}** of **{len(df_all)}** tickets in {range_hint}. "
+                "Widen **Time range** in the sidebar if a Telegram assignment is missing, "
+                "or look up the ticket # in the sidebar."
             )
 
     if not df_all.empty and "status" in df_all.columns:
         mismatches = _fetch_pending_with_response_mismatch()
         if mismatches:
+            shown = ", ".join(mismatches[:5])
             st.error(
-                f"**{len(mismatches)}** ticket(s) have a Response in the log but are still **Pending** "
-                f"in `{TICKETS_TABLE}` (e.g. {', '.join(mismatches[:5])}). "
-                "The Railway bot could not UPDATE the row — check bot logs and apply "
-                "`supabase/migrations/20260516_tickets_active_anon_policies.sql`."
+                f"**{len(mismatches)}** ticket(s) look stuck in **Pending** after a field reply "
+                f"(e.g. {shown}). Use **Record response** on Pending, or check Railway bot logs "
+                "and `supabase/migrations/20260516_tickets_active_anon_policies.sql`. "
+                "Tickets **reassigned** for another visit are not listed here."
             )
 
     status = df["status"].astype(str).str.strip() if not df.empty and "status" in df.columns else pd.Series(dtype=str)
     pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
     open_mask = status.eq("Open") if not df.empty else pd.Series(dtype=bool)
+    unattended_mask = status.eq(STATUS_UNATTENDED) if not df.empty else pd.Series(dtype=bool)
     completed_mask = status.eq("Completed") if not df.empty else pd.Series(dtype=bool)
 
     total_pending = int(pending_mask.sum()) if not df.empty else 0
     total_open = int(open_mask.sum()) if not df.empty else 0
-
-    avg_seconds: float | None = None
-    if not df.empty:
-        completed_df = df[completed_mask].copy()
-        if (
-            not completed_df.empty
-            and "created_at" in completed_df.columns
-            and "responded_at" in completed_df.columns
-        ):
-            c = _parse_ts(completed_df["created_at"])
-            r = _parse_ts(completed_df["responded_at"])
-            valid = c.notna() & r.notna()
-            if valid.any():
-                delta = (r[valid] - c[valid]).dt.total_seconds()
-                avg_seconds = float(delta.mean())
-
+    total_unattended = int(unattended_mask.sum()) if not df.empty else 0
     total_completed = int(completed_mask.sum()) if not df.empty else 0
     _apply_pending_dashboard_nav()
-    pending_label, open_label, completed_label = _sync_dashboard_nav_state(
+    pending_label, open_label, unattended_label, completed_label = _sync_dashboard_nav_state(
         total_pending=total_pending,
         total_open=total_open,
+        total_unattended=total_unattended,
         total_completed=total_completed,
     )
 
     _render_dashboard_header(refreshed_at=refreshed_at)
     main_nav = _render_main_navigation()
     if main_nav == "Tickets":
+        _render_assign_day_metrics(df_all if not df_all.empty else df)
         _render_queue_summary_metrics(
             total_pending=total_pending,
             total_open=total_open,
+            total_unattended=total_unattended,
             total_completed=total_completed,
-            avg_seconds=avg_seconds,
             pending_label=pending_label,
             open_label=open_label,
+            unattended_label=unattended_label,
             completed_label=completed_label,
         )
     queue_view = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
@@ -3660,6 +4358,12 @@ def _render_dashboard(
 
     if queue_view == "Pending":
         st.markdown("##### Pending — waiting on field")
+        st.caption(
+            "Rows show **assignment** details (`additional_info` = site notes from the Telegram "
+            "assignment lines). A **field response** is a separate swipe-reply (or "
+            "``ticket_id + notes`` message) — that moves the ticket to **Open** and fills "
+            "``field_response``."
+        )
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -3670,10 +4374,43 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     pend,
                     key_prefix="assigned",
+                    caption=(
+                        "**Reassign** clears yesterday’s response and starts a new assignment "
+                        "(optional new Telegram post). **Record response** if the bot missed "
+                        "moving the ticket to Open."
+                    ),
                     status_actions=(),
                     allow_delete=True,
                     allow_edit_assignment=True,
+                    allow_manual_field_response=_is_dashboard_admin(),
+                    allow_reassign=_is_dashboard_admin(),
                 )
+
+                if _is_dashboard_admin():
+                    mismatch = _fetch_pending_with_response_mismatch()
+                    if mismatch:
+                        shown = ", ".join(mismatch[:8])
+                        extra = f" (+{len(mismatch) - 8} more)" if len(mismatch) > 8 else ""
+                        st.warning(
+                            "Pending tickets with a **current** field reply not reflected in "
+                            f"status (bot may have failed): {shown}{extra}. Use **Record response**, "
+                            "**Reassign** for a fresh visit, or check **Open**."
+                        )
+
+                if _is_dashboard_admin() and st.session_state.get(
+                    _reassign_session_keys("assigned")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_reassign_editor(
+                        from_status="Pending",
+                        ticket_picker_key="assigned_sb_ticket",
+                        edit_key_prefix="assigned",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(pend),
+                    )
 
                 if st.session_state.get(
                     _assignment_edit_session_keys("assigned")["show"]
@@ -3690,11 +4427,27 @@ def _render_dashboard(
                         ticket_options=_ticket_options_for_admin(pend),
                     )
 
-                if "created_at" in pend.columns:
-                    pend["_created"] = _parse_ts(pend["created_at"])
+                if _is_dashboard_admin() and st.session_state.get(
+                    _manual_field_response_session_keys("assigned")["show"]
+                ):
+                    _render_manual_field_response_editor(
+                        ticket_picker_key="assigned_sb_ticket",
+                        edit_key_prefix="assigned",
+                        ticket_options=_ticket_options_for_admin(pend),
+                        allowed_statuses=("Pending",),
+                        save_label="Save → Open",
+                    )
+
+                stale_col = (
+                    "last_assigned_at"
+                    if "last_assigned_at" in pend.columns
+                    else ("created_at" if "created_at" in pend.columns else None)
+                )
+                if stale_col:
+                    pend["_stale_ts"] = _parse_ts(pend[stale_col])
                     now_utc = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")
-                    pend["_stale"] = pend["_created"].notna() & (
-                        (now_utc - pend["_created"]) > pd.Timedelta(hours=24)
+                    pend["_stale"] = pend["_stale_ts"].notna() & (
+                        (now_utc - pend["_stale_ts"]) > pd.Timedelta(hours=24)
                     )
                 else:
                     pend["_stale"] = False
@@ -3725,8 +4478,43 @@ def _render_dashboard(
                     st.dataframe(view, use_container_width=True, hide_index=True)
                 if pend["_stale"].any():
                     st.caption(
-                        "Oak-tinted rows have been pending **more than 24 hours**."
+                        "Oak-tinted rows: no field response **more than 24 hours** "
+                        "since assignment (`last_assigned_at`)."
                     )
+
+    elif queue_view == "Unattended":
+        st.markdown("##### Unattended — no same-day field response")
+        if df.empty:
+            st.info(f"No tickets in the last {lookback_days} {day_word}.")
+        else:
+            unat = df[unattended_mask].copy()
+            if unat.empty:
+                st.info(
+                    "No **Unattended** tickets in this time window. "
+                    "Tickets move here automatically after assign-day cutoff "
+                    "if the engineer never replied."
+                )
+            else:
+                _render_admin_ticket_toolbar(
+                    unat,
+                    key_prefix="unattended",
+                    caption="Reopen to **Pending** to reassign or chase again.",
+                    status_actions=(
+                        ("Reopen to Pending", "Pending", "ReopenedFromUnattended"),
+                    ),
+                    allow_delete=True,
+                )
+                unat_view = _ticket_queue_view(
+                    unat,
+                    cols=_TICKET_QUEUE_TABLE_COLS
+                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
+                )
+                st.dataframe(
+                    unat_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=_dataframe_column_config(unat_view),
+                )
 
     elif queue_view == "Open":
         st.markdown("##### Open — needs your review")
@@ -3740,13 +4528,29 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     open_df,
                     key_prefix="open",
-                    caption="Mark **Completed** when verified.",
+                    caption=(
+                        "Mark **Completed** when verified. "
+                        "**Reassign** sends the ticket back to **Pending** for next-day field work."
+                    ),
                     status_actions=(
                         ("Mark Completed", "Completed", "Completed"),
                     ),
                     allow_delete=True,
                     allow_edit_assignment=True,
+                    allow_manual_field_response=_is_dashboard_admin(),
+                    allow_reassign=True,
                 )
+
+                if _is_dashboard_admin() and st.session_state.get(
+                    _manual_field_response_session_keys("open")["show"]
+                ):
+                    _render_manual_field_response_editor(
+                        ticket_picker_key="open_sb_ticket",
+                        edit_key_prefix="open",
+                        ticket_options=_ticket_options_for_admin(open_df),
+                        allowed_statuses=("Open",),
+                        save_label="Save response",
+                    )
 
                 if st.session_state.get(
                     _assignment_edit_session_keys("open")["show"]
@@ -3755,6 +4559,19 @@ def _render_dashboard(
                     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
                     _render_assignment_editor(
                         required_status="Open",
+                        ticket_picker_key="open_sb_ticket",
+                        edit_key_prefix="open",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(open_df),
+                    )
+
+                if st.session_state.get(_reassign_session_keys("open")["show"]):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_reassign_editor(
+                        from_status="Open",
                         ticket_picker_key="open_sb_ticket",
                         edit_key_prefix="open",
                         cat_names=cat_names,
