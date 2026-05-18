@@ -97,7 +97,7 @@ from unattended import (
     UNATTENDED_NUDGE_HOURS,
 )
 from dotenv import load_dotenv
-from supabase import create_client
+from supabase import ClientOptions, create_client
 
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
@@ -1231,9 +1231,62 @@ def _check_password() -> None:
     st.stop()
 
 
+_SUPABASE_HTTP_TIMEOUT_SEC = float(os.getenv("SUPABASE_HTTP_TIMEOUT_SEC", "25"))
+_DASH_SUPABASE_DOWN_KEY = "_dash_supabase_unreachable"
+
+
 @st.cache_resource(show_spinner=False)
 def _get_supabase_client():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    opts = ClientOptions(
+        postgrest_client_timeout=_SUPABASE_HTTP_TIMEOUT_SEC,
+        storage_client_timeout=_SUPABASE_HTTP_TIMEOUT_SEC,
+    )
+    return create_client(SUPABASE_URL, SUPABASE_KEY, options=opts)
+
+
+def _is_transient_supabase_error(exc: BaseException) -> bool:
+    """Network / timeout failures (dashboard should degrade, not crash)."""
+    try:
+        import httpx
+
+        if isinstance(exc, httpx.HTTPError):
+            return True
+    except ImportError:
+        pass
+    if isinstance(exc, (TimeoutError, OSError)):
+        return True
+    text = str(exc).lower()
+    return any(
+        needle in text
+        for needle in (
+            "connecttimeout",
+            "readtimeout",
+            "connection",
+            "10060",
+            "timed out",
+            "network",
+            "failed to respond",
+            "name or service not known",
+        )
+    )
+
+
+def _note_supabase_unreachable(exc: Exception | None = None) -> None:
+    st.session_state[_DASH_SUPABASE_DOWN_KEY] = True
+    if exc is not None:
+        st.session_state[f"{_DASH_SUPABASE_DOWN_KEY}_detail"] = str(exc)[:240]
+
+
+def _render_supabase_unreachable_banner() -> None:
+    if not st.session_state.get(_DASH_SUPABASE_DOWN_KEY):
+        return
+    detail = str(st.session_state.get(f"{_DASH_SUPABASE_DOWN_KEY}_detail", "") or "")
+    extra = f" ({detail})" if detail else ""
+    st.warning(
+        "Cannot reach **Supabase** — connection timed out or was blocked"
+        f"{extra}. Check internet, VPN/firewall, and `SUPABASE_URL` / `SUPABASE_KEY` "
+        "in `.env`. Lists stay empty until the database is reachable."
+    )
 
 
 _ORDER_COLUMN_CANDIDATES: tuple[str, ...] = (
@@ -1256,7 +1309,10 @@ def _get_order_column() -> str:
         try:
             client.table(TICKETS_TABLE).select(col).limit(1).execute()
             return col
-        except Exception:
+        except Exception as exc:
+            if _is_transient_supabase_error(exc):
+                _note_supabase_unreachable(exc)
+                return "created_at"
             continue
     return "created_at"
 
@@ -1295,16 +1351,22 @@ def _fetch_ticket_row(ticket_number: str) -> dict | None:
     tid = (ticket_number or "").strip()
     if not tid:
         return None
-    client = _get_supabase_client()
-    res = (
-        client.table(TICKETS_TABLE)
-        .select("*")
-        .eq("ticket_number", tid)
-        .limit(1)
-        .execute()
-    )
-    rows = res.data or []
-    return rows[0] if rows else None
+    try:
+        client = _get_supabase_client()
+        res = (
+            client.table(TICKETS_TABLE)
+            .select("*")
+            .eq("ticket_number", tid)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception as exc:
+        if _is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return None
+        raise
 
 
 def _apply_manual_field_response(
@@ -1469,6 +1531,9 @@ def _fetch_tickets() -> pd.DataFrame:
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             raise _TableMissingError(TICKETS_TABLE, exc) from exc
+        if _is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return pd.DataFrame()
         raise
     rows = res.data or []
     if not rows:
@@ -1613,6 +1678,117 @@ def _ticket_search_session_key(key_prefix: str) -> str:
 
 def _ticket_pick_session_key(key_prefix: str) -> str:
     return f"{key_prefix}_ticket_pick"
+
+
+def _ticket_selection_session_key(key_prefix: str) -> str:
+    return f"{key_prefix}_selected_tickets"
+
+
+def _get_selected_queue_tickets(key_prefix: str, options: list[str]) -> list[str]:
+    allowed = set(options)
+    raw = st.session_state.get(_ticket_selection_session_key(key_prefix), [])
+    if not isinstance(raw, list):
+        return []
+    return [str(t) for t in raw if str(t) in allowed]
+
+
+def _require_selected_tickets(
+    *,
+    key_prefix: str,
+    options: list[str],
+    exactly_one: bool = False,
+) -> list[str] | None:
+    selected = _get_selected_queue_tickets(key_prefix, options)
+    if not selected:
+        st.error(
+            "Tick **Select** on at least one ticket in the table above, "
+            "then click the action."
+        )
+        return None
+    if exactly_one and len(selected) != 1:
+        st.error(
+            f"Select **exactly one** ticket for this action "
+            f"({len(selected)} selected now)."
+        )
+        return None
+    return selected
+
+
+def _picked_ticket_from_selection(
+    *,
+    key_prefix: str,
+    ticket_options: list[str],
+) -> str | None:
+    selected = _require_selected_tickets(
+        key_prefix=key_prefix, options=ticket_options, exactly_one=True
+    )
+    return selected[0] if selected else None
+
+
+def _render_selectable_ticket_table(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    cols: tuple[str, ...],
+) -> list[str]:
+    """Table with a **Select** checkbox per row; returns chosen ticket numbers."""
+    options = _ticket_options_for_admin(df)
+    if not options:
+        st.caption("No tickets in this queue.")
+        return []
+
+    view = _ticket_queue_view(df, cols=cols)
+    sel_key = _ticket_selection_session_key(key_prefix)
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = []
+
+    if "ticket_number" not in view.columns:
+        st.dataframe(view, use_container_width=True, hide_index=True)
+        return []
+
+    b1, b2, _ = st.columns([1, 1, 6])
+    with b1:
+        if st.button("Select all", key=f"{key_prefix}_sel_all", use_container_width=True):
+            st.session_state[sel_key] = list(options)
+            st.rerun()
+    with b2:
+        if st.button("Clear", key=f"{key_prefix}_sel_clear", use_container_width=True):
+            st.session_state[sel_key] = []
+            st.rerun()
+
+    prev = set(_get_selected_queue_tickets(key_prefix, options))
+    table = view.copy()
+    table.insert(0, "Select", table["ticket_number"].astype(str).isin(prev))
+
+    disabled_cols = [c for c in table.columns if c != "Select"]
+    edited = st.data_editor(
+        table,
+        hide_index=True,
+        use_container_width=True,
+        key=f"{key_prefix}_ticket_select_editor",
+        column_config={
+            "Select": st.column_config.CheckboxColumn(
+                "Select",
+                help="Tick, then use the action buttons below",
+                default=False,
+            ),
+        },
+        disabled=disabled_cols,
+    )
+
+    selected = [
+        str(t)
+        for t in edited.loc[edited["Select"] == True, "ticket_number"].astype(str).tolist()
+        if str(t) in options
+    ]
+    st.session_state[sel_key] = selected
+    if selected:
+        shown = ", ".join(selected[:6])
+        extra = f" (+{len(selected) - 6} more)" if len(selected) > 6 else ""
+        st.caption(f"**{len(selected)}** selected: {shown}{extra}")
+    else:
+        st.caption("Tick **Select** on ticket(s), then choose an action below.")
+    return selected
 
 
 _TICKET_PICK_PLACEHOLDER = "__choose_ticket__"
@@ -1824,23 +2000,27 @@ def _apply_admin_ticket_action(
     choice: str,
     confirm_del: bool,
     status_actions: tuple[tuple[str, str, str], ...],
-) -> None:
+    do_rerun: bool = True,
+) -> bool:
+    """Apply one admin action. Returns True on success."""
     if choice == "Delete row":
         if not confirm_del:
             st.warning("Check **Yes, remove permanently** first.")
-            return
+            return False
         try:
             _delete_ticket(picked)
         except Exception as exc:
             _delete_ticket_error_ui(picked, exc)
-            return
-        st.success(f"{picked} deleted (history kept in Log).")
-        st.rerun()
+            return False
+        if do_rerun:
+            st.success(f"{picked} deleted (history kept in Log).")
+            st.rerun()
+        return True
 
     matched = next((a for a in status_actions if a[0] == choice), None)
     if not matched:
         st.error("Unknown action.")
-        return
+        return False
     _, new_status, log_action = matched
     try:
         _set_ticket_status(
@@ -1850,9 +2030,11 @@ def _apply_admin_ticket_action(
         )
     except Exception as exc:
         st.error(f"Could not update {picked}: {exc}")
-        return
-    st.success(f"{picked} → **{new_status}**.")
-    st.rerun()
+        return False
+    if do_rerun:
+        st.success(f"{picked} → **{new_status}**.")
+        st.rerun()
+    return True
 
 
 def _render_ticket_delete_popover(
@@ -1863,11 +2045,13 @@ def _render_ticket_delete_popover(
 ) -> None:
     """Secondary remove flow — popover, confirm checkbox, disabled until checked."""
     with st.popover("Remove…", use_container_width=True):
-        picked = _resolve_picked_ticket(key_prefix=key_prefix, options=options)
-        if not picked:
-            st.caption("Choose a ticket in the list above, then open Remove again.")
+        picked_list = _get_selected_queue_tickets(key_prefix, options)
+        if not picked_list:
+            st.caption("Tick ticket(s) in the table, then open Remove again.")
             return
-        st.markdown(f"**{picked}**")
+        st.markdown("**" + "**, **".join(picked_list[:12]) + "**")
+        if len(picked_list) > 12:
+            st.caption(f"+ {len(picked_list) - 12} more")
         st.caption("Removes from queue · **Log** keeps history.")
         confirm_del = st.checkbox(
             "Yes, remove permanently",
@@ -1881,12 +2065,20 @@ def _render_ticket_delete_popover(
             use_container_width=True,
             disabled=not confirm_del,
         ):
-            _apply_admin_ticket_action(
-                picked=picked,
-                choice="Delete row",
-                confirm_del=confirm_del,
-                status_actions=status_actions,
-            )
+            ok = 0
+            for picked in picked_list:
+                if _apply_admin_ticket_action(
+                    picked=picked,
+                    choice="Delete row",
+                    confirm_del=confirm_del,
+                    status_actions=status_actions,
+                    do_rerun=False,
+                ):
+                    ok += 1
+            if ok:
+                st.success(f"Removed **{ok}** ticket(s) (history kept in Log).")
+                st.session_state[_ticket_selection_session_key(key_prefix)] = []
+                st.rerun()
 
 
 def _sync_manual_field_response_widgets(
@@ -1916,7 +2108,7 @@ def _render_manual_field_response_editor(
     if not st.session_state.get(keys["show"]):
         return
 
-    picked = _picked_ticket_from_search(
+    picked = _picked_ticket_from_selection(
         key_prefix=key_prefix, ticket_options=ticket_options
     )
     if not picked:
@@ -2001,7 +2193,7 @@ def _render_admin_ticket_toolbar(
     allow_manual_field_response: bool = False,
     allow_reassign: bool = False,
 ) -> None:
-    """Ticket picker + primary action; remove lives in a small side popover."""
+    """Actions for tickets ticked in the table above."""
     options = _ticket_options_for_admin(df)
     if not options:
         return
@@ -2009,6 +2201,7 @@ def _render_admin_ticket_toolbar(
     if caption:
         st.caption(caption)
 
+    selected = _get_selected_queue_tickets(key_prefix, options)
     status_labels = [a[0] for a in status_actions]
     del_col = 1 if allow_delete else 0
     edit_col = 1 if allow_edit_assignment else 0
@@ -2019,8 +2212,10 @@ def _render_admin_ticket_toolbar(
     reassign_keys = _reassign_session_keys(key_prefix)
 
     with st.container(border=True):
-        if status_labels or edit_col or mfr_col or reassign_col:
-            widths: list[int] = [2]
+        if selected:
+            st.markdown(f"**{len(selected)}** ticket(s) selected")
+        if status_labels or edit_col or mfr_col or reassign_col or del_col:
+            widths: list[int] = []
             if status_labels:
                 widths.append(1)
             if mfr_col:
@@ -2033,9 +2228,6 @@ def _render_admin_ticket_toolbar(
                 widths.append(1)
             cols = st.columns(widths, vertical_alignment="bottom")
             idx = 0
-            with cols[idx]:
-                _render_admin_ticket_picker(df, key_prefix=key_prefix)
-            idx += 1
             if status_labels:
                 with cols[idx]:
                     if len(status_labels) == 1:
@@ -2046,16 +2238,28 @@ def _render_admin_ticket_toolbar(
                             type="primary",
                             use_container_width=True,
                         ):
-                            picked = _require_queue_ticket(
+                            picked_list = _require_selected_tickets(
                                 key_prefix=key_prefix, options=options
                             )
-                            if picked:
-                                _apply_admin_ticket_action(
-                                    picked=picked,
-                                    choice=label,
-                                    confirm_del=False,
-                                    status_actions=status_actions,
-                                )
+                            if picked_list:
+                                ok = 0
+                                for i, picked in enumerate(picked_list):
+                                    if _apply_admin_ticket_action(
+                                        picked=picked,
+                                        choice=label,
+                                        confirm_del=False,
+                                        status_actions=status_actions,
+                                        do_rerun=False,
+                                    ):
+                                        ok += 1
+                                if ok:
+                                    st.success(
+                                        f"**{ok}** ticket(s) updated → **{label}**."
+                                    )
+                                    st.session_state[
+                                        _ticket_selection_session_key(key_prefix)
+                                    ] = []
+                                    st.rerun()
                     else:
                         choice = st.selectbox(
                             "Action",
@@ -2068,16 +2272,28 @@ def _render_admin_ticket_toolbar(
                             type="primary",
                             use_container_width=True,
                         ):
-                            picked = _require_queue_ticket(
+                            picked_list = _require_selected_tickets(
                                 key_prefix=key_prefix, options=options
                             )
-                            if picked:
-                                _apply_admin_ticket_action(
-                                    picked=picked,
-                                    choice=choice,
-                                    confirm_del=False,
-                                    status_actions=status_actions,
-                                )
+                            if picked_list:
+                                ok = 0
+                                for picked in picked_list:
+                                    if _apply_admin_ticket_action(
+                                        picked=picked,
+                                        choice=choice,
+                                        confirm_del=False,
+                                        status_actions=status_actions,
+                                        do_rerun=False,
+                                    ):
+                                        ok += 1
+                                if ok:
+                                    st.success(
+                                        f"**{ok}** ticket(s) updated → **{choice}**."
+                                    )
+                                    st.session_state[
+                                        _ticket_selection_session_key(key_prefix)
+                                    ] = []
+                                    st.rerun()
                 idx += 1
             if mfr_col:
                 with cols[idx]:
@@ -2116,20 +2332,12 @@ def _render_admin_ticket_toolbar(
                         options=options,
                         status_actions=status_actions,
                     )
-        else:
-            if del_col:
-                c_ticket, c_del = st.columns([3, 1], vertical_alignment="bottom")
-            else:
-                c_ticket, c_del = st.columns([1]), None
-            with c_ticket:
-                _render_admin_ticket_picker(df, key_prefix=key_prefix)
-            if c_del is not None:
-                with c_del:
-                    _render_ticket_delete_popover(
-                        key_prefix=key_prefix,
-                        options=options,
-                        status_actions=status_actions,
-                    )
+        elif del_col:
+            _render_ticket_delete_popover(
+                key_prefix=key_prefix,
+                options=options,
+                status_actions=status_actions,
+            )
 
 
 def _fetch_attendance(
@@ -2834,7 +3042,7 @@ def _render_assignment_editor(
         return
 
     keys = _assignment_edit_session_keys(edit_key_prefix)
-    picked = _picked_ticket_from_search(
+    picked = _picked_ticket_from_selection(
         key_prefix=key_prefix, ticket_options=ticket_options
     )
     if not picked:
@@ -2999,7 +3207,7 @@ def _render_reassign_editor(
         return
 
     keys = _reassign_session_keys(edit_key_prefix)
-    picked = _picked_ticket_from_search(
+    picked = _picked_ticket_from_selection(
         key_prefix=key_prefix, ticket_options=ticket_options
     )
     if not picked:
@@ -3180,6 +3388,9 @@ def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             return [], True
+        if _is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return [], False
         raise
     rows = res.data or []
     names = [str(r["username"]) for r in rows if r.get("username")]
@@ -3220,6 +3431,9 @@ def _try_fetch_task_categories() -> tuple[list[str], bool]:
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             return [], True
+        if _is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
         raise
 
 
@@ -3743,6 +3957,7 @@ def main() -> None:
     _inject_bon_theme()
 
     auto, interval_minutes, lookback_days = _sidebar_controls()
+    _render_supabase_unreachable_banner()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
@@ -4576,13 +4791,33 @@ def _render_dashboard(
             if pend.empty:
                 st.info(f"No pending tickets in the last {lookback_days} {day_word}.")
             else:
+                st.caption(
+                    "Tick **Select** on ticket(s). **Record response** / **Reassign** need "
+                    "exactly one ticket selected."
+                )
+                pend_show = tuple(
+                    c
+                    for c in (
+                        "ticket_number",
+                        "assigned_to",
+                        "task_category",
+                        "additional_info",
+                        "created_at",
+                        "last_assigned_at",
+                    )
+                    if c in pend.columns
+                )
+                _render_selectable_ticket_table(
+                    pend,
+                    key_prefix="assigned",
+                    cols=pend_show,
+                )
                 _render_admin_ticket_toolbar(
                     pend,
                     key_prefix="assigned",
                     caption=(
-                        "**Reassign** clears yesterday’s response and starts a new assignment "
-                        "(optional new Telegram post). **Record response** if the bot missed "
-                        "moving the ticket to Open."
+                        "**Reassign** clears prior response (optional new Telegram post). "
+                        "**Record response** if the bot missed moving the ticket to Open."
                     ),
                     status_actions=(),
                     allow_delete=True,
@@ -4651,41 +4886,22 @@ def _render_dashboard(
                 if stale_col:
                     pend["_stale_ts"] = _parse_ts(pend[stale_col])
                     now_utc = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")
-                    pend["_stale"] = pend["_stale_ts"].notna() & (
-                        (now_utc - pend["_stale_ts"]) > pd.Timedelta(hours=24)
-                    )
-                else:
-                    pend["_stale"] = False
-
-                show = [
-                    c
-                    for c in (
-                        "ticket_number",
-                        "assigned_to",
-                        "task_category",
-                        "additional_info",
-                        "created_at",
-                        "last_assigned_at",
-                    )
-                    if c in pend.columns
-                ]
-                view = _format_local(pend[show])
-
-                def _row_red(_row: pd.Series) -> list[str]:
-                    stale = bool(pend.loc[_row.name, "_stale"]) if "_stale" in pend.columns else False
-                    color = "background-color: rgba(215, 180, 145, 0.12); color: #f0e6dc" if stale else ""
-                    return [color] * len(_row)
-
-                try:
-                    styled = view.style.apply(_row_red, axis=1)
-                    st.dataframe(styled, use_container_width=True, hide_index=True)
-                except Exception:
-                    st.dataframe(view, use_container_width=True, hide_index=True)
-                if pend["_stale"].any():
-                    st.caption(
-                        "Oak-tinted rows: no field response **more than 24 hours** "
-                        "since assignment (`last_assigned_at`)."
-                    )
+                    if pend["_stale_ts"].notna().any():
+                        stale_ids = pend.loc[
+                            pend["_stale_ts"].notna()
+                            & ((now_utc - pend["_stale_ts"]) > pd.Timedelta(hours=24)),
+                            "ticket_number",
+                        ].astype(str).tolist()
+                        if stale_ids:
+                            st.caption(
+                                "Stale (>24h since assign, no response): "
+                                + ", ".join(stale_ids[:8])
+                                + (
+                                    f" (+{len(stale_ids) - 8} more)"
+                                    if len(stale_ids) > 8
+                                    else ""
+                                )
+                            )
 
     elif queue_view == "Unattended":
         st.markdown("##### Unattended — no same-day field response")
@@ -4700,6 +4916,12 @@ def _render_dashboard(
                     "if the engineer never replied."
                 )
             else:
+                _render_selectable_ticket_table(
+                    unat,
+                    key_prefix="unattended",
+                    cols=_TICKET_QUEUE_TABLE_COLS
+                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
+                )
                 _render_admin_ticket_toolbar(
                     unat,
                     key_prefix="unattended",
@@ -4708,17 +4930,6 @@ def _render_dashboard(
                         ("Reopen to Pending", "Pending", "ReopenedFromUnattended"),
                     ),
                     allow_delete=True,
-                )
-                unat_view = _ticket_queue_view(
-                    unat,
-                    cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
-                )
-                st.dataframe(
-                    unat_view,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config=_dataframe_column_config(unat_view),
                 )
 
     elif queue_view == "Open":
@@ -4730,6 +4941,15 @@ def _render_dashboard(
             if open_df.empty:
                 st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
             else:
+                st.caption(
+                    "Tick **Select** on ticket(s), then use actions below. "
+                    "**Mark Completed** allows multiple; other actions need exactly one."
+                )
+                _render_selectable_ticket_table(
+                    open_df,
+                    key_prefix="open",
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
+                )
                 _render_admin_ticket_toolbar(
                     open_df,
                     key_prefix="open",
@@ -4785,17 +5005,6 @@ def _render_dashboard(
                         ticket_options=_ticket_options_for_admin(open_df),
                     )
 
-                open_view = _ticket_queue_view(
-                    open_df,
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
-                )
-                st.dataframe(
-                    open_view,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config=_dataframe_column_config(open_view),
-                )
-
                 with st.expander("Photo gallery", expanded=total_open <= 3):
                     _render_field_photos_section(open_df)
 
@@ -4808,6 +5017,11 @@ def _render_dashboard(
             if done.empty:
                 st.info(f"No completed tickets in the last {lookback_days} {day_word}.")
             else:
+                _render_selectable_ticket_table(
+                    done,
+                    key_prefix="completed",
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
+                )
                 _render_admin_ticket_toolbar(
                     done,
                     key_prefix="completed",
@@ -4816,17 +5030,6 @@ def _render_dashboard(
                         ("Send back to Open", "Open", "Reopened"),
                     ),
                     allow_delete=True,
-                )
-
-                done_view = _ticket_queue_view(
-                    done,
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
-                )
-                st.dataframe(
-                    done_view,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config=_dataframe_column_config(done_view),
                 )
 
                 with st.expander("Photo gallery", expanded=False):
