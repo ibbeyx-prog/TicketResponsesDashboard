@@ -2619,14 +2619,15 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await _group_assignment_ack(update, context, ticket_number, assigned_to)
             else:
                 prev_status = str(existing.get("status") or "").strip()
-                has_field_work = bool(
-                    str(existing.get("field_response") or "").strip()
-                ) or prev_status in ("Open", "Completed")
-                if _same_assignment_target(
+                # Only keep field_response when refreshing notes on an **Open** ticket
+                # (admin review). A new coordinator post for **Pending** / Unattended /
+                # Completed is always a fresh field visit → full reassign (clears reply).
+                keep_open_field_work = prev_status == "Open" and _same_assignment_target(
                     existing,
                     assigned_to=assigned_to,
                     task_category=task_category,
-                ) and has_field_work:
+                )
+                if keep_open_field_work:
                     _db_update_assignment_from_telegram(
                         ticket_number,
                         assigned_to=assigned_to,
@@ -2636,13 +2637,12 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         assignment_telegram_message_id=tg_msg_id,
                     )
                     log.info(
-                        "assignment notes updated ticket=%s status=%s (field work kept)",
+                        "assignment notes updated ticket=%s status=Open (field work kept)",
                         ticket_number,
-                        prev_status,
                     )
                     lines.append(
                         f"• Updated assignment notes for {ticket_number} "
-                        f"({task_category}) — kept **{prev_status}** and field response."
+                        f"({task_category}) — kept **Open** and field response."
                     )
                 else:
                     _db_reassign_ticket(
