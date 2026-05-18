@@ -77,6 +77,7 @@ import altair as alt
 from bot_utils import (
     NOTIFY_BUILD_ID,
     AssignmentTelegramRef,
+    delete_telegram_assignment_message,
     find_assignment_telegram_ref,
     normalize_telegram_group_id_paste,
     notify_telegram_group,
@@ -1728,14 +1729,35 @@ def _set_ticket_status(
             pass
 
 
-def _delete_ticket(ticket_number: str, *, actor: str = "@dashboard-admin") -> None:
+def _delete_ticket(
+    ticket_number: str,
+    *,
+    actor: str = "@dashboard-admin",
+    delete_telegram: bool = False,
+) -> str | None:
     """Delete the ticket row but keep its attendance history.
 
     The ``ticket_attendance_logs.ticket_number`` foreign key is **not**
     cascaded, so the history rows remain queryable from the Log tab even
     after the active ticket is gone. We also append a ``Deleted`` log
     entry so the audit trail explicitly records the removal.
+
+    Returns an optional warning when ``delete_telegram`` was requested but failed.
     """
+    tg_warn: str | None = None
+    if delete_telegram:
+        row = _fetch_ticket_row(ticket_number)
+        if row:
+            try:
+                tg_warn = asyncio.run(
+                    _cc_delete_assignment_from_telegram(
+                        row=row,
+                        ticket_number=ticket_number,
+                    )
+                )
+            except Exception as exc:
+                tg_warn = f"Telegram delete failed: {exc}"
+
     client = _get_supabase_client()
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -1754,6 +1776,49 @@ def _delete_ticket(ticket_number: str, *, actor: str = "@dashboard-admin") -> No
     client.table(TICKETS_TABLE).delete().eq(
         "ticket_number", str(ticket_number)
     ).execute()
+    return tg_warn
+
+
+async def _cc_delete_assignment_from_telegram(
+    *,
+    row: dict,
+    ticket_number: str,
+) -> str | None:
+    """Delete linked assignment message (best effort). Returns warning text or None."""
+    token, chat_id = _cc_resolve_telegram_credentials()
+    if not token or chat_id is None:
+        return "Telegram not configured — assignment message left in the group."
+
+    tg_chat = row.get("assignment_telegram_chat_id")
+    tg_msg = row.get("assignment_telegram_message_id")
+    api_id = _read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None
+    api_hash = _read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None
+
+    if tg_chat is None or tg_msg is None:
+        found = await find_assignment_telegram_ref(
+            ticket_number,
+            group_id=chat_id,
+            bot_token=token,
+            api_id=api_id,
+            api_hash=api_hash,
+        )
+        if found:
+            tg_chat, tg_msg = found.chat_id, found.message_id
+
+    if tg_chat is None or tg_msg is None:
+        return "No linked assignment message found in the group."
+
+    try:
+        await delete_telegram_assignment_message(
+            int(tg_chat),
+            int(tg_msg),
+            api_id=api_id,
+            api_hash=api_hash,
+            bot_token=token,
+        )
+    except Exception as exc:
+        return str(exc)
+    return None
 
 
 def _ticket_options_for_admin(df: pd.DataFrame) -> list[str]:
@@ -2077,6 +2142,7 @@ def _apply_admin_ticket_action(
     confirm_del: bool,
     status_actions: tuple[tuple[str, str, str], ...],
     do_rerun: bool = True,
+    delete_telegram: bool = False,
 ) -> bool:
     """Apply one admin action. Returns True on success."""
     if choice == "Delete row":
@@ -2084,12 +2150,17 @@ def _apply_admin_ticket_action(
             st.warning("Check **Yes, remove permanently** first.")
             return False
         try:
-            _delete_ticket(picked)
+            tg_warn = _delete_ticket(picked, delete_telegram=delete_telegram)
         except Exception as exc:
             _delete_ticket_error_ui(picked, exc)
             return False
         if do_rerun:
-            st.success(f"{picked} deleted (history kept in Log).")
+            msg = f"{picked} deleted (history kept in Log)."
+            if delete_telegram and not tg_warn:
+                msg += " Telegram assignment message removed."
+            elif tg_warn:
+                st.warning(f"{picked}: {tg_warn}")
+            st.success(msg)
             st.rerun()
         return True
 
@@ -2136,6 +2207,17 @@ def _render_ticket_delete_popover(
             value=False,
             key=f"{key_prefix}_del_confirm",
         )
+        token_ok, chat_ok = _cc_resolve_telegram_credentials()
+        can_del_tg = bool(token_ok and chat_ok is not None)
+        delete_tg = st.checkbox(
+            "Also delete Telegram assignment message",
+            value=can_del_tg,
+            disabled=not can_del_tg,
+            key=f"{key_prefix}_del_tg",
+            help="Removes the bot's linked assignment post from the field group when possible.",
+        )
+        if not can_del_tg:
+            st.caption("Set **TELEGRAM_TOKEN** and **TELEGRAM_GROUP_CHAT_ID** to enable.")
         if st.button(
             "Delete",
             key=f"{key_prefix}_del_btn",
@@ -2144,17 +2226,25 @@ def _render_ticket_delete_popover(
             disabled=not confirm_del,
         ):
             ok = 0
+            tg_warnings: list[str] = []
             for picked in picked_list:
-                if _apply_admin_ticket_action(
-                    picked=picked,
-                    choice="Delete row",
-                    confirm_del=confirm_del,
-                    status_actions=status_actions,
-                    do_rerun=False,
-                ):
+                try:
+                    tg_warn = _delete_ticket(
+                        picked,
+                        delete_telegram=bool(delete_tg),
+                    )
+                    if tg_warn:
+                        tg_warnings.append(f"**{picked}**: {tg_warn}")
                     ok += 1
+                except Exception as exc:
+                    _delete_ticket_error_ui(picked, exc)
             if ok:
-                st.success(f"Removed **{ok}** ticket(s) (history kept in Log).")
+                msg = f"Removed **{ok}** ticket(s) (history kept in Log)."
+                if delete_tg and not tg_warnings:
+                    msg += " Telegram assignment message(s) removed when linked."
+                st.success(msg)
+                for w in tg_warnings:
+                    st.warning(w)
                 st.session_state[_ticket_selection_session_key(key_prefix)] = []
                 st.rerun()
 

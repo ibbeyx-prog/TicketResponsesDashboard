@@ -389,5 +389,90 @@ async def update_telegram_assignment_message(
         raise
 
 
+def _delete_message_benign(exc: BaseException) -> bool:
+    err = str(exc).lower()
+    return any(
+        needle in err
+        for needle in (
+            "message to delete not found",
+            "message can't be deleted",
+            "message_id_invalid",
+            "message not found",
+            "not found",
+        )
+    )
+
+
+async def _delete_via_ptb(
+    *,
+    bot_token: str,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    async with Bot(bot_token) as bot:
+        await bot.delete_message(chat_id=int(chat_id), message_id=int(message_id))
+
+
+async def _delete_via_telethon(
+    *,
+    api_id: int,
+    api_hash: str,
+    bot_token: str,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
+    try:
+        await client.start(bot_token=bot_token)
+        await client.delete_messages(int(chat_id), int(message_id))
+    finally:
+        if client.is_connected():
+            await client.disconnect()
+
+
+async def delete_telegram_assignment_message(
+    chat_id: int,
+    message_id: int,
+    *,
+    api_id: str | int | None = None,
+    api_hash: str | None = None,
+    bot_token: str | None = None,
+) -> None:
+    """Delete the bot's assignment post in the field Telegram group."""
+    token = (bot_token or "").strip() or _env_str(
+        "TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"
+    )
+    if not token:
+        raise ValueError("Missing bot token for Telegram delete.")
+
+    api_id_res = api_id
+    if api_id_res is None or (isinstance(api_id_res, str) and not str(api_id_res).strip()):
+        api_id_res = _env_str("TG_API_ID", "TELEGRAM_API_ID") or None
+    api_hash_res = (api_hash or "").strip() or _env_str("TG_API_HASH", "TELEGRAM_API_HASH")
+
+    use_telethon = bool(
+        api_id_res is not None and str(api_id_res).strip() and api_hash_res
+    )
+    try:
+        if use_telethon:
+            await _delete_via_telethon(
+                api_id=int(str(api_id_res).strip()),
+                api_hash=api_hash_res,
+                bot_token=token,
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+            )
+            return
+        await _delete_via_ptb(
+            bot_token=token,
+            chat_id=int(chat_id),
+            message_id=int(message_id),
+        )
+    except Exception as exc:
+        if _delete_message_benign(exc):
+            return
+        raise
+
+
 # Backward-compatible name used by earlier commits.
 send_telegram_assignment = notify_telegram_group
