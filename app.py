@@ -1822,16 +1822,6 @@ def _render_selectable_ticket_table(
         st.dataframe(view, use_container_width=True, hide_index=True)
         return []
 
-    b1, b2, _ = st.columns([1, 1, 6])
-    with b1:
-        if st.button("Select all", key=f"{key_prefix}_sel_all", use_container_width=True):
-            st.session_state[sel_key] = list(options)
-            st.rerun()
-    with b2:
-        if st.button("Clear", key=f"{key_prefix}_sel_clear", use_container_width=True):
-            st.session_state[sel_key] = []
-            st.rerun()
-
     prev = set(_get_selected_queue_tickets(key_prefix, options))
     table = view.copy()
     table.insert(0, "Select", table["ticket_number"].astype(str).isin(prev))
@@ -1845,7 +1835,7 @@ def _render_selectable_ticket_table(
         column_config={
             "Select": st.column_config.CheckboxColumn(
                 "Select",
-                help="Tick, then use the action buttons below",
+                help="Tick, then use the action buttons above",
                 default=False,
             ),
         },
@@ -1863,7 +1853,7 @@ def _render_selectable_ticket_table(
         extra = f" (+{len(selected) - 6} more)" if len(selected) > 6 else ""
         st.caption(f"**{len(selected)}** selected: {shown}{extra}")
     else:
-        st.caption("Tick **Select** on ticket(s), then choose an action below.")
+        st.caption("Tick **Select** on ticket(s), then choose an action above.")
     return selected
 
 
@@ -2108,9 +2098,11 @@ def _render_ticket_delete_popover(
     key_prefix: str,
     options: list[str],
     status_actions: tuple[tuple[str, str, str], ...],
+    compact: bool = False,
 ) -> None:
     """Secondary remove flow — popover, confirm checkbox, disabled until checked."""
-    with st.popover("Remove…", use_container_width=True):
+    label = "Remove" if compact else "Remove…"
+    with st.popover(label, use_container_width=True):
         picked_list = _get_selected_queue_tickets(key_prefix, options)
         if not picked_list:
             st.caption("Tick ticket(s) in the table, then open Remove again.")
@@ -2259,7 +2251,7 @@ def _render_admin_ticket_toolbar(
     allow_manual_field_response: bool = False,
     allow_reassign: bool = False,
 ) -> None:
-    """Actions for tickets ticked in the table above."""
+    """One compact row: Select all, Clear, status + admin actions (+ Remove)."""
     options = _ticket_options_for_admin(df)
     if not options:
         return
@@ -2267,143 +2259,161 @@ def _render_admin_ticket_toolbar(
     if caption:
         st.caption(caption)
 
-    selected = _get_selected_queue_tickets(key_prefix, options)
     status_labels = [a[0] for a in status_actions]
-    del_col = 1 if allow_delete else 0
-    edit_col = 1 if allow_edit_assignment else 0
-    mfr_col = 1 if allow_manual_field_response else 0
-    reassign_col = 1 if allow_reassign else 0
     edit_keys = _assignment_edit_session_keys(key_prefix)
     mfr_keys = _manual_field_response_session_keys(key_prefix)
     reassign_keys = _reassign_session_keys(key_prefix)
+    sel_key = _ticket_selection_session_key(key_prefix)
 
-    with st.container(border=True):
-        if selected:
-            st.markdown(f"**{len(selected)}** ticket(s) selected")
-        if status_labels or edit_col or mfr_col or reassign_col or del_col:
-            widths: list[int] = []
-            if status_labels:
-                widths.append(1)
-            if mfr_col:
-                widths.append(1)
-            if reassign_col:
-                widths.append(1)
-            if edit_col:
-                widths.append(1)
-            if del_col:
-                widths.append(1)
-            cols = st.columns(widths, vertical_alignment="bottom")
-            idx = 0
-            if status_labels:
+    slot_count = 2  # Select all, Clear
+    if status_labels:
+        slot_count += 2 if len(status_labels) > 1 else 1
+    if allow_manual_field_response:
+        slot_count += 1
+    if allow_reassign:
+        slot_count += 1
+    if allow_edit_assignment:
+        slot_count += 1
+    if allow_delete:
+        slot_count += 1
+
+    with st.container(key=f"{key_prefix}_tq_toolbar"):
+        cols = st.columns(slot_count, gap="small", vertical_alignment="bottom")
+        idx = 0
+
+        with cols[idx]:
+            if st.button(
+                "Select all",
+                key=f"{key_prefix}_sel_all",
+                use_container_width=True,
+            ):
+                st.session_state[sel_key] = list(options)
+                st.rerun()
+        idx += 1
+
+        with cols[idx]:
+            if st.button(
+                "Clear",
+                key=f"{key_prefix}_sel_clear",
+                use_container_width=True,
+            ):
+                st.session_state[sel_key] = []
+                st.rerun()
+        idx += 1
+
+        if status_labels:
+            if len(status_labels) == 1:
+                label = status_labels[0]
                 with cols[idx]:
-                    if len(status_labels) == 1:
-                        label = status_labels[0]
-                        if st.button(
-                            label,
-                            key=f"{key_prefix}_apply",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            picked_list = _require_selected_tickets(
-                                key_prefix=key_prefix, options=options
-                            )
-                            if picked_list:
-                                ok = 0
-                                for i, picked in enumerate(picked_list):
-                                    if _apply_admin_ticket_action(
-                                        picked=picked,
-                                        choice=label,
-                                        confirm_del=False,
-                                        status_actions=status_actions,
-                                        do_rerun=False,
-                                    ):
-                                        ok += 1
-                                if ok:
-                                    st.success(
-                                        f"**{ok}** ticket(s) updated → **{label}**."
-                                    )
-                                    st.session_state[
-                                        _ticket_selection_session_key(key_prefix)
-                                    ] = []
-                                    st.rerun()
-                    else:
-                        choice = st.selectbox(
-                            "Action",
-                            options=status_labels,
-                            key=f"{key_prefix}_action_sel",
+                    if st.button(
+                        label,
+                        key=f"{key_prefix}_apply",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        picked_list = _require_selected_tickets(
+                            key_prefix=key_prefix, options=options
                         )
-                        if st.button(
-                            "Apply",
-                            key=f"{key_prefix}_apply",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            picked_list = _require_selected_tickets(
-                                key_prefix=key_prefix, options=options
-                            )
-                            if picked_list:
-                                ok = 0
-                                for picked in picked_list:
-                                    if _apply_admin_ticket_action(
-                                        picked=picked,
-                                        choice=choice,
-                                        confirm_del=False,
-                                        status_actions=status_actions,
-                                        do_rerun=False,
-                                    ):
-                                        ok += 1
-                                if ok:
-                                    st.success(
-                                        f"**{ok}** ticket(s) updated → **{choice}**."
-                                    )
-                                    st.session_state[
-                                        _ticket_selection_session_key(key_prefix)
-                                    ] = []
-                                    st.rerun()
+                        if picked_list:
+                            ok = 0
+                            for picked in picked_list:
+                                if _apply_admin_ticket_action(
+                                    picked=picked,
+                                    choice=label,
+                                    confirm_del=False,
+                                    status_actions=status_actions,
+                                    do_rerun=False,
+                                ):
+                                    ok += 1
+                            if ok:
+                                st.success(
+                                    f"**{ok}** ticket(s) updated → **{label}**."
+                                )
+                                st.session_state[sel_key] = []
+                                st.rerun()
                 idx += 1
-            if mfr_col:
+            else:
                 with cols[idx]:
-                    if st.button(
-                        "Record response",
-                        key=f"{key_prefix}_mfr_btn",
-                        use_container_width=True,
-                    ):
-                        st.session_state[mfr_keys["show"]] = True
-                        st.rerun()
-                idx += 1
-            if reassign_col:
-                with cols[idx]:
-                    if st.button(
-                        "Reassign",
-                        key=f"{key_prefix}_reassign_btn",
-                        use_container_width=True,
-                    ):
-                        st.session_state[reassign_keys["show"]] = True
-                        st.rerun()
-                idx += 1
-            if edit_col:
-                with cols[idx]:
-                    if st.button(
-                        "Edit assignment",
-                        key=f"{key_prefix}_edit_btn",
-                        use_container_width=True,
-                    ):
-                        st.session_state[edit_keys["show"]] = True
-                        st.rerun()
-                idx += 1
-            if del_col:
-                with cols[idx]:
-                    _render_ticket_delete_popover(
-                        key_prefix=key_prefix,
-                        options=options,
-                        status_actions=status_actions,
+                    st.selectbox(
+                        "Action",
+                        options=status_labels,
+                        key=f"{key_prefix}_action_sel",
+                        label_visibility="collapsed",
                     )
-        elif del_col:
-            _render_ticket_delete_popover(
-                key_prefix=key_prefix,
-                options=options,
-                status_actions=status_actions,
-            )
+                idx += 1
+                with cols[idx]:
+                    if st.button(
+                        "Apply",
+                        key=f"{key_prefix}_apply",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        choice = str(
+                            st.session_state.get(f"{key_prefix}_action_sel", "")
+                        )
+                        picked_list = _require_selected_tickets(
+                            key_prefix=key_prefix, options=options
+                        )
+                        if picked_list and choice:
+                            ok = 0
+                            for picked in picked_list:
+                                if _apply_admin_ticket_action(
+                                    picked=picked,
+                                    choice=choice,
+                                    confirm_del=False,
+                                    status_actions=status_actions,
+                                    do_rerun=False,
+                                ):
+                                    ok += 1
+                            if ok:
+                                st.success(
+                                    f"**{ok}** ticket(s) updated → **{choice}**."
+                                )
+                                st.session_state[sel_key] = []
+                                st.rerun()
+                idx += 1
+
+        if allow_manual_field_response:
+            with cols[idx]:
+                if st.button(
+                    "Record response",
+                    key=f"{key_prefix}_mfr_btn",
+                    use_container_width=True,
+                ):
+                    st.session_state[mfr_keys["show"]] = True
+                    st.rerun()
+            idx += 1
+
+        if allow_reassign:
+            with cols[idx]:
+                if st.button(
+                    "Reassign",
+                    key=f"{key_prefix}_reassign_btn",
+                    use_container_width=True,
+                ):
+                    st.session_state[reassign_keys["show"]] = True
+                    st.rerun()
+            idx += 1
+
+        if allow_edit_assignment:
+            with cols[idx]:
+                if st.button(
+                    "Edit assignment",
+                    key=f"{key_prefix}_edit_btn",
+                    use_container_width=True,
+                ):
+                    st.session_state[edit_keys["show"]] = True
+                    st.rerun()
+            idx += 1
+
+        if allow_delete:
+            with cols[idx]:
+                _render_ticket_delete_popover(
+                    key_prefix=key_prefix,
+                    options=options,
+                    status_actions=status_actions,
+                    compact=True,
+                )
 
 
 def _fetch_attendance(
@@ -4166,6 +4176,21 @@ _BON_THEME_CSS = """
     div[data-testid="stExpander"] summary {
         color: var(--bon-oak);
     }
+    /* Ticket queue: one compact toolbar row (Select all … Remove) */
+    div[class*="st-key-"][class*="_tq_toolbar"] .stButton > button,
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stPopover"] > button {
+        font-size: 0.72rem !important;
+        padding: 0.2rem 0.35rem !important;
+        min-height: 1.85rem !important;
+        line-height: 1.2 !important;
+        white-space: nowrap !important;
+    }
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] label {
+        display: none !important;
+    }
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] > div {
+        min-height: 1.85rem !important;
+    }
     /* Remove popover: muted trigger, not full-width primary styling */
     [data-testid="stPopover"] > button {
         font-size: 0.85rem !important;
@@ -4819,11 +4844,6 @@ def _render_dashboard(
                     )
                     if c in pend.columns
                 )
-                _render_selectable_ticket_table(
-                    pend,
-                    key_prefix="assigned",
-                    cols=pend_show,
-                )
                 _render_admin_ticket_toolbar(
                     pend,
                     key_prefix="assigned",
@@ -4836,6 +4856,11 @@ def _render_dashboard(
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=_is_dashboard_admin(),
+                )
+                _render_selectable_ticket_table(
+                    pend,
+                    key_prefix="assigned",
+                    cols=pend_show,
                 )
 
                 if _is_dashboard_admin():
@@ -4928,12 +4953,6 @@ def _render_dashboard(
                     "if the engineer never replied."
                 )
             else:
-                _render_selectable_ticket_table(
-                    unat,
-                    key_prefix="unattended",
-                    cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
-                )
                 _render_admin_ticket_toolbar(
                     unat,
                     key_prefix="unattended",
@@ -4942,6 +4961,12 @@ def _render_dashboard(
                         ("Reopen to Pending", "Pending", "ReopenedFromUnattended"),
                     ),
                     allow_delete=True,
+                )
+                _render_selectable_ticket_table(
+                    unat,
+                    key_prefix="unattended",
+                    cols=_TICKET_QUEUE_TABLE_COLS
+                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
                 )
 
     elif queue_view == "Open":
@@ -4957,11 +4982,6 @@ def _render_dashboard(
                     "Tick **Select** on ticket(s), then use actions below. "
                     "**Mark Completed** allows multiple; other actions need exactly one."
                 )
-                _render_selectable_ticket_table(
-                    open_df,
-                    key_prefix="open",
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
-                )
                 _render_admin_ticket_toolbar(
                     open_df,
                     key_prefix="open",
@@ -4976,6 +4996,11 @@ def _render_dashboard(
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=True,
+                )
+                _render_selectable_ticket_table(
+                    open_df,
+                    key_prefix="open",
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
                 )
 
                 if _is_dashboard_admin() and st.session_state.get(
@@ -5029,11 +5054,6 @@ def _render_dashboard(
             if done.empty:
                 st.info(f"No completed tickets in the last {lookback_days} {day_word}.")
             else:
-                _render_selectable_ticket_table(
-                    done,
-                    key_prefix="completed",
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
-                )
                 _render_admin_ticket_toolbar(
                     done,
                     key_prefix="completed",
@@ -5042,6 +5062,11 @@ def _render_dashboard(
                         ("Send back to Open", "Open", "Reopened"),
                     ),
                     allow_delete=True,
+                )
+                _render_selectable_ticket_table(
+                    done,
+                    key_prefix="completed",
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
                 )
 
                 with st.expander("Photo gallery", expanded=False):
