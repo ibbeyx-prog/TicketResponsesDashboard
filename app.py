@@ -1522,11 +1522,34 @@ def _parse_ts_value(value: object) -> datetime | None:
         return None
 
 
+def _response_metadata_for_current_assignment(row: dict) -> bool:
+    """True when row fields look like a field reply for *this* assignment cycle."""
+    assigned_at = _parse_ts_value(row.get("last_assigned_at"))
+    responded_at = _parse_ts_value(row.get("responded_at"))
+
+    if str(row.get("field_response") or "").strip():
+        if assigned_at is None or responded_at is None:
+            return True
+        return responded_at >= assigned_at
+
+    if row.get("photo_url"):
+        if assigned_at is None or responded_at is None:
+            return True
+        return responded_at >= assigned_at
+
+    if responded_at is not None:
+        if assigned_at is None:
+            return True
+        return responded_at >= assigned_at
+
+    return False
+
+
 def _fetch_pending_with_response_mismatch() -> list[str]:
     """Pending tickets that look stuck after a field reply (bot UPDATE likely failed).
 
-    Ignores **old** Response log rows from before ``last_assigned_at`` — e.g. after
-    **Reassign** for next-day work, when history is kept but the active row was reset.
+    Ignores **old** Response log rows and stale ``responded_at`` from before
+    ``last_assigned_at`` — e.g. after **Reassign** for next-day work.
     """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
@@ -1549,10 +1572,7 @@ def _fetch_pending_with_response_mismatch() -> list[str]:
             tn = str(row.get("ticket_number") or "").strip()
             if not tn:
                 continue
-            if str(row.get("field_response") or "").strip():
-                mismatches.append(tn)
-                continue
-            if row.get("photo_url") or row.get("responded_at"):
+            if _response_metadata_for_current_assignment(row):
                 mismatches.append(tn)
                 continue
             needs_log_check.append(row)
@@ -2856,6 +2876,7 @@ def _cc_reassign_ticket(
         "dashboard_assigned_by": operator_id,
     }
     _cc_execute_ticket_update(client, updates, ticket_number)
+    _cc_ensure_reassign_cleared_response_fields(client, ticket_number)
 
     _cc_insert_attendance_log(
         client,
@@ -2863,6 +2884,33 @@ def _cc_reassign_ticket(
         member_username=assigned_to,
         action_type="Assignment",
         note=_cc_assignment_log_note(additional_info, operator_id),
+    )
+
+
+def _cc_ensure_reassign_cleared_response_fields(
+    client, ticket_number: str
+) -> None:
+    """Retry NULL response columns when the first PATCH left stale metadata."""
+    row = _cc_fetch_ticket_minimal(client, ticket_number)
+    if not row:
+        return
+    if not (
+        str(row.get("field_response") or "").strip()
+        or row.get("photo_url")
+        or row.get("field_responded_by")
+        or row.get("responded_at")
+    ):
+        return
+    _cc_execute_ticket_update(
+        client,
+        {
+            "field_response": None,
+            "field_responded_by": None,
+            "photo_url": None,
+            "responded_at": None,
+            "updated_at": _cc_utc_now_iso(),
+        },
+        ticket_number,
     )
 
 
