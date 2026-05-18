@@ -97,7 +97,12 @@ from unattended import (
     UNATTENDED_NUDGE_HOURS,
 )
 from dotenv import load_dotenv
-from supabase import ClientOptions, create_client
+from supabase_client import (
+    get_cached_supabase_client,
+    is_transient_supabase_error,
+    resolve_supabase_config,
+    test_supabase_connection,
+)
 
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
@@ -210,8 +215,14 @@ def _read_telegram_group_chat_raw() -> str:
     return _read_nested_secret_sections(*nested_keys).strip()
 
 
-SUPABASE_URL = _read_setting("SUPABASE_URL").rstrip("/")
-SUPABASE_KEY = _read_setting("SUPABASE_KEY")
+_sb_cfg = resolve_supabase_config(
+    env_path=_ENV_PATH,
+    read_env=_read_setting,
+    probe=False,
+)
+SUPABASE_URL = (_sb_cfg.url if _sb_cfg else _read_setting("SUPABASE_URL")).rstrip("/")
+SUPABASE_KEY = _sb_cfg.key if _sb_cfg else _read_setting("SUPABASE_KEY")
+_SUPABASE_KEY_SOURCE = _sb_cfg.key_source if _sb_cfg else "SUPABASE_KEY"
 TICKETS_TABLE = _read_setting("TICKETS_TABLE", "tickets_active") or "tickets_active"
 ATTENDANCE_LOGS_TABLE = (
     _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
@@ -253,13 +264,9 @@ _DASH_PENDING_TICKET_QUEUE_KEY = "_dash_pending_ticket_queue"
 _DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = ("Tickets", "Log", "Performance")
 _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
-_CC_NEW_TICKET_LABEL = "New ticket number…"
 _CC_FE_SELECT_KEY = "cc_fe_select"
 _CC_FE_MANUAL_KEY = "cc_fe_manual"
-_CC_TICKET_MODE_KEY = "_cc_ticket_input_mode"
-_CC_TICKET_PICK_KEY = "cc_ticket_pick"
-_CC_TICKET_NEW_VAL_KEY = "cc_ticket_new_val"
-_CC_TICKET_EXTRAS_KEY = "_cc_ticket_extras"
+_CC_TICKET_INPUT_KEY = "cc_ticket_number"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
 _CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
@@ -509,13 +516,37 @@ def _normalize_dashboard_username(raw: str) -> str:
     return s
 
 
-def _dashboard_users_configured() -> bool:
+def _maybe_probe_alternate_supabase_key() -> None:
+    """Once per session, try ``SUPABASE_ANON_KEY`` if the primary key cannot connect."""
+    global SUPABASE_KEY, _SUPABASE_KEY_SOURCE
+    if st.session_state.get("_dash_sb_key_probed"):
+        return
+    st.session_state["_dash_sb_key_probed"] = True
+    cfg = resolve_supabase_config(
+        env_path=_ENV_PATH,
+        read_env=_read_setting,
+        probe=True,
+    )
+    if not cfg:
+        return
+    if cfg.key != SUPABASE_KEY:
+        SUPABASE_KEY = cfg.key
+        _SUPABASE_KEY_SOURCE = cfg.key_source
+        _get_supabase_client.clear()
+
+
+def _dashboard_users_configured() -> bool | None:
+    """``True``/``False`` when Supabase answers; ``None`` when unreachable (timeout)."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return False
+    _maybe_probe_alternate_supabase_key()
     try:
         res = _get_supabase_client().rpc("dashboard_users_configured").execute()
         return bool(res.data)
-    except Exception:
+    except Exception as exc:
+        if is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return None
         return False
 
 
@@ -995,17 +1026,21 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     key=_LOGIN_PWD_WIDGET_KEY,
                 )
             else:
-                st.caption("Legacy mode: shared dashboard password.")
+                st.caption(
+                    "**Local / legacy login** — not your Telegram username. "
+                    "Use the shared password from `.env` → `DASHBOARD_PASSWORD`."
+                )
                 user = ""
                 pwd = st.text_input(
                     "Password",
                     type="password",
+                    placeholder="Value of DASHBOARD_PASSWORD in .env",
                     autocomplete="current-password",
                     key=_LOGIN_PWD_WIDGET_KEY,
                 )
                 oid = st.text_input(
                     "Operator ID",
-                    placeholder="e.g. ali.ops",
+                    placeholder="Your name, e.g. ibeyx",
                     key=_LOGIN_OID_WIDGET_KEY,
                 )
             st.checkbox(
@@ -1142,8 +1177,24 @@ def _render_login_forgot_reset() -> None:
 
 def _check_password() -> None:
     """Block until the viewer has a valid session (per-user or legacy shared password)."""
-    per_user = _dashboard_users_configured()
-    legacy_pw = _read_dashboard_password() if not per_user else ""
+    per_user_state = _dashboard_users_configured()
+    legacy_pw = _read_dashboard_password()
+
+    if per_user_state is None:
+        # Supabase timeout — allow local shared-password login when configured.
+        if legacy_pw:
+            per_user = False
+        else:
+            st.error("Cannot reach **Supabase** (connection timed out).")
+            st.info(
+                "Fix network/VPN/firewall, or set **`DASHBOARD_PASSWORD`** in `.env` "
+                "for offline shared-password login while developing locally."
+            )
+            st.stop()
+    else:
+        per_user = bool(per_user_state)
+        if per_user:
+            legacy_pw = ""
 
     if per_user:
         auth_ready = True
@@ -1202,7 +1253,16 @@ def _check_password() -> None:
             unsafe_allow_html=True,
         )
 
+        if per_user_state is None and legacy_pw:
+            st.warning(
+                "Supabase is unreachable from this PC — using **shared password** login. "
+                "Ticket data will not load until the connection works."
+            )
+
+        _render_login_supabase_status()
+
         if per_user:
+            st.caption("Sign in with your **dashboard username** (e.g. `admin` or `ibeyx`).")
             c1, c2 = st.columns(2)
             with c1:
                 if st.button(
@@ -1235,39 +1295,55 @@ _SUPABASE_HTTP_TIMEOUT_SEC = float(os.getenv("SUPABASE_HTTP_TIMEOUT_SEC", "25"))
 _DASH_SUPABASE_DOWN_KEY = "_dash_supabase_unreachable"
 
 
+def _render_login_supabase_status() -> None:
+    """Show whether this PC can reach Supabase with the configured API key."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    cache_key = "_dash_login_sb_status"
+    status = st.session_state.get(cache_key)
+    if status is None:
+        _maybe_probe_alternate_supabase_key()
+        status = test_supabase_connection(SUPABASE_URL, SUPABASE_KEY)
+        st.session_state[cache_key] = status
+    if status.get("ok"):
+        src = _SUPABASE_KEY_SOURCE or "SUPABASE_KEY"
+        users = status.get("users_configured")
+        st.caption(
+            f"Database reachable ({src}). "
+            + (
+                "Per-user login is enabled."
+                if users
+                else "No dashboard users yet — use legacy password or run migrations."
+            )
+        )
+        return
+    err = status.get("error")
+    detail = str(status.get("detail") or "")
+    if err == "transient":
+        st.error(
+            "Cannot reach Supabase from this PC (timeout/firewall/VPN). "
+            "Allow **python.exe** through the firewall, try another network, or set "
+            "`HTTPS_PROXY` if you use a corporate proxy. "
+            "Run: `python scripts/check_supabase_connection.py`"
+        )
+        if detail:
+            st.caption(detail[:200])
+    else:
+        st.error(
+            "Supabase rejected the API key. In Supabase → Project Settings → API, copy "
+            "the **anon public** key into `.env` as `SUPABASE_KEY` "
+            "(or legacy JWT into `SUPABASE_ANON_KEY`)."
+        )
+        if detail:
+            st.caption(detail[:200])
+
+
 @st.cache_resource(show_spinner=False)
 def _get_supabase_client():
-    opts = ClientOptions(
-        postgrest_client_timeout=_SUPABASE_HTTP_TIMEOUT_SEC,
-        storage_client_timeout=_SUPABASE_HTTP_TIMEOUT_SEC,
-    )
-    return create_client(SUPABASE_URL, SUPABASE_KEY, options=opts)
-
-
-def _is_transient_supabase_error(exc: BaseException) -> bool:
-    """Network / timeout failures (dashboard should degrade, not crash)."""
-    try:
-        import httpx
-
-        if isinstance(exc, httpx.HTTPError):
-            return True
-    except ImportError:
-        pass
-    if isinstance(exc, (TimeoutError, OSError)):
-        return True
-    text = str(exc).lower()
-    return any(
-        needle in text
-        for needle in (
-            "connecttimeout",
-            "readtimeout",
-            "connection",
-            "10060",
-            "timed out",
-            "network",
-            "failed to respond",
-            "name or service not known",
-        )
+    return get_cached_supabase_client(
+        SUPABASE_URL,
+        SUPABASE_KEY,
+        timeout_sec=_SUPABASE_HTTP_TIMEOUT_SEC,
     )
 
 
@@ -1310,7 +1386,7 @@ def _get_order_column() -> str:
             client.table(TICKETS_TABLE).select(col).limit(1).execute()
             return col
         except Exception as exc:
-            if _is_transient_supabase_error(exc):
+            if is_transient_supabase_error(exc):
                 _note_supabase_unreachable(exc)
                 return "created_at"
             continue
@@ -1363,7 +1439,7 @@ def _fetch_ticket_row(ticket_number: str) -> dict | None:
         rows = res.data or []
         return rows[0] if rows else None
     except Exception as exc:
-        if _is_transient_supabase_error(exc):
+        if is_transient_supabase_error(exc):
             _note_supabase_unreachable(exc)
             return None
         raise
@@ -1531,7 +1607,7 @@ def _fetch_tickets() -> pd.DataFrame:
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             raise _TableMissingError(TICKETS_TABLE, exc) from exc
-        if _is_transient_supabase_error(exc):
+        if is_transient_supabase_error(exc):
             _note_supabase_unreachable(exc)
             return pd.DataFrame()
         raise
@@ -1969,16 +2045,6 @@ def _picked_ticket_from_search(
         return picked
     st.info("Search and **choose a ticket** in the list above to continue.")
     return None
-
-
-def _cc_assign_ticket_options(*, limit: int = 80) -> list[str]:
-    """Recent ticket numbers for the Command Center assign dropdown."""
-    try:
-        df = _fetch_tickets()
-    except Exception:
-        return []
-    opts = _ticket_options_for_admin(df)
-    return opts[:limit] if limit else opts
 
 
 def _delete_ticket_error_ui(picked: str, exc: Exception) -> None:
@@ -3388,7 +3454,7 @@ def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             return [], True
-        if _is_transient_supabase_error(exc):
+        if is_transient_supabase_error(exc):
             _note_supabase_unreachable(exc)
             return [], False
         raise
@@ -3431,7 +3497,7 @@ def _try_fetch_task_categories() -> tuple[list[str], bool]:
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
             return [], True
-        if _is_transient_supabase_error(exc):
+        if is_transient_supabase_error(exc):
             _note_supabase_unreachable(exc)
             return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
         raise
@@ -3610,69 +3676,17 @@ def _render_cc_engineer_row(names: list[str], *, missing: bool) -> None:
         _field_team_manage_popover(names, missing=missing)
 
 
-def _on_cc_ticket_pick_change() -> None:
-    if st.session_state.get(_CC_TICKET_PICK_KEY) == _CC_NEW_TICKET_LABEL:
-        st.session_state[_CC_TICKET_MODE_KEY] = "new"
-    else:
-        st.session_state.pop(_CC_TICKET_MODE_KEY, None)
-
-
 def _render_ticket_number_picker() -> None:
-    """Single ticket control: dropdown for existing, or type when **New ticket number…** is chosen."""
-    recent = _cc_assign_ticket_options()
-    extras: list[str] = st.session_state.setdefault(_CC_TICKET_EXTRAS_KEY, [])
-    all_tickets = list(dict.fromkeys([*extras, *recent]))
-    use_new = st.session_state.get(_CC_TICKET_MODE_KEY) == "new" or not all_tickets
-
-    if use_new:
-        st.text_input(
-            "Ticket",
-            placeholder="9 or 16 digits",
-            key=_CC_TICKET_NEW_VAL_KEY,
-        )
-        if all_tickets and st.button(
-            "Pick existing",
-            key="cc_ticket_use_list",
-            type="secondary",
-            use_container_width=True,
-        ):
-            st.session_state.pop(_CC_TICKET_MODE_KEY, None)
-            st.rerun()
-        return
-
-    row_map = _ticket_row_map(_fetch_tickets()) if all_tickets else {}
-
-    def _cc_ticket_fmt(ticket_id: str) -> str:
-        if ticket_id == _CC_NEW_TICKET_LABEL:
-            return _CC_NEW_TICKET_LABEL
-        return _ticket_display_label(ticket_id, row_map.get(ticket_id))
-
-    st.selectbox(
+    """Assign tab: type ticket_number only (no list of other tickets)."""
+    st.text_input(
         "Ticket",
-        options=[_CC_NEW_TICKET_LABEL, *all_tickets],
-        format_func=_cc_ticket_fmt,
-        key=_CC_TICKET_PICK_KEY,
-        on_change=_on_cc_ticket_pick_change,
+        placeholder="9 or 16 digits",
+        key=_CC_TICKET_INPUT_KEY,
     )
 
 
 def _resolve_cc_ticket_number() -> str:
-    if st.session_state.get(_CC_TICKET_MODE_KEY) == "new":
-        return str(st.session_state.get(_CC_TICKET_NEW_VAL_KEY, "")).strip()
-    pick = st.session_state.get(_CC_TICKET_PICK_KEY, "")
-    if pick == _CC_NEW_TICKET_LABEL:
-        return str(st.session_state.get(_CC_TICKET_NEW_VAL_KEY, "")).strip()
-    return str(pick or "").strip()
-
-
-def _remember_cc_ticket_number(ticket_number: str) -> None:
-    tid = ticket_number.strip()
-    if not tid:
-        return
-    extras: list[str] = st.session_state.setdefault(_CC_TICKET_EXTRAS_KEY, [])
-    if tid not in extras:
-        st.session_state[_CC_TICKET_EXTRAS_KEY] = [tid, *extras][:80]
-    st.session_state.pop(_CC_TICKET_MODE_KEY, None)
+    return str(st.session_state.get(_CC_TICKET_INPUT_KEY, "")).strip()
 
 
 def _sidebar_command_center() -> None:
@@ -3847,14 +3861,12 @@ def _sidebar_command_center() -> None:
             st.warning(
                 f"{summary} Posted to Telegram but could not link message for edits: {link_exc}"
             )
-            _remember_cc_ticket_number(tid)
             st.rerun()
             return
     except Exception as exc:
         st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
         return
 
-    _remember_cc_ticket_number(tid)
     st.session_state[_CC_FLASH_KEY] = (
         f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message)."
     )

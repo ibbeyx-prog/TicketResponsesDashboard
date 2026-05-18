@@ -94,7 +94,7 @@ from typing import Any
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from supabase import create_client
+from supabase_client import create_supabase_client, resolve_supabase_config
 from telegram import BotCommand, Message, MessageEntity, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -131,8 +131,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("ticket_bot")
 
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
+_sb_cfg = resolve_supabase_config(env_path=_ENV_PATH, probe=True)
+SUPABASE_URL = (
+    _sb_cfg.url if _sb_cfg else (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+)
+SUPABASE_KEY = _sb_cfg.key if _sb_cfg else (os.getenv("SUPABASE_KEY") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 PORT = int(os.getenv("PORT", "8000"))
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
@@ -185,7 +188,7 @@ if TELEGRAM_WEBHOOK_SECRET and not _WEBHOOK_SECRET_PATTERN.fullmatch(TELEGRAM_WE
         "A–Z, a–z, 0–9, underscore, hyphen only (Telegram Bot API rule)."
     )
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_supabase_client(SUPABASE_URL, SUPABASE_KEY)
 
 # If False after first DB error, skip Supabase session reads/writes for this process.
 _use_db_sessions = True
