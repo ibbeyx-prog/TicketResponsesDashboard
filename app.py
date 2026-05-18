@@ -1365,31 +1365,93 @@ def _apply_manual_field_response(
     )
 
 
+def _parse_ts_value(value: object) -> datetime | None:
+    """Parse one ISO timestamp from Supabase (UTC-aware)."""
+    if value is None:
+        return None
+    try:
+        ts = pd.to_datetime(value, utc=True, errors="coerce")
+        if pd.isna(ts):
+            return None
+        py = ts.to_pydatetime()
+        if py.tzinfo is None:
+            return py.replace(tzinfo=timezone.utc)
+        return py
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch_pending_with_response_mismatch() -> list[str]:
-    """Tickets still Pending but with a recent Response log (bot update likely failed)."""
+    """Pending tickets that look stuck after a field reply (bot UPDATE likely failed).
+
+    Ignores **old** Response log rows from before ``last_assigned_at`` — e.g. after
+    **Reassign** for next-day work, when history is kept but the active row was reset.
+    """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
     client = _get_supabase_client()
     try:
         pending = (
             client.table(TICKETS_TABLE)
-            .select("ticket_number")
+            .select(
+                "ticket_number, field_response, photo_url, responded_at, last_assigned_at"
+            )
             .eq("status", "Pending")
             .limit(200)
             .execute()
         ).data or []
         if not pending:
             return []
-        ids = [str(r["ticket_number"]) for r in pending if r.get("ticket_number")]
+        mismatches: list[str] = []
+        needs_log_check: list[dict] = []
+        for row in pending:
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn:
+                continue
+            if str(row.get("field_response") or "").strip():
+                mismatches.append(tn)
+                continue
+            if row.get("photo_url") or row.get("responded_at"):
+                mismatches.append(tn)
+                continue
+            needs_log_check.append(row)
+
+        if not needs_log_check:
+            return sorted(set(mismatches))
+
+        ids = [str(r["ticket_number"]) for r in needs_log_check if r.get("ticket_number")]
         logs = (
             client.table(ATTENDANCE_LOGS_TABLE)
-            .select("ticket_number")
+            .select("ticket_number, timestamp")
             .eq("action_type", "Response")
             .in_("ticket_number", ids)
             .execute()
         ).data or []
-        logged = {str(r["ticket_number"]) for r in logs if r.get("ticket_number")}
-        return sorted(logged)
+        resp_by_ticket: dict[str, list[datetime]] = {}
+        for entry in logs:
+            tn = str(entry.get("ticket_number") or "").strip()
+            if not tn:
+                continue
+            ts = _parse_ts_value(entry.get("timestamp"))
+            if ts is not None:
+                resp_by_ticket.setdefault(tn, []).append(ts)
+
+        for row in needs_log_check:
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn or tn in mismatches:
+                continue
+            assigned_at = _parse_ts_value(row.get("last_assigned_at"))
+            resp_times = resp_by_ticket.get(tn) or []
+            if assigned_at is None:
+                if resp_times:
+                    mismatches.append(tn)
+                continue
+            for resp_at in resp_times:
+                if resp_at >= assigned_at:
+                    mismatches.append(tn)
+                    break
+
+        return sorted(set(mismatches))
     except Exception:
         return []
 
@@ -2452,17 +2514,24 @@ def _cc_dashboard_reassign_ticket(
         additional_info=additional_info,
         operator_id=operator_id,
     )
-    if from_status == "Open":
+    if from_status in ("Open", "Pending"):
+        action_type = (
+            "ReassignedFromOpen"
+            if from_status == "Open"
+            else "ReassignedFromPending"
+        )
+        note = (
+            "Moved back to Pending for next-day field work."
+            if from_status == "Open"
+            else "Reassigned while Pending; prior response cleared for a fresh visit."
+        )
         try:
             client.table(ATTENDANCE_LOGS_TABLE).insert(
                 {
                     "ticket_number": ticket_number,
                     "member_username": f"@{operator_id.lstrip('@')}",
-                    "action_type": "ReassignedFromOpen",
-                    "note": _cc_assignment_log_note(
-                        "Moved back to Pending for next-day field work.",
-                        operator_id,
-                    ),
+                    "action_type": action_type,
+                    "note": _cc_assignment_log_note(note, operator_id),
                     "timestamp": _cc_utc_now_iso(),
                 }
             ).execute()
@@ -2730,7 +2799,7 @@ def _render_reassign_editor(
     fe_missing: bool,
     ticket_options: list[str],
 ) -> None:
-    """Reassign an Open ticket: Pending again, response cleared, new Telegram assignment."""
+    """Reassign a Pending or Open ticket: fresh Pending row, optional new Telegram post."""
     if not ticket_options:
         return
 
@@ -4237,11 +4306,12 @@ def _render_dashboard(
     if not df_all.empty and "status" in df_all.columns:
         mismatches = _fetch_pending_with_response_mismatch()
         if mismatches:
+            shown = ", ".join(mismatches[:5])
             st.error(
-                f"**{len(mismatches)}** ticket(s) have a Response in the log but are still **Pending** "
-                f"in `{TICKETS_TABLE}` (e.g. {', '.join(mismatches[:5])}). "
-                "The Railway bot could not UPDATE the row — check bot logs and apply "
-                "`supabase/migrations/20260516_tickets_active_anon_policies.sql`."
+                f"**{len(mismatches)}** ticket(s) look stuck in **Pending** after a field reply "
+                f"(e.g. {shown}). Use **Record response** on Pending, or check Railway bot logs "
+                "and `supabase/migrations/20260516_tickets_active_anon_policies.sql`. "
+                "Tickets **reassigned** for another visit are not listed here."
             )
 
     status = df["status"].astype(str).str.strip() if not df.empty and "status" in df.columns else pd.Series(dtype=str)
@@ -4304,10 +4374,16 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     pend,
                     key_prefix="assigned",
+                    caption=(
+                        "**Reassign** clears yesterday’s response and starts a new assignment "
+                        "(optional new Telegram post). **Record response** if the bot missed "
+                        "moving the ticket to Open."
+                    ),
                     status_actions=(),
                     allow_delete=True,
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
+                    allow_reassign=_is_dashboard_admin(),
                 )
 
                 if _is_dashboard_admin():
@@ -4316,10 +4392,25 @@ def _render_dashboard(
                         shown = ", ".join(mismatch[:8])
                         extra = f" (+{len(mismatch) - 8} more)" if len(mismatch) > 8 else ""
                         st.warning(
-                            "Pending tickets with a **Response** in the log (bot may have "
-                            f"failed to flip status): {shown}{extra}. Use **Record response** "
-                            "or check **Open**."
+                            "Pending tickets with a **current** field reply not reflected in "
+                            f"status (bot may have failed): {shown}{extra}. Use **Record response**, "
+                            "**Reassign** for a fresh visit, or check **Open**."
                         )
+
+                if _is_dashboard_admin() and st.session_state.get(
+                    _reassign_session_keys("assigned")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_reassign_editor(
+                        from_status="Pending",
+                        ticket_picker_key="assigned_sb_ticket",
+                        edit_key_prefix="assigned",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(pend),
+                    )
 
                 if st.session_state.get(
                     _assignment_edit_session_keys("assigned")["show"]

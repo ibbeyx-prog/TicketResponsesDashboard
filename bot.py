@@ -1596,6 +1596,7 @@ def _db_reassign_ticket(
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
+        "responded_at": None,
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "additional_info": additional_info,
