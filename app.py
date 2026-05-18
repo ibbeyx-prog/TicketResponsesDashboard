@@ -2211,7 +2211,7 @@ def _render_ticket_delete_popover(
         can_del_tg = bool(token_ok and chat_ok is not None)
         delete_tg = st.checkbox(
             "Also delete Telegram assignment message",
-            value=can_del_tg,
+            value=False,
             disabled=not can_del_tg,
             key=f"{key_prefix}_del_tg",
             help="Removes the bot's linked assignment post from the field group when possible.",
