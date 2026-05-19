@@ -258,6 +258,8 @@ def _cc_show_flash() -> None:
         st.warning(message)
     else:
         st.success(message)
+
+
 # Latest ``ticket_attendance_logs.timestamp`` the dashboard has already "seen"
 # (for toast when Telegram/bot appends a new row).
 _DASH_LAST_ATTENDANCE_TS_KEY = "_dash_last_seen_attendance_ts"
@@ -289,6 +291,7 @@ _CC_FE_SELECT_KEY = "cc_fe_select"
 _CC_FE_MANUAL_KEY = "cc_fe_manual"
 _CC_TICKET_INPUT_KEY = "cc_ticket_number"
 _CC_ASSIGN_NOTES_KEY = "cc_assign_notes"
+_CC_CLEAR_ASSIGN_KEY = "_cc_clear_assign_form"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
 _CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
@@ -3860,12 +3863,17 @@ def _resolve_cc_ticket_number() -> str:
 
 
 def _reset_cc_assign_form(*, categories: list[str]) -> None:
-    """Clear Assign sidebar fields after a successful assignment."""
+    """Clear Assign sidebar fields — call only **before** those widgets render."""
     st.session_state[_CC_TICKET_INPUT_KEY] = ""
     st.session_state[_CC_ASSIGN_NOTES_KEY] = ""
     opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     if opts:
         st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+
+
+def _cc_schedule_assign_form_clear() -> None:
+    """Defer clear until next run (cannot mutate widget keys after they render)."""
+    st.session_state[_CC_CLEAR_ASSIGN_KEY] = True
 
 
 def _sidebar_command_center() -> None:
@@ -3892,6 +3900,9 @@ def _sidebar_command_center() -> None:
 
     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
     cat_names, cat_missing = _try_fetch_task_categories()
+
+    if st.session_state.pop(_CC_CLEAR_ASSIGN_KEY, False):
+        _reset_cc_assign_form(categories=cat_names)
 
     submitted = False
 
@@ -4046,7 +4057,7 @@ def _sidebar_command_center() -> None:
                 f"{summary} Posted to Telegram but could not link message for edits: {link_exc}",
                 level="warning",
             )
-            _reset_cc_assign_form(categories=cat_names)
+            _cc_schedule_assign_form_clear()
             st.rerun()
             return
     except Exception as exc:
@@ -4054,7 +4065,7 @@ def _sidebar_command_center() -> None:
             f"{summary} Telegram post failed (saved in Supabase): {exc}",
             level="warning",
         )
-        _reset_cc_assign_form(categories=cat_names)
+        _cc_schedule_assign_form_clear()
         st.rerun()
         return
 
@@ -4062,7 +4073,7 @@ def _sidebar_command_center() -> None:
         f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message).",
         level="success",
     )
-    _reset_cc_assign_form(categories=cat_names)
+    _cc_schedule_assign_form_clear()
     st.rerun()
 
 
