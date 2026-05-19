@@ -268,6 +268,7 @@ _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 _CC_FE_SELECT_KEY = "cc_fe_select"
 _CC_FE_MANUAL_KEY = "cc_fe_manual"
 _CC_TICKET_INPUT_KEY = "cc_ticket_number"
+_CC_ASSIGN_NOTES_KEY = "cc_assign_notes"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
 _CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
@@ -3838,6 +3839,15 @@ def _resolve_cc_ticket_number() -> str:
     return str(st.session_state.get(_CC_TICKET_INPUT_KEY, "")).strip()
 
 
+def _reset_cc_assign_form(*, categories: list[str]) -> None:
+    """Clear Assign sidebar fields after a successful assignment."""
+    st.session_state[_CC_TICKET_INPUT_KEY] = ""
+    st.session_state[_CC_ASSIGN_NOTES_KEY] = ""
+    opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    if opts:
+        st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+
+
 def _sidebar_command_center() -> None:
     flash = st.session_state.pop(_CC_FLASH_KEY, None)
     if flash:
@@ -3865,39 +3875,37 @@ def _sidebar_command_center() -> None:
     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
     cat_names, cat_missing = _try_fetch_task_categories()
 
-    token_session = ""
-    chat_session = ""
-    additional_info_raw = ""
     submitted = False
 
     with st.container(border=True, key="cc_assign_block"):
         _render_cc_engineer_row(fe_names, missing=fe_missing)
         _render_ticket_number_picker()
         _render_cc_category_row(cat_names, missing=cat_missing)
-        with st.form("cc_assign_form"):
-            additional_info_raw = st.text_area(
-                "Notes (optional)",
-                placeholder="Context for the field team",
-                height=64,
+        st.text_area(
+            "Notes (optional)",
+            placeholder="Context for the field team",
+            height=64,
+            key=_CC_ASSIGN_NOTES_KEY,
+        )
+        if not token_env:
+            st.text_input(
+                "Bot token (session only)",
+                type="password",
+                key=_CC_SESSION_TOKEN_KEY,
+                placeholder="If missing from Secrets",
             )
-            if not token_env:
-                token_session = st.text_input(
-                    "Bot token (session only)",
-                    type="password",
-                    key=_CC_SESSION_TOKEN_KEY,
-                    placeholder="If missing from Secrets",
-                )
-            if not env_group_ok:
-                chat_session = st.text_input(
-                    "Group chat id",
-                    key=_CC_SESSION_GROUP_KEY,
-                    placeholder="-100… or @group",
-                )
-            submitted = st.form_submit_button(
-                "Assign",
-                type="primary",
-                use_container_width=True,
+        if not env_group_ok:
+            st.text_input(
+                "Group chat id",
+                key=_CC_SESSION_GROUP_KEY,
+                placeholder="-100… or @group",
             )
+        submitted = st.button(
+            "Assign",
+            type="primary",
+            use_container_width=True,
+            key="cc_assign_submit_btn",
+        )
 
     if not submitted:
         return
@@ -3920,7 +3928,9 @@ def _sidebar_command_center() -> None:
         st.error(str(exc))
         return
 
-    additional_info_val = (additional_info_raw or "").strip() or None
+    additional_info_val = (
+        str(st.session_state.get(_CC_ASSIGN_NOTES_KEY, "")).strip() or None
+    )
     cat = str(st.session_state.get(_CC_CATEGORY_SELECT_KEY, "")).strip()
     if not cat:
         st.error("Pick a **Category**.")
@@ -3928,15 +3938,11 @@ def _sidebar_command_center() -> None:
 
     # Form widgets with ``key=`` sometimes leave return values empty on submit;
     # merge ``st.session_state`` (updated when the form posts).
-    token = token_env or (
-        str(token_session).strip()
-        or str(st.session_state.get(_CC_SESSION_TOKEN_KEY, "")).strip()
-    )
-    # Prefer env/Secrets; allow one form override when missing or invalid there.
-    chat_raw = (env_chat_raw if env_group_ok else "") or (
-        str(chat_session).strip()
-        or str(st.session_state.get(_CC_SESSION_GROUP_KEY, "")).strip()
-    )
+    token = token_env or str(st.session_state.get(_CC_SESSION_TOKEN_KEY, "")).strip()
+    # Prefer env/Secrets; allow one session override when missing or invalid there.
+    chat_raw = (env_chat_raw if env_group_ok else "") or str(
+        st.session_state.get(_CC_SESSION_GROUP_KEY, "")
+    ).strip()
     chat_id: int | str | None = None
     chat_parse_err: str | None = None
     if chat_raw:
@@ -4007,18 +4013,24 @@ def _sidebar_command_center() -> None:
         try:
             _cc_save_assignment_telegram_ref(_get_supabase_client(), tid, tg_ref)
         except Exception as link_exc:
-            st.warning(
+            st.session_state[_CC_FLASH_KEY] = (
                 f"{summary} Posted to Telegram but could not link message for edits: {link_exc}"
             )
+            _reset_cc_assign_form(categories=cat_names)
             st.rerun()
             return
     except Exception as exc:
-        st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
+        st.session_state[_CC_FLASH_KEY] = (
+            f"{summary} Telegram post failed (saved in Supabase): {exc}"
+        )
+        _reset_cc_assign_form(categories=cat_names)
+        st.rerun()
         return
 
     st.session_state[_CC_FLASH_KEY] = (
         f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message)."
     )
+    _reset_cc_assign_form(categories=cat_names)
     st.rerun()
 
 
