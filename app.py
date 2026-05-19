@@ -1734,9 +1734,10 @@ def _set_ticket_status(
     payload: dict[str, object] = {"status": new_status, "updated_at": now_iso}
     if new_status == "Pending":
         payload["unattended_nudge_sent_at"] = None
-    client.table(TICKETS_TABLE).update(payload).eq(
-        "ticket_number", str(ticket_number)
-    ).execute()
+    if new_status != STATUS_UNDER_INVESTIGATION:
+        payload["follow_up_at"] = None
+        payload["follow_up_note"] = None
+    _cc_execute_ticket_update(client, payload, str(ticket_number))
 
     if log_action:
         try:
@@ -2000,6 +2001,118 @@ def _ticket_display_label(ticket_number: str, row: dict | None) -> str:
     if extra:
         parts.append(extra)
     return " · ".join(parts)
+
+
+def _mark_ticket_for_follow_up(
+    ticket_number: str,
+    *,
+    note: str | None,
+    operator_id: str,
+) -> None:
+    """Individual follow-up case: Open review → Under Investigation + optional note."""
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    status = str(row.get("status") or "").strip()
+    if status != "Open":
+        raise ValueError(
+            f"Ticket **{ticket_number}** is **{status}** — mark follow-up from **Needs review** only."
+        )
+
+    client = _get_supabase_client()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    note_text = (note or "").strip() or None
+    payload: dict[str, object] = {
+        "status": STATUS_UNDER_INVESTIGATION,
+        "updated_at": now_iso,
+        "follow_up_at": now_iso,
+        "follow_up_note": note_text,
+    }
+    _cc_execute_ticket_update(client, payload, ticket_number)
+
+    log_note = note_text or "Marked for individual follow-up from dashboard review."
+    try:
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": str(ticket_number),
+                "member_username": f"@{operator_id.lstrip('@')}",
+                "action_type": "MarkedForFollowUp",
+                "note": log_note,
+                "timestamp": now_iso,
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
+def _apply_investigation_filters(df: pd.DataFrame, *, key_prefix: str) -> pd.DataFrame:
+    """Search + engineer/category filters for the Under Investigation queue."""
+    if df.empty:
+        return df
+
+    engineers: list[str] = []
+    if "assigned_to" in df.columns:
+        engineers = sorted(
+            {str(v).strip() for v in df["assigned_to"].dropna().astype(str) if str(v).strip()}
+        )
+    categories: list[str] = []
+    if "task_category" in df.columns:
+        categories = sorted(
+            {
+                str(v).strip()
+                for v in df["task_category"].dropna().astype(str)
+                if str(v).strip()
+            }
+        )
+
+    f1, f2, f3 = st.columns([2, 1, 1])
+    with f1:
+        search = st.text_input(
+            "Search",
+            placeholder="Ticket #, follow-up note, engineer…",
+            key=f"{key_prefix}_inv_search",
+        )
+    with f2:
+        eng_pick = st.selectbox(
+            "Engineer",
+            options=["All", *engineers],
+            key=f"{key_prefix}_inv_eng",
+        )
+    with f3:
+        cat_pick = st.selectbox(
+            "Category",
+            options=["All", *categories],
+            key=f"{key_prefix}_inv_cat",
+        )
+
+    out = df
+    if (search or "").strip():
+        q = (search or "").strip().lower()
+        matched = _filter_ticket_df_for_search(out, search)
+        if "follow_up_note" in out.columns:
+            note_hit = out[
+                out["follow_up_note"]
+                .fillna("")
+                .astype(str)
+                .str.lower()
+                .str.contains(re.escape(q), regex=True, na=False)
+            ]
+            out = pd.concat([matched, note_hit], ignore_index=True)
+            if "ticket_number" in out.columns:
+                out = out.drop_duplicates(subset=["ticket_number"], keep="first")
+        else:
+            out = matched
+    if eng_pick != "All" and "assigned_to" in out.columns:
+        out = out[out["assigned_to"].astype(str).str.strip() == eng_pick]
+    if cat_pick != "All" and "task_category" in out.columns:
+        out = out[out["task_category"].astype(str).str.strip() == cat_pick]
+
+    if "follow_up_at" in out.columns:
+        out = out.assign(_fu_sort=_parse_ts(out["follow_up_at"]))
+        out = out.sort_values("_fu_sort", ascending=True, na_position="last").drop(
+            columns=["_fu_sort"]
+        )
+    return out
 
 
 def _filter_ticket_df_for_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
@@ -2376,6 +2489,52 @@ def _render_manual_field_response_editor(
         st.rerun()
 
 
+def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> None:
+    """Move one Open ticket to Under Investigation with an optional follow-up note."""
+    with st.popover("Mark follow-up", use_container_width=True):
+        picked = _get_selected_queue_tickets(key_prefix, options)
+        if not picked:
+            st.caption("Select **one** ticket in the table, then open this again.")
+            return
+        if len(picked) != 1:
+            st.caption("Select **exactly one** ticket — follow-up is per case.")
+            return
+        ticket = picked[0]
+        st.markdown(f"**{ticket}**")
+        note = st.text_area(
+            "Follow-up note (optional)",
+            placeholder="e.g. Revisit Tuesday — waiting for site access",
+            key=f"{key_prefix}_follow_up_note",
+            height=72,
+        )
+        if st.button(
+            "Move to Under Investigation",
+            key=f"{key_prefix}_follow_up_confirm",
+            type="primary",
+            use_container_width=True,
+        ):
+            op = _session_operator_id()
+            if not op:
+                st.error("Sign in again — operator session is missing.")
+                return
+            try:
+                _mark_ticket_for_follow_up(ticket, note=note, operator_id=op)
+            except ValueError as exc:
+                st.error(str(exc))
+                return
+            except Exception as exc:
+                st.error(f"Could not mark follow-up: {exc}")
+                return
+            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Tickets"
+            st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
+            st.session_state[_CC_FLASH_KEY] = (
+                f"**{ticket}** marked for follow-up → **Under Investigation**."
+            )
+            st.session_state[_CC_FLASH_LEVEL_KEY] = "success"
+            st.rerun()
+
+
 def _render_admin_ticket_toolbar(
     df: pd.DataFrame,
     *,
@@ -2386,6 +2545,7 @@ def _render_admin_ticket_toolbar(
     allow_edit_assignment: bool = False,
     allow_manual_field_response: bool = False,
     allow_reassign: bool = False,
+    allow_mark_follow_up: bool = False,
 ) -> None:
     """One compact row: Select all, Clear, status + admin actions (+ Remove)."""
     options = _ticket_options_for_admin(df)
@@ -2409,6 +2569,8 @@ def _render_admin_ticket_toolbar(
     if allow_reassign:
         slot_count += 1
     if allow_edit_assignment:
+        slot_count += 1
+    if allow_mark_follow_up:
         slot_count += 1
     if allow_delete:
         slot_count += 1
@@ -2540,6 +2702,14 @@ def _render_admin_ticket_toolbar(
                 ):
                     st.session_state[edit_keys["show"]] = True
                     st.rerun()
+            idx += 1
+
+        if allow_mark_follow_up:
+            with cols[idx]:
+                _render_mark_follow_up_popover(
+                    key_prefix=key_prefix,
+                    options=options,
+                )
             idx += 1
 
         if allow_delete:
@@ -5230,18 +5400,12 @@ def _render_dashboard(
                         "Mark **Completed** when verified. "
                         "**Reassign** sends the ticket back to **Pending** for next-day field work."
                     ),
-                    status_actions=(
-                        ("Mark Completed", "Completed", "Completed"),
-                        (
-                            "Under Investigation",
-                            STATUS_UNDER_INVESTIGATION,
-                            "UnderInvestigation",
-                        ),
-                    ),
+                    status_actions=(("Mark Completed", "Completed", "Completed"),),
                     allow_delete=True,
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=True,
+                    allow_mark_follow_up=True,
                 )
                 _render_selectable_ticket_table(
                     open_df,
@@ -5304,26 +5468,41 @@ def _render_dashboard(
                 )
             else:
                 st.caption(
-                    "Tickets paused for admin follow-up. **Back to Open** resumes review; "
-                    "**Mark Completed** when resolved."
+                    "Individual follow-up cases only (from **Mark follow-up** on Needs review). "
+                    "Use filters below, then **Back to Open** or **Mark Completed** when done."
                 )
-                _render_admin_ticket_toolbar(
-                    inv_df,
-                    key_prefix="investigation",
-                    caption=None,
-                    status_actions=(
-                        ("Back to Open", "Open", "BackToOpenFromInvestigation"),
-                        ("Mark Completed", "Completed", "Completed"),
-                    ),
-                    allow_delete=True,
-                    allow_edit_assignment=True,
-                    allow_reassign=True,
+                inv_filtered = _apply_investigation_filters(
+                    inv_df, key_prefix="investigation"
                 )
-                _render_selectable_ticket_table(
-                    inv_df,
-                    key_prefix="investigation",
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
-                )
+                if inv_filtered.empty:
+                    st.info("No tickets match the current filters.")
+                else:
+                    st.caption(
+                        f"Showing **{len(inv_filtered)}** of **{len(inv_df)}** tickets."
+                    )
+                    _render_admin_ticket_toolbar(
+                        inv_filtered,
+                        key_prefix="investigation",
+                        caption=None,
+                        status_actions=(
+                            ("Back to Open", "Open", "BackToOpenFromInvestigation"),
+                            ("Mark Completed", "Completed", "Completed"),
+                        ),
+                        allow_delete=True,
+                        allow_edit_assignment=True,
+                        allow_reassign=True,
+                    )
+                    inv_cols = list(_TICKET_QUEUE_TABLE_COLS) + (
+                        "additional_info",
+                        "created_at",
+                    )
+                    if "follow_up_note" in inv_df.columns:
+                        inv_cols.extend(["follow_up_at", "follow_up_note"])
+                    _render_selectable_ticket_table(
+                        inv_filtered,
+                        key_prefix="investigation",
+                        cols=tuple(dict.fromkeys(c for c in inv_cols if c in inv_df.columns)),
+                    )
 
                 if st.session_state.get(
                     _assignment_edit_session_keys("investigation")["show"]
