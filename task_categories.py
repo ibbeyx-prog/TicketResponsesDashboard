@@ -13,6 +13,20 @@ DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
     "Femto Recover",
     "Femto Fault",
     "Repeater Fault",
+    "Voice / Data issue",
+    "Femto Swap",
+    "Pico Installation",
+    "Pole / EM installation",
+    "IBS",
+    "Sector / Nodeb Installation",
+    "Lamp Site / Fault",
+    "Mobile Fault / Swap",
+    "Optimization / Logfile",
+    "Customer moved out",
+    "MEGA Survey",
+    "OFF Male",
+    "Continue Installation",
+    "Follow-Up Installation",
 )
 
 

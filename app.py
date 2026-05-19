@@ -1913,11 +1913,68 @@ def _picked_ticket_from_selection(
     return selected[0] if selected else None
 
 
+def _ticket_search_session_key(key_prefix: str) -> str:
+    return f"{key_prefix}_ticket_search"
+
+
+def _filter_df_by_ticket_number(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    """Keep rows whose ticket_number contains the search text (digits OK)."""
+    raw = (query or "").strip()
+    if not raw or df.empty or "ticket_number" not in df.columns:
+        return df
+    lower = raw.lower()
+    digits = re.sub(r"\D", "", raw)
+    tn = df["ticket_number"].fillna("").astype(str)
+    mask = tn.str.lower().str.contains(re.escape(lower), regex=True, na=False)
+    if digits:
+        mask = mask | tn.str.contains(re.escape(digits), regex=True, na=False)
+    return df[mask]
+
+
+def _sort_investigation_by_follow_up(df: pd.DataFrame) -> pd.DataFrame:
+    """Follow-up cases first; within that, oldest ``follow_up_at`` on top."""
+    if df.empty or "follow_up_at" not in df.columns:
+        return df
+    out = df.copy()
+    out["_fu_ts"] = _parse_ts(out["follow_up_at"])
+    out["_has_fu"] = out["_fu_ts"].notna()
+    return (
+        out.sort_values(
+            ["_has_fu", "_fu_ts"],
+            ascending=[False, True],
+            na_position="last",
+        )
+        .drop(columns=["_has_fu", "_fu_ts"])
+    )
+
+
+def _follow_up_display_label(row: pd.Series) -> str:
+    """Visible marker for investigation rows marked via **Mark follow-up**."""
+    if "follow_up_at" not in row.index:
+        return ""
+    fu = row.get("follow_up_at")
+    if fu is None or (isinstance(fu, float) and pd.isna(fu)):
+        return ""
+    if str(fu).strip() in ("", "None", "NaT"):
+        return ""
+    parsed = _parse_ts(pd.Series([fu]))
+    when = (
+        _to_local(parsed).iloc[0].strftime("%d %b %H:%M")
+        if parsed.notna().iloc[0]
+        else str(fu)[:16]
+    )
+    note = str(row.get("follow_up_note") or "").strip()
+    if len(note) > 40:
+        note = note[:37] + "…"
+    return f"● {when}" + (f" — {note}" if note else "")
+
+
 def _render_selectable_ticket_table(
     df: pd.DataFrame,
     *,
     key_prefix: str,
     cols: tuple[str, ...],
+    highlight_follow_up: bool = False,
 ) -> list[str]:
     """Table with a **Select** checkbox per row; returns chosen ticket numbers."""
     options = _ticket_options_for_admin(df)
@@ -1925,7 +1982,34 @@ def _render_selectable_ticket_table(
         st.caption("No tickets in this queue.")
         return []
 
-    view = _ticket_queue_view(df, cols=cols)
+    search_q = st.text_input(
+        "Search ticket #",
+        placeholder="Enter ticket number…",
+        key=_ticket_search_session_key(key_prefix),
+    )
+    work = _sort_investigation_by_follow_up(df) if highlight_follow_up else df
+    filtered = _filter_df_by_ticket_number(work, search_q)
+    if highlight_follow_up and "follow_up_at" in filtered.columns:
+        fu_count = int(_parse_ts(filtered["follow_up_at"]).notna().sum())
+        if fu_count:
+            st.caption(
+                f"**{fu_count}** follow-up case(s) pinned to the top (●). "
+                "Oldest follow-up first — chase these before newer ones."
+            )
+    if (search_q or "").strip() and len(filtered) < len(work):
+        st.caption(f"Showing **{len(filtered)}** of **{len(work)}** tickets.")
+    if filtered.empty and (search_q or "").strip():
+        st.info("No tickets match that ticket number.")
+        return []
+
+    options = _ticket_options_for_admin(filtered)
+    view = _ticket_queue_view(filtered, cols=cols)
+    if highlight_follow_up and not view.empty and "follow_up_at" in filtered.columns:
+        view.insert(
+            0,
+            "Follow-up",
+            filtered.apply(_follow_up_display_label, axis=1).tolist(),
+        )
     sel_key = _ticket_selection_session_key(key_prefix)
     if sel_key not in st.session_state:
         st.session_state[sel_key] = []
@@ -1939,18 +2023,26 @@ def _render_selectable_ticket_table(
     table.insert(0, "Select", table["ticket_number"].astype(str).isin(prev))
 
     disabled_cols = [c for c in table.columns if c != "Select"]
+    col_cfg = {
+        "Select": st.column_config.CheckboxColumn(
+            "Select",
+            help="Tick, then use the action buttons above",
+            default=False,
+        ),
+        **_dataframe_column_config(view),
+    }
+    if "Follow-up" in view.columns:
+        col_cfg["Follow-up"] = st.column_config.TextColumn(
+            "Follow-up",
+            help="● = tracked individual follow-up (Needs review → Follow-up). Blank = general Under Investigation.",
+            width="medium",
+        )
     edited = st.data_editor(
         table,
         hide_index=True,
         use_container_width=True,
         key=f"{key_prefix}_ticket_select_editor",
-        column_config={
-            "Select": st.column_config.CheckboxColumn(
-                "Select",
-                help="Tick, then use the action buttons above",
-                default=False,
-            ),
-        },
+        column_config=col_cfg,
         disabled=disabled_cols,
     )
 
@@ -2003,20 +2095,21 @@ def _ticket_display_label(ticket_number: str, row: dict | None) -> str:
     return " · ".join(parts)
 
 
-def _mark_ticket_for_follow_up(
+def _move_to_investigation(
     ticket_number: str,
     *,
-    note: str | None,
+    follow_up: bool,
+    note: str | None = None,
     operator_id: str,
 ) -> None:
-    """Individual follow-up case: Open review → Under Investigation + optional note."""
+    """Needs review → Under Investigation (general park, or tracked individual follow-up)."""
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
     status = str(row.get("status") or "").strip()
     if status != "Open":
         raise ValueError(
-            f"Ticket **{ticket_number}** is **{status}** — mark follow-up from **Needs review** only."
+            f"Ticket **{ticket_number}** is **{status}** — move from **Needs review** only."
         )
 
     client = _get_supabase_client()
@@ -2025,18 +2118,26 @@ def _mark_ticket_for_follow_up(
     payload: dict[str, object] = {
         "status": STATUS_UNDER_INVESTIGATION,
         "updated_at": now_iso,
-        "follow_up_at": now_iso,
-        "follow_up_note": note_text,
     }
+    if follow_up:
+        payload["follow_up_at"] = now_iso
+        payload["follow_up_note"] = note_text
+        log_action = "MarkedForFollowUp"
+        log_note = note_text or "Individual follow-up from Needs review."
+    else:
+        payload["follow_up_at"] = None
+        payload["follow_up_note"] = None
+        log_action = "MovedToInvestigation"
+        log_note = "Moved to Under Investigation from Needs review (no follow-up tracking)."
+
     _cc_execute_ticket_update(client, payload, ticket_number)
 
-    log_note = note_text or "Marked for individual follow-up from dashboard review."
     try:
         client.table(ATTENDANCE_LOGS_TABLE).insert(
             {
                 "ticket_number": str(ticket_number),
                 "member_username": f"@{operator_id.lstrip('@')}",
-                "action_type": "MarkedForFollowUp",
+                "action_type": log_action,
                 "note": log_note,
                 "timestamp": now_iso,
             }
@@ -2045,74 +2146,19 @@ def _mark_ticket_for_follow_up(
         pass
 
 
-def _apply_investigation_filters(df: pd.DataFrame, *, key_prefix: str) -> pd.DataFrame:
-    """Search + engineer/category filters for the Under Investigation queue."""
-    if df.empty:
-        return df
-
-    engineers: list[str] = []
-    if "assigned_to" in df.columns:
-        engineers = sorted(
-            {str(v).strip() for v in df["assigned_to"].dropna().astype(str) if str(v).strip()}
-        )
-    categories: list[str] = []
-    if "task_category" in df.columns:
-        categories = sorted(
-            {
-                str(v).strip()
-                for v in df["task_category"].dropna().astype(str)
-                if str(v).strip()
-            }
-        )
-
-    f1, f2, f3 = st.columns([2, 1, 1])
-    with f1:
-        search = st.text_input(
-            "Search",
-            placeholder="Ticket #, follow-up note, engineer…",
-            key=f"{key_prefix}_inv_search",
-        )
-    with f2:
-        eng_pick = st.selectbox(
-            "Engineer",
-            options=["All", *engineers],
-            key=f"{key_prefix}_inv_eng",
-        )
-    with f3:
-        cat_pick = st.selectbox(
-            "Category",
-            options=["All", *categories],
-            key=f"{key_prefix}_inv_cat",
-        )
-
-    out = df
-    if (search or "").strip():
-        q = (search or "").strip().lower()
-        matched = _filter_ticket_df_for_search(out, search)
-        if "follow_up_note" in out.columns:
-            note_hit = out[
-                out["follow_up_note"]
-                .fillna("")
-                .astype(str)
-                .str.lower()
-                .str.contains(re.escape(q), regex=True, na=False)
-            ]
-            out = pd.concat([matched, note_hit], ignore_index=True)
-            if "ticket_number" in out.columns:
-                out = out.drop_duplicates(subset=["ticket_number"], keep="first")
-        else:
-            out = matched
-    if eng_pick != "All" and "assigned_to" in out.columns:
-        out = out[out["assigned_to"].astype(str).str.strip() == eng_pick]
-    if cat_pick != "All" and "task_category" in out.columns:
-        out = out[out["task_category"].astype(str).str.strip() == cat_pick]
-
-    if "follow_up_at" in out.columns:
-        out = out.assign(_fu_sort=_parse_ts(out["follow_up_at"]))
-        out = out.sort_values("_fu_sort", ascending=True, na_position="last").drop(
-            columns=["_fu_sort"]
-        )
-    return out
+def _mark_ticket_for_follow_up(
+    ticket_number: str,
+    *,
+    note: str | None,
+    operator_id: str,
+) -> None:
+    """Individual follow-up: Under Investigation + ``follow_up_at`` / note (● in queue)."""
+    _move_to_investigation(
+        ticket_number,
+        follow_up=True,
+        note=note,
+        operator_id=operator_id,
+    )
 
 
 def _filter_ticket_df_for_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
@@ -2309,11 +2355,28 @@ def _apply_admin_ticket_action(
         return False
     _, new_status, log_action = matched
     try:
-        _set_ticket_status(
-            picked,
-            new_status=new_status,
-            log_action=log_action,
-        )
+        if (
+            new_status == STATUS_UNDER_INVESTIGATION
+            and log_action == "MovedToInvestigation"
+        ):
+            op = _session_operator_id()
+            if not op:
+                st.error("Sign in again — operator session is missing.")
+                return False
+            _move_to_investigation(
+                picked,
+                follow_up=False,
+                operator_id=op,
+            )
+        else:
+            _set_ticket_status(
+                picked,
+                new_status=new_status,
+                log_action=log_action,
+            )
+    except ValueError as exc:
+        st.error(str(exc))
+        return False
     except Exception as exc:
         st.error(f"Could not update {picked}: {exc}")
         return False
@@ -2490,8 +2553,8 @@ def _render_manual_field_response_editor(
 
 
 def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> None:
-    """Move one Open ticket to Under Investigation with an optional follow-up note."""
-    with st.popover("Mark follow-up", use_container_width=True):
+    """Tracked individual follow-up (●) — one Open ticket, optional note."""
+    with st.popover("Follow-up", use_container_width=True):
         picked = _get_selected_queue_tickets(key_prefix, options)
         if not picked:
             st.caption("Select **one** ticket in the table, then open this again.")
@@ -2501,6 +2564,10 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
             return
         ticket = picked[0]
         st.markdown(f"**{ticket}**")
+        st.caption(
+            "Tracked case: shows **●** in Investigation and stays pinned on top. "
+            "Use **Under Investigation** in the action menu for general review without tracking."
+        )
         note = st.text_area(
             "Follow-up note (optional)",
             placeholder="e.g. Revisit Tuesday — waiting for site access",
@@ -2508,7 +2575,7 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
             height=72,
         )
         if st.button(
-            "Move to Under Investigation",
+            "Confirm follow-up",
             key=f"{key_prefix}_follow_up_confirm",
             type="primary",
             use_container_width=True,
@@ -2529,7 +2596,7 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
             st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Tickets"
             st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
             st.session_state[_CC_FLASH_KEY] = (
-                f"**{ticket}** marked for follow-up → **Under Investigation**."
+                f"**{ticket}** → **Under Investigation** (follow-up tracked ●)."
             )
             st.session_state[_CC_FLASH_LEVEL_KEY] = "success"
             st.rerun()
@@ -2899,6 +2966,344 @@ def _perf_bucket_settings(
     if span <= pd.Timedelta(hours=48):
         return "%Y-%m-%d %H:00", "Hour (local)", "%b %d %H:%M"
     return "%Y-%m-%d", "Day (local)", "%Y-%m-%d"
+
+
+def _perf_status_timestamp(
+    df: pd.DataFrame, *, prefer_follow_up: bool = False
+) -> pd.Series:
+    """Pick one UTC timestamp per row for performance time-window filtering."""
+    u_col = (
+        _parse_ts(df["updated_at"])
+        if "updated_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    if prefer_follow_up and "follow_up_at" in df.columns:
+        fu = _parse_ts(df["follow_up_at"])
+        return fu.where(fu.notna(), u_col)
+    r_col = (
+        _parse_ts(df["responded_at"])
+        if "responded_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    return u_col.where(u_col.notna(), r_col)
+
+
+def _perf_filter_status_in_range(
+    df_all: pd.DataFrame,
+    status: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    *,
+    prefer_follow_up: bool = False,
+) -> pd.DataFrame:
+    """Rows in ``status`` whose activity timestamp falls in the sidebar range."""
+    if df_all.empty or "status" not in df_all.columns:
+        return pd.DataFrame()
+    target = status.strip().casefold()
+    slice_df = df_all[
+        df_all["status"].astype(str).str.strip().str.casefold() == target
+    ].copy()
+    if slice_df.empty:
+        return slice_df
+    ts = _perf_status_timestamp(slice_df, prefer_follow_up=prefer_follow_up)
+    slice_df = slice_df[ts.notna()].copy()
+    slice_df["_ts"] = ts[ts.notna()]
+    return slice_df[
+        (slice_df["_ts"] >= range_start) & (slice_df["_ts"] <= range_end)
+    ]
+
+
+def _perf_prepare_slices(
+    df_all: pd.DataFrame,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, pd.DataFrame]:
+    """One pass: completed, investigation, unattended rows in the sidebar window."""
+    empty = pd.DataFrame()
+    out = {"completed": empty, "investigation": empty, "unattended": empty}
+    if df_all.empty or "status" not in df_all.columns:
+        return out
+
+    base = df_all.copy()
+    base["_status_cf"] = base["status"].astype(str).str.strip().str.casefold()
+    u_col = (
+        _parse_ts(base["updated_at"])
+        if "updated_at" in base.columns
+        else pd.Series(pd.NaT, index=base.index)
+    )
+    r_col = (
+        _parse_ts(base["responded_at"])
+        if "responded_at" in base.columns
+        else pd.Series(pd.NaT, index=base.index)
+    )
+    fu_col = (
+        _parse_ts(base["follow_up_at"])
+        if "follow_up_at" in base.columns
+        else pd.Series(pd.NaT, index=base.index)
+    )
+    ts_done = u_col.where(u_col.notna(), r_col)
+    ts_inv = fu_col.where(fu_col.notna(), u_col)
+    ts_unatt = u_col
+
+    def _slice(status_key: str, ts: pd.Series) -> pd.DataFrame:
+        mask = base["_status_cf"].eq(status_key) & ts.notna()
+        mask &= ts >= range_start
+        mask &= ts <= range_end
+        part = base.loc[mask].copy()
+        if not part.empty:
+            part["_ts"] = ts.loc[mask]
+        return part
+
+    out["completed"] = _slice("completed", ts_done)
+    out["investigation"] = _slice(
+        STATUS_UNDER_INVESTIGATION.strip().casefold(), ts_inv
+    )
+    out["unattended"] = _slice(STATUS_UNATTENDED.strip().casefold(), ts_unatt)
+    return out
+
+
+def _perf_filter_by_person(df: pd.DataFrame, person: str) -> pd.DataFrame:
+    if df.empty or person in ("", "All"):
+        return df
+    view = _perf_enrich_tickets(df) if "staff" not in df.columns else df.copy()
+    if "staff" not in view.columns:
+        return df
+    return view[view["staff"] == person]
+
+
+def _perf_enrich_tickets(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``staff``, ``category``, and local time from ``_ts``."""
+    view = df.copy()
+    view["_local"] = view["_ts"].dt.tz_convert(LOCAL_TZ)
+    if "assigned_to" in view.columns:
+        view["staff"] = view["assigned_to"].map(_perf_norm_member)
+    else:
+        view["staff"] = "(unknown)"
+    if "task_category" in view.columns:
+        cat_series = view["task_category"].fillna("").astype(str).str.strip()
+        view["category"] = cat_series.mask(cat_series.eq(""), "(uncategorized)")
+    else:
+        view["category"] = "(uncategorized)"
+    return view
+
+
+def _perf_staff_counts(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=int)
+    if "staff" not in df.columns:
+        df = _perf_enrich_tickets(df)
+    return df.groupby("staff").size()
+
+
+def _perf_combine_work(
+    completed: pd.DataFrame,
+    investigation: pd.DataFrame,
+) -> pd.DataFrame:
+    """Completed + Under Investigation = total active work in the window."""
+    parts: list[pd.DataFrame] = []
+    if not completed.empty:
+        c = completed.copy()
+        c["_outcome"] = "Completed"
+        parts.append(c)
+    if not investigation.empty:
+        i = investigation.copy()
+        i["_outcome"] = "Investigation"
+        parts.append(i)
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def _perf_build_summary(
+    completed: pd.DataFrame,
+    investigation: pd.DataFrame,
+    unattended: pd.DataFrame,
+) -> pd.DataFrame:
+    c_counts = _perf_staff_counts(completed)
+    i_counts = _perf_staff_counts(investigation)
+    u_counts = _perf_staff_counts(unattended)
+    people = sorted(
+        set(c_counts.index) | set(i_counts.index) | set(u_counts.index),
+        key=str.lower,
+    )
+    if not people:
+        return pd.DataFrame()
+    rows = [
+        {
+            "Person": p,
+            "Total work": int(c_counts.get(p, 0)) + int(i_counts.get(p, 0)),
+            "Completed": int(c_counts.get(p, 0)),
+            "Investigation": int(i_counts.get(p, 0)),
+            "Unattended": int(u_counts.get(p, 0)),
+        }
+        for p in people
+    ]
+    return pd.DataFrame(rows).sort_values(
+        ["Total work", "Unattended"],
+        ascending=[False, False],
+    )
+
+
+def _render_perf_individual_summary_table(summary: pd.DataFrame) -> None:
+    if summary.empty:
+        return
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+
+def _render_perf_person_bar(
+    view: pd.DataFrame,
+    *,
+    title: str,
+    value_name: str = "Tickets",
+) -> None:
+    if view.empty:
+        st.caption("No data for this filter.")
+        return
+    if "staff" not in view.columns:
+        view = _perf_enrich_tickets(view)
+    totals = (
+        view.groupby("staff", as_index=False)
+        .size()
+        .rename(columns={"size": value_name})
+        .sort_values(value_name, ascending=False)
+    )
+    height = min(420, max(160, 32 * len(totals)))
+    chart = (
+        alt.Chart(totals)
+        .mark_bar()
+        .encode(
+            x=alt.X(f"{value_name}:Q", title=value_name),
+            y=alt.Y("staff:N", sort="-x", title=""),
+            tooltip=[
+                alt.Tooltip("staff:N", title="assigned_to"),
+                alt.Tooltip(f"{value_name}:Q", title="Count"),
+            ],
+            color=alt.value("#D7B491"),
+        )
+        .properties(height=height, title=title)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _render_perf_stacked_staff_chart(
+    view: pd.DataFrame,
+    *,
+    y_title: str,
+    bucket_fmt: str,
+    x_title: str,
+    axis_format: str,
+    chart_height: int = 260,
+) -> None:
+    if view.empty:
+        return
+    if "staff" not in view.columns or "_local" not in view.columns:
+        view = _perf_enrich_tickets(view)
+    view = view.copy()
+    view["bucket"] = view["_local"].dt.strftime(bucket_fmt)
+    by_staff = (
+        view.groupby(["bucket", "staff"], as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+    )
+    by_staff["bucket_sort"] = pd.to_datetime(by_staff["bucket"], errors="coerce")
+    by_staff = by_staff.sort_values("bucket_sort")
+    chart = (
+        alt.Chart(by_staff)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "bucket_sort:T",
+                title=x_title,
+                axis=alt.Axis(labelAngle=-30, format=axis_format),
+            ),
+            y=alt.Y("count:Q", title=y_title),
+            color=alt.Color("staff:N", legend=alt.Legend(title="assigned_to")),
+            tooltip=[
+                alt.Tooltip("bucket:N", title="Bucket"),
+                alt.Tooltip("staff:N", title="assigned_to"),
+                alt.Tooltip("count:Q", title="Count"),
+            ],
+        )
+        .properties(height=chart_height)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _render_perf_outcome_trend(
+    view: pd.DataFrame,
+    *,
+    bucket_fmt: str,
+    x_title: str,
+    axis_format: str,
+) -> None:
+    if view.empty or "_outcome" not in view.columns:
+        return
+    if "staff" not in view.columns or "_local" not in view.columns:
+        view = _perf_enrich_tickets(view)
+    view = view.copy()
+    view["bucket"] = view["_local"].dt.strftime(bucket_fmt)
+    by_out = (
+        view.groupby(["bucket", "_outcome"], as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+    )
+    by_out["bucket_sort"] = pd.to_datetime(by_out["bucket"], errors="coerce")
+    by_out = by_out.sort_values("bucket_sort")
+    chart = (
+        alt.Chart(by_out)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "bucket_sort:T",
+                title=x_title,
+                axis=alt.Axis(labelAngle=-30, format=axis_format),
+            ),
+            y=alt.Y("count:Q", title="Tickets"),
+            color=alt.Color(
+                "_outcome:N",
+                legend=alt.Legend(title="Outcome"),
+                scale=alt.Scale(range=["#D7B491", "#8fa89e"]),
+            ),
+            tooltip=[
+                alt.Tooltip("bucket:N", title="Bucket"),
+                alt.Tooltip("_outcome:N", title="Outcome"),
+                alt.Tooltip("count:Q", title="Count"),
+            ],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _render_perf_ticket_table(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.caption("No tickets to list.")
+        return
+    detail = df.sort_values("_ts", ascending=False).head(200)
+    if "_outcome" in detail.columns:
+        detail = detail.rename(columns={"_outcome": "Outcome"})
+    cols = [
+        c
+        for c in (
+            "Outcome",
+            "status",
+            "ticket_number",
+            "assigned_to",
+            "task_category",
+            "last_assigned_at",
+            "updated_at",
+            "responded_at",
+            "follow_up_at",
+            "follow_up_note",
+            "unattended_nudge_sent_at",
+        )
+        if c in detail.columns
+    ]
+    st.dataframe(
+        _format_local(detail[cols]),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def _fetch_latest_attendance_timestamp() -> datetime | None:
@@ -5390,17 +5795,24 @@ def _render_dashboard(
                 st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
             else:
                 st.caption(
-                    "Tick **Select** on ticket(s), then use actions below. "
-                    "**Mark Completed** allows multiple; other actions need exactly one."
+                    "Tick **Select**, then: **Mark Completed** (bulk OK) · "
+                    "**Under Investigation** (park, no ●) · **Follow-up** (one ticket + note, ● tracked)."
                 )
                 _render_admin_ticket_toolbar(
                     open_df,
                     key_prefix="open",
                     caption=(
-                        "Mark **Completed** when verified. "
-                        "**Reassign** sends the ticket back to **Pending** for next-day field work."
+                        "**Action** menu: **Mark Completed** or **Under Investigation** (no follow-up marker). "
+                        "**Follow-up** popover = individual tracked case. **Reassign** → **Pending**."
                     ),
-                    status_actions=(("Mark Completed", "Completed", "Completed"),),
+                    status_actions=(
+                        ("Mark Completed", "Completed", "Completed"),
+                        (
+                            "Under Investigation",
+                            STATUS_UNDER_INVESTIGATION,
+                            "MovedToInvestigation",
+                        ),
+                    ),
                     allow_delete=True,
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
@@ -5464,45 +5876,36 @@ def _render_dashboard(
             if inv_df.empty:
                 st.info(
                     f"No tickets under investigation in the last {lookback_days} {day_word}. "
-                    "Move tickets here from **Needs review** when more follow-up is required."
+                    "Move tickets here from **Needs review** via **Under Investigation** or **Follow-up**."
                 )
             else:
                 st.caption(
-                    "Individual follow-up cases only (from **Mark follow-up** on Needs review). "
-                    "Use filters below, then **Back to Open** or **Mark Completed** when done."
+                    "**Follow-up** cases (● in the Follow-up column) stay pinned on top. "
+                    "Other **Under Investigation** tickets have no ●. Search by ticket # if needed."
                 )
-                inv_filtered = _apply_investigation_filters(
-                    inv_df, key_prefix="investigation"
+                _render_admin_ticket_toolbar(
+                    inv_df,
+                    key_prefix="investigation",
+                    caption=None,
+                    status_actions=(
+                        ("Back to Open", "Open", "BackToOpenFromInvestigation"),
+                        ("Mark Completed", "Completed", "Completed"),
+                    ),
+                    allow_delete=True,
+                    allow_edit_assignment=True,
+                    allow_reassign=True,
                 )
-                if inv_filtered.empty:
-                    st.info("No tickets match the current filters.")
-                else:
-                    st.caption(
-                        f"Showing **{len(inv_filtered)}** of **{len(inv_df)}** tickets."
-                    )
-                    _render_admin_ticket_toolbar(
-                        inv_filtered,
-                        key_prefix="investigation",
-                        caption=None,
-                        status_actions=(
-                            ("Back to Open", "Open", "BackToOpenFromInvestigation"),
-                            ("Mark Completed", "Completed", "Completed"),
-                        ),
-                        allow_delete=True,
-                        allow_edit_assignment=True,
-                        allow_reassign=True,
-                    )
-                    inv_cols = list(_TICKET_QUEUE_TABLE_COLS) + (
-                        "additional_info",
-                        "created_at",
-                    )
-                    if "follow_up_note" in inv_df.columns:
-                        inv_cols.extend(["follow_up_at", "follow_up_note"])
-                    _render_selectable_ticket_table(
-                        inv_filtered,
-                        key_prefix="investigation",
-                        cols=tuple(dict.fromkeys(c for c in inv_cols if c in inv_df.columns)),
-                    )
+                inv_cols = list(
+                    _TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at")
+                )
+                if "follow_up_note" in inv_df.columns:
+                    inv_cols.extend(["follow_up_at", "follow_up_note"])
+                _render_selectable_ticket_table(
+                    inv_df,
+                    key_prefix="investigation",
+                    cols=tuple(dict.fromkeys(c for c in inv_cols if c in inv_df.columns)),
+                    highlight_follow_up=True,
+                )
 
                 if st.session_state.get(
                     _assignment_edit_session_keys("investigation")["show"]
@@ -5634,11 +6037,10 @@ def _render_field_photos_section(done: pd.DataFrame) -> None:
 
 
 def _render_field_performance_tab(*, lookback_days: int) -> None:
-    """Completed-task counts from ``tickets_active`` (admin **Completed** status)."""
+    """Field outcomes per person — overview + focused tabs."""
     st.markdown("##### Field team performance")
-    st.caption(
-        f"**Completed** tickets · {_format_dash_range_caption() or 'sidebar time range'} · {LOCAL_TZ_LABEL}"
-    )
+    range_caption = _format_dash_range_caption() or "sidebar time range"
+    st.caption(f"{range_caption} · {LOCAL_TZ_LABEL}")
 
     range_start, range_end = _get_dash_range()
 
@@ -5652,158 +6054,147 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         st.info("No ticket data to analyze.")
         return
 
-    done = df_all[
-        df_all["status"].astype(str).str.strip().str.casefold() == "completed"
-    ].copy()
-    if done.empty:
-        st.info("No **Completed** tickets in the database yet.")
-        return
+    slices = _perf_prepare_slices(df_all, range_start, range_end)
+    completed = slices["completed"]
+    investigation = slices["investigation"]
+    unattended = slices["unattended"]
+    n_done, n_inv, n_unatt = len(completed), len(investigation), len(unattended)
 
-    u_col = _parse_ts(done["updated_at"]) if "updated_at" in done.columns else pd.Series(pd.NaT, index=done.index)
-    r_col = _parse_ts(done["responded_at"]) if "responded_at" in done.columns else pd.Series(pd.NaT, index=done.index)
-    done["_ts"] = u_col.where(u_col.notna(), r_col)
-    done = done[done["_ts"].notna()]
-    if done.empty:
-        st.info("Completed tickets have no usable **updated_at** / **responded_at** timestamps.")
-        return
-
-    done = done[(done["_ts"] >= range_start) & (done["_ts"] <= range_end)]
-    if done.empty:
+    if n_done == 0 and n_inv == 0 and n_unatt == 0:
         st.info(
-            "No **Completed** tickets in this time window. "
-            "Try **Last 30 days** or **Pick dates** in the sidebar."
+            "No **Completed**, **Under Investigation**, or **Unattended** tickets "
+            "in this time window. Try **Last 30 days** in the sidebar."
         )
         return
 
-    done["_local"] = done["_ts"].dt.tz_convert(LOCAL_TZ)
-    if "assigned_to" in done.columns:
-        done["staff"] = done["assigned_to"].map(_perf_norm_member)
-    else:
-        done["staff"] = "(unknown)"
+    summary = _perf_build_summary(completed, investigation, unattended)
+    people = ["All"] + (
+        summary["Person"].tolist() if not summary.empty else []
+    )
 
-    if "task_category" in done.columns:
-        cat_series = done["task_category"].fillna("").astype(str).str.strip()
-        done["category"] = cat_series.mask(cat_series.eq(""), "(uncategorized)")
+    focus = st.selectbox(
+        "Focus person",
+        options=people,
+        key="perf_focus_person",
+        help="Filter all tabs to one assignee, or **All** for the full team.",
+    )
+    completed_f = _perf_filter_by_person(completed, focus)
+    investigation_f = _perf_filter_by_person(investigation, focus)
+    unattended_f = _perf_filter_by_person(unattended, focus)
+    work_f = _perf_combine_work(completed_f, investigation_f)
+    n_work = len(work_f)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total work", n_work)
+    m2.metric("Completed", len(completed_f))
+    m3.metric("Unattended", len(unattended_f))
+    n_inv = len(investigation_f)
+    if n_inv:
+        st.caption(
+            f"**Total work** = Completed + Under Investigation "
+            f"({len(completed_f)} + {n_inv}). "
+            "**Unattended** is separate (no field response)."
+        )
     else:
-        done["category"] = "(uncategorized)"
+        st.caption(
+            "**Total work** = Completed + Under Investigation. "
+            "**Unattended** is separate (no field response)."
+        )
 
     bucket_fmt, x_title, axis_format = _perf_bucket_settings(range_start, range_end)
-    view = done.copy()
-    view["bucket"] = view["_local"].dt.strftime(bucket_fmt)
 
-    # --- By assignee ---
-    by_staff = (
-        view.groupby(["bucket", "staff"], as_index=False)
-        .size()
-        .rename(columns={"size": "completions"})
-    )
-    by_staff["bucket_sort"] = pd.to_datetime(by_staff["bucket"], errors="coerce")
-    by_staff = by_staff.sort_values("bucket_sort")
-
-    chart_staff = (
-        alt.Chart(by_staff)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "bucket_sort:T",
-                title=x_title,
-                axis=alt.Axis(labelAngle=-30, format=axis_format),
-            ),
-            y=alt.Y("completions:Q", title="Completed tasks"),
-            color=alt.Color("staff:N", legend=alt.Legend(title="assigned_to")),
-            tooltip=[
-                alt.Tooltip("bucket:N", title="Bucket"),
-                alt.Tooltip("staff:N", title="assigned_to"),
-                alt.Tooltip("completions:Q", title="Count"),
-            ],
-        )
-        .properties(height=300)
-    )
-    st.markdown("##### Completions by **assigned_to** (stacked)")
-    st.altair_chart(chart_staff, use_container_width=True)
-
-    # --- By task category ---
-    by_cat = (
-        view.groupby(["bucket", "category"], as_index=False)
-        .size()
-        .rename(columns={"size": "completions"})
-    )
-    by_cat["bucket_sort"] = pd.to_datetime(by_cat["bucket"], errors="coerce")
-    by_cat = by_cat.sort_values("bucket_sort")
-
-    chart_cat = (
-        alt.Chart(by_cat)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "bucket_sort:T",
-                title=x_title,
-                axis=alt.Axis(labelAngle=-30, format=axis_format),
-            ),
-            y=alt.Y("completions:Q", title="Completed tasks"),
-            color=alt.Color("category:N", legend=alt.Legend(title="task_category")),
-            tooltip=[
-                alt.Tooltip("bucket:N", title="Bucket"),
-                alt.Tooltip("category:N", title="task_category"),
-                alt.Tooltip("completions:Q", title="Count"),
-            ],
-        )
-        .properties(height=300)
-    )
-    st.markdown("##### Completions by **task_category** (stacked)")
-    st.altair_chart(chart_cat, use_container_width=True)
-
-    with st.expander("Drill down by person", expanded=False):
-        staff_opts = sorted(view["staff"].unique().tolist())
-        pick = st.selectbox("Person", options=staff_opts, index=0)
-        one = view[view["staff"] == pick].copy()
-        solo = (
-            one.groupby(["bucket", "category"], as_index=False)
-            .size()
-            .rename(columns={"size": "completions"})
-        )
-        solo["bucket_sort"] = pd.to_datetime(solo["bucket"], errors="coerce")
-        solo = solo.sort_values("bucket_sort")
-
-        solo_chart = (
-            alt.Chart(solo)
-            .mark_bar()
-            .encode(
-                x=alt.X(
-                    "bucket_sort:T",
-                    title=x_title,
-                    axis=alt.Axis(labelAngle=-30, format=axis_format),
-                ),
-                y=alt.Y("completions:Q", title="Completed tasks"),
-                color=alt.Color("category:N", legend=alt.Legend(title="task_category")),
-                tooltip=[
-                    alt.Tooltip("bucket:N", title="Bucket"),
-                    alt.Tooltip("category:N", title="task_category"),
-                    alt.Tooltip("completions:Q", title="Count"),
-                ],
-            )
-            .properties(height=300, title=f"{pick}")
-        )
-        st.altair_chart(solo_chart, use_container_width=True)
-
-        show_cols = [
-            c
-            for c in (
-                "ticket_number",
-                "assigned_to",
-                "task_category",
-                "updated_at",
-                "responded_at",
-                "last_assigned_at",
-            )
-            if c in one.columns
+    tab_overview, tab_work, tab_unatt = st.tabs(
+        [
+            "Overview",
+            f"Total work ({n_work})",
+            f"Unattended ({len(unattended_f)})",
         ]
-        detail = one.sort_values("_ts", ascending=False)[show_cols].head(400)
-        st.dataframe(
-            _format_local(detail),
-            use_container_width=True,
-            hide_index=True,
+    )
+
+    with tab_overview:
+        st.caption(
+            "**Total work** counts tickets you closed or moved to investigation. "
+            "**Unattended** = individual accountability when the field did not respond."
         )
+        if focus != "All":
+            sub = summary[summary["Person"] == focus] if not summary.empty else summary
+            _render_perf_individual_summary_table(sub)
+        else:
+            _render_perf_individual_summary_table(summary)
+        c1, c2 = st.columns(2)
+        with c1:
+            if not work_f.empty:
+                st.markdown("**Total work by person**")
+                _render_perf_person_bar(
+                    work_f,
+                    title="",
+                    value_name="Total work",
+                )
+        with c2:
+            if not unattended_f.empty:
+                st.markdown("**Unattended by person**")
+                _render_perf_person_bar(
+                    unattended_f,
+                    title="",
+                    value_name="Unattended",
+                )
+
+    with tab_work:
+        st.caption(
+            "Completed and Under Investigation combined — active work handled in this window."
+        )
+        if work_f.empty:
+            st.info("No completed or investigation tickets for this filter.")
+        else:
+            view = _perf_enrich_tickets(work_f)
+            c_chart, c_table = st.columns([3, 2])
+            with c_chart:
+                _render_perf_person_bar(
+                    view,
+                    title="Total work by assignee",
+                    value_name="Total work",
+                )
+            with c_table:
+                st.markdown("**Split**")
+                split = (
+                    view.groupby(["_outcome", "category"], as_index=False)
+                    .size()
+                    .rename(columns={"size": "Tickets"})
+                    .sort_values(["Tickets", "_outcome", "category"], ascending=[False, True, True])
+                    .rename(columns={"_outcome": "Outcome", "category": "Category"})
+                )
+                st.dataframe(split, use_container_width=True, hide_index=True)
+            with st.expander("Trend & ticket list", expanded=False):
+                _render_perf_outcome_trend(
+                    view,
+                    bucket_fmt=bucket_fmt,
+                    x_title=x_title,
+                    axis_format=axis_format,
+                )
+                _render_perf_ticket_table(view)
+
+    with tab_unatt:
+        st.caption(
+            "No same-day field response before assign-day cutoff — **per assignee**."
+        )
+        if unattended_f.empty:
+            st.info("No unattended tickets for this filter.")
+        else:
+            _render_perf_person_bar(
+                unattended_f,
+                title="Unattended by assignee",
+                value_name="Unattended",
+            )
+            with st.expander("Trend over time", expanded=False):
+                _render_perf_stacked_staff_chart(
+                    unattended_f,
+                    y_title="Unattended",
+                    bucket_fmt=bucket_fmt,
+                    x_title=x_title,
+                    axis_format=axis_format,
+                )
+            with st.expander("Ticket list", expanded=len(unattended_f) <= 8):
+                _render_perf_ticket_table(unattended_f)
 
 
 def _render_missing_table_help(table: str) -> None:
