@@ -97,6 +97,8 @@ from unattended import (
     STATUS_UNATTENDED,
     UNATTENDED_NUDGE_HOURS,
 )
+
+STATUS_UNDER_INVESTIGATION = "Under Investigation"
 from dotenv import load_dotenv
 from supabase_client import (
     get_cached_supabase_client,
@@ -3153,17 +3155,16 @@ def _cc_dashboard_reassign_ticket(
         additional_info=additional_info,
         operator_id=operator_id,
     )
-    if from_status in ("Open", "Pending"):
-        action_type = (
-            "ReassignedFromOpen"
-            if from_status == "Open"
-            else "ReassignedFromPending"
-        )
-        note = (
-            "Moved back to Pending for next-day field work."
-            if from_status == "Open"
-            else "Reassigned while Pending; prior response cleared for a fresh visit."
-        )
+    if from_status in ("Open", "Pending", STATUS_UNDER_INVESTIGATION):
+        if from_status == "Open":
+            action_type = "ReassignedFromOpen"
+            note = "Moved back to Pending for next-day field work."
+        elif from_status == STATUS_UNDER_INVESTIGATION:
+            action_type = "ReassignedFromInvestigation"
+            note = "Reassigned from Under Investigation; prior response cleared."
+        else:
+            action_type = "ReassignedFromPending"
+            note = "Reassigned while Pending; prior response cleared for a fresh visit."
         try:
             client.table(ATTENDANCE_LOGS_TABLE).insert(
                 {
@@ -4688,7 +4689,15 @@ def _queue_segment_base(label: str | None) -> str:
     """Map queue label (with optional count) back to queue name."""
     if not label:
         return "Pending"
-    for base in ("Pending", "Open", "Unattended", "Completed", "Log", "Performance"):
+    for base in (
+        "Pending",
+        "Under Investigation",
+        "Open",
+        "Unattended",
+        "Completed",
+        "Log",
+        "Performance",
+    ):
         if label == base or label.startswith(f"{base} ("):
             return base
     return "Pending"
@@ -4787,15 +4796,17 @@ def _render_queue_summary_metrics(
     *,
     total_pending: int,
     total_open: int,
+    total_investigation: int,
     total_unattended: int,
     total_completed: int,
     pending_label: str,
     open_label: str,
+    investigation_label: str,
     unattended_label: str,
     completed_label: str,
 ) -> None:
     """Counts — click a queue to switch view."""
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     _render_clickable_queue_metric(
         c1,
         title="Pending",
@@ -4812,13 +4823,20 @@ def _render_queue_summary_metrics(
     )
     _render_clickable_queue_metric(
         c3,
+        title="Investigation",
+        value=total_investigation,
+        queue_name=STATUS_UNDER_INVESTIGATION,
+        option_label=investigation_label,
+    )
+    _render_clickable_queue_metric(
+        c4,
         title="Unattended",
         value=total_unattended,
         queue_name="Unattended",
         option_label=unattended_label,
     )
     _render_clickable_queue_metric(
-        c4,
+        c5,
         title="Completed",
         value=total_completed,
         queue_name="Completed",
@@ -4842,9 +4860,10 @@ def _sync_dashboard_nav_state(
     *,
     total_pending: int,
     total_open: int,
+    total_investigation: int,
     total_unattended: int,
     total_completed: int,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str]:
     """Keep queue session keys valid; return option labels for metrics."""
     _migrate_legacy_queue_nav()
 
@@ -4853,9 +4872,18 @@ def _sync_dashboard_nav_state(
 
     pending_label = _queue_segment_label("Pending", total_pending)
     open_label = _queue_segment_label("Open", total_open)
+    investigation_label = _queue_segment_label(
+        STATUS_UNDER_INVESTIGATION, total_investigation
+    )
     unattended_label = _queue_segment_label("Unattended", total_unattended)
     completed_label = _queue_segment_label("Completed", total_completed)
-    ticket_options = (pending_label, open_label, unattended_label, completed_label)
+    ticket_options = (
+        pending_label,
+        open_label,
+        investigation_label,
+        unattended_label,
+        completed_label,
+    )
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
     if total_open > prev_open:
@@ -4866,7 +4894,13 @@ def _sync_dashboard_nav_state(
             open_label if total_open > 0 else pending_label
         )
     st.session_state["_dash_prev_open_count"] = total_open
-    return pending_label, open_label, unattended_label, completed_label
+    return (
+        pending_label,
+        open_label,
+        investigation_label,
+        unattended_label,
+        completed_label,
+    )
 
 
 def _render_main_navigation() -> str:
@@ -4968,17 +5002,28 @@ def _render_dashboard(
     status = df["status"].astype(str).str.strip() if not df.empty and "status" in df.columns else pd.Series(dtype=str)
     pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
     open_mask = status.eq("Open") if not df.empty else pd.Series(dtype=bool)
+    investigation_mask = (
+        status.eq(STATUS_UNDER_INVESTIGATION) if not df.empty else pd.Series(dtype=bool)
+    )
     unattended_mask = status.eq(STATUS_UNATTENDED) if not df.empty else pd.Series(dtype=bool)
     completed_mask = status.eq("Completed") if not df.empty else pd.Series(dtype=bool)
 
     total_pending = int(pending_mask.sum()) if not df.empty else 0
     total_open = int(open_mask.sum()) if not df.empty else 0
+    total_investigation = int(investigation_mask.sum()) if not df.empty else 0
     total_unattended = int(unattended_mask.sum()) if not df.empty else 0
     total_completed = int(completed_mask.sum()) if not df.empty else 0
     _apply_pending_dashboard_nav()
-    pending_label, open_label, unattended_label, completed_label = _sync_dashboard_nav_state(
+    (
+        pending_label,
+        open_label,
+        investigation_label,
+        unattended_label,
+        completed_label,
+    ) = _sync_dashboard_nav_state(
         total_pending=total_pending,
         total_open=total_open,
+        total_investigation=total_investigation,
         total_unattended=total_unattended,
         total_completed=total_completed,
     )
@@ -4990,10 +5035,12 @@ def _render_dashboard(
         _render_queue_summary_metrics(
             total_pending=total_pending,
             total_open=total_open,
+            total_investigation=total_investigation,
             total_unattended=total_unattended,
             total_completed=total_completed,
             pending_label=pending_label,
             open_label=open_label,
+            investigation_label=investigation_label,
             unattended_label=unattended_label,
             completed_label=completed_label,
         )
@@ -5185,6 +5232,11 @@ def _render_dashboard(
                     ),
                     status_actions=(
                         ("Mark Completed", "Completed", "Completed"),
+                        (
+                            "Under Investigation",
+                            STATUS_UNDER_INVESTIGATION,
+                            "UnderInvestigation",
+                        ),
                     ),
                     allow_delete=True,
                     allow_edit_assignment=True,
@@ -5238,6 +5290,71 @@ def _render_dashboard(
 
                 with st.expander("Photo gallery", expanded=total_open <= 3):
                     _render_field_photos_section(open_df)
+
+    elif queue_view == STATUS_UNDER_INVESTIGATION:
+        st.markdown("##### Under Investigation")
+        if df.empty:
+            st.info(f"No tickets in the last {lookback_days} {day_word}.")
+        else:
+            inv_df = df[investigation_mask].copy()
+            if inv_df.empty:
+                st.info(
+                    f"No tickets under investigation in the last {lookback_days} {day_word}. "
+                    "Move tickets here from **Needs review** when more follow-up is required."
+                )
+            else:
+                st.caption(
+                    "Tickets paused for admin follow-up. **Back to Open** resumes review; "
+                    "**Mark Completed** when resolved."
+                )
+                _render_admin_ticket_toolbar(
+                    inv_df,
+                    key_prefix="investigation",
+                    caption=None,
+                    status_actions=(
+                        ("Back to Open", "Open", "BackToOpenFromInvestigation"),
+                        ("Mark Completed", "Completed", "Completed"),
+                    ),
+                    allow_delete=True,
+                    allow_edit_assignment=True,
+                    allow_reassign=True,
+                )
+                _render_selectable_ticket_table(
+                    inv_df,
+                    key_prefix="investigation",
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
+                )
+
+                if st.session_state.get(
+                    _assignment_edit_session_keys("investigation")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_assignment_editor(
+                        required_status=STATUS_UNDER_INVESTIGATION,
+                        key_prefix="investigation",
+                        edit_key_prefix="investigation",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(inv_df),
+                    )
+
+                if st.session_state.get(_reassign_session_keys("investigation")["show"]):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_reassign_editor(
+                        from_status=STATUS_UNDER_INVESTIGATION,
+                        key_prefix="investigation",
+                        edit_key_prefix="investigation",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(inv_df),
+                    )
+
+                with st.expander("Photo gallery", expanded=total_investigation <= 3):
+                    _render_field_photos_section(inv_df)
 
     elif queue_view == "Completed":
         st.markdown("##### Completed")
