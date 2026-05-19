@@ -238,6 +238,26 @@ _CATEGORIES_SYNCED_ONCE_KEY = "_dashboard_categories_synced_once"
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
+_CC_FLASH_LEVEL_KEY = "_ticket_dashboard_cc_flash_level"
+
+
+def _cc_set_flash(message: str, *, level: str = "success") -> None:
+    """Persist a sidebar message across ``st.rerun()`` (success / warning / error)."""
+    st.session_state[_CC_FLASH_KEY] = message
+    st.session_state[_CC_FLASH_LEVEL_KEY] = level
+
+
+def _cc_show_flash() -> None:
+    message = st.session_state.pop(_CC_FLASH_KEY, None)
+    if not message:
+        return
+    level = str(st.session_state.pop(_CC_FLASH_LEVEL_KEY, "success") or "success")
+    if level == "error":
+        st.error(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.success(message)
 # Latest ``ticket_attendance_logs.timestamp`` the dashboard has already "seen"
 # (for toast when Telegram/bot appends a new row).
 _DASH_LAST_ATTENDANCE_TS_KEY = "_dash_last_seen_attendance_ts"
@@ -3849,9 +3869,7 @@ def _reset_cc_assign_form(*, categories: list[str]) -> None:
 
 
 def _sidebar_command_center() -> None:
-    flash = st.session_state.pop(_CC_FLASH_KEY, None)
-    if flash:
-        st.success(flash)
+    _cc_show_flash()
 
     st.markdown("##### Assign")
     token_env = (
@@ -3914,18 +3932,23 @@ def _sidebar_command_center() -> None:
         if fe_names and not fe_missing:
             pick_choice = st.session_state.get(_CC_FE_SELECT_KEY)
             if not pick_choice or not str(pick_choice).strip():
-                st.error("Pick an engineer from the list.")
+                _cc_set_flash("Pick an engineer from the list.", level="error")
+                st.rerun()
                 return
             handle = _cc_normalize_handle(str(pick_choice))
         else:
             fe_handle_raw = str(st.session_state.get(_CC_FE_MANUAL_KEY, "")).strip()
             if not fe_handle_raw:
-                st.error("Enter an engineer Telegram username.")
+                _cc_set_flash(
+                    "Enter an engineer Telegram username.", level="error"
+                )
+                st.rerun()
                 return
             handle = _cc_normalize_handle(fe_handle_raw)
         tid = _cc_validate_ticket_number(_resolve_cc_ticket_number())
     except ValueError as exc:
-        st.error(str(exc))
+        _cc_set_flash(str(exc), level="error")
+        st.rerun()
         return
 
     additional_info_val = (
@@ -3933,7 +3956,8 @@ def _sidebar_command_center() -> None:
     )
     cat = str(st.session_state.get(_CC_CATEGORY_SELECT_KEY, "")).strip()
     if not cat:
-        st.error("Pick a **Category**.")
+        _cc_set_flash("Pick a **Category**.", level="error")
+        st.rerun()
         return
 
     # Form widgets with ``key=`` sometimes leave return values empty on submit;
@@ -3948,7 +3972,7 @@ def _sidebar_command_center() -> None:
     if chat_raw:
         chat_id, chat_parse_err = _parse_telegram_group_chat_id(chat_raw)
     if chat_parse_err:
-        st.warning(chat_parse_err)
+        _cc_set_flash(chat_parse_err, level="warning")
 
     if not token or chat_id is None:
         missing_bits: list[str] = []
@@ -3966,22 +3990,26 @@ def _sidebar_command_center() -> None:
             missing_bits.append(
                 f"group id **{chat_raw[:72]}** is not a valid integer or **@** public username"
             )
-        st.error(
+        _cc_set_flash(
             "Cannot post to Telegram yet. " + " · ".join(missing_bits) + ". "
             "If the bot token is missing, use the **session-only** token field in this form or set "
             "**TELEGRAM_TOKEN** in Secrets. "
             "For the group, use top-level Secrets keys or `[telegram]` / `group_chat_id` style keys; "
             "restart after editing Secrets. If the id still is not picked up, paste it in the "
-            "**Group chat id (only if missing from Secrets)** field and Assign again."
+            "**Group chat id (only if missing from Secrets)** field and Assign again.",
+            level="error",
         )
+        st.rerun()
         return
 
     op_assign = _session_operator_id()
     if not op_assign:
-        st.error(
+        _cc_set_flash(
             "Session is missing **Operator ID**. Use **Log out** and sign in again — "
-            "Operator ID is required before Command Center can assign."
+            "Operator ID is required before Command Center can assign.",
+            level="error",
         )
+        st.rerun()
         return
 
     try:
@@ -3993,7 +4021,8 @@ def _sidebar_command_center() -> None:
             operator_id=op_assign,
         )
     except Exception as exc:
-        st.error(f"Supabase upsert failed: {exc}")
+        _cc_set_flash(f"Supabase upsert failed: {exc}", level="error")
+        st.rerun()
         return
 
     try:
@@ -4013,22 +4042,25 @@ def _sidebar_command_center() -> None:
         try:
             _cc_save_assignment_telegram_ref(_get_supabase_client(), tid, tg_ref)
         except Exception as link_exc:
-            st.session_state[_CC_FLASH_KEY] = (
-                f"{summary} Posted to Telegram but could not link message for edits: {link_exc}"
+            _cc_set_flash(
+                f"{summary} Posted to Telegram but could not link message for edits: {link_exc}",
+                level="warning",
             )
             _reset_cc_assign_form(categories=cat_names)
             st.rerun()
             return
     except Exception as exc:
-        st.session_state[_CC_FLASH_KEY] = (
-            f"{summary} Telegram post failed (saved in Supabase): {exc}"
+        _cc_set_flash(
+            f"{summary} Telegram post failed (saved in Supabase): {exc}",
+            level="warning",
         )
         _reset_cc_assign_form(categories=cat_names)
         st.rerun()
         return
 
-    st.session_state[_CC_FLASH_KEY] = (
-        f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message)."
+    _cc_set_flash(
+        f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message).",
+        level="success",
     )
     _reset_cc_assign_form(categories=cat_names)
     st.rerun()
