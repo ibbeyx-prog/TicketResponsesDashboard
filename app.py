@@ -294,6 +294,7 @@ _CC_FE_MANUAL_KEY = "cc_fe_manual"
 _CC_TICKET_INPUT_KEY = "cc_ticket_number"
 _CC_ASSIGN_NOTES_KEY = "cc_assign_notes"
 _CC_CLEAR_ASSIGN_KEY = "_cc_clear_assign_form"
+_CC_ADD_UNASSIGNED_KEY = "cc_add_unassigned"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
 _CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
@@ -2107,9 +2108,14 @@ def _move_to_investigation(
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
     status = str(row.get("status") or "").strip()
-    if status != "Open":
+    if status not in ("Open", "Pending"):
         raise ValueError(
-            f"Ticket **{ticket_number}** is **{status}** — move from **Needs review** only."
+            f"Ticket **{ticket_number}** is **{status}** — "
+            "move from **Needs review** or **Pending** only."
+        )
+    if follow_up and status != "Open":
+        raise ValueError(
+            "Follow-up tracking is only when moving from **Needs review**."
         )
 
     client = _get_supabase_client()
@@ -2128,7 +2134,13 @@ def _move_to_investigation(
         payload["follow_up_at"] = None
         payload["follow_up_note"] = None
         log_action = "MovedToInvestigation"
-        log_note = "Moved to Under Investigation from Needs review (no follow-up tracking)."
+        if status == "Pending":
+            log_note = "Moved to Under Investigation from Pending (no field assign)."
+        else:
+            log_note = (
+                "Moved to Under Investigation from Needs review "
+                "(no follow-up tracking)."
+            )
 
     _cc_execute_ticket_update(client, payload, ticket_number)
 
@@ -3542,6 +3554,83 @@ def _cc_insert_assignment(
     )
 
 
+def _cc_insert_pending_unassigned(
+    client,
+    ticket_number: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+    operator_id: str,
+) -> None:
+    """Queue a ticket in Pending with no engineer and no Telegram post."""
+    row: dict = {
+        "ticket_number": ticket_number,
+        "assigned_to": None,
+        "task_category": task_category,
+        "status": "Pending",
+        "field_response": None,
+        "field_responded_by": None,
+        "photo_url": None,
+        "last_assigned_at": None,
+        "unattended_nudge_sent_at": None,
+        "additional_info": additional_info,
+        "dashboard_assigned_by": operator_id,
+    }
+    for _ in range(4):
+        try:
+            client.table(TICKETS_TABLE).insert(row).execute()
+            break
+        except Exception as exc:
+            col = _cc_parse_missing_column(str(exc))
+            if not col or col not in row:
+                raise
+            _TICKETS_MISSING_COLUMNS.add(col)
+            row.pop(col, None)
+    else:
+        raise RuntimeError(
+            f"insert into {TICKETS_TABLE} failed: too many missing-column retries"
+        )
+
+    note = _cc_assignment_log_note(additional_info, operator_id) or (
+        "Queued in Pending without engineer (no Telegram)."
+    )
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=f"@{operator_id.lstrip('@')}",
+        action_type="TicketQueued",
+        note=note,
+    )
+
+
+def _cc_queue_pending_unassigned(
+    ticket_number: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+    operator_id: str,
+) -> str:
+    """Create a Pending ticket with no assignee and no Telegram message."""
+    client = _get_supabase_client()
+    existing = _cc_fetch_ticket_minimal(client, ticket_number)
+    if existing is not None:
+        raise ValueError(
+            f"Ticket **{ticket_number}** already exists "
+            f"(status **{existing.get('status') or '—'}**)."
+        )
+    _cc_insert_pending_unassigned(
+        client,
+        ticket_number,
+        task_category,
+        additional_info=additional_info,
+        operator_id=operator_id,
+    )
+    return (
+        f"**{ticket_number}** added to **Pending** (no engineer, no Telegram). "
+        "Assign or move to **Under Investigation** from the Pending queue."
+    )
+
+
 def _cc_reassign_ticket(
     client,
     ticket_number: str,
@@ -3682,17 +3771,17 @@ def _cc_patch_assignment_fields(
         raise ValueError(f"Only **{required_status}** tickets can be edited here.")
 
     now_iso = _cc_utc_now_iso()
-    _cc_execute_ticket_update(
-        client,
-        {
-            "assigned_to": assigned_to,
-            "task_category": task_category,
-            "additional_info": additional_info,
-            "dashboard_assigned_by": operator_id,
-            "updated_at": now_iso,
-        },
-        ticket_number,
-    )
+    prev_handle = str(row.get("assigned_to") or "").strip()
+    updates: dict[str, object] = {
+        "assigned_to": assigned_to,
+        "task_category": task_category,
+        "additional_info": additional_info,
+        "dashboard_assigned_by": operator_id,
+        "updated_at": now_iso,
+    }
+    if assigned_to and not prev_handle:
+        updates["last_assigned_at"] = now_iso
+    _cc_execute_ticket_update(client, updates, ticket_number)
     _cc_insert_attendance_log(
         client,
         ticket_number=ticket_number,
@@ -4442,6 +4531,7 @@ def _reset_cc_assign_form(*, categories: list[str]) -> None:
     """Clear Assign sidebar fields — call only **before** those widgets render."""
     st.session_state[_CC_TICKET_INPUT_KEY] = ""
     st.session_state[_CC_ASSIGN_NOTES_KEY] = ""
+    st.session_state[_CC_ADD_UNASSIGNED_KEY] = False
     opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     if opts:
         st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
@@ -4483,7 +4573,20 @@ def _sidebar_command_center() -> None:
     submitted = False
 
     with st.container(border=True, key="cc_assign_block"):
-        _render_cc_engineer_row(fe_names, missing=fe_missing)
+        add_unassigned = st.checkbox(
+            "Add to Pending only (no engineer, no Telegram)",
+            key=_CC_ADD_UNASSIGNED_KEY,
+            help=(
+                "Creates the ticket in **Pending** without posting to the field group. "
+                "Assign or send to **Under Investigation** from the Pending queue."
+            ),
+        )
+        if not add_unassigned:
+            _render_cc_engineer_row(fe_names, missing=fe_missing)
+        else:
+            st.caption(
+                "No engineer yet — use **Pending** to assign or investigate later."
+            )
         _render_ticket_number_picker()
         _render_cc_category_row(cat_names, missing=cat_missing)
         st.text_area(
@@ -4492,27 +4595,78 @@ def _sidebar_command_center() -> None:
             height=64,
             key=_CC_ASSIGN_NOTES_KEY,
         )
-        if not token_env:
-            st.text_input(
-                "Bot token (session only)",
-                type="password",
-                key=_CC_SESSION_TOKEN_KEY,
-                placeholder="If missing from Secrets",
-            )
-        if not env_group_ok:
-            st.text_input(
-                "Group chat id",
-                key=_CC_SESSION_GROUP_KEY,
-                placeholder="-100… or @group",
-            )
+        if not add_unassigned:
+            if not token_env:
+                st.text_input(
+                    "Bot token (session only)",
+                    type="password",
+                    key=_CC_SESSION_TOKEN_KEY,
+                    placeholder="If missing from Secrets",
+                )
+            if not env_group_ok:
+                st.text_input(
+                    "Group chat id",
+                    key=_CC_SESSION_GROUP_KEY,
+                    placeholder="-100… or @group",
+                )
+        submit_label = "Add to Pending" if add_unassigned else "Assign"
         submitted = st.button(
-            "Assign",
+            submit_label,
             type="primary",
             use_container_width=True,
             key="cc_assign_submit_btn",
         )
 
     if not submitted:
+        return
+
+    add_unassigned = bool(st.session_state.get(_CC_ADD_UNASSIGNED_KEY))
+
+    try:
+        tid = _cc_validate_ticket_number(_resolve_cc_ticket_number())
+    except ValueError as exc:
+        _cc_set_flash(str(exc), level="error")
+        st.rerun()
+        return
+
+    additional_info_val = (
+        str(st.session_state.get(_CC_ASSIGN_NOTES_KEY, "")).strip() or None
+    )
+    cat = str(st.session_state.get(_CC_CATEGORY_SELECT_KEY, "")).strip()
+    if not cat:
+        _cc_set_flash("Pick a **Category**.", level="error")
+        st.rerun()
+        return
+
+    op_assign = _session_operator_id()
+    if not op_assign:
+        _cc_set_flash(
+            "Session is missing **Operator ID**. Use **Log out** and sign in again.",
+            level="error",
+        )
+        st.rerun()
+        return
+
+    if add_unassigned:
+        try:
+            summary = _cc_queue_pending_unassigned(
+                tid,
+                cat,
+                additional_info=additional_info_val,
+                operator_id=op_assign,
+            )
+        except ValueError as exc:
+            _cc_set_flash(str(exc), level="error")
+            st.rerun()
+            return
+        except Exception as exc:
+            _cc_set_flash(f"Could not queue ticket: {exc}", level="error")
+            st.rerun()
+            return
+        _get_supabase_client.clear()
+        _cc_set_flash(summary, level="success")
+        _cc_schedule_assign_form_clear()
+        st.rerun()
         return
 
     try:
@@ -4532,18 +4686,8 @@ def _sidebar_command_center() -> None:
                 st.rerun()
                 return
             handle = _cc_normalize_handle(fe_handle_raw)
-        tid = _cc_validate_ticket_number(_resolve_cc_ticket_number())
     except ValueError as exc:
         _cc_set_flash(str(exc), level="error")
-        st.rerun()
-        return
-
-    additional_info_val = (
-        str(st.session_state.get(_CC_ASSIGN_NOTES_KEY, "")).strip() or None
-    )
-    cat = str(st.session_state.get(_CC_CATEGORY_SELECT_KEY, "")).strip()
-    if not cat:
-        _cc_set_flash("Pick a **Category**.", level="error")
         st.rerun()
         return
 
@@ -5645,8 +5789,9 @@ def _render_dashboard(
                 st.info(f"No pending tickets in the last {lookback_days} {day_word}.")
             else:
                 st.caption(
-                    "Tick **Select** on ticket(s). **Record response** / **Reassign** need "
-                    "exactly one ticket selected."
+                    "Unassigned rows (no engineer) were added without Telegram — use "
+                    "**Edit assignment** to assign, or **Under Investigation** to park. "
+                    "**Reassign** / **Record response** need exactly one ticket selected."
                 )
                 pend_show = tuple(
                     c
@@ -5664,10 +5809,17 @@ def _render_dashboard(
                     pend,
                     key_prefix="assigned",
                     caption=(
-                        "**Reassign** clears prior response (optional new Telegram post). "
-                        "**Record response** if the bot missed moving the ticket to Open."
+                        "**Edit assignment** assigns an engineer (optional Telegram). "
+                        "**Under Investigation** parks without field assign. "
+                        "**Reassign** clears prior response for a new visit."
                     ),
-                    status_actions=(),
+                    status_actions=(
+                        (
+                            "Under Investigation",
+                            STATUS_UNDER_INVESTIGATION,
+                            "MovedToInvestigation",
+                        ),
+                    ),
                     allow_delete=True,
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
