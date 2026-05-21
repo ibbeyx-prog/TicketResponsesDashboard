@@ -7462,7 +7462,7 @@ def _render_sales_cases_dashboard() -> None:
             key_prefix="sc_resolved",
             title="Resolved",
             empty_msg="No **Resolved** sales cases yet.",
-            caption="Closed cases (read-only). Search by ticket # if needed.",
+            caption=None,
             table_cols=_SC_QUEUE_TABLE_COLS + ("close_note", "status"),
             show_work_panel=False,
             **work_kw,
