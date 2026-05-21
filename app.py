@@ -6587,49 +6587,6 @@ def _sc_filter_sales_df(df: pd.DataFrame, statuses: tuple[str, ...]) -> pd.DataF
     return df[effective.isin(statuses)].copy()
 
 
-_SC_QUEUE_WORKFLOW: tuple[tuple[str, str, str], ...] = (
-    (SC_STATUS_SALES_TICKET, "1", "New intake — triage and send to Investigation"),
-    (SC_STATUS_INVESTIGATION, "2", "Review & site visit — then Design or Resolved"),
-    (SC_STATUS_DESIGN, "3", "Post-visit solution — close when done"),
-    (SC_STATUS_RESOLVED, "4", "Closed — read-only history"),
-)
-
-
-def _sc_queue_help_text(queue_status: str) -> str:
-    hints = {
-        SC_STATUS_SALES_TICKET: (
-            "1. Tick **Select** on one case · 2. Use **Next step** to move forward · "
-            "3. Add a **Case note** in the panel below"
-        ),
-        SC_STATUS_INVESTIGATION: (
-            "Regional cases: open **Site visit** to assign an engineer. "
-            "Use **Next step** when ready for Design or Resolved."
-        ),
-        SC_STATUS_DESIGN: (
-            "Finish the solution, then **Next step → Resolved** with an optional closing note."
-        ),
-        SC_STATUS_RESOLVED: (
-            "Search or browse closed cases. Select a row to read notes — no status changes."
-        ),
-    }
-    return hints.get(queue_status, "")
-
-
-def _render_sc_workflow_strip(*, active_queue: str) -> None:
-    """Pipeline: Sales ticket → Investigation → Design → Resolved."""
-    cols = st.columns(len(_SC_QUEUE_WORKFLOW))
-    active = _sc_effective_status(active_queue)
-    for col, (status, step, blurb) in zip(cols, _SC_QUEUE_WORKFLOW):
-        is_active = _sc_effective_status(status) == active
-        with col:
-            with st.container(border=True):
-                st.markdown(
-                    f"**{'→ ' if is_active else ''}{step}. {status}**"
-                    + (" ✓" if is_active else "")
-                )
-                st.caption(blurb)
-
-
 def _render_sc_selected_case_card(row: pd.Series) -> None:
     """Compact summary for the one selected case."""
     cref = str(row.get("case_ref") or "—")
@@ -7364,19 +7321,10 @@ def _render_sales_queue_segment(
     if sub.empty:
         st.info(empty_msg)
         return
-    help_txt = _sc_queue_help_text(queue_status)
-    if help_txt:
-        st.info(help_txt)
     if caption:
         st.caption(caption)
     options = _sc_case_options_for_admin(sub)
     status_actions = _sc_status_actions_for_queue(queue_status)
-    toolbar_caption = (
-        "Quick actions (table): **Select all** / **Clear**, then **Move to** + **Apply**. "
-        "For one case, use the **work panel** under the table."
-        if status_actions and queue_status != SC_STATUS_RESOLVED
-        else "Search the table or use **Select all** / **Clear**."
-    )
     _render_sales_case_toolbar(
         sub,
         key_prefix=key_prefix,
@@ -7400,13 +7348,7 @@ def _render_sales_queue_segment(
                     fe_missing=fe_missing,
                 )
         elif len(selected) > 1:
-            st.warning(
-                "Select **exactly one** case to open the work panel (details, next step, site visit)."
-            )
-        else:
-            st.caption(
-                "Tip: tick **Select** on one row to edit details or move to the next queue."
-            )
+            st.warning("Select **exactly one** case to open the work panel.")
 
 
 def _render_sales_cases_dashboard() -> None:
@@ -7414,8 +7356,7 @@ def _render_sales_cases_dashboard() -> None:
     _sc_show_sales_flash()
     st.markdown("##### Sales cases")
     st.caption(
-        "Create new cases in the sidebar **Sales intake**. "
-        "Click a stage below to open that queue. Field **Tickets** are separate."
+        "New cases: sidebar **Sales intake**. Open a queue with the metrics above."
     )
 
     try:
@@ -7473,8 +7414,6 @@ def _render_sales_cases_dashboard() -> None:
     )
 
     queue_view = _sc_queue_segment_base(st.session_state.get(_DASH_SALES_QUEUE_KEY))
-    _render_sc_workflow_strip(active_queue=queue_view)
-    st.divider()
     work_kw = dict(
         op=op,
         sales_cats=sales_cats,
@@ -7490,10 +7429,7 @@ def _render_sales_cases_dashboard() -> None:
             key_prefix="sc_sales_ticket",
             title="Sales ticket — new intake",
             empty_msg="No cases in **Sales ticket**. Create one in sidebar **Sales intake**.",
-            caption=(
-                "New sales intake. **Action**: **Investigation**, **Design**, or **Resolved** "
-                "+ optional comment."
-            ),
+            caption=None,
             toolbar_caption=None,
             **work_kw,
         )
@@ -7505,9 +7441,7 @@ def _render_sales_cases_dashboard() -> None:
             key_prefix="sc_investigation",
             title="Investigation — admin review & site visit",
             empty_msg="No cases in **Investigation**.",
-            caption=(
-                "Includes **site visit** cases. **Action**: **Design** or **Resolved** + comment."
-            ),
+            caption=None,
             table_cols=_SC_QUEUE_TABLE_COLS + ("dispatch_type",),
             **work_kw,
         )
@@ -7518,9 +7452,7 @@ def _render_sales_cases_dashboard() -> None:
             key_prefix="sc_design",
             title="Design — post-visit solution",
             empty_msg="No cases in **Design**.",
-            caption=(
-                "Post-visit solution. **Action**: **Resolved** + comment when done."
-            ),
+            caption=None,
             **work_kw,
         )
     elif queue_view == SC_STATUS_RESOLVED:
