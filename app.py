@@ -6168,7 +6168,6 @@ def _render_queue_summary_metrics(
     investigation_label: str,
     unattended_label: str,
     completed_label: str,
-    *,
     total_in_view: int = 0,
     total_in_tabs: int = 0,
     total_other: int = 0,
