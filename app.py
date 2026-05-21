@@ -3357,14 +3357,21 @@ def _perf_prepare_slices(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> dict[str, pd.DataFrame]:
-    """One pass: completed, investigation, unattended rows in the sidebar window."""
+    """One pass: field ticket outcomes in the sidebar window."""
     empty = pd.DataFrame()
-    out = {"completed": empty, "investigation": empty, "unattended": empty}
+    out = {
+        "completed": empty,
+        "investigation": empty,
+        "on_hold": empty,
+        "unattended": empty,
+    }
     if df_all.empty or "status" not in df_all.columns:
         return out
 
     base = df_all.copy()
-    base["_status_cf"] = base["status"].astype(str).str.strip().str.casefold()
+    base["_status_cf"] = (
+        base["status"].map(_normalize_ticket_status_value).str.strip().str.casefold()
+    )
     u_col = (
         _parse_ts(base["updated_at"])
         if "updated_at" in base.columns
@@ -3398,7 +3405,74 @@ def _perf_prepare_slices(
         STATUS_UNDER_INVESTIGATION.strip().casefold(), ts_inv
     )
     out["unattended"] = _slice(STATUS_UNATTENDED.strip().casefold(), ts_unatt)
+    out["on_hold"] = _slice(STATUS_ON_HOLD.strip().casefold(), ts_unatt)
     return out
+
+
+def _perf_filter_sales_in_range(
+    df: pd.DataFrame,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Sales cases whose ``updated_at`` falls in the sidebar time range."""
+    if df.empty:
+        return df
+    ts = (
+        _parse_ts(df["updated_at"])
+        if "updated_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    mask = ts.notna() & (ts >= range_start) & (ts <= range_end)
+    part = df.loc[mask].copy()
+    if not part.empty:
+        part["_ts"] = ts.loc[mask]
+    return part
+
+
+def _perf_enrich_sales_cases(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``staff`` (sales_owner), ``category``, and local time from ``_ts``."""
+    view = df.copy()
+    if "_ts" not in view.columns and "updated_at" in view.columns:
+        view["_ts"] = _parse_ts(view["updated_at"])
+    view["_local"] = view["_ts"].dt.tz_convert(LOCAL_TZ)
+    if "sales_owner" in view.columns:
+        view["staff"] = view["sales_owner"].map(_perf_norm_member)
+    elif "admin_owner" in view.columns:
+        view["staff"] = view["admin_owner"].map(_perf_norm_member)
+    else:
+        view["staff"] = "(unknown)"
+    if "sales_category" in view.columns:
+        cat = view["sales_category"].fillna("").astype(str).str.strip()
+        view["category"] = cat.mask(cat.eq(""), "(uncategorized)")
+    else:
+        view["category"] = "(uncategorized)"
+    if "status" in view.columns:
+        view["status_eff"] = view["status"].map(_sc_effective_status)
+    return view
+
+
+def _perf_build_sales_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "status_eff" not in df.columns:
+        return pd.DataFrame()
+    view = _perf_enrich_sales_cases(df)
+    rows: list[dict[str, object]] = []
+    for person, grp in view.groupby("staff"):
+        st = grp["status_eff"]
+        rows.append(
+            {
+                "Person": person,
+                "Sales ticket": int(st.eq(SC_STATUS_SALES_TICKET).sum()),
+                "Investigation": int(
+                    st.isin(_SC_INVESTIGATION_QUEUE_STATUSES).sum()
+                ),
+                "Design": int(st.eq(SC_STATUS_DESIGN).sum()),
+                "Resolved": int(st.eq(SC_STATUS_RESOLVED).sum()),
+                "Total": len(grp),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["Total", "Person"], ascending=[False, True])
 
 
 def _perf_filter_by_person(df: pd.DataFrame, person: str) -> pd.DataFrame:
@@ -3456,13 +3530,18 @@ def _perf_combine_work(
 def _perf_build_summary(
     completed: pd.DataFrame,
     investigation: pd.DataFrame,
+    on_hold: pd.DataFrame,
     unattended: pd.DataFrame,
 ) -> pd.DataFrame:
     c_counts = _perf_staff_counts(completed)
     i_counts = _perf_staff_counts(investigation)
+    h_counts = _perf_staff_counts(on_hold)
     u_counts = _perf_staff_counts(unattended)
     people = sorted(
-        set(c_counts.index) | set(i_counts.index) | set(u_counts.index),
+        set(c_counts.index)
+        | set(i_counts.index)
+        | set(h_counts.index)
+        | set(u_counts.index),
         key=str.lower,
     )
     if not people:
@@ -3473,6 +3552,7 @@ def _perf_build_summary(
             "Total work": int(c_counts.get(p, 0)) + int(i_counts.get(p, 0)),
             "Completed": int(c_counts.get(p, 0)),
             "Investigation": int(i_counts.get(p, 0)),
+            "On Hold": int(h_counts.get(p, 0)),
             "Unattended": int(u_counts.get(p, 0)),
         }
         for p in people
@@ -3640,6 +3720,35 @@ def _render_perf_ticket_table(df: pd.DataFrame) -> None:
     ]
     st.dataframe(
         _format_local(detail[cols]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.caption("No sales cases to list.")
+        return
+    view = _perf_enrich_sales_cases(df)
+    detail = view.sort_values("_ts", ascending=False).head(200)
+    cols = [
+        c
+        for c in (
+            "status_eff",
+            "case_ref",
+            "account_name",
+            "sales_owner",
+            "sales_category",
+            "account_region",
+            "admin_owner",
+            "assigned_to",
+            "updated_at",
+        )
+        if c in detail.columns
+    ]
+    show = detail[cols].rename(columns={"status_eff": "Status"})
+    st.dataframe(
+        _format_local(show),
         use_container_width=True,
         hide_index=True,
     )
@@ -7973,164 +8082,293 @@ def _render_field_photos_section(done: pd.DataFrame) -> None:
 
 
 def _render_field_performance_tab(*, lookback_days: int) -> None:
-    """Field outcomes per person — overview + focused tabs."""
-    st.markdown("##### Field team performance")
+    """Field tickets + sales cases — outcomes per person in the sidebar window."""
     range_caption = _format_dash_range_caption() or "sidebar time range"
     st.caption(f"{range_caption} · {LOCAL_TZ_LABEL}")
 
     range_start, range_end = _get_dash_range()
+    bucket_fmt, x_title, axis_format = _perf_bucket_settings(range_start, range_end)
 
+    st.markdown("##### Field tickets")
     try:
         df_all = _fetch_tickets()
     except Exception as exc:
         st.error(f"Could not load tickets: {exc}")
-        return
+        df_all = pd.DataFrame()
 
-    if df_all.empty or "status" not in df_all.columns:
-        st.info("No ticket data to analyze.")
-        return
-
-    slices = _perf_prepare_slices(df_all, range_start, range_end)
-    completed = slices["completed"]
-    investigation = slices["investigation"]
-    unattended = slices["unattended"]
-    n_done, n_inv, n_unatt = len(completed), len(investigation), len(unattended)
-
-    if n_done == 0 and n_inv == 0 and n_unatt == 0:
-        st.info(
-            "No **Completed**, **Under Investigation**, or **Unattended** tickets "
-            "in this time window. Try **Last 30 days** in the sidebar."
-        )
-        return
-
-    summary = _perf_build_summary(completed, investigation, unattended)
-    people = ["All"] + (
-        summary["Person"].tolist() if not summary.empty else []
+    field_has_data = (
+        not df_all.empty and "status" in df_all.columns
     )
-
-    focus = st.selectbox(
-        "Focus person",
-        options=people,
-        key="perf_focus_person",
-        help="Filter all tabs to one assignee, or **All** for the full team.",
-    )
-    completed_f = _perf_filter_by_person(completed, focus)
-    investigation_f = _perf_filter_by_person(investigation, focus)
-    unattended_f = _perf_filter_by_person(unattended, focus)
-    work_f = _perf_combine_work(completed_f, investigation_f)
-    n_work = len(work_f)
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total work", n_work)
-    m2.metric("Completed", len(completed_f))
-    m3.metric("Unattended", len(unattended_f))
-    n_inv = len(investigation_f)
-    if n_inv:
-        st.caption(
-            f"**Total work** = Completed + Under Investigation "
-            f"({len(completed_f)} + {n_inv}). "
-            "**Unattended** is separate (no field response)."
-        )
+    if not field_has_data:
+        st.info("No field ticket data to analyze.")
+        completed = investigation = on_hold = unattended = pd.DataFrame()
     else:
-        st.caption(
-            "**Total work** = Completed + Under Investigation. "
-            "**Unattended** is separate (no field response)."
+        slices = _perf_prepare_slices(df_all, range_start, range_end)
+        completed = slices["completed"]
+        investigation = slices["investigation"]
+        on_hold = slices["on_hold"]
+        unattended = slices["unattended"]
+
+    n_done = len(completed)
+    n_inv = len(investigation)
+    n_hold = len(on_hold)
+    n_unatt = len(unattended)
+
+    if field_has_data and n_done == 0 and n_inv == 0 and n_hold == 0 and n_unatt == 0:
+        st.info(
+            "No **Completed**, **Investigation**, **On Hold**, or **Unattended** "
+            "field tickets in this time window. Try **Last 30 days** in the sidebar."
         )
 
-    bucket_fmt, x_title, axis_format = _perf_bucket_settings(range_start, range_end)
-
-    tab_overview, tab_work, tab_unatt = st.tabs(
-        [
-            "Overview",
-            f"Total work ({n_work})",
-            f"Unattended ({len(unattended_f)})",
-        ]
-    )
-
-    with tab_overview:
-        st.caption(
-            "**Total work** counts tickets you closed or moved to investigation. "
-            "**Unattended** = individual accountability when the field did not respond."
+    if field_has_data and (n_done or n_inv or n_hold or n_unatt):
+        summary = _perf_build_summary(completed, investigation, on_hold, unattended)
+        people = ["All"] + (
+            summary["Person"].tolist() if not summary.empty else []
         )
-        if focus != "All":
-            sub = summary[summary["Person"] == focus] if not summary.empty else summary
-            _render_perf_individual_summary_table(sub)
-        else:
-            _render_perf_individual_summary_table(summary)
-        c1, c2 = st.columns(2)
-        with c1:
-            if not work_f.empty:
-                st.markdown("**Total work by person**")
-                _render_perf_person_bar(
-                    work_f,
-                    title="",
-                    value_name="Total work",
+        focus = st.selectbox(
+            "Focus assignee (field)",
+            options=people,
+            key="perf_focus_person",
+            help="Filter field ticket tabs to one engineer, or **All**.",
+        )
+        completed_f = _perf_filter_by_person(completed, focus)
+        investigation_f = _perf_filter_by_person(investigation, focus)
+        on_hold_f = _perf_filter_by_person(on_hold, focus)
+        unattended_f = _perf_filter_by_person(unattended, focus)
+        work_f = _perf_combine_work(completed_f, investigation_f)
+        n_work = len(work_f)
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total work", n_work)
+        m2.metric("Completed", len(completed_f))
+        m3.metric("On Hold", len(on_hold_f))
+        m4.metric("Unattended", len(unattended_f))
+        m5.metric("Investigation", len(investigation_f))
+        st.caption(
+            "**Total work** = Completed + Under Investigation in this window. "
+            "**On Hold** = admin chase queue (by assignee). "
+            "**Unattended** = no same-day field response."
+        )
+
+        tab_overview, tab_work, tab_hold, tab_unatt = st.tabs(
+            [
+                "Overview",
+                f"Total work ({n_work})",
+                f"On Hold ({len(on_hold_f)})",
+                f"Unattended ({len(unattended_f)})",
+            ]
+        )
+
+        with tab_overview:
+            if focus != "All":
+                sub = (
+                    summary[summary["Person"] == focus]
+                    if not summary.empty
+                    else summary
                 )
-        with c2:
-            if not unattended_f.empty:
-                st.markdown("**Unattended by person**")
+                _render_perf_individual_summary_table(sub)
+            else:
+                _render_perf_individual_summary_table(summary)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if not work_f.empty:
+                    st.markdown("**Total work by assignee**")
+                    _render_perf_person_bar(
+                        work_f, title="", value_name="Total work"
+                    )
+            with c2:
+                if not on_hold_f.empty:
+                    st.markdown("**On Hold by assignee**")
+                    _render_perf_person_bar(
+                        on_hold_f, title="", value_name="On Hold"
+                    )
+            with c3:
+                if not unattended_f.empty:
+                    st.markdown("**Unattended by assignee**")
+                    _render_perf_person_bar(
+                        unattended_f, title="", value_name="Unattended"
+                    )
+
+        with tab_work:
+            st.caption(
+                "Completed and Under Investigation combined — work handled in this window."
+            )
+            if work_f.empty:
+                st.info("No completed or investigation tickets for this filter.")
+            else:
+                view = _perf_enrich_tickets(work_f)
+                c_chart, c_table = st.columns([3, 2])
+                with c_chart:
+                    _render_perf_person_bar(
+                        view,
+                        title="Total work by assignee",
+                        value_name="Total work",
+                    )
+                with c_table:
+                    st.markdown("**Split**")
+                    split = (
+                        view.groupby(["_outcome", "category"], as_index=False)
+                        .size()
+                        .rename(columns={"size": "Tickets"})
+                        .sort_values(
+                            ["Tickets", "_outcome", "category"],
+                            ascending=[False, True, True],
+                        )
+                        .rename(columns={"_outcome": "Outcome", "category": "Category"})
+                    )
+                    st.dataframe(split, use_container_width=True, hide_index=True)
+                with st.expander("Trend & ticket list", expanded=False):
+                    _render_perf_outcome_trend(
+                        view,
+                        bucket_fmt=bucket_fmt,
+                        x_title=x_title,
+                        axis_format=axis_format,
+                    )
+                    _render_perf_ticket_table(view)
+
+        with tab_hold:
+            st.caption(
+                "Tickets moved to **On Hold** by an admin in this window — chase queue per assignee."
+            )
+            if on_hold_f.empty:
+                st.info("No on-hold tickets for this filter.")
+            else:
+                hold_view = _perf_enrich_tickets(on_hold_f)
+                _render_perf_person_bar(
+                    hold_view,
+                    title="On Hold by assignee",
+                    value_name="On Hold",
+                )
+                with st.expander("Trend over time", expanded=False):
+                    _render_perf_stacked_staff_chart(
+                        hold_view,
+                        y_title="On Hold",
+                        bucket_fmt=bucket_fmt,
+                        x_title=x_title,
+                        axis_format=axis_format,
+                    )
+                with st.expander("Ticket list", expanded=len(on_hold_f) <= 8):
+                    _render_perf_ticket_table(hold_view)
+
+        with tab_unatt:
+            st.caption(
+                "No same-day field response before assign-day cutoff — per assignee."
+            )
+            if unattended_f.empty:
+                st.info("No unattended tickets for this filter.")
+            else:
                 _render_perf_person_bar(
                     unattended_f,
-                    title="",
+                    title="Unattended by assignee",
                     value_name="Unattended",
                 )
+                with st.expander("Trend over time", expanded=False):
+                    _render_perf_stacked_staff_chart(
+                        unattended_f,
+                        y_title="Unattended",
+                        bucket_fmt=bucket_fmt,
+                        x_title=x_title,
+                        axis_format=axis_format,
+                    )
+                with st.expander("Ticket list", expanded=len(unattended_f) <= 8):
+                    _render_perf_ticket_table(unattended_f)
 
-    with tab_work:
-        st.caption(
-            "Completed and Under Investigation combined — active work handled in this window."
-        )
-        if work_f.empty:
-            st.info("No completed or investigation tickets for this filter.")
-        else:
-            view = _perf_enrich_tickets(work_f)
-            c_chart, c_table = st.columns([3, 2])
-            with c_chart:
-                _render_perf_person_bar(
-                    view,
-                    title="Total work by assignee",
-                    value_name="Total work",
-                )
-            with c_table:
-                st.markdown("**Split**")
-                split = (
-                    view.groupby(["_outcome", "category"], as_index=False)
-                    .size()
-                    .rename(columns={"size": "Tickets"})
-                    .sort_values(["Tickets", "_outcome", "category"], ascending=[False, True, True])
-                    .rename(columns={"_outcome": "Outcome", "category": "Category"})
-                )
-                st.dataframe(split, use_container_width=True, hide_index=True)
-            with st.expander("Trend & ticket list", expanded=False):
-                _render_perf_outcome_trend(
-                    view,
-                    bucket_fmt=bucket_fmt,
-                    x_title=x_title,
-                    axis_format=axis_format,
-                )
-                _render_perf_ticket_table(view)
+    st.divider()
+    st.markdown("##### Sales cases")
+    st.caption(
+        "Cases with activity in this window (by **updated_at**). "
+        "Grouped by **sales_owner**."
+    )
+    try:
+        sc_all = _fetch_sales_cases_df()
+    except Exception as exc:
+        st.error(f"Could not load sales cases: {exc}")
+        return
 
-    with tab_unatt:
-        st.caption(
-            "No same-day field response before assign-day cutoff — **per assignee**."
+    if sc_all is None:
+        st.warning(
+            f"The `{SALES_CASES_TABLE}` table is missing. Apply "
+            f"``supabase/migrations/20260620_dashboard_sales_cases.sql`` in Supabase."
         )
-        if unattended_f.empty:
-            st.info("No unattended tickets for this filter.")
-        else:
-            _render_perf_person_bar(
-                unattended_f,
-                title="Unattended by assignee",
-                value_name="Unattended",
+        return
+
+    sc_df = _perf_filter_sales_in_range(sc_all, range_start, range_end)
+    if sc_df.empty:
+        st.info(
+            "No sales cases updated in this time window. "
+            "Try **Last 30 days** or widen **Time range**."
+        )
+        return
+
+    sc_summary = _perf_build_sales_summary(sc_df)
+    sc_people = ["All"] + (
+        sc_summary["Person"].tolist() if not sc_summary.empty else []
+    )
+    sc_focus = st.selectbox(
+        "Focus sales owner",
+        options=sc_people,
+        key="perf_sc_focus_person",
+        help="Filter sales charts to one owner, or **All**.",
+    )
+    sc_f = _perf_filter_by_person(sc_df, sc_focus)
+    sc_view = _perf_enrich_sales_cases(sc_f)
+
+    n_sales = len(_sc_filter_sales_df(sc_f, (SC_STATUS_SALES_TICKET,)))
+    n_sc_inv = len(_sc_filter_sales_df(sc_f, _SC_INVESTIGATION_QUEUE_STATUSES))
+    n_design = len(_sc_filter_sales_df(sc_f, (SC_STATUS_DESIGN,)))
+    n_resolved = len(_sc_filter_sales_df(sc_f, (SC_STATUS_RESOLVED,)))
+
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("In window", len(sc_f))
+    s2.metric("Sales ticket", n_sales)
+    s3.metric("Investigation", n_sc_inv)
+    s4.metric("Design", n_design)
+    s5.metric("Resolved", n_resolved)
+
+    tab_sc_over, tab_sc_list = st.tabs(
+        ["Overview", f"Cases ({len(sc_f)})"],
+    )
+    with tab_sc_over:
+        if sc_focus != "All":
+            sub_sc = (
+                sc_summary[sc_summary["Person"] == sc_focus]
+                if not sc_summary.empty
+                else sc_summary
             )
+            _render_perf_individual_summary_table(sub_sc)
+        else:
+            _render_perf_individual_summary_table(sc_summary)
+        if not sc_view.empty:
+            by_status = (
+                sc_view.groupby("status_eff", as_index=False)
+                .size()
+                .rename(columns={"size": "Cases"})
+                .sort_values("Cases", ascending=False)
+            )
+            c_bar, c_pie = st.columns([2, 1])
+            with c_bar:
+                _render_perf_person_bar(
+                    sc_view,
+                    title="Cases by sales owner",
+                    value_name="Cases",
+                )
+            with c_pie:
+                st.markdown("**By status**")
+                st.dataframe(by_status, use_container_width=True, hide_index=True)
+
+    with tab_sc_list:
+        if sc_view.empty:
+            st.info("No sales cases for this filter.")
+        else:
             with st.expander("Trend over time", expanded=False):
                 _render_perf_stacked_staff_chart(
-                    unattended_f,
-                    y_title="Unattended",
+                    sc_view,
+                    y_title="Cases",
                     bucket_fmt=bucket_fmt,
                     x_title=x_title,
                     axis_format=axis_format,
                 )
-            with st.expander("Ticket list", expanded=len(unattended_f) <= 8):
-                _render_perf_ticket_table(unattended_f)
+            _render_perf_sales_case_table(sc_view)
 
 
 def _render_missing_table_help(table: str) -> None:
