@@ -3352,14 +3352,35 @@ def _perf_filter_status_in_range(
     ]
 
 
+def _perf_reference_ts(df: pd.DataFrame) -> pd.Series:
+    """Latest activity timestamp per ticket (same basis as Tickets time range)."""
+    cols = [
+        c
+        for c in (
+            "last_assigned_at",
+            "responded_at",
+            "updated_at",
+            "created_at",
+        )
+        if c in df.columns
+    ]
+    if not cols:
+        return pd.Series(pd.NaT, index=df.index)
+    stacked = pd.concat([_parse_ts(df[c]) for c in cols], axis=1)
+    return stacked.max(axis=1, skipna=True)
+
+
 def _perf_prepare_slices(
     df_all: pd.DataFrame,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> dict[str, pd.DataFrame]:
-    """One pass: field ticket outcomes in the sidebar window."""
+    """Field tickets in view — same rules as the Tickets tab queue counts."""
     empty = pd.DataFrame()
-    out = {
+    out: dict[str, pd.DataFrame] = {
+        "in_view": empty,
+        "pending": empty,
+        "open": empty,
         "completed": empty,
         "investigation": empty,
         "on_hold": empty,
@@ -3368,44 +3389,27 @@ def _perf_prepare_slices(
     if df_all.empty or "status" not in df_all.columns:
         return out
 
-    base = df_all.copy()
-    base["_status_cf"] = (
-        base["status"].map(_normalize_ticket_status_value).str.strip().str.casefold()
+    in_view, _in_range_n = _dashboard_tickets_in_view(
+        df_all, range_start=range_start, range_end=range_end
     )
-    u_col = (
-        _parse_ts(base["updated_at"])
-        if "updated_at" in base.columns
-        else pd.Series(pd.NaT, index=base.index)
-    )
-    r_col = (
-        _parse_ts(base["responded_at"])
-        if "responded_at" in base.columns
-        else pd.Series(pd.NaT, index=base.index)
-    )
-    fu_col = (
-        _parse_ts(base["follow_up_at"])
-        if "follow_up_at" in base.columns
-        else pd.Series(pd.NaT, index=base.index)
-    )
-    ts_done = u_col.where(u_col.notna(), r_col)
-    ts_inv = fu_col.where(fu_col.notna(), u_col)
-    ts_unatt = u_col
+    out["in_view"] = in_view
+    if in_view.empty:
+        return out
 
-    def _slice(status_key: str, ts: pd.Series) -> pd.DataFrame:
-        mask = base["_status_cf"].eq(status_key) & ts.notna()
-        mask &= ts >= range_start
-        mask &= ts <= range_end
-        part = base.loc[mask].copy()
+    masks = _ticket_queue_count_masks(in_view)
+    ref_ts = _perf_reference_ts(in_view)
+    for key in (
+        "pending",
+        "open",
+        "on_hold",
+        "investigation",
+        "unattended",
+        "completed",
+    ):
+        part = in_view.loc[masks[key]].copy()
         if not part.empty:
-            part["_ts"] = ts.loc[mask]
-        return part
-
-    out["completed"] = _slice("completed", ts_done)
-    out["investigation"] = _slice(
-        STATUS_UNDER_INVESTIGATION.strip().casefold(), ts_inv
-    )
-    out["unattended"] = _slice(STATUS_UNATTENDED.strip().casefold(), ts_unatt)
-    out["on_hold"] = _slice(STATUS_ON_HOLD.strip().casefold(), ts_unatt)
+            part["_ts"] = ref_ts.loc[masks[key]]
+        out[key] = part
     return out
 
 
@@ -3546,17 +3550,23 @@ def _perf_combine_work(
 
 
 def _perf_build_summary(
+    pending: pd.DataFrame,
+    open_df: pd.DataFrame,
     completed: pd.DataFrame,
     investigation: pd.DataFrame,
     on_hold: pd.DataFrame,
     unattended: pd.DataFrame,
 ) -> pd.DataFrame:
+    p_counts = _perf_staff_counts(pending)
+    o_counts = _perf_staff_counts(open_df)
     c_counts = _perf_staff_counts(completed)
     i_counts = _perf_staff_counts(investigation)
     h_counts = _perf_staff_counts(on_hold)
     u_counts = _perf_staff_counts(unattended)
     people = sorted(
-        set(c_counts.index)
+        set(p_counts.index)
+        | set(o_counts.index)
+        | set(c_counts.index)
         | set(i_counts.index)
         | set(h_counts.index)
         | set(u_counts.index),
@@ -3567,16 +3577,26 @@ def _perf_build_summary(
     rows = [
         {
             "Person": p,
-            "Total work": int(c_counts.get(p, 0)) + int(i_counts.get(p, 0)),
+            "Total": (
+                int(p_counts.get(p, 0))
+                + int(o_counts.get(p, 0))
+                + int(c_counts.get(p, 0))
+                + int(i_counts.get(p, 0))
+                + int(h_counts.get(p, 0))
+                + int(u_counts.get(p, 0))
+            ),
+            "Pending": int(p_counts.get(p, 0)),
+            "Needs review": int(o_counts.get(p, 0)),
             "Completed": int(c_counts.get(p, 0)),
             "Investigation": int(i_counts.get(p, 0)),
             "On Hold": int(h_counts.get(p, 0)),
             "Unattended": int(u_counts.get(p, 0)),
+            "Handled": int(c_counts.get(p, 0)) + int(i_counts.get(p, 0)),
         }
         for p in people
     ]
     return pd.DataFrame(rows).sort_values(
-        ["Total work", "Unattended"],
+        ["Total", "Handled"],
         ascending=[False, False],
     )
 
@@ -8119,27 +8139,37 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     )
     if not field_has_data:
         st.info("No field ticket data to analyze.")
-        completed = investigation = on_hold = unattended = pd.DataFrame()
+        in_view = pending = open_df = completed = investigation = on_hold = unattended = (
+            pd.DataFrame()
+        )
     else:
         slices = _perf_prepare_slices(df_all, range_start, range_end)
+        in_view = slices["in_view"]
+        pending = slices["pending"]
+        open_df = slices["open"]
         completed = slices["completed"]
         investigation = slices["investigation"]
         on_hold = slices["on_hold"]
         unattended = slices["unattended"]
 
+    n_in_view = len(in_view)
+    n_pending = len(pending)
+    n_open = len(open_df)
     n_done = len(completed)
     n_inv = len(investigation)
     n_hold = len(on_hold)
     n_unatt = len(unattended)
+    n_tab_sum = n_pending + n_open + n_hold + n_done + n_inv + n_unatt
 
-    if field_has_data and n_done == 0 and n_inv == 0 and n_hold == 0 and n_unatt == 0:
+    if field_has_data and n_in_view == 0:
         st.info(
-            "No **Completed**, **Investigation**, **On Hold**, or **Unattended** "
-            "field tickets in this time window. Try **Last 30 days** in the sidebar."
+            "No field tickets in this time window. Try **Last 30 days** in the sidebar."
         )
 
-    if field_has_data and (n_done or n_inv or n_hold or n_unatt):
-        summary = _perf_build_summary(completed, investigation, on_hold, unattended)
+    if field_has_data and n_in_view > 0:
+        summary = _perf_build_summary(
+            pending, open_df, completed, investigation, on_hold, unattended
+        )
         people = ["All"] + (
             summary["Person"].tolist() if not summary.empty else []
         )
@@ -8149,29 +8179,46 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             key="perf_focus_person",
             help="Filter field ticket tabs to one engineer, or **All**.",
         )
+        pending_f = _perf_filter_by_person(pending, focus)
+        open_f = _perf_filter_by_person(open_df, focus)
         completed_f = _perf_filter_by_person(completed, focus)
         investigation_f = _perf_filter_by_person(investigation, focus)
         on_hold_f = _perf_filter_by_person(on_hold, focus)
         unattended_f = _perf_filter_by_person(unattended, focus)
         work_f = _perf_combine_work(completed_f, investigation_f)
         n_work = len(work_f)
-
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Total work", n_work)
-        m2.metric("Completed", len(completed_f))
-        m3.metric("On Hold", len(on_hold_f))
-        m4.metric("Unattended", len(unattended_f))
-        m5.metric("Investigation", len(investigation_f))
-        st.caption(
-            "**Total work** = Completed + Under Investigation in this window. "
-            "**On Hold** = admin chase queue (by assignee). "
-            "**Unattended** = no same-day field response."
+        n_filtered = (
+            len(pending_f)
+            + len(open_f)
+            + len(on_hold_f)
+            + len(completed_f)
+            + len(investigation_f)
+            + len(unattended_f)
         )
+
+        m0, m1, m2, m3, m4, m5, m6 = st.columns(7)
+        m0.metric("In view", n_in_view if focus == "All" else n_filtered)
+        m1.metric("Pending", len(pending_f))
+        m2.metric("Needs review", len(open_f))
+        m3.metric("On Hold", len(on_hold_f))
+        m4.metric("Completed", len(completed_f))
+        m5.metric("Investigation", len(investigation_f))
+        m6.metric("Unattended", len(unattended_f))
+        st.caption(
+            "**In view** matches the **Tickets** tab (time range + active queues). "
+            "Queue counts above sum to **In view** when **All** assignees are selected. "
+            "**Handled** (Completed + Investigation) is in the overview table — not the same as **In view**."
+        )
+        if focus == "All" and n_tab_sum != n_in_view:
+            st.warning(
+                f"Queue sum (**{n_tab_sum}**) ≠ in view (**{n_in_view}**) — "
+                "some tickets have an unrecognized status."
+            )
 
         tab_overview, tab_work, tab_hold, tab_unatt = st.tabs(
             [
                 "Overview",
-                f"Total work ({n_work})",
+                f"Handled ({n_work})",
                 f"On Hold ({len(on_hold_f)})",
                 f"Unattended ({len(unattended_f)})",
             ]
@@ -8190,9 +8237,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             c1, c2, c3 = st.columns(3)
             with c1:
                 if not work_f.empty:
-                    st.markdown("**Total work by assignee**")
+                    st.markdown("**Handled by assignee**")
                     _render_perf_person_bar(
-                        work_f, title="", value_name="Total work"
+                        work_f, title="", value_name="Handled"
                     )
             with c2:
                 if not on_hold_f.empty:
@@ -8209,7 +8256,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_work:
             st.caption(
-                "Completed and Under Investigation combined — work handled in this window."
+                "**Handled** = Completed + Under Investigation (subset of **In view**)."
             )
             if work_f.empty:
                 st.info("No completed or investigation tickets for this filter.")
@@ -8219,8 +8266,8 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 with c_chart:
                     _render_perf_person_bar(
                         view,
-                        title="Total work by assignee",
-                        value_name="Total work",
+                        title="Handled by assignee",
+                        value_name="Handled",
                     )
                 with c_table:
                     st.markdown("**Split**")
