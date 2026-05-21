@@ -6847,7 +6847,7 @@ def _render_sales_case_toolbar(
         if show_work_tabs:
             with cols[idx]:
                 if st.button(
-                    "Edit case details (admin)",
+                    "Edit case details",
                     key=f"{key_prefix}_tab_edit",
                     use_container_width=True,
                 ):
