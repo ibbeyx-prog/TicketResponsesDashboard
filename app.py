@@ -101,6 +101,7 @@ from unattended import (
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
+QUEUE_LABEL_DAILY_TASK = "Daily Task"
 
 # Active field queues: always visible even when outside the sidebar time range.
 _ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
@@ -6305,6 +6306,8 @@ def _queue_segment_base(label: str | None) -> str:
         return STATUS_ON_HOLD
     if label == "No Answer" or label.startswith("No Answer ("):
         return STATUS_ON_HOLD
+    if label == QUEUE_LABEL_DAILY_TASK or label.startswith(f"{QUEUE_LABEL_DAILY_TASK} ("):
+        return "Pending"
     for base in (
         "Pending",
         "Open",
@@ -6407,7 +6410,7 @@ def _render_assign_day_metrics(
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Assigned today", assigned_today)
     c2.metric("Responded today", responded_today)
-    c3.metric("Pending (in view)", pending_in_view)
+    c3.metric(f"{QUEUE_LABEL_DAILY_TASK} (in view)", pending_in_view)
     c4.metric("Unattended (in view)", unattended_in_view)
     nudge_h = int(UNATTENDED_NUDGE_HOURS) if UNATTENDED_NUDGE_HOURS == int(UNATTENDED_NUDGE_HOURS) else UNATTENDED_NUDGE_HOURS
     st.caption(
@@ -6439,7 +6442,7 @@ def _render_queue_summary_metrics(
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     _render_clickable_queue_metric(
         c1,
-        title="Pending",
+        title=QUEUE_LABEL_DAILY_TASK,
         value=total_pending,
         queue_name="Pending",
         option_label=pending_label,
@@ -6489,7 +6492,7 @@ def _render_queue_summary_metrics(
                 if total_other
                 else ""
             )
-            + "). Active **Pending / Needs review / On Hold / Investigation** rows stay "
+            + "). Active **Daily Task / Needs review / On Hold / Investigation** rows stay "
             "visible even outside the date range."
         )
 
@@ -6521,7 +6524,7 @@ def _sync_dashboard_nav_state(
     if st.session_state.get(_DASH_MAIN_NAV_KEY) not in _DASH_MAIN_NAV_OPTIONS:
         st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
 
-    pending_label = _queue_segment_label("Pending", total_pending)
+    pending_label = _queue_segment_label(QUEUE_LABEL_DAILY_TASK, total_pending)
     on_hold_label = _queue_segment_label(STATUS_ON_HOLD, total_on_hold)
     open_label = _queue_segment_label("Open", total_open)
     investigation_label = _queue_segment_label(
@@ -7704,7 +7707,7 @@ def _render_dashboard(
         return
 
     if queue_view == "Pending":
-        st.markdown("##### Pending — waiting on field")
+        st.markdown(f"##### {QUEUE_LABEL_DAILY_TASK} — waiting on field")
         st.caption(
             "Rows show **assignment** details (`additional_info` = site notes from the Telegram "
             "assignment lines). A **field response** is a separate swipe-reply (or "
@@ -8290,7 +8293,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         m0, m1, m2, m3, m4, m5, m6 = st.columns(7)
         m0.metric("In view", n_in_view if focus == "All" else n_filtered)
-        m1.metric("Pending", len(pending_f))
+        m1.metric(QUEUE_LABEL_DAILY_TASK, len(pending_f))
         m2.metric("Needs review", len(open_f))
         m3.metric("On Hold", len(on_hold_f))
         m4.metric("Completed", len(completed_f))
