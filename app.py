@@ -99,6 +99,7 @@ from unattended import (
 )
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
+STATUS_NO_ANSWER = "No Answer"
 
 # --- Sales cases (separate track from field tickets; admin-first) ---
 SALES_REGION_CODES: tuple[str, ...] = (
@@ -1711,9 +1712,10 @@ def _apply_manual_field_response(
     if not row:
         raise ValueError(f"Ticket {ticket_number} not found.")
     status = str(row.get("status") or "").strip()
-    if status not in ("Pending", "Open"):
+    if status not in ("Pending", "Open", STATUS_NO_ANSWER):
         raise ValueError(
-            f"Ticket is {status}; manual response is only allowed while Pending or Open."
+            f"Ticket is {status}; manual response is only allowed while "
+            "Pending, No Answer, or Open."
         )
 
     assignee_raw = str(row.get("assigned_to") or "").strip()
@@ -1733,7 +1735,7 @@ def _apply_manual_field_response(
         "updated_at": now_iso,
         "field_responded_by": field_responded_by,
     }
-    if status == "Pending":
+    if status in ("Pending", STATUS_NO_ANSWER):
         payload["status"] = "Open"
         payload["responded_at"] = now_iso
     elif not row.get("responded_at"):
@@ -1742,7 +1744,7 @@ def _apply_manual_field_response(
     _cc_execute_ticket_update(client, payload, ticket_number)
 
     op = _session_operator_id() or _session_dashboard_username() or "dashboard-admin"
-    action = "entry" if status == "Pending" else "update"
+    action = "entry" if status in ("Pending", STATUS_NO_ANSWER) else "update"
     log_note = text
     if field_responded_by:
         log_note = f"Responded by {field_responded_by}: {text}"
@@ -1794,6 +1796,65 @@ def _response_metadata_for_current_assignment(row: dict) -> bool:
         return responded_at >= assigned_at
 
     return False
+
+
+def _move_to_no_answer(ticket_number: str, *, operator_id: str) -> None:
+    """Set status **No Answer** — assigned, field reply cleared, chase engineer."""
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    status = str(row.get("status") or "").strip()
+    allowed = ("Open", STATUS_UNDER_INVESTIGATION, "Pending", STATUS_NO_ANSWER)
+    if status not in allowed:
+        raise ValueError(
+            f"Ticket **{ticket_number}** is **{status}** — "
+            "**No Answer** from **Needs review**, **Investigation**, or **Pending** only."
+        )
+    if not str(row.get("assigned_to") or "").strip():
+        raise ValueError(
+            f"Ticket **{ticket_number}** has no assignee — use **Edit assignment** first."
+        )
+    client = _get_supabase_client()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    from_label = {
+        "Open": "Needs review",
+        STATUS_UNDER_INVESTIGATION: "Under Investigation",
+        "Pending": "Pending",
+        STATUS_NO_ANSWER: STATUS_NO_ANSWER,
+    }.get(status, status)
+    _cc_execute_ticket_update(
+        client,
+        {
+            "status": STATUS_NO_ANSWER,
+            "field_response": None,
+            "field_responded_by": None,
+            "photo_url": None,
+            "responded_at": None,
+            "unattended_nudge_sent_at": None,
+            "follow_up_at": None,
+            "follow_up_note": None,
+            "updated_at": now_iso,
+        },
+        ticket_number,
+    )
+    _cc_ensure_reassign_cleared_response_fields(client, ticket_number)
+    try:
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": str(ticket_number),
+                "member_username": f"@{operator_id.lstrip('@')}",
+                "action_type": "NoAnswer",
+                "note": f"Moved to **No Answer** from {from_label} (field reply cleared).",
+                "timestamp": now_iso,
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
+def _navigate_to_no_answer_queue() -> None:
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Tickets"
+    st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_NO_ANSWER
 
 
 def _fetch_pending_with_response_mismatch() -> list[str]:
@@ -2345,10 +2406,10 @@ def _move_to_investigation(
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
     status = str(row.get("status") or "").strip()
-    if status not in ("Open", "Pending"):
+    if status not in ("Open", "Pending", STATUS_NO_ANSWER):
         raise ValueError(
             f"Ticket **{ticket_number}** is **{status}** — "
-            "move from **Needs review** or **Pending** only."
+            "move from **Needs review**, **Pending**, or **No Answer** only."
         )
     if follow_up and status != "Open":
         raise ValueError(
@@ -2373,6 +2434,8 @@ def _move_to_investigation(
         log_action = "MovedToInvestigation"
         if status == "Pending":
             log_note = "Moved to Under Investigation from Pending (no field assign)."
+        elif status == STATUS_NO_ANSWER:
+            log_note = "Moved to Under Investigation from No Answer."
         else:
             log_note = (
                 "Moved to Under Investigation from Needs review "
@@ -2604,7 +2667,14 @@ def _apply_admin_ticket_action(
         return False
     _, new_status, log_action = matched
     try:
-        if (
+        if log_action == "NoAnswer":
+            op = _session_operator_id()
+            if not op:
+                st.error("Sign in again — operator session is missing.")
+                return False
+            _move_to_no_answer(picked, operator_id=op)
+            _navigate_to_no_answer_queue()
+        elif (
             new_status == STATUS_UNDER_INVESTIGATION
             and log_action == "MovedToInvestigation"
         ):
@@ -2630,7 +2700,12 @@ def _apply_admin_ticket_action(
         st.error(f"Could not update {picked}: {exc}")
         return False
     if do_rerun:
-        st.success(f"{picked} → **{new_status}**.")
+        msg = (
+            f"{picked} → **No Answer**."
+            if log_action == "NoAnswer"
+            else f"{picked} → **{new_status}**."
+        )
+        st.success(msg)
         st.rerun()
     return True
 
@@ -4056,13 +4131,16 @@ def _cc_dashboard_reassign_ticket(
         additional_info=additional_info,
         operator_id=operator_id,
     )
-    if from_status in ("Open", "Pending", STATUS_UNDER_INVESTIGATION):
+    if from_status in ("Open", "Pending", STATUS_NO_ANSWER, STATUS_UNDER_INVESTIGATION):
         if from_status == "Open":
             action_type = "ReassignedFromOpen"
             note = "Moved back to Pending for next-day field work."
         elif from_status == STATUS_UNDER_INVESTIGATION:
             action_type = "ReassignedFromInvestigation"
             note = "Reassigned from Under Investigation; prior response cleared."
+        elif from_status == STATUS_NO_ANSWER:
+            action_type = "ReassignedFromNoAnswer"
+            note = "Reassigned from No Answer; prior response cleared for a fresh visit."
         else:
             action_type = "ReassignedFromPending"
             note = "Reassigned while Pending; prior response cleared for a fresh visit."
@@ -5868,8 +5946,11 @@ def _queue_segment_base(label: str | None) -> str:
     """Map queue label (with optional count) back to queue name."""
     if not label:
         return "Pending"
+    if label == "Unavailable" or label.startswith("Unavailable ("):
+        return STATUS_NO_ANSWER
     for base in (
         "Pending",
+        STATUS_NO_ANSWER,
         "Under Investigation",
         "Open",
         "Unattended",
@@ -5930,7 +6011,7 @@ def _render_clickable_queue_metric(
     with col:
         if st.button(
             label,
-            key=f"dash_metric_nav_{queue_name.lower()}",
+            key=f"dash_metric_nav_{queue_name.lower().replace(' ', '_')}",
             type="secondary",
             use_container_width=True,
             disabled=active,
@@ -5977,18 +6058,20 @@ def _render_assign_day_metrics(df_all: pd.DataFrame) -> None:
 def _render_queue_summary_metrics(
     *,
     total_pending: int,
+    total_no_answer: int,
     total_open: int,
     total_investigation: int,
     total_unattended: int,
     total_completed: int,
     pending_label: str,
+    no_answer_label: str,
     open_label: str,
     investigation_label: str,
     unattended_label: str,
     completed_label: str,
 ) -> None:
     """Counts — click a queue to switch view."""
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     _render_clickable_queue_metric(
         c1,
         title="Pending",
@@ -5998,27 +6081,34 @@ def _render_queue_summary_metrics(
     )
     _render_clickable_queue_metric(
         c2,
+        title="No Answer",
+        value=total_no_answer,
+        queue_name=STATUS_NO_ANSWER,
+        option_label=no_answer_label,
+    )
+    _render_clickable_queue_metric(
+        c3,
         title="Needs review",
         value=total_open,
         queue_name="Open",
         option_label=open_label,
     )
     _render_clickable_queue_metric(
-        c3,
+        c4,
         title="Investigation",
         value=total_investigation,
         queue_name=STATUS_UNDER_INVESTIGATION,
         option_label=investigation_label,
     )
     _render_clickable_queue_metric(
-        c4,
+        c5,
         title="Unattended",
         value=total_unattended,
         queue_name="Unattended",
         option_label=unattended_label,
     )
     _render_clickable_queue_metric(
-        c5,
+        c6,
         title="Completed",
         value=total_completed,
         queue_name="Completed",
@@ -6041,11 +6131,12 @@ _TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
 def _sync_dashboard_nav_state(
     *,
     total_pending: int,
+    total_no_answer: int,
     total_open: int,
     total_investigation: int,
     total_unattended: int,
     total_completed: int,
-) -> tuple[str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str]:
     """Keep queue session keys valid; return option labels for metrics."""
     _migrate_legacy_queue_nav()
 
@@ -6053,6 +6144,7 @@ def _sync_dashboard_nav_state(
         st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
 
     pending_label = _queue_segment_label("Pending", total_pending)
+    no_answer_label = _queue_segment_label(STATUS_NO_ANSWER, total_no_answer)
     open_label = _queue_segment_label("Open", total_open)
     investigation_label = _queue_segment_label(
         STATUS_UNDER_INVESTIGATION, total_investigation
@@ -6061,6 +6153,7 @@ def _sync_dashboard_nav_state(
     completed_label = _queue_segment_label("Completed", total_completed)
     ticket_options = (
         pending_label,
+        no_answer_label,
         open_label,
         investigation_label,
         unattended_label,
@@ -6078,6 +6171,7 @@ def _sync_dashboard_nav_state(
     st.session_state["_dash_prev_open_count"] = total_open
     return (
         pending_label,
+        no_answer_label,
         open_label,
         investigation_label,
         unattended_label,
@@ -7163,6 +7257,9 @@ def _render_dashboard(
 
     status = df["status"].astype(str).str.strip() if not df.empty and "status" in df.columns else pd.Series(dtype=str)
     pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
+    no_answer_mask = (
+        status.eq(STATUS_NO_ANSWER) if not df.empty else pd.Series(dtype=bool)
+    )
     open_mask = status.eq("Open") if not df.empty else pd.Series(dtype=bool)
     investigation_mask = (
         status.eq(STATUS_UNDER_INVESTIGATION) if not df.empty else pd.Series(dtype=bool)
@@ -7171,6 +7268,7 @@ def _render_dashboard(
     completed_mask = status.eq("Completed") if not df.empty else pd.Series(dtype=bool)
 
     total_pending = int(pending_mask.sum()) if not df.empty else 0
+    total_no_answer = int(no_answer_mask.sum()) if not df.empty else 0
     total_open = int(open_mask.sum()) if not df.empty else 0
     total_investigation = int(investigation_mask.sum()) if not df.empty else 0
     total_unattended = int(unattended_mask.sum()) if not df.empty else 0
@@ -7178,12 +7276,14 @@ def _render_dashboard(
     _apply_pending_dashboard_nav()
     (
         pending_label,
+        no_answer_label,
         open_label,
         investigation_label,
         unattended_label,
         completed_label,
     ) = _sync_dashboard_nav_state(
         total_pending=total_pending,
+        total_no_answer=total_no_answer,
         total_open=total_open,
         total_investigation=total_investigation,
         total_unattended=total_unattended,
@@ -7196,11 +7296,13 @@ def _render_dashboard(
         _render_assign_day_metrics(df_all if not df_all.empty else df)
         _render_queue_summary_metrics(
             total_pending=total_pending,
+            total_no_answer=total_no_answer,
             total_open=total_open,
             total_investigation=total_investigation,
             total_unattended=total_unattended,
             total_completed=total_completed,
             pending_label=pending_label,
+            no_answer_label=no_answer_label,
             open_label=open_label,
             investigation_label=investigation_label,
             unattended_label=unattended_label,
@@ -7266,6 +7368,7 @@ def _render_dashboard(
                             STATUS_UNDER_INVESTIGATION,
                             "MovedToInvestigation",
                         ),
+                        ("No Answer", STATUS_NO_ANSWER, "NoAnswer"),
                     ),
                     allow_delete=True,
                     allow_edit_assignment=True,
@@ -7355,6 +7458,94 @@ def _render_dashboard(
                                 )
                             )
 
+    elif queue_view == STATUS_NO_ANSWER:
+        st.markdown("##### No Answer — assigned, no field reply")
+        st.caption(
+            "Chase the engineer on site. **Record response** when they reply → **Needs review**. "
+            "**Reassign** clears the visit for a fresh assignment."
+        )
+        if df.empty:
+            st.info(f"No tickets in the last {lookback_days} {day_word}.")
+        else:
+            na_df = df[no_answer_mask].copy()
+            if na_df.empty:
+                st.info(f"No **No Answer** tickets in the last {lookback_days} {day_word}.")
+            else:
+                na_show = tuple(
+                    c
+                    for c in (
+                        "ticket_number",
+                        "assigned_to",
+                        "task_category",
+                        "additional_info",
+                        "last_assigned_at",
+                        "created_at",
+                    )
+                    if c in na_df.columns
+                )
+                _render_admin_ticket_toolbar(
+                    na_df,
+                    key_prefix="no_answer",
+                    caption=(
+                        "**Action**: **Under Investigation** to park, or **Reassign** / "
+                        "**Record response** (one ticket selected)."
+                    ),
+                    status_actions=(
+                        (
+                            "Under Investigation",
+                            STATUS_UNDER_INVESTIGATION,
+                            "MovedToInvestigation",
+                        ),
+                    ),
+                    allow_delete=True,
+                    allow_edit_assignment=True,
+                    allow_manual_field_response=_is_dashboard_admin(),
+                    allow_reassign=_is_dashboard_admin(),
+                )
+                _render_selectable_ticket_table(
+                    na_df,
+                    key_prefix="no_answer",
+                    cols=na_show,
+                )
+                if _is_dashboard_admin() and st.session_state.get(
+                    _reassign_session_keys("no_answer")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_reassign_editor(
+                        from_status=STATUS_NO_ANSWER,
+                        key_prefix="no_answer",
+                        edit_key_prefix="no_answer",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(na_df),
+                    )
+                if st.session_state.get(
+                    _assignment_edit_session_keys("no_answer")["show"]
+                ):
+                    cat_names, _cat_missing = _try_fetch_task_categories()
+                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+                    _render_assignment_editor(
+                        required_status=STATUS_NO_ANSWER,
+                        key_prefix="no_answer",
+                        edit_key_prefix="no_answer",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=_ticket_options_for_admin(na_df),
+                    )
+                if _is_dashboard_admin() and st.session_state.get(
+                    _manual_field_response_session_keys("no_answer")["show"]
+                ):
+                    _render_manual_field_response_editor(
+                        key_prefix="no_answer",
+                        edit_key_prefix="no_answer",
+                        ticket_options=_ticket_options_for_admin(na_df),
+                        allowed_statuses=(STATUS_NO_ANSWER,),
+                        save_label="Save → Open",
+                    )
+
     elif queue_view == "Unattended":
         st.markdown("##### Unattended — no same-day field response")
         if df.empty:
@@ -7411,6 +7602,7 @@ def _render_dashboard(
                             STATUS_UNDER_INVESTIGATION,
                             "MovedToInvestigation",
                         ),
+                        ("No Answer", STATUS_NO_ANSWER, "NoAnswer"),
                     ),
                     allow_delete=True,
                     allow_edit_assignment=True,
@@ -7489,6 +7681,7 @@ def _render_dashboard(
                     status_actions=(
                         ("Back to Open", "Open", "BackToOpenFromInvestigation"),
                         ("Mark Completed", "Completed", "Completed"),
+                        ("No Answer", STATUS_NO_ANSWER, "NoAnswer"),
                     ),
                     allow_delete=True,
                     allow_edit_assignment=True,

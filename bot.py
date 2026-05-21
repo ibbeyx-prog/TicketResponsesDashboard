@@ -50,8 +50,8 @@ Database expectations
    ``TELEGRAM_ALLOWED_USERNAMES``).
 
    The bot does **not** post operational confirmations in field groups (no
-   assignment/field-reply ack spam). Use the Streamlit dashboard (Pending / Open /
-   Log, plus toasts on new attendance-log rows) instead.
+   assignment/field-reply ack spam). Use the Streamlit dashboard (Pending / No Answer /
+   Open / Log, plus toasts on new attendance-log rows) instead.
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
     one row (``action_type='Assignment'``); every field response writes one row
@@ -143,6 +143,8 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 _WEBHOOK_SECRET_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 BOT_SESSIONS_TABLE = (os.getenv("BOT_SESSIONS_TABLE") or "bot_sessions").strip()
 TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets_active").strip()
+STATUS_NO_ANSWER = "No Answer"
+_FIELD_REPLY_STATUSES = frozenset({"Pending", "Open", STATUS_NO_ANSWER})
 ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
@@ -831,7 +833,7 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
 
 
 def _ticket_field_reply_eligible(ticket_number: str) -> bool:
-    """Pending/Open tickets can receive a field completion."""
+    """Pending / No Answer / Open tickets can receive a field completion."""
     try:
         row = _db_get_ticket(ticket_number)
     except Exception:
@@ -839,7 +841,7 @@ def _ticket_field_reply_eligible(ticket_number: str) -> bool:
         return False
     if not row:
         return False
-    return str(row.get("status") or "").strip() in ("Pending", "Open")
+    return str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES
 
 
 def _resolve_ticket_from_assignment_reply(
@@ -2238,7 +2240,7 @@ async def ingest_telethon_field_media_reply(event: object) -> bool:
     except Exception:
         log.exception("telethon media reply: db lookup failed %s", ticket_number)
         return False
-    if not row or str(row.get("status") or "").strip() not in ("Pending", "Open"):
+    if not row or str(row.get("status") or "").strip() not in _FIELD_REPLY_STATUSES:
         return False
 
     client = getattr(event, "client", None)
@@ -2363,7 +2365,7 @@ async def handle_group_standalone_field_reply(
     if not row:
         log.warning("standalone field_reply: ticket %s not in dashboard", ticket_number)
         return
-    if str(row.get("status") or "").strip() not in ("Pending", "Open"):
+    if str(row.get("status") or "").strip() not in _FIELD_REPLY_STATUSES:
         log.info(
             "standalone field_reply: ticket %s status=%s — skip",
             ticket_number,
@@ -2454,7 +2456,7 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     ticket_status = str(row.get("status") or "").strip()
-    if ticket_status not in ("Pending", "Open"):
+    if ticket_status not in _FIELD_REPLY_STATUSES:
         await _reply(
             update,
             f"Ticket {ticket_number} is already {ticket_status} — no new field reply needed.",
@@ -2703,7 +2705,7 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 row = _db_get_ticket(ticket_number)
             except Exception:
                 row = None
-            if row and str(row.get("status") or "").strip() in ("Pending", "Open"):
+            if row and str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES:
                 log.info(
                     "handle_non_text: group photo+caption standalone for %s",
                     ticket_number,
