@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html
 import hmac
 import json
 import os
@@ -5808,12 +5809,83 @@ _BON_THEME_CSS = """
     div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stSelectbox"] > div {
         min-height: 1.85rem !important;
     }
-    div[class*="st-key-sc_selected_case_card"] {
-        background: rgba(215, 180, 145, 0.06) !important;
-        border-color: rgba(215, 180, 145, 0.35) !important;
-    }
     div[class*="st-key-"][class*="_work_panel"] {
         margin-top: 0.75rem;
+        padding: 0.25rem 0 0.5rem 0;
+    }
+    .sc-case-hero {
+        border: 1px solid rgba(215, 180, 145, 0.45);
+        border-radius: 14px;
+        background: linear-gradient(
+            135deg,
+            rgba(215, 180, 145, 0.14) 0%,
+            rgba(215, 180, 145, 0.04) 55%,
+            transparent 100%
+        );
+        padding: 1rem 1.15rem 1.1rem;
+        margin-bottom: 0.35rem;
+    }
+    .sc-case-hero__eyebrow {
+        font-size: 0.68rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--bon-muted);
+        margin-bottom: 0.35rem;
+    }
+    .sc-case-hero__ticket {
+        font-size: 1.15rem;
+        font-weight: 600;
+        color: var(--bon-text);
+        line-height: 1.3;
+    }
+    .sc-case-hero__account {
+        font-size: 0.95rem;
+        color: var(--bon-muted);
+        margin-top: 0.2rem;
+        margin-bottom: 0.75rem;
+        line-height: 1.35;
+    }
+    .sc-case-hero__pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem 0.5rem;
+    }
+    .sc-meta-pill {
+        display: inline-block;
+        font-size: 0.78rem;
+        padding: 0.28rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid rgba(215, 180, 145, 0.35);
+        background: rgba(0, 0, 0, 0.25);
+        color: var(--bon-text);
+        white-space: nowrap;
+    }
+    .sc-meta-pill--accent {
+        border-color: var(--bon-oak);
+        background: rgba(215, 180, 145, 0.18);
+        color: var(--bon-oak);
+        font-weight: 600;
+    }
+    div[class*="st-key-"][class*="_sc_details_box"] [data-testid="stForm"],
+    div[class*="st-key-"][class*="_sc_next_box"] {
+        border: none !important;
+        background: transparent !important;
+        padding: 0 !important;
+    }
+    div[class*="st-key-"][class*="_sc_details_box"],
+    div[class*="st-key-"][class*="_sc_next_box"],
+    div[class*="st-key-"][class*="_sc_site_box"] {
+        border: 1px solid rgba(215, 180, 145, 0.28) !important;
+        border-radius: 12px !important;
+        background: var(--bon-card) !important;
+        padding: 0.85rem 1rem 1rem !important;
+    }
+    div[class*="st-key-"][class*="_work_panel"] .stTabs [data-baseweb="tab-list"] {
+        margin-top: 0.25rem;
+        margin-bottom: 0.65rem;
+    }
+    div[class*="st-key-"][class*="_work_panel"] [data-testid="stFormSubmitButton"] button {
+        margin-top: 0.35rem;
     }
     /* Remove popover: muted trigger, not full-width primary styling */
     [data-testid="stPopover"] > button {
@@ -6588,26 +6660,36 @@ def _sc_filter_sales_df(df: pd.DataFrame, statuses: tuple[str, ...]) -> pd.DataF
 
 
 def _render_sc_selected_case_card(row: pd.Series) -> None:
-    """Compact summary for the one selected case."""
-    cref = str(row.get("case_ref") or "—")
-    account = str(row.get("account_name") or "—")
-    owner = str(row.get("sales_owner") or "—")
-    status = _sc_effective_status(row.get("status"))
-    priority = str(row.get("sales_priority") or "—")
-    region = str(row.get("account_region") or "—")
-    category = str(row.get("sales_category") or "—")
-    assignee = str(row.get("assigned_to") or "").strip()
-    with st.container(border=True, key="sc_selected_case_card"):
-        st.markdown(f"**Ticket {cref}** · {account}")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.caption(f"**Status** {status}")
-        c2.caption(f"**Owner** {owner}")
-        c3.caption(f"**Priority** {priority}")
-        c4.caption(f"**Region** {region}")
-        st.caption(
-            f"**Category** {category}"
-            + (f" · **Engineer** {assignee}" if assignee else "")
-        )
+    """Hero summary for the one selected case."""
+    cref = html.escape(str(row.get("case_ref") or "—"))
+    account = html.escape(str(row.get("account_name") or "—"))
+    owner = html.escape(str(row.get("sales_owner") or "—"))
+    status = html.escape(_sc_effective_status(row.get("status")))
+    priority = html.escape(str(row.get("sales_priority") or "—"))
+    region = html.escape(str(row.get("account_region") or "—"))
+    category = html.escape(str(row.get("sales_category") or "—"))
+    assignee = html.escape(str(row.get("assigned_to") or "").strip())
+    engineer_pill = (
+        f'<span class="sc-meta-pill">Engineer · {assignee}</span>' if assignee else ""
+    )
+    st.markdown(
+        f"""
+<div class="sc-case-hero">
+  <div class="sc-case-hero__eyebrow">Selected case</div>
+  <div class="sc-case-hero__ticket">{cref}</div>
+  <div class="sc-case-hero__account">{account}</div>
+  <div class="sc-case-hero__pills">
+    <span class="sc-meta-pill sc-meta-pill--accent">{status}</span>
+    <span class="sc-meta-pill">{owner}</span>
+    <span class="sc-meta-pill">{priority}</span>
+    <span class="sc-meta-pill">{region}</span>
+    <span class="sc-meta-pill">{category}</span>
+    {engineer_pill}
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def _sc_sales_case_display_cols() -> tuple[str, ...]:
@@ -7088,39 +7170,40 @@ def _render_sales_case_work_panel(
     if show_site_visit:
         tab_names.append("Site visit")
 
-    st.markdown("##### Work on selected case")
     _render_sc_selected_case_card(r0)
     tabs = st.tabs(tab_names)
 
     tab_idx = 0
     with tabs[tab_idx]:
         tab_idx += 1
-        st.caption("Update region, category, or notes — does not change queue status.")
-        with st.form(f"sc_edit_case_form_{key_prefix}", clear_on_submit=False):
-            e1, e2 = st.columns(2)
-            with e1:
-                st.selectbox(
-                    "Account region (team)",
-                    options=list(SALES_REGION_CODES),
-                    key="sc_edit_region",
+        with st.container(border=True, key=f"{key_prefix}_sc_details_box"):
+            st.markdown("**Case details**")
+            st.caption("Region, category, and notes — does not change queue status.")
+            with st.form(f"sc_edit_case_form_{key_prefix}", clear_on_submit=False):
+                e1, e2 = st.columns(2)
+                with e1:
+                    st.selectbox(
+                        "Account region (team)",
+                        options=list(SALES_REGION_CODES),
+                        key="sc_edit_region",
+                    )
+                with e2:
+                    st.selectbox(
+                        "Sales category (intent)",
+                        options=edit_cat_opts,
+                        key="sc_edit_scat",
+                    )
+                st.text_area(
+                    "Case note (internal)",
+                    key="sc_edit_admin_notes",
+                    height=140,
+                    placeholder="What the team needs to know while working this case…",
                 )
-            with e2:
-                st.selectbox(
-                    "Sales category (intent)",
-                    options=edit_cat_opts,
-                    key="sc_edit_scat",
+                save_edit = st.form_submit_button(
+                    "Save details",
+                    type="primary",
+                    use_container_width=True,
                 )
-            st.text_area(
-                "Case note (internal)",
-                key="sc_edit_admin_notes",
-                height=120,
-                placeholder="Notes for your team while working this case",
-            )
-            save_edit = st.form_submit_button(
-                "Save details",
-                type="primary",
-                use_container_width=True,
-            )
         if save_edit:
             notes = str(st.session_state.get("sc_edit_admin_notes", "")).strip() or None
             try:
@@ -7145,26 +7228,24 @@ def _render_sales_case_work_panel(
     if status_actions and op:
         with tabs[tab_idx]:
             tab_idx += 1
-            st.caption("Move this case to the next queue. Add a comment if helpful.")
-            st.text_area(
-                "Comment (optional)",
-                key="sc_action_comment",
-                height=72,
-                placeholder="Saved with the status change",
-            )
-            status_labels = [label for label, _ in status_actions]
-            label_to_target = {label: tgt for label, tgt in status_actions}
-            act_cols = st.columns([3, 1], gap="small", vertical_alignment="bottom")
-            with act_cols[0]:
+            with st.container(border=True, key=f"{key_prefix}_sc_next_box"):
+                st.markdown("**Next step**")
+                st.caption("Move this case to another queue.")
+                status_labels = [label for label, _ in status_actions]
+                label_to_target = {label: tgt for label, tgt in status_actions}
                 st.selectbox(
                     "Move to",
                     options=status_labels,
                     key=f"{key_prefix}_panel_sc_action_sel",
-                    label_visibility="visible",
                 )
-            with act_cols[1]:
+                st.text_area(
+                    "Comment (optional)",
+                    key="sc_action_comment",
+                    height=88,
+                    placeholder="Optional note saved with the status change",
+                )
                 if st.button(
-                    "Apply",
+                    "Apply move",
                     key=f"{key_prefix}_panel_sc_apply",
                     type="primary",
                     use_container_width=True,
@@ -7196,15 +7277,15 @@ def _render_sales_case_work_panel(
         with tabs[tab_idx]:
             region_label = str(r0.get("dispatch_region") or "—")
             cur_assignee = str(r0.get("assigned_to") or "").strip()
-            st.caption(
-                f"**{region_label}** — assign the engineer who will visit the site."
-            )
-            if cur_assignee:
-                st.info(f"Current engineer: **{cur_assignee}**")
-            with st.form(
-                f"sc_region_assign_engineer_form_{key_prefix}",
-                clear_on_submit=False,
-            ):
+            with st.container(border=True, key=f"{key_prefix}_sc_site_box"):
+                st.markdown("**Site visit**")
+                st.caption(f"**{region_label}** — assign the visiting engineer.")
+                if cur_assignee:
+                    st.markdown(f"Current: **{cur_assignee}**")
+                with st.form(
+                    f"sc_region_assign_engineer_form_{key_prefix}",
+                    clear_on_submit=False,
+                ):
                 if fe_names and not fe_missing:
                     st.selectbox(
                         "Engineer",
