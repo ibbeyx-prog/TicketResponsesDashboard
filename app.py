@@ -99,6 +99,48 @@ from unattended import (
 )
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
+
+# --- Sales cases (separate track from field tickets; admin-first) ---
+SALES_REGION_CODES: tuple[str, ...] = (
+    "SOC",
+    "EOC",
+    "KOC",
+    "LOC",
+    "AOC",
+    "GOC",
+    "CENTRAL",
+)
+SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Standard")
+DEFAULT_SALES_CASE_CATEGORIES: tuple[str, ...] = (
+    "QOS Issue",
+)
+SC_STATUS_SALES_TICKET = "Sales ticket"
+SC_STATUS_INVESTIGATION = "Investigation"
+SC_STATUS_REGIONAL = "Regional for site visit"
+SC_STATUS_DESIGN = "Design"
+SC_STATUS_RESOLVED = "Resolved"
+
+# Older rows / labels (mapped in UI until backfill migration runs).
+_SC_LEGACY_STATUS_MAP: dict[str, str] = {
+    "Sales intake": SC_STATUS_SALES_TICKET,
+    "Admin triage": SC_STATUS_INVESTIGATION,
+    "System check": SC_STATUS_INVESTIGATION,
+    "Dispatch approved": SC_STATUS_INVESTIGATION,
+    "Awaiting field": SC_STATUS_REGIONAL,
+    "Field in progress": SC_STATUS_REGIONAL,
+    "Admin review": SC_STATUS_DESIGN,
+    "Closed": SC_STATUS_RESOLVED,
+}
+
+
+def _sc_effective_status(raw: object) -> str:
+    s = str(raw or "").strip()
+    return _SC_LEGACY_STATUS_MAP.get(s, s)
+
+
+_SC_SALES_FLASH_KEY = "_dash_sales_cases_flash"
+_SC_SALES_FLASH_LEVEL_KEY = "_dash_sales_cases_flash_level"
+
 from dotenv import load_dotenv
 from supabase_client import (
     get_cached_supabase_client,
@@ -227,6 +269,10 @@ SUPABASE_URL = (_sb_cfg.url if _sb_cfg else _read_setting("SUPABASE_URL")).rstri
 SUPABASE_KEY = _sb_cfg.key if _sb_cfg else _read_setting("SUPABASE_KEY")
 _SUPABASE_KEY_SOURCE = _sb_cfg.key_source if _sb_cfg else "SUPABASE_KEY"
 TICKETS_TABLE = _read_setting("TICKETS_TABLE", "tickets_active") or "tickets_active"
+SALES_CASES_TABLE = (
+    _read_setting("SALES_CASES_TABLE", "dashboard_sales_cases")
+    or "dashboard_sales_cases"
+)
 ATTENDANCE_LOGS_TABLE = (
     _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
     or "ticket_attendance_logs"
@@ -286,7 +332,7 @@ _DASH_MAIN_NAV_KEY = "_dash_main_nav"
 _DASH_TICKET_QUEUE_KEY = "_dash_ticket_queue"
 _DASH_PENDING_MAIN_NAV_KEY = "_dash_pending_main_nav"
 _DASH_PENDING_TICKET_QUEUE_KEY = "_dash_pending_ticket_queue"
-_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = ("Tickets", "Log", "Performance")
+_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = ("Tickets", "Sales cases", "Log", "Performance")
 _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 _CC_FE_SELECT_KEY = "cc_fe_select"
@@ -5623,7 +5669,7 @@ def _sync_dashboard_nav_state(
 
 
 def _render_main_navigation() -> str:
-    """Single row: Tickets | Log | Performance."""
+    """Top row: Tickets | Sales cases | Log | Performance."""
     return str(
         st.radio(
             "View",
@@ -5659,6 +5705,719 @@ def _ticket_queue_view(df: pd.DataFrame, cols: tuple[str, ...] = _TICKET_QUEUE_T
     if not show:
         return _format_local(sorted_df)
     return _format_local(sorted_df[show].copy())
+
+
+def _sc_set_sales_flash(message: str, *, level: str = "success") -> None:
+    st.session_state[_SC_SALES_FLASH_KEY] = message
+    st.session_state[_SC_SALES_FLASH_LEVEL_KEY] = level
+
+
+def _sc_show_sales_flash() -> None:
+    msg = st.session_state.pop(_SC_SALES_FLASH_KEY, None)
+    if not msg:
+        return
+    lev = str(st.session_state.pop(_SC_SALES_FLASH_LEVEL_KEY, "success") or "success")
+    if lev == "error":
+        st.error(msg)
+    elif lev == "warning":
+        st.warning(msg)
+    else:
+        st.success(msg)
+
+
+def _fetch_sales_cases_df() -> pd.DataFrame | None:
+    """Return sales-case rows, empty DataFrame if none, or ``None`` if table missing."""
+    client = _get_supabase_client()
+    try:
+        res = (
+            client.table(SALES_CASES_TABLE)
+            .select("*")
+            .order("updated_at", desc=True)
+            .execute()
+        )
+    except Exception as exc:
+        err = str(exc).lower()
+        if (
+            "does not exist" in err
+            or "schema cache" in err
+            or "42p01" in err
+            or "could not find the table" in err
+        ):
+            return None
+        raise
+    rows = res.data or []
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def _sales_cases_update_row(row_id: str, payload: dict) -> None:
+    client = _get_supabase_client()
+    body = {**payload, "updated_at": _cc_utc_now_iso()}
+    client.table(SALES_CASES_TABLE).update(body).eq("id", row_id).execute()
+
+
+def _sales_cases_insert_row(payload: dict) -> None:
+    client = _get_supabase_client()
+    row = {**payload, "updated_at": _cc_utc_now_iso(), "created_at": _cc_utc_now_iso()}
+    client.table(SALES_CASES_TABLE).insert(row).execute()
+
+
+def _sc_filter_sales_df(df: pd.DataFrame, statuses: tuple[str, ...]) -> pd.DataFrame:
+    if df.empty or "status" not in df.columns:
+        return df.iloc[0:0].copy()
+    effective = df["status"].astype(str).str.strip().map(_sc_effective_status)
+    return df[effective.isin(statuses)].copy()
+
+
+def _sc_sales_case_display_cols() -> tuple[str, ...]:
+    return (
+        "case_ref",
+        "account_name",
+        "sales_owner",
+        "sales_priority",
+        "account_region",
+        "sales_category",
+        "status",
+        "admin_owner",
+        "additional_info",
+        "close_note",
+        "dispatch_type",
+        "dispatch_region",
+        "assigned_to",
+        "field_task_category",
+        "updated_at",
+    )
+
+
+def _sc_rename_sales_case_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Friendly column headers in tables (DB columns unchanged)."""
+    mapping = {
+        "case_ref": "Ticket number",
+        "account_name": "Resort name / Company name",
+        "additional_info": "Admin notes",
+        "close_note": "Closing note",
+    }
+    return df.rename(columns={k: v for k, v in mapping.items() if k in df.columns})
+
+
+def _sc_sync_case_edit_widgets(
+    *,
+    row_id: str,
+    row: pd.Series,
+    sales_cats: list[str],
+) -> None:
+    """Load selected case into edit widgets (Streamlit keeps stale keys otherwise)."""
+    if st.session_state.get("sc_edit_synced_id") == row_id:
+        return
+    st.session_state["sc_edit_synced_id"] = row_id
+    reg = str(row.get("account_region") or "").strip()
+    st.session_state["sc_edit_region"] = (
+        reg if reg in SALES_REGION_CODES else SALES_REGION_CODES[0]
+    )
+    scat = str(row.get("sales_category") or "").strip()
+    cat_opts = list(sales_cats)
+    if scat and scat not in cat_opts:
+        cat_opts = [scat, *cat_opts]
+    st.session_state["sc_edit_scat"] = scat if scat in cat_opts else cat_opts[0]
+    st.session_state["sc_edit_admin_notes"] = str(row.get("additional_info") or "")
+
+
+def _sc_sync_dispatch_widgets(*, row_id: str, row: pd.Series) -> None:
+    """Default dispatch form for the selected case (region team picks engineer later)."""
+    if st.session_state.get("sc_disp_synced_id") == row_id:
+        return
+    st.session_state["sc_disp_synced_id"] = row_id
+    st.session_state["sc_disp_dtype"] = "Region team"
+    acc_reg = str(row.get("account_region") or "").strip()
+    if acc_reg in SALES_REGION_CODES:
+        st.session_state["sc_disp_region"] = acc_reg
+    elif SALES_REGION_CODES:
+        st.session_state["sc_disp_region"] = SALES_REGION_CODES[0]
+    st.session_state["sc_disp_post_tg"] = False
+
+
+def _render_sales_cases_dashboard() -> None:
+    """Separate UI for sales-priority cases (not field ``tickets_active``)."""
+    _sc_show_sales_flash()
+    st.markdown("##### Sales cases")
+    st.caption(
+        "Queue flow: **Sales ticket** → **Investigation** → **Regional for site visit** → "
+        "**Design** → **Resolved**. Separate from field **Tickets**. Regional teams "
+        f"({', '.join(SALES_REGION_CODES)}) assign the engineer for the site visit."
+    )
+    with st.expander("Queue flow (reference)", expanded=False):
+        st.markdown(
+            "1. **Sales ticket** — new case from sales  \n"
+            "2. **Investigation** — admin review (resolve without visit, or send to regional)  \n"
+            "3. **Regional for site visit** — region assigns engineer, site work  \n"
+            "4. **Design** — solution after visit  \n"
+            "5. **Resolved** — closed"
+        )
+
+    try:
+        df = _fetch_sales_cases_df()
+    except Exception as exc:
+        st.error(f"Could not load sales cases: {exc}")
+        return
+
+    if df is None:
+        st.warning(
+            f"The `{SALES_CASES_TABLE}` table is missing. Apply "
+            f"``supabase/migrations/20260620_dashboard_sales_cases.sql`` in the Supabase SQL "
+            "editor (includes RLS for the anon key), then refresh this app."
+        )
+        return
+
+    op = _session_operator_id()
+    if not op:
+        st.error("Sign in again — **Operator ID** is required.")
+        return
+
+    cat_names, _cat_miss = _try_fetch_task_categories()
+    field_cats = (
+        cat_names if cat_names else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    )
+    sales_cats = list(DEFAULT_SALES_CASE_CATEGORIES)
+    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+
+    with st.expander("**New sales case** (intake — no field Telegram)", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            cr = st.text_input(
+                "Ticket number",
+                key="sc_new_case_ref",
+                placeholder="9 or 16 digits",
+            )
+            an = st.text_input("Resort name / Company name", key="sc_new_account")
+            so = st.text_input("Sales owner", key="sc_new_sales_owner", placeholder="Name or @handle")
+            pr = st.selectbox("Sales priority", options=list(SALES_PRIORITY_OPTIONS), key="sc_new_priority")
+        with c2:
+            rg = st.selectbox("Account region (team)", options=list(SALES_REGION_CODES), key="sc_new_region")
+            scat = st.selectbox("Sales category (intent)", options=sales_cats, key="sc_new_scat")
+        desc = st.text_area("Description / notes", key="sc_new_desc", height=100)
+        if st.button("Create sales case", type="primary", key="sc_new_submit"):
+            if not (cr or "").strip() or not (an or "").strip() or not (so or "").strip():
+                st.warning(
+                    "Fill **Ticket number**, **Resort name / Company name**, and **Sales owner**."
+                )
+            else:
+                try:
+                    _sales_cases_insert_row(
+                        {
+                            "case_ref": (cr or "").strip(),
+                            "account_name": (an or "").strip(),
+                            "sales_owner": (so or "").strip(),
+                            "sales_priority": pr,
+                            "account_region": rg,
+                            "sales_category": scat,
+                            "description": (desc or "").strip() or None,
+                            "status": SC_STATUS_SALES_TICKET,
+                            "admin_owner": None,
+                        }
+                    )
+                    _get_supabase_client.clear()
+                    _sc_set_sales_flash(
+                        "Sales case created — it appears under **Sales ticket**."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not create case: {exc}")
+
+    tab_ticket, tab_inv, tab_reg, tab_design, tab_resolved = st.tabs(
+        (
+            "Sales ticket",
+            "Investigation",
+            "Regional",
+            "Design",
+            "Resolved",
+        )
+    )
+
+    def _show_tab(sub: pd.DataFrame, *, empty_msg: str) -> None:
+        if sub.empty:
+            st.info(empty_msg)
+            return
+        cols = [c for c in _sc_sales_case_display_cols() if c in sub.columns]
+        show_df = sub[cols].copy()
+        if "status" in show_df.columns:
+            show_df["status"] = show_df["status"].map(_sc_effective_status)
+        st.dataframe(
+            _format_local(_sc_rename_sales_case_columns_for_display(show_df)),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tab_ticket:
+        sub = _sc_filter_sales_df(df, (SC_STATUS_SALES_TICKET,))
+        _show_tab(sub, empty_msg="No cases in **Sales ticket**.")
+
+    with tab_inv:
+        sub = _sc_filter_sales_df(df, (SC_STATUS_INVESTIGATION,))
+        _show_tab(sub, empty_msg="No cases in **Investigation**.")
+
+    with tab_reg:
+        sub = _sc_filter_sales_df(df, (SC_STATUS_REGIONAL,))
+        _show_tab(sub, empty_msg="No cases in **Regional for site visit**.")
+
+    with tab_design:
+        sub = _sc_filter_sales_df(df, (SC_STATUS_DESIGN,))
+        _show_tab(sub, empty_msg="No cases in **Design**.")
+
+    with tab_resolved:
+        sub = _sc_filter_sales_df(df, (SC_STATUS_RESOLVED,))
+        _show_tab(sub, empty_msg="No **Resolved** sales cases yet.")
+
+    st.markdown("---")
+    st.markdown("##### Work on a case")
+    open_statuses = (
+        SC_STATUS_SALES_TICKET,
+        SC_STATUS_INVESTIGATION,
+        SC_STATUS_REGIONAL,
+        SC_STATUS_DESIGN,
+    )
+    open_df = _sc_filter_sales_df(df, open_statuses) if not df.empty else df
+    if open_df.empty:
+        st.caption("No open sales cases — create one above.")
+        return
+
+    labels: list[str] = []
+    id_by_label: dict[str, str] = {}
+    for _, row in open_df.iterrows():
+        rid = str(row.get("id") or "")
+        cref = str(row.get("case_ref") or "—")
+        stt = _sc_effective_status(row.get("status"))
+        lbl = f"{cref} · {stt} · {rid[:8]}…"
+        labels.append(lbl)
+        id_by_label[lbl] = rid
+
+    pick_lbl = st.selectbox("Select case", options=labels, key="sc_pick_case_lbl")
+    row_id = id_by_label[pick_lbl]
+    sel = open_df[open_df["id"].astype(str) == row_id]
+    if sel.empty:
+        st.warning("Case not found.")
+        return
+    r0 = sel.iloc[0]
+    cur_status = _sc_effective_status(r0.get("status"))
+
+    c_a, c_b, c_c = st.columns(3)
+    with c_a:
+        st.metric("Status", cur_status or "—")
+    with c_b:
+        st.metric("Region (account)", str(r0.get("account_region") or "—"))
+    with c_c:
+        st.metric("Priority", str(r0.get("sales_priority") or "—"))
+
+    with st.expander("Case details", expanded=False):
+        detail_cols = [c for c in sel.columns]
+        detail_show = sel[detail_cols].copy()
+        if "status" in detail_show.columns:
+            detail_show["status"] = detail_show["status"].map(_sc_effective_status)
+        st.dataframe(
+            _format_local(
+                _sc_rename_sales_case_columns_for_display(detail_show)
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    _sc_sync_case_edit_widgets(row_id=row_id, row=r0, sales_cats=sales_cats)
+    edit_cat_opts = list(sales_cats)
+    cur_scat = str(r0.get("sales_category") or "").strip()
+    if cur_scat and cur_scat not in edit_cat_opts:
+        edit_cat_opts = [cur_scat, *edit_cat_opts]
+    with st.expander("**Edit case details** (admin)", expanded=False):
+        st.caption(
+            "Update **region**, **category**, or **admin notes** without changing status."
+        )
+        with st.form("sc_edit_case_form", clear_on_submit=False):
+            st.selectbox(
+                "Account region (team)",
+                options=list(SALES_REGION_CODES),
+                key="sc_edit_region",
+            )
+            st.selectbox(
+                "Sales category (intent)",
+                options=edit_cat_opts,
+                key="sc_edit_scat",
+            )
+            st.text_area(
+                "Admin notes",
+                key="sc_edit_admin_notes",
+                height=100,
+                placeholder="Internal notes from the admin team",
+            )
+            save_edit = st.form_submit_button(
+                "Save case details",
+                use_container_width=True,
+            )
+        if save_edit:
+            notes = str(st.session_state.get("sc_edit_admin_notes", "")).strip() or None
+            try:
+                _sales_cases_update_row(
+                    row_id,
+                    {
+                        "account_region": str(
+                            st.session_state.get("sc_edit_region", "")
+                        ).strip(),
+                        "sales_category": str(
+                            st.session_state.get("sc_edit_scat", "")
+                        ).strip(),
+                        "additional_info": notes,
+                    },
+                )
+                _get_supabase_client.clear()
+                _sc_set_sales_flash("Case details updated.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save: {exc}")
+
+    # --- Queue actions (Sales ticket → Investigation → Regional → Design → Resolved) ---
+    if cur_status == SC_STATUS_SALES_TICKET:
+        if st.button("→ Investigation", key="sc_act_to_investigation", type="primary"):
+            _sales_cases_update_row(
+                row_id,
+                {"status": SC_STATUS_INVESTIGATION, "admin_owner": op},
+            )
+            _get_supabase_client.clear()
+            _sc_set_sales_flash("Case moved to **Investigation**.")
+            st.rerun()
+    elif cur_status == SC_STATUS_REGIONAL:
+        disp_type = str(r0.get("dispatch_type") or "").strip().lower()
+        assigned = str(r0.get("assigned_to") or "").strip()
+        if disp_type == "region" and not assigned:
+            st.caption(
+                f"**{r0.get('dispatch_region') or '—'}** — regional team assigns the engineer "
+                "for the site visit below."
+            )
+        if st.button("Site visit complete → Design", key="sc_act_to_design", type="primary"):
+            if disp_type == "region" and not assigned:
+                st.warning(
+                    "Assign an engineer first (regional team decides who visits the site)."
+                )
+            else:
+                _sales_cases_update_row(row_id, {"status": SC_STATUS_DESIGN})
+                _get_supabase_client.clear()
+                _sc_set_sales_flash("Moved to **Design**.")
+                st.rerun()
+    elif cur_status == SC_STATUS_DESIGN:
+        if st.button("← Back to Regional", key="sc_act_back_regional"):
+            _sales_cases_update_row(row_id, {"status": SC_STATUS_REGIONAL})
+            _get_supabase_client.clear()
+            _sc_set_sales_flash("Moved back to **Regional for site visit**.")
+            st.rerun()
+
+    if cur_status in (SC_STATUS_INVESTIGATION, SC_STATUS_DESIGN):
+        if st.session_state.get("sc_close_synced_id") != row_id:
+            st.session_state["sc_close_synced_id"] = row_id
+            st.session_state["sc_close_note"] = str(r0.get("close_note") or "")
+        close_btn_label = (
+            "Resolve (no site visit)"
+            if cur_status == SC_STATUS_INVESTIGATION
+            else "Resolve case"
+        )
+        with st.expander("**Resolve case**", expanded=False):
+            st.caption("Optional note when closing as **Resolved**.")
+            with st.form("sc_close_case_form", clear_on_submit=False):
+                st.text_area(
+                    "Closing note",
+                    key="sc_close_note",
+                    height=100,
+                    placeholder="Outcome, resolution summary, or handoff to sales",
+                )
+                do_close = st.form_submit_button(
+                    close_btn_label,
+                    type="primary",
+                    use_container_width=True,
+                )
+            if do_close:
+                close_note = (
+                    str(st.session_state.get("sc_close_note", "")).strip() or None
+                )
+                payload: dict = {"status": SC_STATUS_RESOLVED}
+                if close_note:
+                    payload["close_note"] = close_note
+                try:
+                    _sales_cases_update_row(row_id, payload)
+                except Exception as exc:
+                    err = str(exc).lower()
+                    if "close_note" in err and (
+                        "column" in err or "schema" in err
+                    ):
+                        st.error(
+                            "Could not save closing note — apply "
+                            "`supabase/migrations/20260621_sales_case_close_note.sql` "
+                            "in Supabase, then try again."
+                        )
+                    else:
+                        st.error(f"Could not resolve case: {exc}")
+                else:
+                    _get_supabase_client.clear()
+                    msg = "Case **Resolved**."
+                    if close_note:
+                        msg += " Closing note saved."
+                    elif cur_status == SC_STATUS_INVESTIGATION:
+                        msg = "Case **Resolved** (no site visit)."
+                    _sc_set_sales_flash(msg)
+                    st.rerun()
+
+    if cur_status == SC_STATUS_REGIONAL:
+        region_label = str(r0.get("dispatch_region") or "—")
+        cur_assignee = str(r0.get("assigned_to") or "").strip()
+        st.markdown(f"**Region dispatch — {region_label}**")
+        if cur_assignee:
+            st.caption(f"Assigned engineer: **{cur_assignee}** (change below if needed).")
+        else:
+            st.caption("No engineer yet — regional team assigns who visits the site.")
+        with st.expander("Assign engineer (region team)", expanded=not bool(cur_assignee)):
+            with st.form("sc_region_assign_engineer_form", clear_on_submit=False):
+                if fe_names and not fe_missing:
+                    st.selectbox(
+                        "Engineer",
+                        options=[f"@{n}" for n in fe_names],
+                        key="sc_region_assign_fe",
+                    )
+                else:
+                    st.text_input(
+                        "Engineer @username",
+                        key="sc_region_assign_fe_manual",
+                        placeholder="username",
+                    )
+                st.checkbox(
+                    "Post assignment to field Telegram",
+                    value=False,
+                    key="sc_region_assign_post_tg",
+                )
+                assign_submitted = st.form_submit_button(
+                    "Save engineer assignment",
+                    use_container_width=True,
+                )
+            if assign_submitted:
+                raw_h = (
+                    str(st.session_state.get("sc_region_assign_fe", "")).strip()
+                    if fe_names and not fe_missing
+                    else str(
+                        st.session_state.get("sc_region_assign_fe_manual", "")
+                    ).strip()
+                )
+                try:
+                    handle = _cc_normalize_handle(raw_h)
+                except ValueError as ve:
+                    st.error(str(ve))
+                else:
+                    patch = {"assigned_to": handle}
+                    post_tg = bool(st.session_state.get("sc_region_assign_post_tg"))
+                    tg_ok = False
+                    if post_tg:
+                        token = (
+                            _read_setting("TG_BOT_TOKEN").strip()
+                            or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+                            or _read_setting("TELEGRAM_TOKEN").strip()
+                        )
+                        chat_raw = _read_telegram_group_chat_raw()
+                        chat_id, _w = _parse_telegram_group_chat_id(chat_raw)
+                        fcat = str(r0.get("field_task_category") or "").strip()
+                        if not fcat:
+                            st.warning("Set **Field task category** on dispatch first.")
+                        elif not token or chat_id is None:
+                            st.warning(
+                                "Engineer saved. Telegram skipped — set token + group id."
+                            )
+                        else:
+                            cref = str(r0.get("case_ref") or "").strip()
+                            try:
+                                asyncio.run(
+                                    notify_telegram_group(
+                                        handle.lstrip("@"),
+                                        cref or row_id[:8],
+                                        fcat,
+                                        additional_info=str(
+                                            r0.get("description") or ""
+                                        )
+                                        or None,
+                                        assigned_by=op,
+                                        api_id=_read_setting("TG_API_ID")
+                                        or _read_setting("TELEGRAM_API_ID")
+                                        or None,
+                                        api_hash=_read_setting("TG_API_HASH")
+                                        or _read_setting("TELEGRAM_API_HASH")
+                                        or None,
+                                        bot_token=token or None,
+                                        group_id=chat_id,
+                                    )
+                                )
+                                tg_ok = True
+                            except Exception as tg_exc:
+                                st.warning(
+                                    f"Engineer saved; Telegram post failed: {tg_exc}"
+                                )
+                    try:
+                        _sales_cases_update_row(row_id, patch)
+                        _get_supabase_client.clear()
+                        msg = f"Engineer **{handle}** assigned for **{region_label}**."
+                        if post_tg and tg_ok:
+                            msg += " Telegram posted."
+                        _sc_set_sales_flash(msg)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not assign engineer: {exc}")
+
+    # --- Dispatch form (Investigation → Regional for site visit) ---
+    if cur_status == SC_STATUS_INVESTIGATION:
+        _sc_sync_dispatch_widgets(row_id=row_id, row=r0)
+        st.markdown("**Send to regional for site visit**")
+        st.caption(
+            "**Region team** is the usual path — the regional team chooses which engineer "
+            "visits the site after dispatch. Use **Individual engineer** only when you already "
+            "know who is going."
+        )
+        st.radio(
+            "Dispatch type",
+            options=("Region team", "Individual engineer"),
+            horizontal=True,
+            key="sc_disp_dtype",
+        )
+        dtype_sel = str(st.session_state.get("sc_disp_dtype", "Region team")).strip()
+        with st.form("sc_dispatch_form", clear_on_submit=False):
+            if dtype_sel == "Individual engineer":
+                if fe_names and not fe_missing:
+                    st.selectbox(
+                        "Engineer",
+                        options=[f"@{n}" for n in fe_names],
+                        key="sc_disp_fe",
+                    )
+                else:
+                    st.text_input(
+                        "Engineer @username",
+                        key="sc_disp_fe_manual",
+                        placeholder="username",
+                    )
+            else:
+                st.selectbox(
+                    "Region team",
+                    options=list(SALES_REGION_CODES),
+                    key="sc_disp_region",
+                    help="Engineer is assigned later by this region team.",
+                )
+            fcat = st.selectbox("Field task category", options=field_cats, key="sc_disp_fcat")
+            st.text_area(
+                "Dispatch reason (required)",
+                key="sc_disp_reason",
+                placeholder="Why field or region is needed after admin/system checks",
+            )
+            if dtype_sel == "Individual engineer":
+                st.checkbox(
+                    "Post to field Telegram",
+                    value=False,
+                    key="sc_disp_post_tg",
+                    help="Uses the same field group as **Tickets** Command Center.",
+                )
+            submitted = st.form_submit_button(
+                "Submit dispatch → Regional for site visit"
+            )
+
+        if submitted:
+            reason_s = str(st.session_state.get("sc_disp_reason", "")).strip()
+            dtype = str(st.session_state.get("sc_disp_dtype", "")).strip()
+            fcat = str(st.session_state.get("sc_disp_fcat", "")).strip()
+            post_tg = bool(st.session_state.get("sc_disp_post_tg", False))
+            dregion = str(st.session_state.get("sc_disp_region", "") or "").strip()
+            if len(reason_s) < 8:
+                st.error("Enter a meaningful **Dispatch reason** (at least a short sentence).")
+            else:
+                patch: dict = {
+                    "status": SC_STATUS_REGIONAL,
+                    "field_task_category": fcat,
+                    "dispatch_reason": reason_s,
+                    "additional_info": reason_s,
+                }
+                try:
+                    if dtype == "Individual engineer":
+                        raw_h = (
+                            str(st.session_state.get("sc_disp_fe", "")).strip()
+                            if fe_names and not fe_missing
+                            else str(
+                                st.session_state.get("sc_disp_fe_manual", "")
+                            ).strip()
+                        )
+                        try:
+                            handle = _cc_normalize_handle(raw_h)
+                        except ValueError as ve:
+                            st.error(str(ve))
+                        else:
+                            patch["dispatch_type"] = "individual"
+                            patch["dispatch_region"] = None
+                            patch["assigned_to"] = handle
+                            tg_posted = False
+                            if post_tg:
+                                token = (
+                                    _read_setting("TG_BOT_TOKEN").strip()
+                                    or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+                                    or _read_setting("TELEGRAM_TOKEN").strip()
+                                )
+                                chat_raw = _read_telegram_group_chat_raw()
+                                chat_id, _w = _parse_telegram_group_chat_id(chat_raw)
+                                if not token or chat_id is None:
+                                    st.warning(
+                                        "Saved dispatch in dashboard. "
+                                        "Telegram skipped — set token + **TELEGRAM_GROUP_CHAT_ID**."
+                                    )
+                                else:
+                                    cref = str(r0.get("case_ref") or "").strip()
+                                    try:
+                                        asyncio.run(
+                                            notify_telegram_group(
+                                                handle.lstrip("@"),
+                                                cref or row_id[:8],
+                                                fcat,
+                                                additional_info=str(
+                                                    r0.get("description") or ""
+                                                )
+                                                or None,
+                                                assigned_by=op,
+                                                api_id=_read_setting("TG_API_ID")
+                                                or _read_setting("TELEGRAM_API_ID")
+                                                or None,
+                                                api_hash=_read_setting("TG_API_HASH")
+                                                or _read_setting("TELEGRAM_API_HASH")
+                                                or None,
+                                                bot_token=token or None,
+                                                group_id=chat_id,
+                                            )
+                                        )
+                                        tg_posted = True
+                                    except Exception as tg_exc:
+                                        st.warning(
+                                            f"Dispatch saved; Telegram post failed: {tg_exc}"
+                                        )
+                            _sales_cases_update_row(row_id, patch)
+                            _get_supabase_client.clear()
+                            msg = "Dispatch recorded — **Regional for site visit**."
+                            if post_tg and tg_posted:
+                                msg += " Telegram posted."
+                            _sc_set_sales_flash(msg)
+                            st.rerun()
+                    else:
+                        if dregion not in SALES_REGION_CODES:
+                            st.error("Pick a valid **Region team**.")
+                        else:
+                            patch["dispatch_type"] = "region"
+                            patch["dispatch_region"] = dregion
+                            patch["assigned_to"] = None
+                            if post_tg:
+                                st.warning(
+                                    "Telegram post is only for **Individual** dispatch. "
+                                    "Region assignment is recorded here — notify the region channel manually."
+                                )
+                            _sales_cases_update_row(row_id, patch)
+                            _get_supabase_client.clear()
+                            _sc_set_sales_flash(
+                                "Dispatch recorded — **Regional for site visit** "
+                                f"({dregion})."
+                            )
+                            st.rerun()
+                except Exception as exc:
+                    st.error(f"Dispatch failed: {exc}")
 
 
 def _render_dashboard(
@@ -5771,6 +6530,10 @@ def _render_dashboard(
 
     if main_nav == "Performance":
         _render_field_performance_tab(lookback_days=lookback_days)
+        return
+
+    if main_nav == "Sales cases":
+        _render_sales_cases_dashboard()
         return
 
     if queue_view == "Pending":

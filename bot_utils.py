@@ -70,9 +70,7 @@ def _build_assignment_notify_text(
     if note:
         parts.append(note)
     if who:
-        parts.append(f"Assigned by dashboard: {who}")
-    parts.append("")
-    parts.append("Field team: reply to THIS message with your update (text or photo).")
+        parts.append(f"Assigned by : {who}")
     return "\n".join(parts)
 
 

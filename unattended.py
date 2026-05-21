@@ -143,6 +143,9 @@ async def run_unattended_nudges(
     sent = 0
     skipped = 0
     for row in pending:
+        if not str(row.get("assigned_to") or "").strip():
+            skipped += 1
+            continue
         if not should_send_nudge(row):
             skipped += 1
             continue
