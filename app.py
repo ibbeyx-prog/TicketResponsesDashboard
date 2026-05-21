@@ -7286,29 +7286,29 @@ def _render_sales_case_work_panel(
                     f"sc_region_assign_engineer_form_{key_prefix}",
                     clear_on_submit=False,
                 ):
-                if fe_names and not fe_missing:
-                    st.selectbox(
-                        "Engineer",
-                        options=[f"@{n}" for n in fe_names],
-                        key="sc_region_assign_fe",
+                    if fe_names and not fe_missing:
+                        st.selectbox(
+                            "Engineer",
+                            options=[f"@{n}" for n in fe_names],
+                            key="sc_region_assign_fe",
+                        )
+                    else:
+                        st.text_input(
+                            "Engineer @username",
+                            key="sc_region_assign_fe_manual",
+                            placeholder="username",
+                        )
+                    st.checkbox(
+                        "Post assignment to field Telegram",
+                        value=False,
+                        key="sc_region_assign_post_tg",
                     )
-                else:
-                    st.text_input(
-                        "Engineer @username",
-                        key="sc_region_assign_fe_manual",
-                        placeholder="username",
+                    assign_submitted = st.form_submit_button(
+                        "Save engineer assignment",
+                        type="primary",
+                        use_container_width=True,
                     )
-                st.checkbox(
-                    "Post assignment to field Telegram",
-                    value=False,
-                    key="sc_region_assign_post_tg",
-                )
-                assign_submitted = st.form_submit_button(
-                    "Save engineer assignment",
-                    type="primary",
-                    use_container_width=True,
-                )
-            if assign_submitted:
+                if assign_submitted:
                 raw_h = (
                     str(st.session_state.get("sc_region_assign_fe", "")).strip()
                     if fe_names and not fe_missing
