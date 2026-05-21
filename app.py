@@ -534,7 +534,9 @@ _SC_CC_ST_SCAT_KEY = "sc_cc_st_scat"
 _SC_CC_ST_DESC_KEY = "sc_cc_st_desc"
 _SC_CC_CLEAR_ST_INTAKE_KEY = "_sc_cc_clear_st_intake"
 _CC_SIDEBAR_TAB_KEY = "_cc_sidebar_tab"
-_CC_SIDEBAR_TAB_OPTIONS: tuple[str, ...] = ("Assign", "Sales intake")
+CC_TAB_CSM = "CSM"
+CC_TAB_SALES = "SALES"
+_CC_SIDEBAR_TAB_OPTIONS: tuple[str, ...] = (CC_TAB_CSM, CC_TAB_SALES)
 
 
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
@@ -991,7 +993,7 @@ def _render_dashboard_team_accounts() -> None:
     if not admin_user:
         return
 
-    with st.expander("Team accounts (admin)", expanded=False):
+    with st.expander("Team accounts (admin)", expanded=False, key="bon_box_team_accounts"):
         st.caption(
             "Create dashboard logins for your team. "
             "Re-enter **your** password to confirm each action."
@@ -5100,19 +5102,19 @@ def _sc_insert_intake_case(
 
 
 def _sidebar_sales_intake() -> None:
-    """Create new sales tickets from the sidebar (no field Telegram)."""
+    """SALES intake — new sales cases from the sidebar (no field Telegram)."""
     try:
         probe = _fetch_sales_cases_df()
     except Exception:
         return
     if probe is None:
         st.caption(
-            "Sales intake unavailable — apply "
+            "**SALES** unavailable — apply "
             "`supabase/migrations/20260620_dashboard_sales_cases.sql`."
         )
         return
 
-    st.caption("New cases start in **Sales ticket** — no Telegram post.")
+    st.caption("Cases start in **Sales ticket** — no Telegram post.")
 
     if st.session_state.pop(_SC_CC_CLEAR_ST_INTAKE_KEY, False):
         _reset_sc_cc_sales_ticket_form()
@@ -5120,46 +5122,36 @@ def _sidebar_sales_intake() -> None:
     sales_cats = list(DEFAULT_SALES_CASE_CATEGORIES)
 
     with st.container(border=True, key="sc_cc_intake_block"):
-        st.markdown("**New sales case**")
-        st.caption("Required: ticket #, resort/company, sales owner.")
-        r1, r2 = st.columns(2)
-        with r1:
-            st.text_input(
-                "Ticket number",
-                key=_SC_CC_ST_REF_KEY,
-                placeholder="9 or 16 digits",
-            )
-        with r2:
-            st.text_input(
-                "Resort name / Company name",
-                key=_SC_CC_ST_ACCOUNT_KEY,
-            )
+        st.markdown("##### SALES")
+        st.caption("Ticket # and resort/company.")
+        st.text_input(
+            "Ticket number",
+            key=_SC_CC_ST_REF_KEY,
+            placeholder="9 or 16 digits",
+        )
+        st.text_input(
+            "Resort name / Company name",
+            key=_SC_CC_ST_ACCOUNT_KEY,
+            placeholder="Resort or company name",
+        )
         r3, r4 = st.columns(2)
         with r3:
-            st.text_input(
-                "Sales owner",
-                key=_SC_CC_ST_OWNER_KEY,
-                placeholder="Name or @handle",
-            )
-        with r4:
             st.selectbox(
                 "Sales priority",
                 options=list(SALES_PRIORITY_OPTIONS),
                 key=_SC_CC_ST_PRIORITY_KEY,
             )
-        r5, r6 = st.columns(2)
-        with r5:
+        with r4:
             st.selectbox(
-                "Account region (team)",
+                "Region Team",
                 options=list(SALES_REGION_CODES),
                 key=_SC_CC_ST_REGION_KEY,
             )
-        with r6:
-            st.selectbox(
-                "Sales category (intent)",
-                options=sales_cats,
-                key=_SC_CC_ST_SCAT_KEY,
-            )
+        st.selectbox(
+            "Sales category (intent)",
+            options=sales_cats,
+            key=_SC_CC_ST_SCAT_KEY,
+        )
         st.text_area(
             "Description (optional)",
             key=_SC_CC_ST_DESC_KEY,
@@ -5167,7 +5159,7 @@ def _sidebar_sales_intake() -> None:
             placeholder="Short summary for the admin team",
         )
         submit_st = st.button(
-            "Create sales ticket",
+            "Create SALES case",
             type="primary",
             use_container_width=True,
             key="sc_cc_st_submit",
@@ -5176,10 +5168,9 @@ def _sidebar_sales_intake() -> None:
     if submit_st:
         cr = str(st.session_state.get(_SC_CC_ST_REF_KEY, "")).strip()
         an = str(st.session_state.get(_SC_CC_ST_ACCOUNT_KEY, "")).strip()
-        so = str(st.session_state.get(_SC_CC_ST_OWNER_KEY, "")).strip()
-        if not cr or not an or not so:
+        if not cr or not an:
             _sc_set_sales_flash(
-                "Fill **Ticket number**, **Resort name / Company name**, and **Sales owner**.",
+                "Fill **Ticket number** and **Resort name / Company name**.",
                 level="warning",
             )
             st.rerun()
@@ -5187,7 +5178,7 @@ def _sidebar_sales_intake() -> None:
         _sc_insert_intake_case(
             case_ref=cr,
             account_name=an,
-            sales_owner=so,
+            sales_owner="",
             sales_priority=str(
                 st.session_state.get(_SC_CC_ST_PRIORITY_KEY, "Standard")
             ).strip(),
@@ -5200,43 +5191,34 @@ def _sidebar_sales_intake() -> None:
         )
 
 
-def _render_cc_sidebar_nav() -> str:
-    """Sidebar tabs — same pill style as queue metrics (e.g. Resolved)."""
-    raw = st.session_state.get(_CC_SIDEBAR_TAB_KEY)
-    if raw == "assign":
-        st.session_state[_CC_SIDEBAR_TAB_KEY] = "Assign"
-    elif raw == "sales":
-        st.session_state[_CC_SIDEBAR_TAB_KEY] = "Sales intake"
-    choice = str(st.session_state.get(_CC_SIDEBAR_TAB_KEY, "Assign"))
-    if choice not in _CC_SIDEBAR_TAB_OPTIONS:
-        choice = "Assign"
-        st.session_state[_CC_SIDEBAR_TAB_KEY] = choice
+def _normalize_cc_sidebar_tab(raw: object) -> str:
+    """Map legacy Assign / Sales intake session values to CSM / SALES."""
+    s = str(raw or "").strip()
+    if s in _CC_SIDEBAR_TAB_OPTIONS:
+        return s
+    low = s.casefold()
+    if low in ("assign", "csm", "field", "field assign"):
+        return CC_TAB_CSM
+    if low in ("sales", "sales intake", "sales\nintake"):
+        return CC_TAB_SALES
+    return CC_TAB_CSM
 
-    with st.container(key="cc_sidebar_nav_row"):
-        col_assign, col_sales = st.columns(2, gap="small")
-        with col_assign:
-            with st.container(key="cc_nav_metric_assign"):
-                if st.button(
-                    "Assign",
-                    key="cc_nav_metric_assign_btn",
-                    type="secondary",
-                    use_container_width=True,
-                    disabled=choice == "Assign",
-                ):
-                    st.session_state[_CC_SIDEBAR_TAB_KEY] = "Assign"
-                    st.rerun()
-        with col_sales:
-            with st.container(key="cc_nav_metric_sales"):
-                if st.button(
-                    "Sales\nintake",
-                    key="cc_nav_metric_sales_btn",
-                    type="secondary",
-                    use_container_width=True,
-                    disabled=choice == "Sales intake",
-                ):
-                    st.session_state[_CC_SIDEBAR_TAB_KEY] = "Sales intake"
-                    st.rerun()
-    return "sales" if choice == "Sales intake" else "assign"
+
+def _render_cc_sidebar_nav() -> str:
+    """TICKET hub — same expander + radio pattern as Team accounts / Filters."""
+    st.session_state[_CC_SIDEBAR_TAB_KEY] = _normalize_cc_sidebar_tab(
+        st.session_state.get(_CC_SIDEBAR_TAB_KEY)
+    )
+    with st.expander("TICKET", expanded=True, key="bon_box_ticket"):
+        st.radio(
+            "Branch",
+            options=list(_CC_SIDEBAR_TAB_OPTIONS),
+            key=_CC_SIDEBAR_TAB_KEY,
+            label_visibility="collapsed",
+            horizontal=False,
+        )
+    choice = _normalize_cc_sidebar_tab(st.session_state.get(_CC_SIDEBAR_TAB_KEY))
+    return "sales" if choice == CC_TAB_SALES else "assign"
 
 
 def _sidebar_field_assign() -> None:
@@ -5267,6 +5249,8 @@ def _sidebar_field_assign() -> None:
     submitted = False
 
     with st.container(border=True, key="cc_assign_block"):
+        st.markdown("##### CSM")
+        st.caption("Field assignment → Telegram group.")
         add_unassigned = st.checkbox(
             "Add to Daily Task only (no engineer, no Telegram)",
             key=_CC_ADD_UNASSIGNED_KEY,
@@ -5525,7 +5509,7 @@ def _sidebar_controls() -> tuple[bool, int, int]:
         st.markdown("**Time range**")
         lookback_days, _range_start, _range_end = _sidebar_date_range()
 
-        with st.expander("More filters", expanded=False):
+        with st.expander("Filters", expanded=False, key="bon_box_filters"):
             auto = st.toggle("Auto-refresh", value=True)
             if auto:
                 interval_minutes = st.slider(
@@ -5619,6 +5603,8 @@ _BON_THEME_CSS = """
         --bon-text: #e8e6e3;
         --bon-muted: #a39e97;
         --bon-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --bon-box-border: rgba(215, 180, 145, 0.45);
+        --bon-box-radius: 8px;
     }
     /* One UI font everywhere Streamlit allows (tables, metrics, forms, markdown). */
     .stApp,
@@ -5693,8 +5679,8 @@ _BON_THEME_CSS = """
         color: var(--bon-text);
     }
     div[data-testid="stVerticalBlockBorderWrapper"] {
-        border: 1px solid var(--bon-oak) !important;
-        border-radius: 14px !important;
+        border: 1px solid var(--bon-box-border) !important;
+        border-radius: var(--bon-box-radius) !important;
         background-color: var(--bon-card) !important;
     }
     /* Assign block: one oak outline; form has no extra gray box */
@@ -5706,22 +5692,48 @@ _BON_THEME_CSS = """
     }
     [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
     [data-testid="stSidebar"] .stTextInput input,
-    [data-testid="stSidebar"] .stTextArea textarea {
-        border: 1px solid rgba(215, 180, 145, 0.45) !important;
-        border-radius: 8px !important;
+    [data-testid="stSidebar"] .stTextArea textarea,
+    [data-testid="stMain"] .stSelectbox [data-baseweb="select"] > div,
+    [data-testid="stMain"] .stTextInput input,
+    [data-testid="stMain"] .stTextArea textarea,
+    [data-testid="stMain"] .stNumberInput input {
+        border: 1px solid var(--bon-box-border) !important;
+        border-radius: var(--bon-box-radius) !important;
     }
     [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div:focus-within,
     [data-testid="stSidebar"] .stTextInput input:focus,
-    [data-testid="stSidebar"] .stTextArea textarea:focus {
+    [data-testid="stSidebar"] .stTextArea textarea:focus,
+    [data-testid="stMain"] .stSelectbox [data-baseweb="select"] > div:focus-within,
+    [data-testid="stMain"] .stTextInput input:focus,
+    [data-testid="stMain"] .stTextArea textarea:focus,
+    [data-testid="stMain"] .stNumberInput input:focus {
         border-color: var(--bon-oak) !important;
         box-shadow: 0 0 0 1px var(--bon-oak) !important;
     }
+    /* SALES intake: prominent ticket + account fields */
+    [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_case_ref"],
+    [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_account"] {
+        margin-bottom: 0.65rem !important;
+    }
+    [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_case_ref"] label,
+    [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_account"] label {
+        font-size: 0.92rem !important;
+        font-weight: 600 !important;
+        color: var(--bon-text) !important;
+    }
+    [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_case_ref"] input,
+    [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_account"] input {
+        min-height: 3.1rem !important;
+        font-size: 1.08rem !important;
+        padding: 0.8rem 1rem !important;
+        letter-spacing: 0.02em;
+    }
     .stTabs [data-baseweb="tab-list"] {
         background-color: var(--bon-panel);
-        border-radius: 10px;
+        border-radius: var(--bon-box-radius);
         padding: 4px;
         gap: 4px;
-        border: 1px solid rgba(215, 180, 145, 0.35);
+        border: 1px solid var(--bon-box-border);
     }
     .stTabs [data-baseweb="tab"] {
         color: var(--bon-muted);
@@ -5750,8 +5762,8 @@ _BON_THEME_CSS = """
     [data-testid="stFormSubmitButton"] button[kind="secondary"],
     button[data-testid="stBaseButton-primary"],
     button[data-testid="stBaseButton-secondary"] {
-        border-radius: 8px !important;
-        border: 1px solid rgba(215, 180, 145, 0.45) !important;
+        border-radius: var(--bon-box-radius) !important;
+        border: 1px solid var(--bon-box-border) !important;
         background-color: var(--bon-card) !important;
         background-image: none !important;
         color: var(--bon-muted) !important;
@@ -5785,13 +5797,33 @@ _BON_THEME_CSS = """
         color: var(--bon-oak) !important;
         border-color: var(--bon-oak) !important;
     }
+    /* Expandable panels — same box as Log out (sidebar + main) */
     div[data-testid="stExpander"] details {
-        border: 1px solid var(--bon-oak);
-        border-radius: 14px;
-        background-color: var(--bon-card);
+        border: 1px solid var(--bon-box-border) !important;
+        border-radius: var(--bon-box-radius) !important;
+        background-color: var(--bon-card) !important;
+        overflow: hidden;
+        margin-bottom: 0.5rem;
     }
     div[data-testid="stExpander"] summary {
-        color: var(--bon-oak);
+        color: var(--bon-text) !important;
+        font-weight: 500 !important;
+        font-size: 0.95rem !important;
+        padding: 0.65rem 1rem !important;
+        min-height: 2.75rem !important;
+        display: flex !important;
+        align-items: center !important;
+        list-style: none !important;
+        cursor: pointer;
+        box-shadow: none !important;
+    }
+    div[data-testid="stExpander"] summary:hover {
+        background-color: rgba(215, 180, 145, 0.12) !important;
+        color: var(--bon-oak) !important;
+    }
+    div[data-testid="stExpander"] details[open] > div {
+        padding: 0.35rem 0.85rem 0.85rem !important;
+        border-top: 1px solid rgba(215, 180, 145, 0.22);
     }
     /* Ticket / sales queue: one compact toolbar row (Select all … Apply) */
     div[class*="st-key-"][class*="_tq_toolbar"] .stButton > button,
@@ -5816,8 +5848,8 @@ _BON_THEME_CSS = """
         padding: 0.25rem 0 0.5rem 0;
     }
     .sc-case-hero {
-        border: 1px solid rgba(215, 180, 145, 0.45);
-        border-radius: 14px;
+        border: 1px solid var(--bon-box-border);
+        border-radius: var(--bon-box-radius);
         background: linear-gradient(
             135deg,
             rgba(215, 180, 145, 0.14) 0%,
@@ -5876,9 +5908,10 @@ _BON_THEME_CSS = """
     }
     div[class*="st-key-"][class*="_sc_details_box"],
     div[class*="st-key-"][class*="_sc_next_box"],
-    div[class*="st-key-"][class*="_sc_site_box"] {
-        border: 1px solid rgba(215, 180, 145, 0.28) !important;
-        border-radius: 12px !important;
+    div[class*="st-key-"][class*="_sc_site_box"],
+    div[class*="st-key-"][class*="_work_panel"] > div[data-testid="stVerticalBlockBorderWrapper"] {
+        border: 1px solid var(--bon-box-border) !important;
+        border-radius: var(--bon-box-radius) !important;
         background: var(--bon-card) !important;
         padding: 0.85rem 1rem 1rem !important;
     }
@@ -5905,39 +5938,10 @@ _BON_THEME_CSS = """
         opacity: 0.45;
         cursor: not-allowed;
     }
-    /* Sidebar Command Center: Assign | Sales intake (same as Resolved queue metric) */
-    [data-testid="stSidebar"] div.st-key-cc_sidebar_nav_row {
-        margin: 0.15rem 0 0.75rem 0;
-    }
-    [data-testid="stSidebar"] div[class*="st-key-cc_nav_metric_"] .stButton {
-        width: 100%;
-    }
-    [data-testid="stSidebar"] div[class*="st-key-cc_nav_metric_"] .stButton > button {
-        background: var(--bon-card) !important;
-        border: 1px solid rgba(215, 180, 145, 0.28) !important;
-        border-radius: 10px !important;
-        color: var(--bon-muted) !important;
-        font-weight: 500 !important;
-        font-size: 0.8rem !important;
-        line-height: 1.35 !important;
-        white-space: pre-line !important;
-        min-height: 4.25rem !important;
-        padding: 0.55rem 0.65rem !important;
-        text-align: center !important;
-        width: 100% !important;
-    }
-    [data-testid="stSidebar"] div[class*="st-key-cc_nav_metric_"] .stButton > button:not(:disabled):hover {
-        color: var(--bon-text) !important;
-        border-color: rgba(215, 180, 145, 0.5) !important;
-        background: rgba(215, 180, 145, 0.08) !important;
-    }
-    [data-testid="stSidebar"] div[class*="st-key-cc_nav_metric_"] .stButton > button:disabled {
-        opacity: 1 !important;
-        color: var(--bon-oak) !important;
-        border-color: var(--bon-oak) !important;
-        font-weight: 600 !important;
-        cursor: default !important;
-        box-shadow: inset 0 -2px 0 var(--bon-oak) !important;
+    [data-testid="stSidebar"] div[class*="st-key-bon_box_ticket"] details[open] div[data-testid="stRadio"] > div[role="radiogroup"] {
+        gap: 0.65rem !important;
+        padding: 0.15rem 0 0.15rem 0.15rem !important;
+        margin: 0 !important;
     }
     /* Command Center: compact Team popover beside engineer dropdown */
     [data-testid="stSidebar"] div.st-key-cc_team_popover > button {
@@ -6001,18 +6005,23 @@ _BON_THEME_CSS = """
     [data-testid="stMetric"] {
         background: var(--bon-card);
         padding: 8px 12px;
-        border-radius: 10px;
-        border: 1px solid rgba(215, 180, 145, 0.28);
+        border-radius: var(--bon-box-radius);
+        border: 1px solid var(--bon-box-border);
     }
     [data-testid="stMetric"]:has([data-testid="stMetricDelta"]) {
-        border-color: rgba(215, 180, 145, 0.55);
+        border-color: var(--bon-oak);
     }
     [data-testid="stMetric"] label { color: var(--bon-muted) !important; }
     [data-testid="stMetric"] [data-testid="stMetricValue"] {
         color: var(--bon-oak) !important;
     }
     .stMarkdown a { color: var(--bon-oak); }
-    [data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
+    [data-testid="stDataFrame"] {
+        border: 1px solid var(--bon-box-border);
+        border-radius: var(--bon-box-radius);
+        overflow: hidden;
+        background: var(--bon-card);
+    }
     /* Text-style nav radios (sidebar + main) */
     [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"],
     [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] {
@@ -6057,10 +6066,11 @@ _BON_THEME_CSS = """
         margin-bottom: 0.5rem !important;
     }
     /* Clickable queue metrics (replace second nav row) */
-    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button {
+    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button,
+    [data-testid="stMain"] div[class*="st-key-dash_sc_metric_nav_"] .stButton > button {
         background: var(--bon-card) !important;
-        border: 1px solid rgba(215, 180, 145, 0.28) !important;
-        border-radius: 10px !important;
+        border: 1px solid var(--bon-box-border) !important;
+        border-radius: var(--bon-box-radius) !important;
         color: var(--bon-muted) !important;
         font-weight: 500 !important;
         font-size: 0.8rem !important;
@@ -6070,12 +6080,14 @@ _BON_THEME_CSS = """
         padding: 0.55rem 0.65rem !important;
         text-align: left !important;
     }
-    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button:not(:disabled):hover {
+    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button:not(:disabled):hover,
+    [data-testid="stMain"] div[class*="st-key-dash_sc_metric_nav_"] .stButton > button:not(:disabled):hover {
         color: var(--bon-text) !important;
         border-color: rgba(215, 180, 145, 0.5) !important;
         background: rgba(215, 180, 145, 0.08) !important;
     }
-    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button:disabled {
+    [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button:disabled,
+    [data-testid="stMain"] div[class*="st-key-dash_sc_metric_nav_"] .stButton > button:disabled {
         opacity: 1 !important;
         color: var(--bon-oak) !important;
         border-color: var(--bon-oak) !important;
@@ -7189,7 +7201,7 @@ def _render_sales_case_work_panel(
                 e1, e2 = st.columns(2)
                 with e1:
                     st.selectbox(
-                        "Account region (team)",
+                        "Region Team",
                         options=list(SALES_REGION_CODES),
                         key="sc_edit_region",
                     )
@@ -7445,7 +7457,7 @@ def _render_sales_cases_dashboard() -> None:
     _sc_show_sales_flash()
     st.markdown("##### Sales cases")
     st.caption(
-        "New cases: sidebar **Sales intake**. Open a queue with the metrics above."
+        "New cases: sidebar **SALES**. Open a queue with the metrics above."
     )
 
     try:
@@ -7517,7 +7529,7 @@ def _render_sales_cases_dashboard() -> None:
             queue_status=SC_STATUS_SALES_TICKET,
             key_prefix="sc_sales_ticket",
             title="Sales ticket — new intake",
-            empty_msg="No cases in **Sales ticket**. Create one in sidebar **Sales intake**.",
+            empty_msg="No cases in **Sales ticket**. Create one in sidebar **SALES**.",
             caption=None,
             toolbar_caption=None,
             **work_kw,
