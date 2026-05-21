@@ -7309,74 +7309,76 @@ def _render_sales_case_work_panel(
                         use_container_width=True,
                     )
                 if assign_submitted:
-                raw_h = (
-                    str(st.session_state.get("sc_region_assign_fe", "")).strip()
-                    if fe_names and not fe_missing
-                    else str(
-                        st.session_state.get("sc_region_assign_fe_manual", "")
-                    ).strip()
-                )
-                try:
-                    handle = _cc_normalize_handle(raw_h)
-                except ValueError as ve:
-                    st.error(str(ve))
-                else:
-                    patch = {"assigned_to": handle}
-                    post_tg = bool(st.session_state.get("sc_region_assign_post_tg"))
-                    tg_ok = False
-                    if post_tg:
-                        token = (
-                            _read_setting("TG_BOT_TOKEN").strip()
-                            or _read_setting("TELEGRAM_BOT_TOKEN").strip()
-                            or _read_setting("TELEGRAM_TOKEN").strip()
-                        )
-                        chat_raw = _read_telegram_group_chat_raw()
-                        chat_id, _w = _parse_telegram_group_chat_id(chat_raw)
-                        fcat = str(r0.get("field_task_category") or "").strip()
-                        if not fcat:
-                            st.warning("Set **Field task category** on dispatch first.")
-                        elif not token or chat_id is None:
-                            st.warning(
-                                "Engineer saved. Telegram skipped — set token + group id."
-                            )
-                        else:
-                            cref = str(r0.get("case_ref") or "").strip()
-                            try:
-                                asyncio.run(
-                                    notify_telegram_group(
-                                        handle.lstrip("@"),
-                                        cref or row_id[:8],
-                                        fcat,
-                                        additional_info=str(
-                                            r0.get("description") or ""
-                                        )
-                                        or None,
-                                        assigned_by=op,
-                                        api_id=_read_setting("TG_API_ID")
-                                        or _read_setting("TELEGRAM_API_ID")
-                                        or None,
-                                        api_hash=_read_setting("TG_API_HASH")
-                                        or _read_setting("TELEGRAM_API_HASH")
-                                        or None,
-                                        bot_token=token or None,
-                                        group_id=chat_id,
-                                    )
-                                )
-                                tg_ok = True
-                            except Exception as tg_exc:
-                                st.warning(
-                                    f"Engineer saved; Telegram post failed: {tg_exc}"
-                                )
+                    raw_h = (
+                        str(st.session_state.get("sc_region_assign_fe", "")).strip()
+                        if fe_names and not fe_missing
+                        else str(
+                            st.session_state.get("sc_region_assign_fe_manual", "")
+                        ).strip()
+                    )
                     try:
-                        _sales_cases_update_row(row_id, patch)
-                        _get_supabase_client.clear()
-                        msg = f"Engineer **{handle}** assigned for **{region_label}**."
-                        if post_tg and tg_ok:
-                            msg += " Telegram posted."
-                        _sc_set_sales_flash(msg)
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Could not assign engineer: {exc}")
+                        handle = _cc_normalize_handle(raw_h)
+                    except ValueError as ve:
+                        st.error(str(ve))
+                    else:
+                        patch = {"assigned_to": handle}
+                        post_tg = bool(st.session_state.get("sc_region_assign_post_tg"))
+                        tg_ok = False
+                        if post_tg:
+                            token = (
+                                _read_setting("TG_BOT_TOKEN").strip()
+                                or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+                                or _read_setting("TELEGRAM_TOKEN").strip()
+                            )
+                            chat_raw = _read_telegram_group_chat_raw()
+                            chat_id, _w = _parse_telegram_group_chat_id(chat_raw)
+                            fcat = str(r0.get("field_task_category") or "").strip()
+                            if not fcat:
+                                st.warning(
+                                    "Set **Field task category** on dispatch first."
+                                )
+                            elif not token or chat_id is None:
+                                st.warning(
+                                    "Engineer saved. Telegram skipped — set token + group id."
+                                )
+                            else:
+                                cref = str(r0.get("case_ref") or "").strip()
+                                try:
+                                    asyncio.run(
+                                        notify_telegram_group(
+                                            handle.lstrip("@"),
+                                            cref or row_id[:8],
+                                            fcat,
+                                            additional_info=str(
+                                                r0.get("description") or ""
+                                            )
+                                            or None,
+                                            assigned_by=op,
+                                            api_id=_read_setting("TG_API_ID")
+                                            or _read_setting("TELEGRAM_API_ID")
+                                            or None,
+                                            api_hash=_read_setting("TG_API_HASH")
+                                            or _read_setting("TELEGRAM_API_HASH")
+                                            or None,
+                                            bot_token=token or None,
+                                            group_id=chat_id,
+                                        )
+                                    )
+                                    tg_ok = True
+                                except Exception as tg_exc:
+                                    st.warning(
+                                        f"Engineer saved; Telegram post failed: {tg_exc}"
+                                    )
+                        try:
+                            _sales_cases_update_row(row_id, patch)
+                            _get_supabase_client.clear()
+                            msg = f"Engineer **{handle}** assigned for **{region_label}**."
+                            if post_tg and tg_ok:
+                                msg += " Telegram posted."
+                            _sc_set_sales_flash(msg)
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not assign engineer: {exc}")
 
 def _render_sales_queue_segment(
     df: pd.DataFrame,
