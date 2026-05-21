@@ -123,6 +123,10 @@ SALES_REGION_CODES: tuple[str, ...] = (
 SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Standard")
 DEFAULT_SALES_CASE_CATEGORIES: tuple[str, ...] = (
     "QOS Issue",
+    "Call Drop Issues",
+    "Coverage Issues",
+    "Mobile Data Issues",
+    "Voice Call Issues",
 )
 SC_STATUS_SALES_TICKET = "Sales ticket"
 SC_STATUS_INVESTIGATION = "Investigation"
