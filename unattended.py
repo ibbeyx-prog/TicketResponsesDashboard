@@ -10,7 +10,7 @@ from typing import Any
 log = logging.getLogger("unattended")
 
 STATUS_UNATTENDED = "Unattended"
-STATUS_PENDING = "Pending"
+STATUS_DAILY_TASK = "Daily Task"
 
 UNATTENDED_NUDGE_HOURS = float(os.getenv("UNATTENDED_NUDGE_HOURS", "6"))
 ASSIGN_DAY_CUTOFF_HOUR = int(os.getenv("ASSIGN_DAY_CUTOFF_HOUR", "23"))
@@ -60,7 +60,7 @@ def has_field_response_since_assign(row: dict) -> bool:
 
 def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> bool:
     """Pending with no same-day (or prior-day) field response after assign-day cutoff."""
-    if str(row.get("status") or "").strip() != STATUS_PENDING:
+    if str(row.get("status") or "").strip() != STATUS_DAILY_TASK:
         return False
     if has_field_response_since_assign(row):
         return False
@@ -82,7 +82,7 @@ def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> boo
 
 def should_send_nudge(row: dict, *, now: datetime | None = None) -> bool:
     """Pending, no response, same assign day, past nudge delay, nudge not sent yet."""
-    if str(row.get("status") or "").strip() != STATUS_PENDING:
+    if str(row.get("status") or "").strip() != STATUS_DAILY_TASK:
         return False
     if has_field_response_since_assign(row):
         return False
@@ -123,7 +123,7 @@ def _fetch_pending_tickets(client: Any, *, tickets_table: str) -> list[dict]:
             "ticket_number, assigned_to, task_category, status, "
             "last_assigned_at, responded_at, unattended_nudge_sent_at"
         )
-        .eq("status", STATUS_PENDING)
+        .eq("status", STATUS_DAILY_TASK)
         .limit(500)
         .execute()
     )
@@ -210,7 +210,7 @@ def run_unattended_close(
                     "ticket_number": ticket,
                     "member_username": "@system",
                     "action_type": "AutoUnattended",
-                    "note": "No field response before assign-day cutoff; closed from Pending.",
+                    "note": "No field response before assign-day cutoff; closed from Daily Task.",
                     "timestamp": now_iso,
                 }
             ).execute()

@@ -13,7 +13,7 @@ Database expectations
          ticket_number text primary key,
          assigned_to text,
          task_category text not null,
-         status text default 'Pending',
+         status text default 'Daily Task',
          field_response text,
          photo_url text,
          responded_at timestamptz,
@@ -36,7 +36,7 @@ Database expectations
 
    **Wrong reply within ~1 hour:** delete the Telegram message (Telethon listener
    when ``TG_API_ID``/``TG_API_HASH`` are set) or reply ``UNDO`` to that message;
-   the dashboard clears the response and sets the ticket back to ``Pending``.
+   the dashboard clears the response and sets the ticket back to ``Daily Task``.
 
    Only the admin/ops team marks tickets ``'Completed'`` (or sends them back to
    ``'Open'``) from the dashboard.
@@ -50,7 +50,7 @@ Database expectations
    ``TELEGRAM_ALLOWED_USERNAMES``).
 
    The bot does **not** post operational confirmations in field groups (no
-   assignment/field-reply ack spam). Use the Streamlit dashboard (Pending / On Hold /
+   assignment/field-reply ack spam). Use the Streamlit dashboard (Daily Task / On Hold /
    Open / Log, plus toasts on new attendance-log rows) instead.
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
@@ -115,6 +115,7 @@ from task_categories import (
 )
 from unattended import (
     CRON_SECRET,
+    STATUS_DAILY_TASK,
     nudge_message,
     run_unattended_close,
     run_unattended_nudges,
@@ -144,7 +145,7 @@ _WEBHOOK_SECRET_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 BOT_SESSIONS_TABLE = (os.getenv("BOT_SESSIONS_TABLE") or "bot_sessions").strip()
 TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets_active").strip()
 STATUS_ON_HOLD = "On Hold"
-_FIELD_REPLY_STATUSES = frozenset({"Pending", "Open", STATUS_ON_HOLD})
+_FIELD_REPLY_STATUSES = frozenset({STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD})
 ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
@@ -882,7 +883,7 @@ def _resolve_ticket_from_assignment_reply(
             row = _db_get_ticket(ticket_number)
         except Exception:
             continue
-        if row and str(row.get("status") or "").strip() == "Pending":
+        if row and str(row.get("status") or "").strip() == STATUS_DAILY_TASK:
             pending_on_parent.append(ticket_number)
     if len(pending_on_parent) == 1:
         return pending_on_parent[0]
@@ -937,7 +938,7 @@ def _resolve_ticket_by_unique_id(
                 row = _db_get_ticket(tid)
             except Exception:
                 continue
-            if row and str(row.get("status") or "").strip() == "Pending":
+            if row and str(row.get("status") or "").strip() == STATUS_DAILY_TASK:
                 pending.append(tid)
         if len(pending) == 1:
             return pending[0]
@@ -991,7 +992,7 @@ def _pending_tickets_for_assignee(replier_username: str | None) -> list[dict[str
         res = (
             supabase.table(TICKETS_TABLE)
             .select("ticket_number, assigned_to, last_assigned_at")
-            .eq("status", "Pending")
+            .eq("status", STATUS_DAILY_TASK)
             .execute()
         )
     except Exception:
@@ -1354,7 +1355,7 @@ def _db_undo_field_response_by_telegram_message(chat_id: int, message_id: int) -
 
     now_iso = _utc_now_iso()
     updates = {
-        "status": "Pending",
+        "status": STATUS_DAILY_TASK,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
@@ -1519,7 +1520,7 @@ def _db_insert_assignment(
         "ticket_number": ticket_number,
         "assigned_to": assigned_to,
         "task_category": task_category,
-        "status": "Pending",
+        "status": STATUS_DAILY_TASK,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
@@ -1587,7 +1588,7 @@ def _db_reassign_ticket(
     """Overwrite assigned_to / task_category and reset prior work for a re-assignment.
 
     Resets the task fully for the new assignee: ``status`` goes back to
-    ``"Pending"``, the previous ``field_response`` / ``photo_url`` are
+    ``STATUS_DAILY_TASK``, the previous ``field_response`` / ``photo_url`` are
     nullified, ``additional_info`` is overwritten with whatever came on the
     new assignment message (or NULLed out if none provided), and
     ``last_assigned_at`` is refreshed so the dashboard's "Days to Look
@@ -1597,7 +1598,7 @@ def _db_reassign_ticket(
     updates = {
         "assigned_to": assigned_to,
         "task_category": task_category,
-        "status": "Pending",
+        "status": STATUS_DAILY_TASK,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
@@ -2611,7 +2612,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         lines.append(
                             f"• Re-assigned ticket {ticket_number} ({task_category}) "
                             f"from {prev_assignee} to {assigned_to}{info_suffix}. "
-                            f"Status reset to Pending (was {prev_status}); "
+                            f"Status reset to Daily Task (was {prev_status}); "
                             "previous response and photo cleared."
                         )
                     else:
@@ -2662,7 +2663,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     lines.append(
                         f"• Re-assigned ticket {ticket_number} ({task_category}) "
                         f"from {prev_assignee} to {assigned_to}{info_suffix}. "
-                        f"Status reset to Pending (was {prev_status}); "
+                        f"Status reset to Daily Task (was {prev_status}); "
                         "previous response and photo cleared."
                     )
                 await _group_assignment_ack(update, context, ticket_number, assigned_to)

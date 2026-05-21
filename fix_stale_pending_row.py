@@ -1,4 +1,4 @@
-"""Clear stale field-response fields on Pending tickets (after reassign-in-Telegram bug).
+"""Clear stale field-response fields on Daily Task tickets (after reassign-in-Telegram bug).
 
 Usage:
   python fix_stale_pending_row.py 100616936 100627136 2020051772000001

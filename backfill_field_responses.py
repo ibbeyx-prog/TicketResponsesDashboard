@@ -95,11 +95,11 @@ def main() -> int:
     pending_with_log = [
         str(t["ticket_number"])
         for t in tickets
-        if str(t.get("status")) == "Pending" and str(t.get("ticket_number")) in log_by_ticket
+        if str(t.get("status")) == "Daily Task" and str(t.get("ticket_number")) in log_by_ticket
     ]
     if pending_with_log:
         print(
-            f"\nPost-deploy Pending + Response log (SQL would repair): "
+            f"\nPost-deploy Daily Task + Response log (SQL would repair): "
             f"{', '.join(pending_with_log)}"
         )
 

@@ -95,19 +95,20 @@ from task_categories import (
 )
 from unattended import (
     OPS_TZ,
+    STATUS_DAILY_TASK,
     STATUS_UNATTENDED,
     UNATTENDED_NUDGE_HOURS,
 )
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
-QUEUE_LABEL_DAILY_TASK = "Daily Task"
 
 # Active field queues: always visible even when outside the sidebar time range.
 _ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
-    {"Pending", "Open", STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION}
+    {STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION}
 )
 _LEGACY_STATUS_ALIASES: dict[str, str] = {
+    "pending": STATUS_DAILY_TASK,
     "no answer": STATUS_ON_HOLD,
     "unavailable": STATUS_ON_HOLD,
 }
@@ -1727,10 +1728,10 @@ def _apply_manual_field_response(
     if not row:
         raise ValueError(f"Ticket {ticket_number} not found.")
     status = str(row.get("status") or "").strip()
-    if status not in ("Pending", "Open", STATUS_ON_HOLD):
+    if status not in (STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD):
         raise ValueError(
             f"Ticket is {status}; manual response is only allowed while "
-            "Pending, On Hold, or Open."
+            "Daily Task, On Hold, or Open."
         )
 
     assignee_raw = str(row.get("assigned_to") or "").strip()
@@ -1750,7 +1751,7 @@ def _apply_manual_field_response(
         "updated_at": now_iso,
         "field_responded_by": field_responded_by,
     }
-    if status in ("Pending", STATUS_ON_HOLD):
+    if status in (STATUS_DAILY_TASK, STATUS_ON_HOLD):
         payload["status"] = "Open"
         payload["responded_at"] = now_iso
     elif not row.get("responded_at"):
@@ -1759,7 +1760,7 @@ def _apply_manual_field_response(
     _cc_execute_ticket_update(client, payload, ticket_number)
 
     op = _session_operator_id() or _session_dashboard_username() or "dashboard-admin"
-    action = "entry" if status in ("Pending", STATUS_ON_HOLD) else "update"
+    action = "entry" if status in (STATUS_DAILY_TASK, STATUS_ON_HOLD) else "update"
     log_note = text
     if field_responded_by:
         log_note = f"Responded by {field_responded_by}: {text}"
@@ -1819,12 +1820,12 @@ def _move_to_on_hold(ticket_number: str, *, operator_id: str) -> None:
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
     status = _normalize_ticket_status_value(row.get("status"))
-    allowed = ("Open", STATUS_UNDER_INVESTIGATION, "Pending", STATUS_ON_HOLD)
+    allowed = ("Open", STATUS_UNDER_INVESTIGATION, STATUS_DAILY_TASK, STATUS_ON_HOLD)
     if status not in allowed:
         raw = str(row.get("status") or "").strip()
         raise ValueError(
             f"Ticket **{ticket_number}** is **{raw or '—'}** — "
-            "**On Hold** from **Needs review**, **Investigation**, or **Pending** only."
+            "**On Hold** from **Needs review**, **Investigation**, or **Daily Task** only."
         )
     if not str(row.get("assigned_to") or "").strip():
         raise ValueError(
@@ -1835,7 +1836,7 @@ def _move_to_on_hold(ticket_number: str, *, operator_id: str) -> None:
     from_label = {
         "Open": "Needs review",
         STATUS_UNDER_INVESTIGATION: "Under Investigation",
-        "Pending": "Pending",
+        STATUS_DAILY_TASK: STATUS_DAILY_TASK,
         STATUS_ON_HOLD: STATUS_ON_HOLD,
     }.get(status, status)
     _cc_execute_ticket_update(
@@ -1874,7 +1875,7 @@ def _navigate_to_on_hold_queue() -> None:
 
 
 def _fetch_pending_with_response_mismatch() -> list[str]:
-    """Pending tickets that look stuck after a field reply (bot UPDATE likely failed).
+    """Daily Task tickets that look stuck after a field reply (bot UPDATE likely failed).
 
     Ignores **old** Response log rows and stale ``responded_at`` from before
     ``last_assigned_at`` — e.g. after **Reassign** for next-day work.
@@ -1888,7 +1889,7 @@ def _fetch_pending_with_response_mismatch() -> list[str]:
             .select(
                 "ticket_number, field_response, photo_url, responded_at, last_assigned_at"
             )
-            .eq("status", "Pending")
+            .eq("status", STATUS_DAILY_TASK)
             .limit(200)
             .execute()
         ).data or []
@@ -2033,7 +2034,7 @@ def _set_ticket_status(
     client = _get_supabase_client()
     now_iso = datetime.now(timezone.utc).isoformat()
     payload: dict[str, object] = {"status": new_status, "updated_at": now_iso}
-    if new_status == "Pending":
+    if new_status == STATUS_DAILY_TASK:
         payload["unattended_nudge_sent_at"] = None
     if new_status != STATUS_UNDER_INVESTIGATION:
         payload["follow_up_at"] = None
@@ -2441,10 +2442,10 @@ def _move_to_investigation(
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
     status = str(row.get("status") or "").strip()
-    if status not in ("Open", "Pending", STATUS_ON_HOLD):
+    if status not in ("Open", STATUS_DAILY_TASK, STATUS_ON_HOLD):
         raise ValueError(
             f"Ticket **{ticket_number}** is **{status}** — "
-            "move from **Needs review**, **Pending**, or **On Hold** only."
+            "move from **Needs review**, **Daily Task**, or **On Hold** only."
         )
     if follow_up and status != "Open":
         raise ValueError(
@@ -2467,8 +2468,8 @@ def _move_to_investigation(
         payload["follow_up_at"] = None
         payload["follow_up_note"] = None
         log_action = "MovedToInvestigation"
-        if status == "Pending":
-            log_note = "Moved to Under Investigation from Pending (no field assign)."
+        if status == STATUS_DAILY_TASK:
+            log_note = "Moved to Under Investigation from Daily Task (no field assign)."
         elif status == STATUS_ON_HOLD:
             log_note = "Moved to Under Investigation from On Hold."
         else:
@@ -2832,10 +2833,10 @@ def _render_manual_field_response_editor(
     key_prefix: str,
     edit_key_prefix: str,
     ticket_options: list[str],
-    allowed_statuses: tuple[str, ...] = ("Pending", "Open"),
+    allowed_statuses: tuple[str, ...] = (STATUS_DAILY_TASK, "Open"),
     save_label: str = "Save",
 ) -> None:
-    """Admin form: record or correct a field reply (Pending → Open, or update Open)."""
+    """Admin form: record or correct a field reply (Daily Task → Open, or update Open)."""
     keys = _manual_field_response_session_keys(edit_key_prefix)
     if not st.session_state.get(keys["show"]):
         return
@@ -2859,7 +2860,7 @@ def _render_manual_field_response_editor(
     _sync_manual_field_response_widgets(keys=keys, picked=picked, row=row)
 
     assignee = str(row.get("assigned_to") or "—")
-    if status == "Pending":
+    if status == STATUS_DAILY_TASK:
         st.caption(
             f"Record a field reply for **{picked}** (assignee {assignee}). "
             "Use when the bot did not capture the Telegram reply. Saves to **Open**."
@@ -2906,7 +2907,7 @@ def _render_manual_field_response_editor(
             st.error(str(exc))
             return
         st.session_state[keys["show"]] = False
-        if status == "Pending":
+        if status == STATUS_DAILY_TASK:
             st.success(f"{picked} → **Open** (field response saved).")
         else:
             st.success(f"{picked}: field response updated.")
@@ -3610,7 +3611,7 @@ def _perf_build_summary(
                 + int(h_counts.get(p, 0))
                 + int(u_counts.get(p, 0))
             ),
-            QUEUE_LABEL_DAILY_TASK: int(p_counts.get(p, 0)),
+            STATUS_DAILY_TASK: int(p_counts.get(p, 0)),
             "Needs review": int(o_counts.get(p, 0)),
             "Completed": int(c_counts.get(p, 0)),
             "Investigation": int(i_counts.get(p, 0)),
@@ -3868,7 +3869,7 @@ def _maybe_toast_new_telegram_activity() -> None:
     prev_dt = prev.to_pydatetime()
     if latest > prev_dt:
         st.toast(
-            "New activity — check **Pending**, **Open**, **Log**, or **Performance**.",
+            "New activity — check **Daily Task**, **Open**, **Log**, or **Performance**.",
             icon="📥",
         )
         st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
@@ -4020,7 +4021,7 @@ def _cc_insert_assignment(
         "ticket_number": ticket_number,
         "assigned_to": assigned_to,
         "task_category": task_category,
-        "status": "Pending",
+        "status": STATUS_DAILY_TASK,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
@@ -4061,12 +4062,12 @@ def _cc_insert_pending_unassigned(
     additional_info: str | None = None,
     operator_id: str,
 ) -> None:
-    """Queue a ticket in Pending with no engineer and no Telegram post."""
+    """Queue a ticket in Daily Task with no engineer and no Telegram post."""
     row: dict = {
         "ticket_number": ticket_number,
         "assigned_to": None,
         "task_category": task_category,
-        "status": "Pending",
+        "status": STATUS_DAILY_TASK,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
@@ -4091,7 +4092,7 @@ def _cc_insert_pending_unassigned(
         )
 
     note = _cc_assignment_log_note(additional_info, operator_id) or (
-        "Queued in Pending without engineer (no Telegram)."
+        "Queued in Daily Task without engineer (no Telegram)."
     )
     _cc_insert_attendance_log(
         client,
@@ -4109,7 +4110,7 @@ def _cc_queue_pending_unassigned(
     additional_info: str | None = None,
     operator_id: str,
 ) -> str:
-    """Create a Pending ticket with no assignee and no Telegram message."""
+    """Create a Daily Task ticket with no assignee and no Telegram message."""
     client = _get_supabase_client()
     existing = _cc_fetch_ticket_minimal(client, ticket_number)
     if existing is not None:
@@ -4125,8 +4126,8 @@ def _cc_queue_pending_unassigned(
         operator_id=operator_id,
     )
     return (
-        f"**{ticket_number}** added to **Pending** (no engineer, no Telegram). "
-        "Assign or move to **Under Investigation** from the Pending queue."
+        f"**{ticket_number}** added to **Daily Task** (no engineer, no Telegram). "
+        "Assign or move to **Under Investigation** from the Daily Task queue."
     )
 
 
@@ -4143,7 +4144,7 @@ def _cc_reassign_ticket(
     updates = {
         "assigned_to": assigned_to,
         "task_category": task_category,
-        "status": "Pending",
+        "status": STATUS_DAILY_TASK,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
@@ -4225,7 +4226,7 @@ def _cc_upsert_assignment(
     prev_assignee = existing.get("assigned_to") or "—"
     return (
         f"Re-assigned **{ticket_number}** from {prev_assignee} to {assigned_to}; "
-        "status reset to Pending."
+        "status reset to Daily Task."
     )
 
 
@@ -4301,7 +4302,7 @@ def _cc_dashboard_reassign_ticket(
     operator_id: str,
     from_status: str,
 ) -> dict:
-    """Reassign for next-day field work: reset to Pending and clear prior response."""
+    """Reassign for next-day field work: reset to Daily Task and clear prior response."""
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
@@ -4318,10 +4319,10 @@ def _cc_dashboard_reassign_ticket(
         additional_info=additional_info,
         operator_id=operator_id,
     )
-    if from_status in ("Open", "Pending", STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION):
+    if from_status in ("Open", STATUS_DAILY_TASK, STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION):
         if from_status == "Open":
             action_type = "ReassignedFromOpen"
-            note = "Moved back to Pending for next-day field work."
+            note = "Moved back to Daily Task for next-day field work."
         elif from_status == STATUS_UNDER_INVESTIGATION:
             action_type = "ReassignedFromInvestigation"
             note = "Reassigned from Under Investigation; prior response cleared."
@@ -4330,7 +4331,7 @@ def _cc_dashboard_reassign_ticket(
             note = "Reassigned from On Hold; prior response cleared for a fresh visit."
         else:
             action_type = "ReassignedFromPending"
-            note = "Reassigned while Pending; prior response cleared for a fresh visit."
+            note = "Reassigned while Daily Task; prior response cleared for a fresh visit."
         try:
             client.table(ATTENDANCE_LOGS_TABLE).insert(
                 {
@@ -4443,7 +4444,7 @@ def _render_assignment_editor(
     fe_missing: bool,
     ticket_options: list[str],
 ) -> None:
-    """Edit assignment fields + optional Telegram sync (Pending or Open)."""
+    """Edit assignment fields + optional Telegram sync (Daily Task or Open)."""
     if not ticket_options:
         return
 
@@ -4608,7 +4609,7 @@ def _render_reassign_editor(
     fe_missing: bool,
     ticket_options: list[str],
 ) -> None:
-    """Reassign a Pending or Open ticket: fresh Pending row, optional new Telegram post."""
+    """Reassign a Daily Task or Open ticket: fresh Daily Task row, optional new Telegram post."""
     if not ticket_options:
         return
 
@@ -4628,7 +4629,7 @@ def _render_reassign_editor(
         return
 
     st.caption(
-        f"Reassign **{picked}** for next-day field work → **Pending**. "
+        f"Reassign **{picked}** for next-day field work → **Daily Task**. "
         "Clears the previous field response and photo. "
         "Posts a **new** assignment line in Telegram (when enabled below)."
     )
@@ -4665,7 +4666,7 @@ def _render_reassign_editor(
             key=keys["sync_tg"],
         )
         submitted = st.form_submit_button(
-            "Reassign → Pending", type="primary", use_container_width=True
+            "Reassign → Daily Task", type="primary", use_container_width=True
         )
 
     if not submitted:
@@ -4742,7 +4743,7 @@ def _render_reassign_editor(
 
     st.session_state[keys["show"]] = False
     st.session_state[_CC_FLASH_KEY] = (
-        f"**{picked}** reassigned → **Pending** ({handle}, {cat})."
+        f"**{picked}** reassigned → **Daily Task** ({handle}, {cat})."
         + (f" {tg_note}" if tg_note else "")
     )
     _get_supabase_client.clear()
@@ -5267,18 +5268,18 @@ def _sidebar_field_assign() -> None:
 
     with st.container(border=True, key="cc_assign_block"):
         add_unassigned = st.checkbox(
-            "Add to Pending only (no engineer, no Telegram)",
+            "Add to Daily Task only (no engineer, no Telegram)",
             key=_CC_ADD_UNASSIGNED_KEY,
             help=(
-                "Creates the ticket in **Pending** without posting to the field group. "
-                "Assign or send to **Under Investigation** from the Pending queue."
+                "Creates the ticket in **Daily Task** without posting to the field group. "
+                "Assign or send to **Under Investigation** from the Daily Task queue."
             ),
         )
         if not add_unassigned:
             _render_cc_engineer_row(fe_names, missing=fe_missing)
         else:
             st.caption(
-                "No engineer yet — use **Pending** to assign or investigate later."
+                "No engineer yet — use **Daily Task** to assign or investigate later."
             )
         _render_ticket_number_picker()
         _render_cc_category_row(cat_names, missing=cat_missing)
@@ -5302,7 +5303,7 @@ def _sidebar_field_assign() -> None:
                     key=_CC_SESSION_GROUP_KEY,
                     placeholder="-100… or @group",
                 )
-        submit_label = "Add to Pending" if add_unassigned else "Assign"
+        submit_label = "Add to Daily Task" if add_unassigned else "Assign"
         submitted = st.button(
             submit_label,
             type="primary",
@@ -6240,7 +6241,7 @@ def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
             "other": empty,
         }
     status = _normalized_status_series(df)
-    pending = status.eq("Pending")
+    pending = status.eq(STATUS_DAILY_TASK)
     on_hold = status.eq(STATUS_ON_HOLD)
     open_m = status.eq("Open")
     investigation = status.eq(STATUS_UNDER_INVESTIGATION)
@@ -6301,15 +6302,17 @@ def _queue_segment_label(name: str, count: int) -> str:
 def _queue_segment_base(label: str | None) -> str:
     """Map queue label (with optional count) back to queue name."""
     if not label:
-        return "Pending"
+        return STATUS_DAILY_TASK
     if label == "Unavailable" or label.startswith("Unavailable ("):
         return STATUS_ON_HOLD
     if label == "No Answer" or label.startswith("No Answer ("):
         return STATUS_ON_HOLD
-    if label == QUEUE_LABEL_DAILY_TASK or label.startswith(f"{QUEUE_LABEL_DAILY_TASK} ("):
-        return "Pending"
+    if label == STATUS_DAILY_TASK or label.startswith(f"{STATUS_DAILY_TASK} ("):
+        return STATUS_DAILY_TASK
+    if label == "Pending" or label.startswith("Pending ("):
+        return STATUS_DAILY_TASK
     for base in (
-        "Pending",
+        STATUS_DAILY_TASK,
         "Open",
         STATUS_ON_HOLD,
         "Under Investigation",
@@ -6320,7 +6323,7 @@ def _queue_segment_base(label: str | None) -> str:
     ):
         if label == base or label.startswith(f"{base} ("):
             return base
-    return "Pending"
+    return STATUS_DAILY_TASK
 
 
 def _migrate_legacy_queue_nav() -> None:
@@ -6410,7 +6413,7 @@ def _render_assign_day_metrics(
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Assigned today", assigned_today)
     c2.metric("Responded today", responded_today)
-    c3.metric(f"{QUEUE_LABEL_DAILY_TASK} (in view)", pending_in_view)
+    c3.metric(f"{STATUS_DAILY_TASK} (in view)", pending_in_view)
     c4.metric("Unattended (in view)", unattended_in_view)
     nudge_h = int(UNATTENDED_NUDGE_HOURS) if UNATTENDED_NUDGE_HOURS == int(UNATTENDED_NUDGE_HOURS) else UNATTENDED_NUDGE_HOURS
     st.caption(
@@ -6442,9 +6445,9 @@ def _render_queue_summary_metrics(
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     _render_clickable_queue_metric(
         c1,
-        title=QUEUE_LABEL_DAILY_TASK,
+        title=STATUS_DAILY_TASK,
         value=total_pending,
-        queue_name="Pending",
+        queue_name=STATUS_DAILY_TASK,
         option_label=pending_label,
     )
     _render_clickable_queue_metric(
@@ -6524,7 +6527,7 @@ def _sync_dashboard_nav_state(
     if st.session_state.get(_DASH_MAIN_NAV_KEY) not in _DASH_MAIN_NAV_OPTIONS:
         st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
 
-    pending_label = _queue_segment_label(QUEUE_LABEL_DAILY_TASK, total_pending)
+    pending_label = _queue_segment_label(STATUS_DAILY_TASK, total_pending)
     on_hold_label = _queue_segment_label(STATUS_ON_HOLD, total_on_hold)
     open_label = _queue_segment_label("Open", total_open)
     investigation_label = _queue_segment_label(
@@ -7612,8 +7615,8 @@ def _render_dashboard(
         if mismatches:
             shown = ", ".join(mismatches[:5])
             st.error(
-                f"**{len(mismatches)}** ticket(s) look stuck in **Pending** after a field reply "
-                f"(e.g. {shown}). Use **Record response** on Pending, or check Railway bot logs "
+                f"**{len(mismatches)}** ticket(s) look stuck in **Daily Task** after a field reply "
+                f"(e.g. {shown}). Use **Record response** on Daily Task, or check Railway bot logs "
                 "and `supabase/migrations/20260516_tickets_active_anon_policies.sql`. "
                 "Tickets **reassigned** for another visit are not listed here."
             )
@@ -7706,8 +7709,8 @@ def _render_dashboard(
         _render_sales_cases_dashboard()
         return
 
-    if queue_view == "Pending":
-        st.markdown(f"##### {QUEUE_LABEL_DAILY_TASK} — waiting on field")
+    if queue_view == STATUS_DAILY_TASK:
+        st.markdown(f"##### {STATUS_DAILY_TASK} — waiting on field")
         st.caption(
             "Rows show **assignment** details (`additional_info` = site notes from the Telegram "
             "assignment lines). A **field response** is a separate swipe-reply (or "
@@ -7771,7 +7774,7 @@ def _render_dashboard(
                         shown = ", ".join(mismatch[:8])
                         extra = f" (+{len(mismatch) - 8} more)" if len(mismatch) > 8 else ""
                         st.warning(
-                            "Pending tickets with a **current** field reply not reflected in "
+                            "Daily Task tickets with a **current** field reply not reflected in "
                             f"status (bot may have failed): {shown}{extra}. Use **Record response**, "
                             "**Reassign** for a fresh visit, or check **Open**."
                         )
@@ -7782,7 +7785,7 @@ def _render_dashboard(
                     cat_names, _cat_missing = _try_fetch_task_categories()
                     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
                     _render_reassign_editor(
-                        from_status="Pending",
+                        from_status=STATUS_DAILY_TASK,
                         key_prefix="assigned",
                         edit_key_prefix="assigned",
                         cat_names=cat_names,
@@ -7797,7 +7800,7 @@ def _render_dashboard(
                     cat_names, _cat_missing = _try_fetch_task_categories()
                     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
                     _render_assignment_editor(
-                        required_status="Pending",
+                        required_status=STATUS_DAILY_TASK,
                         key_prefix="assigned",
                         edit_key_prefix="assigned",
                         cat_names=cat_names,
@@ -7813,7 +7816,7 @@ def _render_dashboard(
                         key_prefix="assigned",
                         edit_key_prefix="assigned",
                         ticket_options=_ticket_options_for_admin(pend),
-                        allowed_statuses=("Pending",),
+                        allowed_statuses=(STATUS_DAILY_TASK,),
                         save_label="Save → Open",
                     )
 
@@ -7846,7 +7849,7 @@ def _render_dashboard(
         st.markdown("##### On Hold — admin chase queue")
         st.caption(
             "Tickets land here only when an admin uses **Action → On Hold** "
-            "(from **Pending**, **Needs review**, or **Investigation**). "
+            "(from **Daily Task**, **Needs review**, or **Investigation**). "
             "**Record response** when the engineer replies → **Needs review**. "
             "**Reassign** clears the visit for a fresh assignment."
         )
@@ -7948,9 +7951,9 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     unat,
                     key_prefix="unattended",
-                    caption="Reopen to **Pending** to reassign or chase again.",
+                    caption="Reopen to **Daily Task** to reassign or chase again.",
                     status_actions=(
-                        ("Reopen to Pending", "Pending", "ReopenedFromUnattended"),
+                        ("Reopen to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
                     ),
                     allow_delete=True,
                 )
@@ -7979,7 +7982,7 @@ def _render_dashboard(
                     key_prefix="open",
                     caption=(
                         "**Action** menu: **Mark Completed** or **Under Investigation** (no follow-up marker). "
-                        "**Follow-up** popover = individual tracked case. **Reassign** → **Pending**."
+                        "**Follow-up** popover = individual tracked case. **Reassign** → **Daily Task**."
                     ),
                     status_actions=(
                         ("Mark Completed", "Completed", "Completed"),
@@ -8293,7 +8296,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         m0, m1, m2, m3, m4, m5, m6 = st.columns(7)
         m0.metric("In view", n_in_view if focus == "All" else n_filtered)
-        m1.metric(QUEUE_LABEL_DAILY_TASK, len(pending_f))
+        m1.metric(STATUS_DAILY_TASK, len(pending_f))
         m2.metric("Needs review", len(open_f))
         m3.metric("On Hold", len(on_hold_f))
         m4.metric("Completed", len(completed_f))

@@ -9,7 +9,7 @@ Reads ``.env`` (same as bot + dashboard) and prints:
 - Which ``TICKETS_TABLE`` is configured
 - Recent tickets by status
 - Recent ``Response`` rows in attendance logs
-- Tickets still ``Pending`` but with a newer Response log (bot/DB mismatch)
+- Tickets still ``Daily Task`` but with a newer Response log (bot/DB mismatch)
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ def main() -> int:
     bridge = (os.getenv("TELEGRAM_GROUP_REPLY_BRIDGE") or "").strip()
     print(f"TELEGRAM_GROUP_REPLY_BRIDGE={bridge or '(not set)'}")
     print(
-        "\nReminder: after a field reply the ticket moves Pending -> Open. "
-        "On the dashboard use the **Open** queue, not Pending.\n"
+        "\nReminder: after a field reply the ticket moves Daily Task -> Open. "
+        "On the dashboard use the **Open** queue, not Daily Task.\n"
     )
 
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -108,22 +108,23 @@ def main() -> int:
     mismatches = []
     for row in logs:
         tid = str(row.get("ticket_number") or "")
-        if tid and ticket_status.get(tid) == "Pending":
+        st = ticket_status.get(tid)
+        if tid and st in ("Daily Task", "Pending"):
             mismatches.append(tid)
 
     if mismatches:
         print(
-            "\n*** MISMATCH: Response logged but ticket still Pending "
+            "\n*** MISMATCH: Response logged but ticket still Daily Task "
             f"(bot update may have failed): {', '.join(dict.fromkeys(mismatches))}"
         )
         print("    Check Railway bot logs for 'ticket field completion update failed'.")
         print("    Ensure RLS allows UPDATE on tickets for the bot's Supabase key.")
     else:
-        print("\nNo obvious Pending+Response mismatch in recent data.")
+        print("\nNo obvious Daily Task+Response mismatch in recent data.")
 
     open_count = sum(1 for r in tickets if str(r.get("status")) == "Open")
     if open_count:
-        print(f"\n{open_count} recent ticket(s) are Open — dashboard should show them under **Open**, not Pending.")
+        print(f"\n{open_count} recent ticket(s) are Open — dashboard should show them under **Open**, not Daily Task.")
 
     return 0
 
