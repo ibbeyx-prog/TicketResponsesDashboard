@@ -1799,7 +1799,7 @@ def _response_metadata_for_current_assignment(row: dict) -> bool:
 
 
 def _move_to_no_answer(ticket_number: str, *, operator_id: str) -> None:
-    """Set status **No Answer** — assigned, field reply cleared, chase engineer."""
+    """Admin-only: set status **No Answer** and clear field reply for chase."""
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
@@ -2668,6 +2668,9 @@ def _apply_admin_ticket_action(
     _, new_status, log_action = matched
     try:
         if log_action == "NoAnswer":
+            if not _is_dashboard_admin():
+                st.error("Only dashboard admins can move tickets to **No Answer**.")
+                return False
             op = _session_operator_id()
             if not op:
                 st.error("Sign in again — operator session is missing.")
@@ -2946,6 +2949,8 @@ def _render_admin_ticket_toolbar(
     if caption:
         st.caption(caption)
 
+    if not _is_dashboard_admin():
+        status_actions = tuple(a for a in status_actions if a[2] != "NoAnswer")
     status_labels = [a[0] for a in status_actions]
     edit_keys = _assignment_edit_session_keys(key_prefix)
     mfr_keys = _manual_field_response_session_keys(key_prefix)
@@ -5950,11 +5955,11 @@ def _queue_segment_base(label: str | None) -> str:
         return STATUS_NO_ANSWER
     for base in (
         "Pending",
+        "Open",
         STATUS_NO_ANSWER,
         "Under Investigation",
-        "Open",
-        "Unattended",
         "Completed",
+        "Unattended",
         "Log",
         "Performance",
     ):
@@ -6081,17 +6086,17 @@ def _render_queue_summary_metrics(
     )
     _render_clickable_queue_metric(
         c2,
-        title="No Answer",
-        value=total_no_answer,
-        queue_name=STATUS_NO_ANSWER,
-        option_label=no_answer_label,
-    )
-    _render_clickable_queue_metric(
-        c3,
         title="Needs review",
         value=total_open,
         queue_name="Open",
         option_label=open_label,
+    )
+    _render_clickable_queue_metric(
+        c3,
+        title="No Answer",
+        value=total_no_answer,
+        queue_name=STATUS_NO_ANSWER,
+        option_label=no_answer_label,
     )
     _render_clickable_queue_metric(
         c4,
@@ -6102,17 +6107,17 @@ def _render_queue_summary_metrics(
     )
     _render_clickable_queue_metric(
         c5,
-        title="Unattended",
-        value=total_unattended,
-        queue_name="Unattended",
-        option_label=unattended_label,
-    )
-    _render_clickable_queue_metric(
-        c6,
         title="Completed",
         value=total_completed,
         queue_name="Completed",
         option_label=completed_label,
+    )
+    _render_clickable_queue_metric(
+        c6,
+        title="Unattended",
+        value=total_unattended,
+        queue_name="Unattended",
+        option_label=unattended_label,
     )
 
 
@@ -6153,11 +6158,11 @@ def _sync_dashboard_nav_state(
     completed_label = _queue_segment_label("Completed", total_completed)
     ticket_options = (
         pending_label,
-        no_answer_label,
         open_label,
+        no_answer_label,
         investigation_label,
-        unattended_label,
         completed_label,
+        unattended_label,
     )
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
@@ -6171,11 +6176,11 @@ def _sync_dashboard_nav_state(
     st.session_state["_dash_prev_open_count"] = total_open
     return (
         pending_label,
-        no_answer_label,
         open_label,
+        no_answer_label,
         investigation_label,
-        unattended_label,
         completed_label,
+        unattended_label,
     )
 
 
@@ -7276,11 +7281,11 @@ def _render_dashboard(
     _apply_pending_dashboard_nav()
     (
         pending_label,
-        no_answer_label,
         open_label,
+        no_answer_label,
         investigation_label,
-        unattended_label,
         completed_label,
+        unattended_label,
     ) = _sync_dashboard_nav_state(
         total_pending=total_pending,
         total_no_answer=total_no_answer,
@@ -7302,11 +7307,11 @@ def _render_dashboard(
             total_unattended=total_unattended,
             total_completed=total_completed,
             pending_label=pending_label,
-            no_answer_label=no_answer_label,
             open_label=open_label,
+            no_answer_label=no_answer_label,
             investigation_label=investigation_label,
-            unattended_label=unattended_label,
             completed_label=completed_label,
+            unattended_label=unattended_label,
         )
     queue_view = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
 
@@ -7459,9 +7464,11 @@ def _render_dashboard(
                             )
 
     elif queue_view == STATUS_NO_ANSWER:
-        st.markdown("##### No Answer — assigned, no field reply")
+        st.markdown("##### No Answer — admin chase queue")
         st.caption(
-            "Chase the engineer on site. **Record response** when they reply → **Needs review**. "
+            "Tickets land here only when an admin uses **Action → No Answer** "
+            "(from **Pending**, **Needs review**, or **Investigation**). "
+            "**Record response** when the engineer replies → **Needs review**. "
             "**Reassign** clears the visit for a fresh assignment."
         )
         if df.empty:
