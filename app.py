@@ -101,6 +101,15 @@ from unattended import (
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
 
+# Active field queues: always visible even when outside the sidebar time range.
+_ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
+    {"Pending", "Open", STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION}
+)
+_LEGACY_STATUS_ALIASES: dict[str, str] = {
+    "no answer": STATUS_ON_HOLD,
+    "unavailable": STATUS_ON_HOLD,
+}
+
 # --- Sales cases (separate track from field tickets; admin-first) ---
 SALES_REGION_CODES: tuple[str, ...] = (
     "SOC",
@@ -1803,11 +1812,12 @@ def _move_to_on_hold(ticket_number: str, *, operator_id: str) -> None:
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
-    status = str(row.get("status") or "").strip()
+    status = _normalize_ticket_status_value(row.get("status"))
     allowed = ("Open", STATUS_UNDER_INVESTIGATION, "Pending", STATUS_ON_HOLD)
     if status not in allowed:
+        raw = str(row.get("status") or "").strip()
         raise ValueError(
-            f"Ticket **{ticket_number}** is **{status}** — "
+            f"Ticket **{ticket_number}** is **{raw or '—'}** — "
             "**On Hold** from **Needs review**, **Investigation**, or **Pending** only."
         )
     if not str(row.get("assigned_to") or "").strip():
@@ -5908,6 +5918,83 @@ def _dataframe_column_config(df: pd.DataFrame) -> dict:
     return cfg
 
 
+def _normalize_ticket_status_value(raw: object) -> str:
+    """Map legacy DB labels to current queue statuses for counts and filters."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    return _LEGACY_STATUS_ALIASES.get(s.casefold(), s)
+
+
+def _normalized_status_series(df: pd.DataFrame) -> pd.Series:
+    if df.empty or "status" not in df.columns:
+        return pd.Series(dtype=str)
+    return df["status"].map(_normalize_ticket_status_value)
+
+
+def _dashboard_tickets_in_view(
+    df_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> tuple[pd.DataFrame, int]:
+    """Tickets in the sidebar range plus active queue rows (never hide open work)."""
+    if df_all.empty:
+        return df_all, 0
+    in_range = _apply_dash_time_range(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if "status" not in df_all.columns:
+        return in_range, len(in_range)
+    norm = _normalized_status_series(df_all)
+    active = df_all[norm.isin(_ACTIVE_QUEUE_STATUSES)].copy()
+    if in_range.empty:
+        return active, 0
+    if active.empty:
+        return in_range, len(in_range)
+    key = "ticket_number" if "ticket_number" in df_all.columns else None
+    if key:
+        merged = pd.concat([in_range, active], ignore_index=True).drop_duplicates(
+            subset=[key], keep="first"
+        )
+    else:
+        merged = pd.concat([in_range, active], ignore_index=True).drop_duplicates()
+    return merged, len(in_range)
+
+
+def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Boolean masks per queue tab (mutually exclusive on normalized status)."""
+    empty = pd.Series(dtype=bool)
+    if df.empty:
+        return {
+            "pending": empty,
+            "on_hold": empty,
+            "open": empty,
+            "investigation": empty,
+            "unattended": empty,
+            "completed": empty,
+            "other": empty,
+        }
+    status = _normalized_status_series(df)
+    pending = status.eq("Pending")
+    on_hold = status.eq(STATUS_ON_HOLD)
+    open_m = status.eq("Open")
+    investigation = status.eq(STATUS_UNDER_INVESTIGATION)
+    unattended = status.eq(STATUS_UNATTENDED)
+    completed = status.eq("Completed")
+    known = pending | on_hold | open_m | investigation | unattended | completed
+    other = ~known & status.ne("")
+    return {
+        "pending": pending,
+        "on_hold": on_hold,
+        "open": open_m,
+        "investigation": investigation,
+        "unattended": unattended,
+        "completed": completed,
+        "other": other,
+    }
+
+
 def _apply_dash_time_range(
     df: pd.DataFrame,
     *,
@@ -6028,32 +6115,37 @@ def _render_clickable_queue_metric(
             st.rerun()
 
 
-def _render_assign_day_metrics(df_all: pd.DataFrame) -> None:
+def _render_assign_day_metrics(
+    df_all: pd.DataFrame,
+    *,
+    df_in_view: pd.DataFrame | None = None,
+) -> None:
     """Today's assignment funnel (ops timezone, UTC+5)."""
     if df_all.empty:
         return
+    view = df_in_view if df_in_view is not None else df_all
     today = datetime.now(OPS_TZ).date()
     start = _local_date_start(today)
     end = _local_date_end(today)
     assigned_today = 0
     responded_today = 0
-    unattended_today = 0
-    pending_now = 0
+    unattended_in_view = 0
+    pending_in_view = 0
     if "last_assigned_at" in df_all.columns:
         la = _parse_ts(df_all["last_assigned_at"])
         assigned_today = int(((la >= start) & (la <= end)).sum())
     if "responded_at" in df_all.columns:
         rp = _parse_ts(df_all["responded_at"])
         responded_today = int(((rp >= start) & (rp <= end)).sum())
-    if "status" in df_all.columns:
-        st_series = df_all["status"].astype(str).str.strip()
-        unattended_today = int(st_series.eq(STATUS_UNATTENDED).sum())
-        pending_now = int(st_series.eq("Pending").sum())
+    if not view.empty and "status" in view.columns:
+        masks = _ticket_queue_count_masks(view)
+        pending_in_view = int(masks["pending"].sum())
+        unattended_in_view = int(masks["unattended"].sum())
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Assigned today", assigned_today)
     c2.metric("Responded today", responded_today)
-    c3.metric("Pending now", pending_now)
-    c4.metric("Unattended (total)", unattended_today)
+    c3.metric("Pending (in view)", pending_in_view)
+    c4.metric("Unattended (in view)", unattended_in_view)
     nudge_h = int(UNATTENDED_NUDGE_HOURS) if UNATTENDED_NUDGE_HOURS == int(UNATTENDED_NUDGE_HOURS) else UNATTENDED_NUDGE_HOURS
     st.caption(
         f"Assign day ends {os.getenv('ASSIGN_DAY_CUTOFF_HOUR', '23')}:{os.getenv('ASSIGN_DAY_CUTOFF_MINUTE', '59').zfill(2)} "
@@ -6076,6 +6168,10 @@ def _render_queue_summary_metrics(
     investigation_label: str,
     unattended_label: str,
     completed_label: str,
+    *,
+    total_in_view: int = 0,
+    total_in_tabs: int = 0,
+    total_other: int = 0,
 ) -> None:
     """Counts — click a queue to switch view."""
     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -6121,6 +6217,19 @@ def _render_queue_summary_metrics(
         queue_name="Unattended",
         option_label=unattended_label,
     )
+    if total_in_view > 0:
+        st.caption(
+            f"**{total_in_tabs}** ticket(s) across queue tabs "
+            f"(**{total_in_view}** in view"
+            + (
+                f"; **{total_other}** with an unrecognized status — widen **Time range** "
+                "or fix status in Supabase"
+                if total_other
+                else ""
+            )
+            + "). Active **Pending / Needs review / On Hold / Investigation** rows stay "
+            "visible even outside the date range."
+        )
 
 
 _TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
@@ -7240,16 +7349,22 @@ def _render_dashboard(
         return
     else:
         range_start, range_end = _get_dash_range()
-        df = _apply_dash_time_range(
+        df, in_range_count = _dashboard_tickets_in_view(
             df_all, range_start=range_start, range_end=range_end
         )
-        if len(df_all) > len(df):
-            range_hint = _format_dash_range_caption() or f"the last {lookback_days} day(s)"
-            st.caption(
-                f"Showing **{len(df)}** of **{len(df_all)}** tickets in {range_hint}. "
-                "Widen **Time range** in the sidebar if a Telegram assignment is missing, "
-                "or look up the ticket # in the sidebar."
-            )
+        range_hint = _format_dash_range_caption() or f"the last {lookback_days} day(s)"
+        active_extra = max(0, len(df) - in_range_count)
+        if len(df_all) > in_range_count or active_extra:
+            parts = [
+                f"**{in_range_count}** ticket(s) with activity in {range_hint}",
+            ]
+            if active_extra:
+                parts.append(
+                    f"**{active_extra}** active queue ticket(s) kept visible outside that range"
+                )
+            if len(df_all) > len(df):
+                parts.append(f"**{len(df_all) - len(df)}** older row(s) hidden — widen **Time range**")
+            st.caption(". ".join(parts) + ".")
 
     if not df_all.empty and "status" in df_all.columns:
         mismatches = _fetch_pending_with_response_mismatch()
@@ -7262,24 +7377,42 @@ def _render_dashboard(
                 "Tickets **reassigned** for another visit are not listed here."
             )
 
-    status = df["status"].astype(str).str.strip() if not df.empty and "status" in df.columns else pd.Series(dtype=str)
-    pending_mask = status.eq("Pending") if not df.empty else pd.Series(dtype=bool)
-    on_hold_mask = (
-        status.eq(STATUS_ON_HOLD) if not df.empty else pd.Series(dtype=bool)
-    )
-    open_mask = status.eq("Open") if not df.empty else pd.Series(dtype=bool)
-    investigation_mask = (
-        status.eq(STATUS_UNDER_INVESTIGATION) if not df.empty else pd.Series(dtype=bool)
-    )
-    unattended_mask = status.eq(STATUS_UNATTENDED) if not df.empty else pd.Series(dtype=bool)
-    completed_mask = status.eq("Completed") if not df.empty else pd.Series(dtype=bool)
+    masks = _ticket_queue_count_masks(df)
+    pending_mask = masks["pending"]
+    on_hold_mask = masks["on_hold"]
+    open_mask = masks["open"]
+    investigation_mask = masks["investigation"]
+    unattended_mask = masks["unattended"]
+    completed_mask = masks["completed"]
+    other_mask = masks["other"]
 
-    total_pending = int(pending_mask.sum()) if not df.empty else 0
-    total_on_hold = int(on_hold_mask.sum()) if not df.empty else 0
-    total_open = int(open_mask.sum()) if not df.empty else 0
-    total_investigation = int(investigation_mask.sum()) if not df.empty else 0
-    total_unattended = int(unattended_mask.sum()) if not df.empty else 0
-    total_completed = int(completed_mask.sum()) if not df.empty else 0
+    total_pending = int(pending_mask.sum())
+    total_on_hold = int(on_hold_mask.sum())
+    total_open = int(open_mask.sum())
+    total_investigation = int(investigation_mask.sum())
+    total_unattended = int(unattended_mask.sum())
+    total_completed = int(completed_mask.sum())
+    total_other = int(other_mask.sum())
+    total_in_tabs = (
+        total_pending
+        + total_on_hold
+        + total_open
+        + total_investigation
+        + total_unattended
+        + total_completed
+    )
+    total_in_view = len(df) if not df.empty else 0
+    if total_other:
+        raw_other = (
+            df.loc[other_mask, "status"].astype(str).str.strip().value_counts().head(5)
+            if not df.empty and "status" in df.columns
+            else pd.Series(dtype=int)
+        )
+        detail = ", ".join(f"**{k}** ({v})" for k, v in raw_other.items())
+        st.warning(
+            f"**{total_other}** ticket(s) use a status not shown in the queue tabs: {detail}. "
+            "Run migration `20260625_rename_no_answer_to_on_hold.sql` or move them manually."
+        )
     _apply_pending_dashboard_nav()
     (
         pending_label,
@@ -7300,7 +7433,7 @@ def _render_dashboard(
     _render_dashboard_header(refreshed_at=refreshed_at)
     main_nav = _render_main_navigation()
     if main_nav == "Tickets":
-        _render_assign_day_metrics(df_all if not df_all.empty else df)
+        _render_assign_day_metrics(df_all, df_in_view=df)
         _render_queue_summary_metrics(
             total_pending=total_pending,
             total_on_hold=total_on_hold,
@@ -7314,6 +7447,9 @@ def _render_dashboard(
             investigation_label=investigation_label,
             completed_label=completed_label,
             unattended_label=unattended_label,
+            total_in_view=total_in_view,
+            total_in_tabs=total_in_tabs,
+            total_other=total_other,
         )
     queue_view = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
 
