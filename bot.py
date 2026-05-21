@@ -50,7 +50,7 @@ Database expectations
    ``TELEGRAM_ALLOWED_USERNAMES``).
 
    The bot does **not** post operational confirmations in field groups (no
-   assignment/field-reply ack spam). Use the Streamlit dashboard (Pending / No Answer /
+   assignment/field-reply ack spam). Use the Streamlit dashboard (Pending / On Hold /
    Open / Log, plus toasts on new attendance-log rows) instead.
 
 2a) ``ticket_attendance_logs`` — append-only history. Every assignment writes
@@ -143,8 +143,8 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 _WEBHOOK_SECRET_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 BOT_SESSIONS_TABLE = (os.getenv("BOT_SESSIONS_TABLE") or "bot_sessions").strip()
 TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets_active").strip()
-STATUS_NO_ANSWER = "No Answer"
-_FIELD_REPLY_STATUSES = frozenset({"Pending", "Open", STATUS_NO_ANSWER})
+STATUS_ON_HOLD = "On Hold"
+_FIELD_REPLY_STATUSES = frozenset({"Pending", "Open", STATUS_ON_HOLD})
 ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
@@ -833,7 +833,7 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
 
 
 def _ticket_field_reply_eligible(ticket_number: str) -> bool:
-    """Pending / No Answer / Open tickets can receive a field completion."""
+    """Pending / On Hold / Open tickets can receive a field completion."""
     try:
         row = _db_get_ticket(ticket_number)
     except Exception:
