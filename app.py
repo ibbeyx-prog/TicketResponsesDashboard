@@ -3484,6 +3484,24 @@ def _perf_filter_by_person(df: pd.DataFrame, person: str) -> pd.DataFrame:
     return view[view["staff"] == person]
 
 
+def _perf_sales_account_names(df: pd.DataFrame) -> list[str]:
+    if df.empty or "account_name" not in df.columns:
+        return []
+    names = df["account_name"].fillna("").astype(str).str.strip()
+    return sorted({n for n in names.tolist() if n}, key=str.lower)
+
+
+def _perf_filter_sales_by_account(df: pd.DataFrame, account: str) -> pd.DataFrame:
+    if df.empty or account in ("", "All"):
+        return df
+    if "account_name" not in df.columns:
+        return df
+    target = str(account).strip()
+    return df[
+        df["account_name"].fillna("").astype(str).str.strip() == target
+    ].copy()
+
+
 def _perf_enrich_tickets(df: pd.DataFrame) -> pd.DataFrame:
     """Add ``staff``, ``category``, and local time from ``_ts``."""
     view = df.copy()
@@ -8304,13 +8322,31 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     sc_people = ["All"] + (
         sc_summary["Person"].tolist() if not sc_summary.empty else []
     )
-    sc_focus = st.selectbox(
-        "Focus sales owner",
-        options=sc_people,
-        key="perf_sc_focus_person",
-        help="Filter sales charts to one owner, or **All**.",
-    )
+    sc_accounts = ["All"] + _perf_sales_account_names(sc_df)
+    f_owner, f_resort = st.columns(2)
+    with f_owner:
+        sc_focus = st.selectbox(
+            "Focus sales owner",
+            options=sc_people,
+            key="perf_sc_focus_person",
+            help="Filter to one **sales_owner**, or **All**.",
+        )
+    with f_resort:
+        sc_account = st.selectbox(
+            "Focus resort / company",
+            options=sc_accounts,
+            key="perf_sc_focus_account",
+            help="Filter to one **Resort name / Company name** (`account_name`), or **All**.",
+        )
     sc_f = _perf_filter_by_person(sc_df, sc_focus)
+    sc_f = _perf_filter_sales_by_account(sc_f, sc_account)
+    if sc_focus != "All" or sc_account != "All":
+        bits = []
+        if sc_focus != "All":
+            bits.append(f"sales owner **{sc_focus}**")
+        if sc_account != "All":
+            bits.append(f"resort/company **{sc_account}**")
+        st.caption(f"Filtered by {' and '.join(bits)} · **{len(sc_f)}** case(s).")
     sc_view = _perf_enrich_sales_cases(sc_f)
 
     n_sales = len(_sc_filter_sales_df(sc_f, (SC_STATUS_SALES_TICKET,)))
@@ -8329,15 +8365,12 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         ["Overview", f"Cases ({len(sc_f)})"],
     )
     with tab_sc_over:
-        if sc_focus != "All":
-            sub_sc = (
-                sc_summary[sc_summary["Person"] == sc_focus]
-                if not sc_summary.empty
-                else sc_summary
-            )
-            _render_perf_individual_summary_table(sub_sc)
-        else:
-            _render_perf_individual_summary_table(sc_summary)
+        summary_view = sc_summary
+        if sc_focus != "All" and not sc_summary.empty:
+            summary_view = sc_summary[sc_summary["Person"] == sc_focus]
+        if sc_account != "All" and not sc_f.empty:
+            summary_view = _perf_build_sales_summary(sc_f)
+        _render_perf_individual_summary_table(summary_view)
         if not sc_view.empty:
             by_status = (
                 sc_view.groupby("status_eff", as_index=False)
