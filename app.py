@@ -1532,7 +1532,6 @@ def _check_password() -> None:
         _render_login_supabase_status()
 
         if per_user:
-            st.caption("Sign in with your **dashboard username** (e.g. `admin` or `ibeyx`).")
             c1, c2 = st.columns(2)
             with c1:
                 if st.button(
@@ -1576,16 +1575,6 @@ def _render_login_supabase_status() -> None:
         status = test_supabase_connection(SUPABASE_URL, SUPABASE_KEY)
         st.session_state[cache_key] = status
     if status.get("ok"):
-        src = _SUPABASE_KEY_SOURCE or "SUPABASE_KEY"
-        users = status.get("users_configured")
-        st.caption(
-            f"Database reachable ({src}). "
-            + (
-                "Per-user login is enabled."
-                if users
-                else "No dashboard users yet — use legacy password or run migrations."
-            )
-        )
         return
     err = status.get("error")
     detail = str(status.get("detail") or "")
