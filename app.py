@@ -7037,7 +7037,7 @@ def _render_sales_case_work_panel(
     if cur_scat and cur_scat not in edit_cat_opts:
         edit_cat_opts = [cur_scat, *edit_cat_opts]
     if show_edit:
-        st.markdown("##### Edit case details (admin)")
+        st.markdown("##### Edit case details")
         st.caption(
             "Update **region**, **category**, or **admin notes** without changing status."
         )
