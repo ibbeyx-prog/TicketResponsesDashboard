@@ -3610,7 +3610,7 @@ def _perf_build_summary(
                 + int(h_counts.get(p, 0))
                 + int(u_counts.get(p, 0))
             ),
-            "Pending": int(p_counts.get(p, 0)),
+            QUEUE_LABEL_DAILY_TASK: int(p_counts.get(p, 0)),
             "Needs review": int(o_counts.get(p, 0)),
             "Completed": int(c_counts.get(p, 0)),
             "Investigation": int(i_counts.get(p, 0)),
