@@ -1,5 +1,5 @@
 """
-Field Ticket Ops — Streamlit dashboard for field ticket operations (Supabase).
+Field Ticket Operations — Streamlit dashboard for field ticket operations (Supabase).
 
 Run: ``streamlit run app.py``
 
@@ -781,6 +781,65 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_OPERATOR_ID_KEY] = operator_id
 
 
+def _react_handoff_signing_key() -> bytes:
+    pepper = (
+        _read_setting("DASHBOARD_SESSION_SECRET")
+        or _read_setting("SUPABASE_KEY")
+        or "ticket-dashboard-remember"
+    )
+    return hashlib.sha256(pepper.encode()).digest()
+
+
+def _parse_react_auth_handoff(token: str) -> dict | None:
+    """Verify HMAC token from ``login-web`` (``body.signature``)."""
+    try:
+        body, sig = str(token).rsplit(".", 1)
+        if not body or not sig:
+            return None
+        expected = hmac.new(
+            _react_handoff_signing_key(), body.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        pad = "=" * (-len(body) % 4)
+        data = json.loads(base64.urlsafe_b64decode(body + pad))
+        age = datetime.now(timezone.utc).timestamp() - float(data.get("ts", 0))
+        if age > 120 or age < -30:
+            return None
+        uname = str(data.get("u", "")).strip()
+        op = str(data.get("op", "")).strip()
+        if not uname or not op:
+            return None
+        return {"u": uname, "op": op}
+    except Exception:
+        return None
+
+
+def _try_react_auth_handoff() -> bool:
+    """Accept a short-lived token from the React login app (``login-web``)."""
+    token = st.query_params.get("_auth")
+    if not token:
+        return False
+    data = _parse_react_auth_handoff(str(token))
+    if not data:
+        st.error(
+            "Could not complete sign-in from the login page. "
+            "Try again at the React login URL, or use **?native=1** on this URL "
+            "for the built-in form."
+        )
+        return False
+    uname = data["u"]
+    op = data["op"]
+    fp = _auth_session_fingerprint(username=uname, operator_id=op)
+    _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
+    try:
+        del st.query_params["_auth"]
+    except Exception:
+        pass
+    st.rerun()
+    return True
+
+
 def _normalize_dashboard_username(raw: str) -> str:
     s = "".join(
         ch
@@ -1156,17 +1215,18 @@ def _render_login_page_styles() -> None:
     st.markdown(
         """
         <style>
-        /* Login page: same deep dark-black as dashboard */
+        /* Login — BON brand (matches login-web React shell) */
         .stApp,
         [data-testid="stAppViewContainer"],
         [data-testid="stHeader"],
         [data-testid="stMain"],
         [data-testid="stAppViewContainer"] section.main {
-            background-color: var(--bon-bg) !important;
+            background: #000 !important;
         }
         [data-testid="stHeader"] {
             border-bottom: none !important;
             box-shadow: none !important;
+            background: transparent !important;
         }
         [data-testid="stAppViewContainer"] {
             min-height: 100vh;
@@ -1183,12 +1243,28 @@ def _render_login_page_styles() -> None:
             display: grid !important;
             place-items: center !important;
             padding: 0 !important;
+            position: relative;
+            overflow: hidden;
+        }
+        [data-testid="stAppViewContainer"] section.main::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            pointer-events: none;
+            background:
+                radial-gradient(ellipse 80% 50% at 20% 40%, rgba(241, 90, 41, 0.18), transparent 55%),
+                radial-gradient(ellipse 70% 45% at 80% 60%, rgba(0, 179, 198, 0.14), transparent 50%),
+                radial-gradient(ellipse 50% 40% at 50% 100%, rgba(247, 147, 30, 0.1), transparent 45%),
+                linear-gradient(180deg, #000 0%, #0a0a0a 50%, #000 100%);
         }
         [data-testid="stAppViewContainer"] section.main .block-container {
             width: min(30rem, 92vw) !important;
             max-width: 30rem !important;
             margin: 0 auto !important;
             padding: 0.5rem 0.75rem 1.5rem !important;
+            position: relative;
+            z-index: 2;
         }
         div.st-key-login_panel,
         div.st-key-login_panel > div {
@@ -1203,20 +1279,34 @@ def _render_login_page_styles() -> None:
             max-width: 30rem !important;
             margin-left: auto !important;
             margin-right: auto !important;
-            background-color: var(--bon-card) !important;
+            background: rgba(0, 0, 0, 0.55) !important;
+            border: 1px solid rgba(255, 255, 255, 0.12) !important;
+            border-radius: 1rem !important;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 0 40px rgba(0, 179, 198, 0.08);
         }
         [data-testid="stAppViewContainer"] section.main .block-container [data-testid="stMarkdownContainer"] {
             width: 100% !important;
             text-align: center !important;
         }
         h2.bon-login-title {
-            font-size: 2.55rem !important;
-            font-weight: 700 !important;
-            color: #e8e6e3 !important;
+            font-size: clamp(2rem, 6vw, 2.75rem) !important;
+            font-weight: 800 !important;
             text-align: center !important;
             width: 100% !important;
             margin: 0 auto 0.35rem auto !important;
             padding: 0 !important;
+            background: linear-gradient(
+                90deg,
+                #F15A29 0%,
+                #F7931E 35%,
+                #E2231A 65%,
+                #00B3C6 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.02em;
         }
         p.bon-login-sub {
             font-size: 0.9rem !important;
@@ -1232,10 +1322,42 @@ def _render_login_page_styles() -> None:
             border: none !important;
             padding: 0 !important;
         }
+        [data-testid="stAppViewContainer"] section.main button[kind="primary"] {
+            background: linear-gradient(90deg, #F15A29, #F7931E) !important;
+            border: 1px solid rgba(255,255,255,0.1) !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _maybe_redirect_to_react_login() -> None:
+    """Send users to the Next.js login when ``DASHBOARD_REACT_LOGIN_URL`` is set."""
+    react_url = (_read_setting("DASHBOARD_REACT_LOGIN_URL") or "").strip().rstrip("/")
+    if not react_url:
+        return
+    if st.query_params.get("native") == "1":
+        return
+    # Failed handoff or mid-redirect — do not bounce back to React in a loop.
+    if st.query_params.get("_auth"):
+        return
+    safe = json.dumps(react_url)
+    components.html(
+        f"""
+        <script>
+        (function () {{
+          const target = {safe};
+          if (window.parent.location.href.indexOf(target) === -1) {{
+            window.parent.location.replace(target);
+          }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+    st.info(f"Redirecting to sign-in… If nothing happens, open [{react_url}]({react_url}).")
+    st.stop()
 
 
 def _operator_id_allowlist() -> frozenset[str] | None:
@@ -1519,6 +1641,11 @@ def _check_password() -> None:
 
     _clear_auth_session()
 
+    if _try_react_auth_handoff():
+        return
+
+    _maybe_redirect_to_react_login()
+
     _inject_bon_theme()
     _render_login_page_styles()
 
@@ -1528,7 +1655,7 @@ def _check_password() -> None:
 
     with st.container(key="login_panel"):
         st.markdown(
-            '<h2 class="bon-login-title">Field Ticket Ops</h2>'
+            '<h2 class="bon-login-title">Field Ticket Operations</h2>'
             '<p class="bon-login-sub">Sign in to continue.</p>',
             unsafe_allow_html=True,
         )
@@ -5505,7 +5632,7 @@ MAX_LOOKBACK_DAYS = 365
 def _sidebar_controls() -> tuple[bool, int, int]:
     """Return (auto_enabled, interval_minutes, lookback_days)."""
     with st.sidebar:
-        st.markdown("### Field Ticket Ops")
+        st.markdown("### Field Ticket Operations")
         op = _session_operator_id()
         if op:
             st.caption(f"Signed in as **{op}**")
@@ -5559,7 +5686,7 @@ def _sidebar_controls() -> tuple[bool, int, int]:
 
 def main() -> None:
     # Must be the first Streamlit command every run (login + dashboard).
-    st.set_page_config(page_title="Field Ticket Ops", layout="wide")
+    st.set_page_config(page_title="Field Ticket Operations", layout="wide")
 
     _check_password()
 
@@ -6364,7 +6491,7 @@ def _migrate_legacy_queue_nav() -> None:
 
 def _render_dashboard_header(*, refreshed_at: str) -> None:
     """Desktop top bar: title and last refresh."""
-    st.markdown("## Dashboard")
+    st.markdown("## Field Ticket Operations")
     st.caption(f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in sidebar **Time Range**")
 
 
