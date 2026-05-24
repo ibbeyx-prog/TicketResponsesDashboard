@@ -102,6 +102,7 @@ from unattended import (
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
+STATUS_RESOLVED = "Resolved"
 
 # Active field queues: always visible even when outside the sidebar time range.
 _ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
@@ -110,6 +111,7 @@ _ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
 _REASSIGNABLE_STATUSES: frozenset[str] = frozenset(_ACTIVE_QUEUE_STATUSES)
 _LEGACY_STATUS_ALIASES: dict[str, str] = {
     "pending": STATUS_DAILY_TASK,
+    "completed": STATUS_RESOLVED,
     "no answer": STATUS_ON_HOLD,
     "unavailable": STATUS_ON_HOLD,
 }
@@ -136,7 +138,7 @@ SC_STATUS_SALES_TICKET = "Sales ticket"
 SC_STATUS_INVESTIGATION = "Investigation"
 SC_STATUS_REGIONAL = "Regional for site visit"
 SC_STATUS_DESIGN = "Design"
-SC_STATUS_RESOLVED = "Resolved"
+SC_STATUS_RESOLVED = STATUS_RESOLVED
 # Shown together under the Investigation queue (no separate Regional column).
 _SC_INVESTIGATION_QUEUE_STATUSES: tuple[str, ...] = (
     SC_STATUS_INVESTIGATION,
@@ -3560,11 +3562,11 @@ def _perf_combine_work(
     completed: pd.DataFrame,
     investigation: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Completed + Under Investigation = total active work in the window."""
+    """Resolved + Under Investigation = total active work in the window."""
     parts: list[pd.DataFrame] = []
     if not completed.empty:
         c = completed.copy()
-        c["_outcome"] = "Completed"
+        c["_outcome"] = STATUS_RESOLVED
         parts.append(c)
     if not investigation.empty:
         i = investigation.copy()
@@ -3613,7 +3615,7 @@ def _perf_build_summary(
             ),
             STATUS_DAILY_TASK: int(p_counts.get(p, 0)),
             "Needs Review": int(o_counts.get(p, 0)),
-            "Completed": int(c_counts.get(p, 0)),
+            STATUS_RESOLVED: int(c_counts.get(p, 0)),
             "Investigation": int(i_counts.get(p, 0)),
             "On Hold": int(h_counts.get(p, 0)),
             "Unattended": int(u_counts.get(p, 0)),
@@ -6265,7 +6267,7 @@ def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     open_m = status.eq("Open")
     investigation = status.eq(STATUS_UNDER_INVESTIGATION)
     unattended = status.eq(STATUS_UNATTENDED)
-    completed = status.eq("Completed")
+    completed = status.eq(STATUS_RESOLVED)
     known = pending | on_hold | open_m | investigation | unattended | completed
     other = ~known & status.ne("")
     return {
@@ -6330,12 +6332,14 @@ def _queue_segment_base(label: str | None) -> str:
         return STATUS_DAILY_TASK
     if label == "Pending" or label.startswith("Pending ("):
         return STATUS_DAILY_TASK
+    if label == "Completed" or label.startswith("Completed ("):
+        return STATUS_RESOLVED
     for base in (
         STATUS_DAILY_TASK,
         "Open",
         STATUS_ON_HOLD,
         "Under Investigation",
-        "Completed",
+        STATUS_RESOLVED,
         "Unattended",
         "Log",
         "Performance",
@@ -6492,9 +6496,9 @@ def _render_queue_summary_metrics(
     )
     _render_clickable_queue_metric(
         c5,
-        title="Completed",
+        title=STATUS_RESOLVED,
         value=total_completed,
-        queue_name="Completed",
+        queue_name=STATUS_RESOLVED,
         option_label=completed_label,
     )
     _render_clickable_queue_metric(
@@ -6553,7 +6557,7 @@ def _sync_dashboard_nav_state(
         STATUS_UNDER_INVESTIGATION, total_investigation
     )
     unattended_label = _queue_segment_label("Unattended", total_unattended)
-    completed_label = _queue_segment_label("Completed", total_completed)
+    completed_label = _queue_segment_label(STATUS_RESOLVED, total_completed)
     ticket_options = (
         pending_label,
         open_label,
@@ -6562,6 +6566,10 @@ def _sync_dashboard_nav_state(
         completed_label,
         unattended_label,
     )
+
+    cur_q = st.session_state.get(_DASH_TICKET_QUEUE_KEY)
+    if cur_q and _queue_segment_base(cur_q) == STATUS_RESOLVED:
+        st.session_state[_DASH_TICKET_QUEUE_KEY] = completed_label
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
     if total_open > prev_open:
@@ -7996,18 +8004,18 @@ def _render_dashboard(
                 st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
             else:
                 st.caption(
-                    "Select ticket(s) with **Select**, then: **Mark Completed** (bulk OK) · "
+                    "Select ticket(s) with **Select**, then: **Mark Resolved** (bulk OK) · "
                     "**Under Investigation** (park, no ●) · **Follow-up** (one ticket + note, ● tracked)."
                 )
                 _render_admin_ticket_toolbar(
                     open_df,
                     key_prefix="open",
                     caption=(
-                        "**Action** menu: **Mark Completed** or **Under Investigation** (no follow-up marker). "
+                        "**Action** menu: **Mark Resolved** or **Under Investigation** (no follow-up marker). "
                         "**Follow-up** popover = individual tracked case. **Reassign** → **Daily Task**."
                     ),
                     status_actions=(
-                        ("Mark Completed", "Completed", "Completed"),
+                        ("Mark Resolved", STATUS_RESOLVED, "Resolved"),
                         (
                             "Under Investigation",
                             STATUS_UNDER_INVESTIGATION,
@@ -8091,7 +8099,7 @@ def _render_dashboard(
                     caption=None,
                     status_actions=(
                         ("Back to Open", "Open", "BackToOpenFromInvestigation"),
-                        ("Mark Completed", "Completed", "Completed"),
+                        ("Mark Resolved", STATUS_RESOLVED, "Resolved"),
                         ("On Hold", STATUS_ON_HOLD, "OnHold"),
                     ),
                     allow_delete=True,
@@ -8141,14 +8149,14 @@ def _render_dashboard(
                 with st.expander("Photo gallery", expanded=total_investigation <= 3):
                     _render_field_photos_section(inv_df)
 
-    elif queue_view == "Completed":
-        st.markdown("##### Completed")
+    elif queue_view == STATUS_RESOLVED:
+        st.markdown(f"##### {STATUS_RESOLVED}")
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
             done = df[completed_mask].copy()
             if done.empty:
-                st.info(f"No completed tickets in the last {lookback_days} {day_word}.")
+                st.info(f"No resolved tickets in the last {lookback_days} {day_word}.")
             else:
                 _render_admin_ticket_toolbar(
                     done,
@@ -8184,7 +8192,7 @@ def _render_field_photos_section(done: pd.DataFrame) -> None:
         if t is not None
     ]
     if not ticket_ids:
-        st.caption("No completed tickets to show photos for.")
+        st.caption("No resolved tickets to show photos for.")
         return
 
     grouped = _fetch_ticket_photos(ticket_ids)
@@ -8321,13 +8329,13 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         m1.metric(STATUS_DAILY_TASK, len(pending_f))
         m2.metric("Needs Review", len(open_f))
         m3.metric("On Hold", len(on_hold_f))
-        m4.metric("Completed", len(completed_f))
+        m4.metric(STATUS_RESOLVED, len(completed_f))
         m5.metric("Investigation", len(investigation_f))
         m6.metric("Unattended", len(unattended_f))
         st.caption(
             "**In view** matches the **Tickets** tab (time range + active queues). "
             "Queue counts above sum to **In view** when **All** assignees are selected. "
-            "**Handled** (Completed + Investigation) is in the overview table — not the same as **In view**."
+            f"**Handled** ({STATUS_RESOLVED} + Investigation) is in the overview table — not the same as **In view**."
         )
         if focus == "All" and n_tab_sum != n_in_view:
             st.warning(
@@ -8376,10 +8384,10 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_work:
             st.caption(
-                "**Handled** = Completed + Under Investigation (subset of **In view**)."
+                f"**Handled** = {STATUS_RESOLVED} + Under Investigation (subset of **In view**)."
             )
             if work_f.empty:
-                st.info("No completed or investigation tickets for this filter.")
+                st.info("No resolved or investigation tickets for this filter.")
             else:
                 view = _perf_enrich_tickets(work_f)
                 c_chart, c_table = st.columns([3, 2])

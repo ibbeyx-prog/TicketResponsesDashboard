@@ -38,7 +38,7 @@ Database expectations
    when ``TG_API_ID``/``TG_API_HASH`` are set) or reply ``UNDO`` to that message;
    the dashboard clears the response and sets the ticket back to ``Daily Task``.
 
-   Only the admin/ops team marks tickets ``'Completed'`` (or sends them back to
+   Only the admin/ops team marks tickets ``'Resolved'`` (or sends them back to
    ``'Open'``) from the dashboard.
 
    Dashboard Command Center posts are **plain text**: line 1 is
@@ -1450,8 +1450,8 @@ def _db_complete_ticket_field_response(
 
     A field reply is *not* the final state anymore -- it lands as ``Open``
     so the ops/admin team can review the photo+note on the dashboard and
-    decide whether to mark the ticket ``Completed`` (or send it back to
-    ``Open`` after re-review). The bot never sets ``Completed`` itself.
+    decide whether to mark the ticket ``Resolved`` (or send it back to
+    ``Open`` after re-review). The bot never sets ``Resolved`` itself.
     """
     responded_at = _utc_now_iso()
     updates: dict[str, Any] = {
@@ -2627,7 +2627,7 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 prev_status = str(existing.get("status") or "").strip()
                 # Only keep field_response when refreshing notes on an **Open** ticket
                 # (admin review). A new coordinator post for **Pending** / Unattended /
-                # Completed is always a fresh field visit → full reassign (clears reply).
+                # Resolved is always a fresh field visit → full reassign (clears reply).
                 keep_open_field_work = prev_status == "Open" and _same_assignment_target(
                     existing,
                     assigned_to=assigned_to,
