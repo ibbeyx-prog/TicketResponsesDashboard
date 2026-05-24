@@ -1242,8 +1242,8 @@ def _render_login_page_styles() -> None:
             display: block !important;
         }
         .bon-login-word-netops {
-            color: #F7931E !important;
-            -webkit-text-fill-color: #F7931E !important;
+            color: #FF5A36 !important;
+            -webkit-text-fill-color: #FF5A36 !important;
         }
         .bon-login-word-coverage,
         .bon-login-word-eye {
