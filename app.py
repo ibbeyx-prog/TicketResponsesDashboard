@@ -1211,11 +1211,77 @@ def _render_dashboard_team_accounts() -> None:
             )
 
 
+_BON_PATH_COLORS: tuple[str, ...] = ("#F15A29", "#00B3C6", "#E2231A", "#F7931E")
+
+
+def _bon_login_path_d(i: int, position: int) -> str:
+    """SVG path ``d`` — same geometry as ``login-web`` BackgroundPaths."""
+    return (
+        f"M-{380 - i * 5 * position} -{189 + i * 6}"
+        f"C-{380 - i * 5 * position} -{189 + i * 6} "
+        f"-{312 - i * 5 * position} {216 - i * 6} "
+        f"{152 - i * 5 * position} {343 - i * 6}"
+        f"C{616 - i * 5 * position} {470 - i * 6} "
+        f"{684 - i * 5 * position} {875 - i * 6} "
+        f"{684 - i * 5 * position} {875 - i * 6}"
+    )
+
+
+def _render_login_animated_background() -> None:
+    """Animated BON curves behind the login form (React BackgroundPaths parity)."""
+    paths: list[str] = []
+    for position in (1, -1):
+        for i in range(36):
+            dur = 20 + (i % 10)
+            paths.append(
+                f'<path class="bon-login-path" d="{_bon_login_path_d(i, position)}" '
+                f'stroke="{_BON_PATH_COLORS[i % len(_BON_PATH_COLORS)]}" '
+                f'stroke-width="{0.5 + i * 0.03:.2f}" '
+                f'stroke-opacity="{0.22 + (i % 9) * 0.04:.2f}" '
+                f'fill="none" style="animation-duration:{dur}s" />'
+            )
+    svg_body = "\n".join(paths)
+    st.markdown(
+        f"""
+        <div id="bon-login-bg" aria-hidden="true">
+            <svg viewBox="0 0 696 316" preserveAspectRatio="xMidYMid slice"
+                 xmlns="http://www.w3.org/2000/svg">
+                {svg_body}
+            </svg>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_login_page_styles() -> None:
     st.markdown(
         """
         <style>
         /* Login — BON brand (matches login-web React shell) */
+        #bon-login-bg {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            pointer-events: none;
+            overflow: hidden;
+            background: #000;
+        }
+        #bon-login-bg svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #bon-login-bg .bon-login-path {
+            stroke-dasharray: 1400;
+            stroke-dashoffset: 1400;
+            animation: bon-path-flow linear infinite;
+        }
+        @keyframes bon-path-flow {
+            0% { stroke-dashoffset: 1400; opacity: 0.28; }
+            50% { opacity: 0.58; }
+            100% { stroke-dashoffset: 0; opacity: 0.28; }
+        }
         .stApp,
         [data-testid="stAppViewContainer"],
         [data-testid="stHeader"],
@@ -1253,10 +1319,9 @@ def _render_login_page_styles() -> None:
             z-index: 0;
             pointer-events: none;
             background:
-                radial-gradient(ellipse 80% 50% at 20% 40%, rgba(241, 90, 41, 0.18), transparent 55%),
-                radial-gradient(ellipse 70% 45% at 80% 60%, rgba(0, 179, 198, 0.14), transparent 50%),
-                radial-gradient(ellipse 50% 40% at 50% 100%, rgba(247, 147, 30, 0.1), transparent 45%),
-                linear-gradient(180deg, #000 0%, #0a0a0a 50%, #000 100%);
+                radial-gradient(ellipse 80% 50% at 20% 40%, rgba(241, 90, 41, 0.12), transparent 55%),
+                radial-gradient(ellipse 70% 45% at 80% 60%, rgba(0, 179, 198, 0.1), transparent 50%),
+                radial-gradient(ellipse 50% 40% at 50% 100%, rgba(247, 147, 30, 0.08), transparent 45%);
         }
         [data-testid="stAppViewContainer"] section.main .block-container {
             width: min(30rem, 92vw) !important;
@@ -1296,17 +1361,19 @@ def _render_login_page_styles() -> None:
             width: 100% !important;
             margin: 0 auto 0.35rem auto !important;
             padding: 0 !important;
-            background: linear-gradient(
-                90deg,
-                #F15A29 0%,
-                #F7931E 35%,
-                #E2231A 65%,
-                #00B3C6 100%
-            );
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
             letter-spacing: -0.02em;
+        }
+        .bon-login-word-field {
+            color: #F15A29 !important;
+            -webkit-text-fill-color: #F15A29 !important;
+        }
+        .bon-login-word-ticket {
+            color: #F7931E !important;
+            -webkit-text-fill-color: #F7931E !important;
+        }
+        .bon-login-word-ops {
+            color: #00B3C6 !important;
+            -webkit-text-fill-color: #00B3C6 !important;
         }
         p.bon-login-sub {
             font-size: 0.9rem !important;
@@ -1332,10 +1399,37 @@ def _render_login_page_styles() -> None:
     )
 
 
+def _running_on_streamlit_cloud() -> bool:
+    return str(_ENV_PATH).startswith("/mount/src/")
+
+
+def _react_login_misconfig_message(react_url: str) -> str | None:
+    """Return a user-facing hint when ``DASHBOARD_REACT_LOGIN_URL`` cannot work."""
+    lower = react_url.casefold()
+    if "streamlit.app" in lower:
+        return (
+            "**DASHBOARD_REACT_LOGIN_URL** is set to this Streamlit app. It must be the "
+            "**React login** URL (deploy ``login-web`` to Vercel/Railway), not "
+            "``https://….streamlit.app``. Remove the secret to use the built-in sign-in here."
+        )
+    if _running_on_streamlit_cloud() and (
+        "localhost" in lower or "127.0.0.1" in lower
+    ):
+        return (
+            "**DASHBOARD_REACT_LOGIN_URL** points to localhost, which visitors on "
+            "Streamlit Cloud cannot reach. Remove it or set a public HTTPS login URL."
+        )
+    return None
+
+
 def _maybe_redirect_to_react_login() -> None:
     """Send users to the Next.js login when ``DASHBOARD_REACT_LOGIN_URL`` is set."""
     react_url = (_read_setting("DASHBOARD_REACT_LOGIN_URL") or "").strip().rstrip("/")
     if not react_url:
+        return
+    misconfig = _react_login_misconfig_message(react_url)
+    if misconfig:
+        st.warning(misconfig)
         return
     if st.query_params.get("native") == "1":
         return
@@ -1648,6 +1742,7 @@ def _check_password() -> None:
 
     _inject_bon_theme()
     _render_login_page_styles()
+    _render_login_animated_background()
 
     view = st.session_state.get(_LOGIN_VIEW_KEY, "sign_in")
     if view not in ("sign_in", "forgot_request", "forgot_reset"):
@@ -1655,7 +1750,10 @@ def _check_password() -> None:
 
     with st.container(key="login_panel"):
         st.markdown(
-            '<h2 class="bon-login-title">Field Ticket Operations</h2>'
+            '<h2 class="bon-login-title">'
+            '<span class="bon-login-word-field">Field</span> '
+            '<span class="bon-login-word-ticket">Ticket</span> '
+            '<span class="bon-login-word-ops">Operations</span></h2>'
             '<p class="bon-login-sub">Sign in to continue.</p>',
             unsafe_allow_html=True,
         )

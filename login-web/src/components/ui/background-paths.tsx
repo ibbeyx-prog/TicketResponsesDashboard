@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { motion } from "framer-motion";
 
 import { Button } from "@/components/ui/button";
@@ -57,16 +57,15 @@ function FloatingPaths({ position }: { position: number }) {
   );
 }
 
-const TITLE_GRADIENT_STYLE: CSSProperties = {
-  backgroundImage:
-    "linear-gradient(90deg, #F15A29 0%, #F7931E 32%, #E2231A 58%, #00B3C6 100%)",
-  backgroundSize: "100% 100%",
-  backgroundRepeat: "no-repeat",
-  WebkitBackgroundClip: "text",
-  backgroundClip: "text",
-  WebkitTextFillColor: "transparent",
-  color: "transparent",
-};
+const BON_TITLE_WORD_COLORS = {
+  field: "#F15A29",
+  ticket: "#F7931E",
+  operations: "#00B3C6",
+} as const;
+
+function splitLoginTitleWords(title: string): string[] {
+  return title.trim().split(/\s+/).filter(Boolean);
+}
 
 export function BackgroundPaths({
   title = "Field Ticket Operations",
@@ -75,6 +74,7 @@ export function BackgroundPaths({
   title?: string;
   children?: ReactNode;
 }) {
+  const words = splitLoginTitleWords(title);
   return (
     <motion.div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-black">
       <div className="absolute inset-0">
@@ -99,9 +99,24 @@ export function BackgroundPaths({
               damping: 22,
             }}
             className="mb-8 inline-block max-w-full text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl lg:text-7xl"
-            style={TITLE_GRADIENT_STYLE}
           >
-            {title}
+            {words.map((word, i) => {
+              const key = word.toLowerCase();
+              const color =
+                key === "field"
+                  ? BON_TITLE_WORD_COLORS.field
+                  : key === "ticket"
+                    ? BON_TITLE_WORD_COLORS.ticket
+                    : key === "operations"
+                      ? BON_TITLE_WORD_COLORS.operations
+                      : "#ffffff";
+              return (
+                <span key={`${word}-${i}`} style={{ color }}>
+                  {i > 0 ? " " : ""}
+                  {word}
+                </span>
+              );
+            })}
           </motion.h1>
 
           {children ?? (
