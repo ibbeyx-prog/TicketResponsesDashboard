@@ -1,5 +1,5 @@
 """
-Field Ticket Operations — Streamlit dashboard for field ticket operations (Supabase).
+NetOps Coverage Eye — Streamlit dashboard for field ticket operations (Supabase).
 
 Run: ``streamlit run app.py``
 
@@ -781,65 +781,6 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_OPERATOR_ID_KEY] = operator_id
 
 
-def _react_handoff_signing_key() -> bytes:
-    pepper = (
-        _read_setting("DASHBOARD_SESSION_SECRET")
-        or _read_setting("SUPABASE_KEY")
-        or "ticket-dashboard-remember"
-    )
-    return hashlib.sha256(pepper.encode()).digest()
-
-
-def _parse_react_auth_handoff(token: str) -> dict | None:
-    """Verify HMAC token from ``login-web`` (``body.signature``)."""
-    try:
-        body, sig = str(token).rsplit(".", 1)
-        if not body or not sig:
-            return None
-        expected = hmac.new(
-            _react_handoff_signing_key(), body.encode("ascii"), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(sig, expected):
-            return None
-        pad = "=" * (-len(body) % 4)
-        data = json.loads(base64.urlsafe_b64decode(body + pad))
-        age = datetime.now(timezone.utc).timestamp() - float(data.get("ts", 0))
-        if age > 120 or age < -30:
-            return None
-        uname = str(data.get("u", "")).strip()
-        op = str(data.get("op", "")).strip()
-        if not uname or not op:
-            return None
-        return {"u": uname, "op": op}
-    except Exception:
-        return None
-
-
-def _try_react_auth_handoff() -> bool:
-    """Accept a short-lived token from the React login app (``login-web``)."""
-    token = st.query_params.get("_auth")
-    if not token:
-        return False
-    data = _parse_react_auth_handoff(str(token))
-    if not data:
-        st.error(
-            "Could not complete sign-in from the login page. "
-            "Try again at the React login URL, or use **?native=1** on this URL "
-            "for the built-in form."
-        )
-        return False
-    uname = data["u"]
-    op = data["op"]
-    fp = _auth_session_fingerprint(username=uname, operator_id=op)
-    _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
-    try:
-        del st.query_params["_auth"]
-    except Exception:
-        pass
-    st.rerun()
-    return True
-
-
 def _normalize_dashboard_username(raw: str) -> str:
     s = "".join(
         ch
@@ -1215,7 +1156,7 @@ def _render_login_page_styles() -> None:
     st.markdown(
         """
         <style>
-        /* Login — BON brand (matches login-web React shell) */
+        /* Login — BON brand */
         .stApp,
         [data-testid="stAppViewContainer"],
         [data-testid="stHeader"],
@@ -1297,17 +1238,17 @@ def _render_login_page_styles() -> None:
             padding: 0 !important;
             letter-spacing: -0.02em;
         }
-        .bon-login-word-field {
-            color: #F15A29 !important;
-            -webkit-text-fill-color: #F15A29 !important;
+        .bon-login-line {
+            display: block !important;
         }
-        .bon-login-word-ticket {
+        .bon-login-word-netops {
             color: #F7931E !important;
             -webkit-text-fill-color: #F7931E !important;
         }
-        .bon-login-word-ops {
-            color: #00B3C6 !important;
-            -webkit-text-fill-color: #00B3C6 !important;
+        .bon-login-word-coverage,
+        .bon-login-word-eye {
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
         }
         p.bon-login-sub {
             font-size: 0.9rem !important;
@@ -1331,61 +1272,6 @@ def _render_login_page_styles() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def _running_on_streamlit_cloud() -> bool:
-    return str(_ENV_PATH).startswith("/mount/src/")
-
-
-def _react_login_misconfig_message(react_url: str) -> str | None:
-    """Return a user-facing hint when ``DASHBOARD_REACT_LOGIN_URL`` cannot work."""
-    lower = react_url.casefold()
-    if "streamlit.app" in lower:
-        return (
-            "**DASHBOARD_REACT_LOGIN_URL** is set to this Streamlit app. It must be the "
-            "**React login** URL (deploy ``login-web`` to Vercel/Railway), not "
-            "``https://….streamlit.app``. Remove the secret to use the built-in sign-in here."
-        )
-    if _running_on_streamlit_cloud() and (
-        "localhost" in lower or "127.0.0.1" in lower
-    ):
-        return (
-            "**DASHBOARD_REACT_LOGIN_URL** points to localhost, which visitors on "
-            "Streamlit Cloud cannot reach. Remove it or set a public HTTPS login URL."
-        )
-    return None
-
-
-def _maybe_redirect_to_react_login() -> None:
-    """Send users to the Next.js login when ``DASHBOARD_REACT_LOGIN_URL`` is set."""
-    react_url = (_read_setting("DASHBOARD_REACT_LOGIN_URL") or "").strip().rstrip("/")
-    if not react_url:
-        return
-    misconfig = _react_login_misconfig_message(react_url)
-    if misconfig:
-        st.warning(misconfig)
-        return
-    if st.query_params.get("native") == "1":
-        return
-    # Failed handoff or mid-redirect — do not bounce back to React in a loop.
-    if st.query_params.get("_auth"):
-        return
-    safe = json.dumps(react_url)
-    components.html(
-        f"""
-        <script>
-        (function () {{
-          const target = {safe};
-          if (window.parent.location.href.indexOf(target) === -1) {{
-            window.parent.location.replace(target);
-          }}
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-    st.info(f"Redirecting to sign-in… If nothing happens, open [{react_url}]({react_url}).")
-    st.stop()
 
 
 def _operator_id_allowlist() -> frozenset[str] | None:
@@ -1669,11 +1555,6 @@ def _check_password() -> None:
 
     _clear_auth_session()
 
-    if _try_react_auth_handoff():
-        return
-
-    _maybe_redirect_to_react_login()
-
     _inject_bon_theme()
     _render_login_page_styles()
 
@@ -1684,9 +1565,11 @@ def _check_password() -> None:
     with st.container(key="login_panel"):
         st.markdown(
             '<h2 class="bon-login-title">'
-            '<span class="bon-login-word-field">Field</span> '
-            '<span class="bon-login-word-ticket">Ticket</span> '
-            '<span class="bon-login-word-ops">Operations</span></h2>'
+            '<span class="bon-login-line">'
+            '<span class="bon-login-word-netops">NetOps</span></span>'
+            '<span class="bon-login-line">'
+            '<span class="bon-login-word-coverage">Coverage</span> '
+            '<span class="bon-login-word-eye">Eye</span></span></h2>'
             '<p class="bon-login-sub">Sign in to continue.</p>',
             unsafe_allow_html=True,
         )
@@ -5663,7 +5546,7 @@ MAX_LOOKBACK_DAYS = 365
 def _sidebar_controls() -> tuple[bool, int, int]:
     """Return (auto_enabled, interval_minutes, lookback_days)."""
     with st.sidebar:
-        st.markdown("### Field Ticket Operations")
+        st.markdown("### NetOps  \nCoverage Eye")
         op = _session_operator_id()
         if op:
             st.caption(f"Signed in as **{op}**")
@@ -5717,7 +5600,7 @@ def _sidebar_controls() -> tuple[bool, int, int]:
 
 def main() -> None:
     # Must be the first Streamlit command every run (login + dashboard).
-    st.set_page_config(page_title="Field Ticket Operations", layout="wide")
+    st.set_page_config(page_title="NetOps Coverage Eye", layout="wide")
 
     _check_password()
 
@@ -6522,7 +6405,7 @@ def _migrate_legacy_queue_nav() -> None:
 
 def _render_dashboard_header(*, refreshed_at: str) -> None:
     """Desktop top bar: title and last refresh."""
-    st.markdown("## Field Ticket Operations")
+    st.markdown("## NetOps  \nCoverage Eye")
     st.caption(f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in sidebar **Time Range**")
 
 
