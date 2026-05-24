@@ -1211,77 +1211,11 @@ def _render_dashboard_team_accounts() -> None:
             )
 
 
-_BON_PATH_COLORS: tuple[str, ...] = ("#F15A29", "#00B3C6", "#E2231A", "#F7931E")
-
-
-def _bon_login_path_d(i: int, position: int) -> str:
-    """SVG path ``d`` — same geometry as ``login-web`` BackgroundPaths."""
-    return (
-        f"M-{380 - i * 5 * position} -{189 + i * 6}"
-        f"C-{380 - i * 5 * position} -{189 + i * 6} "
-        f"-{312 - i * 5 * position} {216 - i * 6} "
-        f"{152 - i * 5 * position} {343 - i * 6}"
-        f"C{616 - i * 5 * position} {470 - i * 6} "
-        f"{684 - i * 5 * position} {875 - i * 6} "
-        f"{684 - i * 5 * position} {875 - i * 6}"
-    )
-
-
-def _render_login_animated_background() -> None:
-    """Animated BON curves behind the login form (React BackgroundPaths parity)."""
-    paths: list[str] = []
-    for position in (1, -1):
-        for i in range(36):
-            dur = 20 + (i % 10)
-            paths.append(
-                f'<path class="bon-login-path" d="{_bon_login_path_d(i, position)}" '
-                f'stroke="{_BON_PATH_COLORS[i % len(_BON_PATH_COLORS)]}" '
-                f'stroke-width="{0.5 + i * 0.03:.2f}" '
-                f'stroke-opacity="{0.22 + (i % 9) * 0.04:.2f}" '
-                f'fill="none" style="animation-duration:{dur}s" />'
-            )
-    svg_body = "\n".join(paths)
-    st.markdown(
-        f"""
-        <div id="bon-login-bg" aria-hidden="true">
-            <svg viewBox="0 0 696 316" preserveAspectRatio="xMidYMid slice"
-                 xmlns="http://www.w3.org/2000/svg">
-                {svg_body}
-            </svg>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def _render_login_page_styles() -> None:
     st.markdown(
         """
         <style>
         /* Login — BON brand (matches login-web React shell) */
-        #bon-login-bg {
-            position: fixed;
-            inset: 0;
-            z-index: 0;
-            pointer-events: none;
-            overflow: hidden;
-            background: #000;
-        }
-        #bon-login-bg svg {
-            width: 100%;
-            height: 100%;
-            display: block;
-        }
-        #bon-login-bg .bon-login-path {
-            stroke-dasharray: 1400;
-            stroke-dashoffset: 1400;
-            animation: bon-path-flow linear infinite;
-        }
-        @keyframes bon-path-flow {
-            0% { stroke-dashoffset: 1400; opacity: 0.28; }
-            50% { opacity: 0.58; }
-            100% { stroke-dashoffset: 0; opacity: 0.28; }
-        }
         .stApp,
         [data-testid="stAppViewContainer"],
         [data-testid="stHeader"],
@@ -1742,7 +1676,6 @@ def _check_password() -> None:
 
     _inject_bon_theme()
     _render_login_page_styles()
-    _render_login_animated_background()
 
     view = st.session_state.get(_LOGIN_VIEW_KEY, "sign_in")
     if view not in ("sign_in", "forgot_request", "forgot_reset"):
