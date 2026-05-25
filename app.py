@@ -8224,12 +8224,6 @@ def _render_dashboard(
 
     if queue_view == STATUS_DAILY_TASK:
         st.markdown(f"##### {STATUS_DAILY_TASK} — Waiting on Field")
-        st.caption(
-            "Rows show **assignment** details (`additional_info` = site notes from the Telegram "
-            "assignment lines). A **field response** is a separate swipe-reply (or "
-            "``ticket_id + notes`` message) — that moves the ticket to **Open** and fills "
-            "``field_response``."
-        )
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -8237,11 +8231,6 @@ def _render_dashboard(
             if pend.empty:
                 st.info(f"No pending tickets in the last {lookback_days} {day_word}.")
             else:
-                st.caption(
-                    "Unassigned rows (no engineer) were added without Telegram — use "
-                    "**Edit assignment** to assign, or **Under Investigation** to park. "
-                    "**Reassign** / **Record response** need exactly one ticket selected."
-                )
                 pend_show = tuple(
                     c
                     for c in (
@@ -8257,11 +8246,6 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     pend,
                     key_prefix="assigned",
-                    caption=(
-                        "**Edit assignment** assigns an engineer (optional Telegram). "
-                        "**Under Investigation** parks without field assign. "
-                        "**Reassign** clears prior response for a new visit."
-                    ),
                     status_actions=(
                         (
                             "Under Investigation",
