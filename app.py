@@ -180,7 +180,15 @@ def _sc_status_actions_for_queue(queue_status: str) -> tuple[tuple[str, str], ..
             ("Mark Resolved", SC_STATUS_RESOLVED),
         )
     if queue_status == SC_STATUS_DESIGN:
-        return (("Mark Resolved", SC_STATUS_RESOLVED),)
+        return (
+            ("Back to Investigation", SC_STATUS_INVESTIGATION),
+            ("Mark Resolved", SC_STATUS_RESOLVED),
+        )
+    if queue_status == SC_STATUS_RESOLVED:
+        return (
+            ("Back to Design", SC_STATUS_DESIGN),
+            ("Back to Investigation", SC_STATUS_INVESTIGATION),
+        )
     return ()
 
 
@@ -232,7 +240,15 @@ def _sc_status_actions_for_case(cur_status: str) -> tuple[tuple[str, str], ...]:
             ("Mark Resolved", SC_STATUS_RESOLVED),
         )
     if cur_status == SC_STATUS_DESIGN:
-        return (("Mark Resolved", SC_STATUS_RESOLVED),)
+        return (
+            ("Back to Investigation", SC_STATUS_INVESTIGATION),
+            ("Mark Resolved", SC_STATUS_RESOLVED),
+        )
+    if cur_status == SC_STATUS_RESOLVED:
+        return (
+            ("Back to Design", SC_STATUS_DESIGN),
+            ("Back to Investigation", SC_STATUS_INVESTIGATION),
+        )
     return ()
 
 
@@ -262,25 +278,41 @@ def _sc_apply_status_advance(
     """Move case to another queue. Returns an error message, or None on success."""
     cur = _sc_effective_status(r0.get("status"))
     if target_status == SC_STATUS_INVESTIGATION:
-        if cur != SC_STATUS_SALES_TICKET:
-            return f"Case is **{cur}** — **Investigation** from **Sales Ticket** only."
-        payload = _sc_patch_with_action_comment(
-            {"status": SC_STATUS_INVESTIGATION, "admin_owner": op},
-            action_comment,
-        )
+        if cur == SC_STATUS_SALES_TICKET:
+            payload = _sc_patch_with_action_comment(
+                {"status": SC_STATUS_INVESTIGATION, "admin_owner": op},
+                action_comment,
+            )
+        elif cur in (
+            SC_STATUS_REGIONAL,
+            SC_STATUS_DESIGN,
+            SC_STATUS_RESOLVED,
+        ):
+            body: dict[str, object] = {"status": SC_STATUS_INVESTIGATION}
+            if cur == SC_STATUS_RESOLVED:
+                body["close_note"] = None
+            payload = _sc_patch_with_action_comment(body, action_comment)
+        else:
+            return f"Case is **{cur}** — cannot move to **Investigation**."
         _sales_cases_update_row(row_id, payload)
         return None
     if target_status == SC_STATUS_DESIGN:
-        if cur not in (
+        if cur in (
             SC_STATUS_SALES_TICKET,
             SC_STATUS_INVESTIGATION,
             SC_STATUS_REGIONAL,
         ):
+            payload = _sc_patch_with_action_comment(
+                {"status": SC_STATUS_DESIGN},
+                action_comment,
+            )
+        elif cur == SC_STATUS_RESOLVED:
+            payload = _sc_patch_with_action_comment(
+                {"status": SC_STATUS_DESIGN, "close_note": None},
+                action_comment,
+            )
+        else:
             return f"Case is **{cur}** — cannot move to **Design**."
-        payload = _sc_patch_with_action_comment(
-            {"status": SC_STATUS_DESIGN},
-            action_comment,
-        )
         _sales_cases_update_row(row_id, payload)
         return None
     if target_status == SC_STATUS_RESOLVED:
