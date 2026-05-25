@@ -117,6 +117,7 @@ from task_categories import (
 from unattended import (
     CRON_SECRET,
     STATUS_DAILY_TASK,
+    UNATTENDED_POLL_MINUTES,
     nudge_message,
     run_unattended_close,
     run_unattended_nudges,
