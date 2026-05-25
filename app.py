@@ -1241,9 +1241,13 @@ def _render_login_page_styles() -> None:
         .bon-login-line {
             display: block !important;
         }
+        .bon-login-line-netops {
+            font-size: 125% !important;
+            line-height: 1.1 !important;
+        }
         .bon-login-word-netops {
-            color: #FF5A36 !important;
-            -webkit-text-fill-color: #FF5A36 !important;
+            color: #FF5A1F !important;
+            -webkit-text-fill-color: #FF5A1F !important;
         }
         .bon-login-word-coverage,
         .bon-login-word-eye {
@@ -1565,7 +1569,7 @@ def _check_password() -> None:
     with st.container(key="login_panel"):
         st.markdown(
             '<h2 class="bon-login-title">'
-            '<span class="bon-login-line">'
+            '<span class="bon-login-line bon-login-line-netops">'
             '<span class="bon-login-word-netops">NetOps</span></span>'
             '<span class="bon-login-line">'
             '<span class="bon-login-word-coverage">Coverage</span> '
