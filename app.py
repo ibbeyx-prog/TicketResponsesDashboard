@@ -128,6 +128,7 @@ SALES_REGION_CODES: tuple[str, ...] = (
     "CENTRAL",
 )
 SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Standard")
+SALES_ATTENDED_BY_OPTIONS: tuple[str, ...] = ("Mular_s", "Ibbe")
 DEFAULT_SALES_CASE_CATEGORIES: tuple[str, ...] = (
     "QOS Issue",
     "Call Drop Issues",
@@ -171,16 +172,50 @@ def _sc_status_actions_for_queue(queue_status: str) -> tuple[tuple[str, str], ..
         return (
             ("Investigation", SC_STATUS_INVESTIGATION),
             ("Design", SC_STATUS_DESIGN),
-            ("Resolved", SC_STATUS_RESOLVED),
+            ("Mark Resolved", SC_STATUS_RESOLVED),
         )
     if queue_status == SC_STATUS_INVESTIGATION:
         return (
             ("Design", SC_STATUS_DESIGN),
-            ("Resolved", SC_STATUS_RESOLVED),
+            ("Mark Resolved", SC_STATUS_RESOLVED),
         )
     if queue_status == SC_STATUS_DESIGN:
-        return (("Resolved", SC_STATUS_RESOLVED),)
+        return (("Mark Resolved", SC_STATUS_RESOLVED),)
     return ()
+
+
+def _sc_toolbar_action_label(label: str, target_status: str) -> str:
+    if target_status == SC_STATUS_RESOLVED:
+        return "Mark Resolved"
+    return label
+
+
+def _sc_toolbar_label_to_target(
+    status_actions: tuple[tuple[str, str], ...],
+) -> dict[str, str]:
+    return {
+        _sc_toolbar_action_label(label, tgt): tgt for label, tgt in status_actions
+    }
+
+
+def _sc_toolbar_panel_keys(key_prefix: str) -> dict[str, str]:
+    return {
+        "details": f"{key_prefix}_sc_show_details",
+    }
+
+
+def _sc_clear_toolbar_panels_except(key_prefix: str) -> None:
+    for prefix in (
+        "sc_sales_ticket",
+        "sc_investigation",
+        "sc_design",
+        "sc_resolved",
+    ):
+        if prefix == key_prefix:
+            continue
+        keys = _sc_toolbar_panel_keys(prefix)
+        for k in keys.values():
+            st.session_state.pop(k, None)
 
 
 def _sc_status_actions_for_case(cur_status: str) -> tuple[tuple[str, str], ...]:
@@ -189,15 +224,15 @@ def _sc_status_actions_for_case(cur_status: str) -> tuple[tuple[str, str], ...]:
         return (
             ("Investigation", SC_STATUS_INVESTIGATION),
             ("Design", SC_STATUS_DESIGN),
-            ("Resolved", SC_STATUS_RESOLVED),
+            ("Mark Resolved", SC_STATUS_RESOLVED),
         )
     if cur_status in (SC_STATUS_INVESTIGATION, SC_STATUS_REGIONAL):
         return (
             ("Design", SC_STATUS_DESIGN),
-            ("Resolved", SC_STATUS_RESOLVED),
+            ("Mark Resolved", SC_STATUS_RESOLVED),
         )
     if cur_status == SC_STATUS_DESIGN:
-        return (("Resolved", SC_STATUS_RESOLVED),)
+        return (("Mark Resolved", SC_STATUS_RESOLVED),)
     return ()
 
 
@@ -276,39 +311,47 @@ def _sc_apply_status_advance(
     return None
 
 
-def _sc_advance_selected_case(
+def _sc_apply_status_to_selected_cases(
     df: pd.DataFrame,
     *,
     key_prefix: str,
     case_options: list[str],
     target_status: str,
     op: str,
-    success_flash: str,
-) -> None:
+) -> int:
+    """Bulk status move for all ticked cases in the queue table."""
     picked = _require_selected_sales_cases(
-        key_prefix=key_prefix, options=case_options, exactly_one=True
+        key_prefix=key_prefix, options=case_options, exactly_one=False
     )
     if not picked:
-        return
-    row_id, _cref, r0 = _picked_sales_case_from_selection(
-        df, key_prefix=key_prefix, case_options=case_options
-    )
-    if not row_id or r0 is None:
-        return
+        return 0
     action_comment = str(st.session_state.get("sc_action_comment", "")).strip() or None
-    err = _sc_apply_status_advance(
-        row_id,
-        r0=r0,
-        target_status=target_status,
-        op=op,
-        action_comment=action_comment,
-    )
-    if err:
-        st.warning(err)
-        return
-    _get_supabase_client.clear()
-    _sc_set_sales_flash(success_flash)
-    st.rerun()
+    ok = 0
+    for cref in picked:
+        sub = df[df["case_ref"].fillna("").astype(str) == cref]
+        if sub.empty:
+            continue
+        r0 = sub.iloc[0]
+        row_id = str(r0.get("id") or "").strip()
+        if not row_id:
+            continue
+        err = _sc_apply_status_advance(
+            row_id,
+            r0=r0,
+            target_status=target_status,
+            op=op,
+            action_comment=action_comment,
+        )
+        if err:
+            st.warning(f"**{cref}**: {err}")
+        else:
+            ok += 1
+    if ok:
+        _get_supabase_client.clear()
+        st.session_state[_sc_case_selection_session_key(key_prefix)] = []
+        _sc_set_sales_flash(f"**{ok}** case(s) moved to **{target_status}**.")
+        st.rerun()
+    return ok
 
 
 def _sc_sync_case_note_widgets(*, row_id: str, row: pd.Series) -> None:
@@ -531,7 +574,7 @@ _CC_CATEGORY_SELECT_KEY = "cc_category_select"
 _CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
 _SC_CC_ST_REF_KEY = "sc_cc_st_case_ref"
 _SC_CC_ST_ACCOUNT_KEY = "sc_cc_st_account"
-_SC_CC_ST_OWNER_KEY = "sc_cc_st_owner"
+_SC_CC_ST_ATTENDED_KEY = "sc_cc_st_attended"
 _SC_CC_ST_PRIORITY_KEY = "sc_cc_st_priority"
 _SC_CC_ST_REGION_KEY = "sc_cc_st_region"
 _SC_CC_ST_SCAT_KEY = "sc_cc_st_scat"
@@ -2350,13 +2393,13 @@ def _filter_df_by_case_ref(df: pd.DataFrame, query: str) -> pd.DataFrame:
 
 
 def _filter_sales_cases_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
-    """Search ticket #, resort/company, sales owner, or category."""
+    """Search ticket #, resort/company, attended by, or category."""
     raw = (query or "").strip()
     if not raw or df.empty:
         return df
     lower = raw.lower()
     mask = pd.Series(False, index=df.index)
-    for col in ("case_ref", "account_name", "sales_owner", "sales_category"):
+    for col in ("case_ref", "account_name", "attended_by", "sales_category"):
         if col not in df.columns:
             continue
         series = df[col].fillna("").astype(str)
@@ -3017,6 +3060,59 @@ def _render_manual_field_response_editor(
         st.rerun()
 
 
+def _render_ticket_status_action_popover(
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str, str], ...],
+    status_labels: list[str],
+) -> None:
+    """Action picker: trigger shows choice; menu lists options; Apply commits."""
+    sel_key = f"{key_prefix}_action_sel"
+    if sel_key not in st.session_state or st.session_state[sel_key] not in status_labels:
+        st.session_state[sel_key] = status_labels[0]
+    trigger = str(st.session_state[sel_key])
+
+    with st.popover(trigger, use_container_width=True):
+        st.caption("Choose action")
+        for label in status_labels:
+            picked = label == st.session_state[sel_key]
+            if st.button(
+                label,
+                key=f"{key_prefix}_pick_{label.replace(' ', '_')}",
+                type="primary" if picked else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[sel_key] = label
+                st.rerun()
+        st.divider()
+        if st.button(
+            "Apply",
+            key=f"{key_prefix}_apply",
+            type="primary",
+            use_container_width=True,
+        ):
+            choice = str(st.session_state.get(sel_key, ""))
+            picked_list = _require_selected_tickets(
+                key_prefix=key_prefix, options=options
+            )
+            if picked_list and choice:
+                ok = 0
+                for picked in picked_list:
+                    if _apply_admin_ticket_action(
+                        picked=picked,
+                        choice=choice,
+                        confirm_del=False,
+                        status_actions=status_actions,
+                        do_rerun=False,
+                    ):
+                        ok += 1
+                if ok:
+                    st.success(f"**{ok}** ticket(s) updated → **{choice}**.")
+                    st.session_state[_ticket_selection_session_key(key_prefix)] = []
+                    st.rerun()
+
+
 def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> None:
     """Tracked individual follow-up (●) — one Open ticket, optional note."""
     with st.popover("Follow-up", use_container_width=True):
@@ -3097,7 +3193,7 @@ def _render_admin_ticket_toolbar(
 
     slot_count = 2  # Select all, Clear
     if status_labels:
-        slot_count += 2 if len(status_labels) > 1 else 1
+        slot_count += 1 if len(status_labels) > 1 else 1
     if allow_manual_field_response:
         slot_count += 1
     if allow_reassign:
@@ -3133,78 +3229,6 @@ def _render_admin_ticket_toolbar(
                 st.rerun()
         idx += 1
 
-        if status_labels:
-            if len(status_labels) == 1:
-                label = status_labels[0]
-                with cols[idx]:
-                    if st.button(
-                        label,
-                        key=f"{key_prefix}_apply",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        picked_list = _require_selected_tickets(
-                            key_prefix=key_prefix, options=options
-                        )
-                        if picked_list:
-                            ok = 0
-                            for picked in picked_list:
-                                if _apply_admin_ticket_action(
-                                    picked=picked,
-                                    choice=label,
-                                    confirm_del=False,
-                                    status_actions=status_actions,
-                                    do_rerun=False,
-                                ):
-                                    ok += 1
-                            if ok:
-                                st.success(
-                                    f"**{ok}** ticket(s) updated → **{label}**."
-                                )
-                                st.session_state[sel_key] = []
-                                st.rerun()
-                idx += 1
-            else:
-                with cols[idx]:
-                    st.selectbox(
-                        "Action",
-                        options=status_labels,
-                        key=f"{key_prefix}_action_sel",
-                        label_visibility="collapsed",
-                    )
-                idx += 1
-                with cols[idx]:
-                    if st.button(
-                        "Apply",
-                        key=f"{key_prefix}_apply",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        choice = str(
-                            st.session_state.get(f"{key_prefix}_action_sel", "")
-                        )
-                        picked_list = _require_selected_tickets(
-                            key_prefix=key_prefix, options=options
-                        )
-                        if picked_list and choice:
-                            ok = 0
-                            for picked in picked_list:
-                                if _apply_admin_ticket_action(
-                                    picked=picked,
-                                    choice=choice,
-                                    confirm_del=False,
-                                    status_actions=status_actions,
-                                    do_rerun=False,
-                                ):
-                                    ok += 1
-                            if ok:
-                                st.success(
-                                    f"**{ok}** ticket(s) updated → **{choice}**."
-                                )
-                                st.session_state[sel_key] = []
-                                st.rerun()
-                idx += 1
-
         if allow_manual_field_response:
             with cols[idx]:
                 if st.button(
@@ -3238,6 +3262,47 @@ def _render_admin_ticket_toolbar(
                     st.session_state[edit_keys["show"]] = True
                     st.rerun()
             idx += 1
+
+        if status_labels:
+            if len(status_labels) == 1:
+                label = status_labels[0]
+                with cols[idx]:
+                    if st.button(
+                        label,
+                        key=f"{key_prefix}_apply",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        picked_list = _require_selected_tickets(
+                            key_prefix=key_prefix, options=options
+                        )
+                        if picked_list:
+                            ok = 0
+                            for picked in picked_list:
+                                if _apply_admin_ticket_action(
+                                    picked=picked,
+                                    choice=label,
+                                    confirm_del=False,
+                                    status_actions=status_actions,
+                                    do_rerun=False,
+                                ):
+                                    ok += 1
+                            if ok:
+                                st.success(
+                                    f"**{ok}** ticket(s) updated → **{label}**."
+                                )
+                                st.session_state[sel_key] = []
+                                st.rerun()
+                idx += 1
+            else:
+                with cols[idx]:
+                    _render_ticket_status_action_popover(
+                        key_prefix=key_prefix,
+                        options=options,
+                        status_actions=status_actions,
+                        status_labels=status_labels,
+                    )
+                idx += 1
 
         if allow_mark_follow_up:
             with cols[idx]:
@@ -3563,13 +3628,14 @@ def _perf_filter_sales_in_range(
 
 
 def _perf_enrich_sales_cases(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``staff`` (sales_owner), ``category``, and local time from ``_ts``."""
+    """Add ``staff`` (attended_by), ``category``, and local time from ``_ts``."""
     view = df.copy()
     if "_ts" not in view.columns and "updated_at" in view.columns:
         view["_ts"] = _parse_ts(view["updated_at"])
     view["_local"] = view["_ts"].dt.tz_convert(LOCAL_TZ)
-    if "sales_owner" in view.columns:
-        view["staff"] = view["sales_owner"].map(_perf_norm_member)
+    if "attended_by" in view.columns:
+        ab = view["attended_by"].fillna("").astype(str).str.strip()
+        view["staff"] = ab.mask(ab.eq(""), "(unknown)")
     elif "admin_owner" in view.columns:
         view["staff"] = view["admin_owner"].map(_perf_norm_member)
     else:
@@ -3904,7 +3970,7 @@ def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
             "status_eff",
             "case_ref",
             "account_name",
-            "sales_owner",
+            "attended_by",
             "sales_category",
             "account_region",
             "admin_owner",
@@ -3913,7 +3979,9 @@ def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
         )
         if c in detail.columns
     ]
-    show = detail[cols].rename(columns={"status_eff": "Status"})
+    show = detail[cols].rename(
+        columns={"status_eff": "Status", "attended_by": "Attended by"}
+    )
     st.dataframe(
         _format_local(show),
         use_container_width=True,
@@ -5160,7 +5228,7 @@ def _cc_schedule_assign_form_clear() -> None:
 def _reset_sc_cc_sales_ticket_form() -> None:
     st.session_state[_SC_CC_ST_REF_KEY] = ""
     st.session_state[_SC_CC_ST_ACCOUNT_KEY] = ""
-    st.session_state[_SC_CC_ST_OWNER_KEY] = ""
+    st.session_state[_SC_CC_ST_ATTENDED_KEY] = SALES_ATTENDED_BY_OPTIONS[0]
     st.session_state[_SC_CC_ST_DESC_KEY] = ""
     if _SC_CC_ST_PRIORITY_KEY in st.session_state:
         st.session_state[_SC_CC_ST_PRIORITY_KEY] = SALES_PRIORITY_OPTIONS[-1]
@@ -5170,7 +5238,7 @@ def _sc_insert_intake_case(
     *,
     case_ref: str,
     account_name: str,
-    sales_owner: str,
+    attended_by: str,
     sales_priority: str,
     account_region: str,
     sales_category: str,
@@ -5184,7 +5252,7 @@ def _sc_insert_intake_case(
             {
                 "case_ref": case_ref,
                 "account_name": account_name,
-                "sales_owner": sales_owner,
+                "attended_by": attended_by,
                 "sales_priority": sales_priority,
                 "account_region": account_region,
                 "sales_category": sales_category,
@@ -5244,6 +5312,11 @@ def _sidebar_sales_intake() -> None:
             key=_SC_CC_ST_ACCOUNT_KEY,
             placeholder="Resort or company name",
         )
+        st.selectbox(
+            "Attended by",
+            options=list(SALES_ATTENDED_BY_OPTIONS),
+            key=_SC_CC_ST_ATTENDED_KEY,
+        )
         r3, r4 = st.columns(2)
         with r3:
             st.selectbox(
@@ -5288,7 +5361,11 @@ def _sidebar_sales_intake() -> None:
         _sc_insert_intake_case(
             case_ref=cr,
             account_name=an,
-            sales_owner="",
+            attended_by=str(
+                st.session_state.get(
+                    _SC_CC_ST_ATTENDED_KEY, SALES_ATTENDED_BY_OPTIONS[0]
+                )
+            ).strip(),
             sales_priority=str(
                 st.session_state.get(_SC_CC_ST_PRIORITY_KEY, "Standard")
             ).strip(),
@@ -6810,6 +6887,11 @@ def _sales_cases_insert_row(payload: dict) -> None:
     client.table(SALES_CASES_TABLE).insert(row).execute()
 
 
+def _sales_cases_delete_row(row_id: str) -> None:
+    client = _get_supabase_client()
+    client.table(SALES_CASES_TABLE).delete().eq("id", row_id).execute()
+
+
 def _sc_filter_sales_df(df: pd.DataFrame, statuses: tuple[str, ...]) -> pd.DataFrame:
     if df.empty or "status" not in df.columns:
         return df.iloc[0:0].copy()
@@ -6821,7 +6903,7 @@ def _render_sc_selected_case_card(row: pd.Series) -> None:
     """Hero summary for the one selected case."""
     cref = html.escape(str(row.get("case_ref") or "—"))
     account = html.escape(str(row.get("account_name") or "—"))
-    owner = html.escape(str(row.get("sales_owner") or "—"))
+    attended = html.escape(str(row.get("attended_by") or "—"))
     status = html.escape(_sc_effective_status(row.get("status")))
     priority = html.escape(str(row.get("sales_priority") or "—"))
     region = html.escape(str(row.get("account_region") or "—"))
@@ -6838,7 +6920,7 @@ def _render_sc_selected_case_card(row: pd.Series) -> None:
   <div class="sc-case-hero__account">{account}</div>
   <div class="sc-case-hero__pills">
     <span class="sc-meta-pill sc-meta-pill--accent">{status}</span>
-    <span class="sc-meta-pill">{owner}</span>
+    <span class="sc-meta-pill">Attended · {attended}</span>
     <span class="sc-meta-pill">{priority}</span>
     <span class="sc-meta-pill">{region}</span>
     <span class="sc-meta-pill">{category}</span>
@@ -6854,7 +6936,7 @@ def _sc_sales_case_display_cols() -> tuple[str, ...]:
     return (
         "case_ref",
         "account_name",
-        "sales_owner",
+        "attended_by",
         "sales_priority",
         "account_region",
         "sales_category",
@@ -6875,6 +6957,7 @@ def _sc_rename_sales_case_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
     mapping = {
         "case_ref": "Ticket Number",
         "account_name": "Resort Name / Company Name",
+        "attended_by": "Attended by",
         "additional_info": "Case note",
         "close_note": "Closing note",
     }
@@ -6901,12 +6984,16 @@ def _sc_sync_case_edit_widgets(
         cat_opts = [scat, *cat_opts]
     st.session_state["sc_edit_scat"] = scat if scat in cat_opts else cat_opts[0]
     st.session_state["sc_edit_admin_notes"] = str(row.get("additional_info") or "")
+    att = str(row.get("attended_by") or "").strip()
+    st.session_state["sc_edit_attended_by"] = (
+        att if att in SALES_ATTENDED_BY_OPTIONS else SALES_ATTENDED_BY_OPTIONS[0]
+    )
 
 
 _SC_QUEUE_TABLE_COLS: tuple[str, ...] = (
     "case_ref",
     "account_name",
-    "sales_owner",
+    "attended_by",
     "sales_priority",
     "account_region",
     "sales_category",
@@ -7089,7 +7176,10 @@ def _render_selectable_sales_case_table(
         extra = f" (+{len(selected) - 6} more)" if len(selected) > 6 else ""
         st.caption(f"**{len(selected)}** selected: {shown}{extra}")
     else:
-        st.caption("Select one row below to open the **work panel** (details & next step).")
+        st.caption(
+            "Tick **Select**, then use the action buttons below "
+            "(or open the **work panel** for one case)."
+        )
     return selected
 
 
@@ -7097,6 +7187,122 @@ def _sc_clear_work_panel_tabs(key_prefix: str) -> None:
     """Reset per-queue selection helpers when clearing the table."""
     st.session_state.pop("sc_edit_synced_id", None)
     st.session_state.pop("sc_note_synced_id", None)
+    panel = _sc_toolbar_panel_keys(key_prefix)
+    for k in panel.values():
+        st.session_state.pop(k, None)
+
+
+def _render_sales_case_action_popover(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    case_options: list[str],
+    status_actions: tuple[tuple[str, str], ...],
+    op: str,
+) -> None:
+    """Action picker: trigger shows choice; menu lists options; Apply commits."""
+    status_labels = [_sc_toolbar_action_label(lbl, tgt) for lbl, tgt in status_actions]
+    label_to_target = _sc_toolbar_label_to_target(status_actions)
+    sel_key = f"{key_prefix}_sc_action_sel"
+    if sel_key not in st.session_state or st.session_state[sel_key] not in status_labels:
+        st.session_state[sel_key] = status_labels[0]
+    trigger = str(st.session_state[sel_key])
+
+    with st.popover(trigger, use_container_width=True):
+        st.caption("Choose action")
+        for label in status_labels:
+            picked = label == st.session_state[sel_key]
+            if st.button(
+                label,
+                key=f"{key_prefix}_sc_pick_{label.replace(' ', '_')}",
+                type="primary" if picked else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[sel_key] = label
+                st.rerun()
+        st.divider()
+        if st.button(
+            "Apply",
+            key=f"{key_prefix}_sc_apply",
+            type="primary",
+            use_container_width=True,
+        ):
+            choice = str(st.session_state.get(sel_key, ""))
+            target = label_to_target.get(choice)
+            if target:
+                _sc_apply_status_to_selected_cases(
+                    df,
+                    key_prefix=key_prefix,
+                    case_options=case_options,
+                    target_status=target,
+                    op=op,
+                )
+
+
+def _render_sales_case_delete_popover(
+    *,
+    key_prefix: str,
+    options: list[str],
+) -> None:
+    with st.popover("Remove", use_container_width=True):
+        picked_list = _get_selected_queue_sales_cases(key_prefix, options)
+        if not picked_list:
+            st.caption("Select case(s) in the table, then open **Remove** again.")
+            return
+        st.markdown("**" + "**, **".join(picked_list[:12]) + "**")
+        if len(picked_list) > 12:
+            st.caption(f"+ {len(picked_list) - 12} more")
+        st.caption("Permanently deletes the sales case row.")
+        confirm_del = st.checkbox(
+            "Yes, Remove Permanently",
+            value=False,
+            key=f"{key_prefix}_sc_del_confirm",
+        )
+        if st.button(
+            "Delete",
+            key=f"{key_prefix}_sc_del_btn",
+            type="secondary",
+            use_container_width=True,
+            disabled=not confirm_del,
+        ):
+            ok = 0
+            for cref in picked_list:
+                row = _fetch_sales_case_row_by_ref(cref)
+                if not row:
+                    st.warning(f"**{cref}** not found.")
+                    continue
+                row_id = str(row.get("id") or "").strip()
+                if not row_id:
+                    continue
+                try:
+                    _sales_cases_delete_row(row_id)
+                    ok += 1
+                except Exception as exc:
+                    st.error(f"**{cref}**: {exc}")
+            if ok:
+                _get_supabase_client.clear()
+                st.session_state[_sc_case_selection_session_key(key_prefix)] = []
+                _sc_set_sales_flash(f"Removed **{ok}** sales case(s).")
+                st.rerun()
+
+
+def _fetch_sales_case_row_by_ref(case_ref: str) -> dict | None:
+    cref = str(case_ref or "").strip()
+    if not cref:
+        return None
+    try:
+        res = (
+            _get_supabase_client()
+            .table(SALES_CASES_TABLE)
+            .select("*")
+            .eq("case_ref", cref)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
 
 
 def _render_sales_case_toolbar(
@@ -7106,18 +7312,30 @@ def _render_sales_case_toolbar(
     caption: str | None = None,
     status_actions: tuple[tuple[str, str], ...] = (),
     op: str = "",
+    allow_delete: bool = True,
+    allow_edit_assignment: bool = False,
 ) -> None:
-    """Select all / Clear / bulk status actions for the queue table."""
+    """Select all / Clear / status + admin actions for sales case queues."""
     options = _sc_case_options_for_admin(df)
     if not options:
         return
     if caption:
         st.caption(caption)
     sel_key = _sc_case_selection_session_key(key_prefix)
-    status_labels = [label for label, _ in status_actions] if op else []
+    panel_keys = _sc_toolbar_panel_keys(key_prefix)
+    status_labels = (
+        [_sc_toolbar_action_label(lbl, tgt) for lbl, tgt in status_actions] if op else []
+    )
+    label_to_target = _sc_toolbar_label_to_target(status_actions) if op else {}
+
     slot_count = 2
     if status_labels:
-        slot_count += 2 if len(status_labels) > 1 else 1
+        slot_count += 1 if len(status_labels) > 1 else 1
+    if allow_edit_assignment:
+        slot_count += 1
+    if allow_delete:
+        slot_count += 1
+
     with st.container(key=f"{key_prefix}_sc_toolbar"):
         cols = st.columns(slot_count, gap="small", vertical_alignment="bottom")
         idx = 0
@@ -7143,8 +7361,26 @@ def _render_sales_case_toolbar(
                 st.rerun()
         idx += 1
 
+        if allow_edit_assignment:
+            with cols[idx]:
+                if st.button(
+                    "Edit assignment",
+                    key=f"{key_prefix}_sc_edit_btn",
+                    use_container_width=True,
+                ):
+                    if not _require_selected_sales_cases(
+                        key_prefix=key_prefix,
+                        options=options,
+                        exactly_one=True,
+                    ):
+                        pass
+                    else:
+                        _sc_clear_toolbar_panels_except(key_prefix)
+                        st.session_state[panel_keys["details"]] = True
+                        st.rerun()
+            idx += 1
+
         if status_labels:
-            label_to_target = {label: tgt for label, tgt in status_actions}
             if len(status_labels) == 1:
                 only_label = status_labels[0]
                 only_target = label_to_target[only_label]
@@ -7155,45 +7391,31 @@ def _render_sales_case_toolbar(
                         type="primary",
                         use_container_width=True,
                     ):
-                        _sc_advance_selected_case(
+                        _sc_apply_status_to_selected_cases(
                             df,
                             key_prefix=key_prefix,
                             case_options=options,
                             target_status=only_target,
                             op=op,
-                            success_flash=f"Case moved to **{only_target}**.",
                         )
                 idx += 1
             else:
                 with cols[idx]:
-                    st.selectbox(
-                        "Action",
-                        options=status_labels,
-                        key=f"{key_prefix}_sc_action_sel",
-                        label_visibility="collapsed",
+                    _render_sales_case_action_popover(
+                        df,
+                        key_prefix=key_prefix,
+                        case_options=options,
+                        status_actions=status_actions,
+                        op=op,
                     )
                 idx += 1
-                with cols[idx]:
-                    if st.button(
-                        "Apply",
-                        key=f"{key_prefix}_sc_apply",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        choice = str(
-                            st.session_state.get(f"{key_prefix}_sc_action_sel", "")
-                        )
-                        target = label_to_target.get(choice)
-                        if target:
-                            _sc_advance_selected_case(
-                                df,
-                                key_prefix=key_prefix,
-                                case_options=options,
-                                target_status=target,
-                                op=op,
-                                success_flash=f"Case moved to **{target}**.",
-                            )
-                idx += 1
+
+        if allow_delete:
+            with cols[idx]:
+                _render_sales_case_delete_popover(
+                    key_prefix=key_prefix,
+                    options=options,
+                )
 
 
 def _render_clickable_sales_queue_metric(
@@ -7304,6 +7526,7 @@ def _render_sales_case_work_panel(
     field_cats: list[str],
     fe_names: list[str],
     fe_missing: bool,
+    open_tab: str = "details",
 ) -> None:
     """Actions for exactly one selected case (edit, dispatch, resolve, assign)."""
     row_id, _cref, r0 = _picked_sales_case_from_selection(
@@ -7330,6 +7553,13 @@ def _render_sales_case_work_panel(
 
     _render_sc_selected_case_card(r0)
     tabs = st.tabs(tab_names)
+    tab_by_name = {name: i for i, name in enumerate(tab_names)}
+    start_idx = tab_by_name.get(
+        "Site Visit" if open_tab == "site_visit" and "Site Visit" in tab_by_name else "Case Details",
+        0,
+    )
+    if start_idx > 0:
+        st.caption(f"Opened **{tab_names[start_idx]}** — use the tabs to switch.")
 
     tab_idx = 0
     with tabs[tab_idx]:
@@ -7338,6 +7568,11 @@ def _render_sales_case_work_panel(
             st.markdown("**Case Details**")
             st.caption("Region, category, and notes — does not change queue status.")
             with st.form(f"sc_edit_case_form_{key_prefix}", clear_on_submit=False):
+                st.selectbox(
+                    "Attended by",
+                    options=list(SALES_ATTENDED_BY_OPTIONS),
+                    key="sc_edit_attended_by",
+                )
                 e1, e2 = st.columns(2)
                 with e1:
                     st.selectbox(
@@ -7368,6 +7603,9 @@ def _render_sales_case_work_panel(
                 _sales_cases_update_row(
                     row_id,
                     {
+                        "attended_by": str(
+                            st.session_state.get("sc_edit_attended_by", "")
+                        ).strip(),
                         "account_region": str(
                             st.session_state.get("sc_edit_region", "")
                         ).strip(),
@@ -7389,8 +7627,10 @@ def _render_sales_case_work_panel(
             with st.container(border=True, key=f"{key_prefix}_sc_next_box"):
                 st.markdown("**Next Step**")
                 st.caption("Move this case to another queue.")
-                status_labels = [label for label, _ in status_actions]
-                label_to_target = {label: tgt for label, tgt in status_actions}
+                status_labels = [
+                    _sc_toolbar_action_label(label, tgt) for label, tgt in status_actions
+                ]
+                label_to_target = _sc_toolbar_label_to_target(status_actions)
                 st.selectbox(
                     "Move To",
                     options=status_labels,
@@ -7550,6 +7790,8 @@ def _render_sales_queue_segment(
     table_cols: tuple[str, ...] = _SC_QUEUE_TABLE_COLS,
     toolbar_caption: str | None = None,
     show_work_panel: bool = True,
+    allow_delete: bool = True,
+    allow_edit_assignment: bool = False,
     op: str = "",
     sales_cats: list[str] | None = None,
     field_cats: list[str] | None = None,
@@ -7572,11 +7814,32 @@ def _render_sales_queue_segment(
         caption=toolbar_caption,
         status_actions=status_actions if op else (),
         op=op,
+        allow_delete=allow_delete,
+        allow_edit_assignment=allow_edit_assignment,
     )
     _render_selectable_sales_case_table(sub, key_prefix=key_prefix, cols=table_cols)
+
     if show_work_panel and queue_status != SC_STATUS_RESOLVED:
         selected = _get_selected_queue_sales_cases(key_prefix, options)
-        if len(selected) == 1:
+        panel_keys = _sc_toolbar_panel_keys(key_prefix)
+        force_details = bool(st.session_state.get(panel_keys["details"]))
+        if force_details:
+            if len(selected) != 1:
+                st.warning("Select **exactly one** case for this action.")
+            else:
+                with st.container(border=True, key=f"{key_prefix}_work_panel"):
+                    _render_sales_case_work_panel(
+                        sub,
+                        key_prefix=key_prefix,
+                        case_options=options,
+                        op=op,
+                        sales_cats=sales_cats or list(DEFAULT_SALES_CASE_CATEGORIES),
+                        field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
+                        fe_names=fe_names or [],
+                        fe_missing=fe_missing,
+                        open_tab="details",
+                    )
+        elif len(selected) == 1:
             with st.container(border=True, key=f"{key_prefix}_work_panel"):
                 _render_sales_case_work_panel(
                     sub,
@@ -7672,6 +7935,7 @@ def _render_sales_cases_dashboard() -> None:
             empty_msg="No cases in **Sales Ticket**. Create one in sidebar **SALES**.",
             caption=None,
             toolbar_caption=None,
+            allow_edit_assignment=True,
             **work_kw,
         )
     elif queue_view == SC_STATUS_INVESTIGATION:
@@ -7684,6 +7948,7 @@ def _render_sales_cases_dashboard() -> None:
             empty_msg="No cases in **Investigation**.",
             caption=None,
             table_cols=_SC_QUEUE_TABLE_COLS + ("dispatch_type",),
+            allow_edit_assignment=True,
             **work_kw,
         )
     elif queue_view == SC_STATUS_DESIGN:
@@ -7694,6 +7959,7 @@ def _render_sales_cases_dashboard() -> None:
             title="Design — Post-Visit Solution",
             empty_msg="No cases in **Design**.",
             caption=None,
+            allow_edit_assignment=True,
             **work_kw,
         )
     elif queue_view == SC_STATUS_RESOLVED:
@@ -7706,6 +7972,8 @@ def _render_sales_cases_dashboard() -> None:
             caption=None,
             table_cols=_SC_QUEUE_TABLE_COLS + ("close_note", "status"),
             show_work_panel=False,
+            allow_delete=True,
+            allow_edit_assignment=False,
             **work_kw,
         )
 
@@ -8585,7 +8853,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     st.markdown("##### Sales Cases")
     st.caption(
         "Cases with activity in this window (by **updated_at**). "
-        "Grouped by **sales_owner**."
+        "Grouped by **attended by**."
     )
     try:
         sc_all = _fetch_sales_cases_df()
@@ -8616,10 +8884,10 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     f_owner, f_resort = st.columns(2)
     with f_owner:
         sc_focus = st.selectbox(
-            "Focus Sales Owner",
+            "Focus attended by",
             options=sc_people,
             key="perf_sc_focus_person",
-            help="Filter to one **sales_owner**, or **All**.",
+            help="Filter to **Mular_s**, **Ibbe**, or **All**.",
         )
     with f_resort:
         sc_account = st.selectbox(
@@ -8633,7 +8901,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     if sc_focus != "All" or sc_account != "All":
         bits = []
         if sc_focus != "All":
-            bits.append(f"sales owner **{sc_focus}**")
+            bits.append(f"attended by **{sc_focus}**")
         if sc_account != "All":
             bits.append(f"resort/company **{sc_account}**")
         st.caption(f"Filtered by {' and '.join(bits)} · **{len(sc_f)}** case(s).")
