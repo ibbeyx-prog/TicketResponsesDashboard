@@ -347,7 +347,7 @@ def _sc_apply_status_to_selected_cases(
         else:
             ok += 1
     if ok:
-        _get_supabase_client.clear()
+        _invalidate_dashboard_data_cache()
         st.session_state[_sc_case_selection_session_key(key_prefix)] = []
         _sc_set_sales_flash(f"**{ok}** case(s) moved to **{target_status}**.")
         st.rerun()
@@ -1691,6 +1691,23 @@ def _check_password() -> None:
 _SUPABASE_HTTP_TIMEOUT_SEC = float(os.getenv("SUPABASE_HTTP_TIMEOUT_SEC", "25"))
 _DASH_SUPABASE_DOWN_KEY = "_dash_supabase_unreachable"
 _DASH_UNATTENDED_TICK_KEY = "_dash_unattended_last_tick"
+_DASH_MISMATCH_CACHE_KEY = "_dash_pending_mismatch_cache"
+_DASH_DATA_CACHE_TTL_SEC = max(
+    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "60") or "60"))
+)
+
+
+def _invalidate_dashboard_data_cache() -> None:
+    """Drop cached reads after writes; keep the Supabase client connection."""
+    for clearable in (
+        _fetch_tickets_cached,
+        _fetch_sales_cases_cached,
+        _fetch_latest_attendance_ts_cached,
+        _cached_field_engineer_usernames,
+        _cached_task_categories,
+    ):
+        clearable.clear()
+    st.session_state.pop(_DASH_MISMATCH_CACHE_KEY, None)
 
 
 def _maybe_run_unattended_close() -> None:
@@ -1710,6 +1727,7 @@ def _maybe_run_unattended_close() -> None:
         st.session_state[_DASH_UNATTENDED_TICK_KEY] = now
         closed = int(stats.get("closed") or 0)
         if closed:
+            _invalidate_dashboard_data_cache()
             st.toast(
                 f"Moved {closed} ticket(s) to **Unattended** "
                 "(no field reply before assign-day cutoff)."
@@ -2019,7 +2037,7 @@ def _navigate_to_on_hold_queue() -> None:
     st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_ON_HOLD
 
 
-def _fetch_pending_with_response_mismatch() -> list[str]:
+def _fetch_pending_with_response_mismatch_uncached() -> list[str]:
     """Daily Task tickets that look stuck after a field reply (bot UPDATE likely failed).
 
     Ignores **old** Response log rows and stale ``responded_at`` from before
@@ -2091,7 +2109,24 @@ def _fetch_pending_with_response_mismatch() -> list[str]:
         return []
 
 
-def _fetch_tickets() -> pd.DataFrame:
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_pending_mismatch_cached() -> tuple[str, ...]:
+    return tuple(_fetch_pending_with_response_mismatch_uncached())
+
+
+def _fetch_pending_with_response_mismatch() -> list[str]:
+    """Throttled in session; backed by ``cache_data`` to avoid duplicate HTTP per rerun."""
+    now = datetime.now(timezone.utc).timestamp()
+    cached = st.session_state.get(_DASH_MISMATCH_CACHE_KEY)
+    if cached and (now - float(cached[0])) < 90:
+        return list(cached[1])
+    mismatches = list(_fetch_pending_mismatch_cached())
+    st.session_state[_DASH_MISMATCH_CACHE_KEY] = (now, tuple(mismatches))
+    return mismatches
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_tickets_cached() -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
     client = _get_supabase_client()
@@ -2109,6 +2144,10 @@ def _fetch_tickets() -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+
+def _fetch_tickets() -> pd.DataFrame:
+    return _fetch_tickets_cached()
 
 
 def _fetch_ticket_photos(
@@ -2139,8 +2178,9 @@ def _fetch_ticket_photos(
         if not ids:
             return {}
         q = q.in_("ticket_number", ids)
+    row_cap = min(limit_per_ticket * max(len(ticket_numbers or [1]), 1), 500)
     try:
-        res = q.order("timestamp", desc=True).limit(limit_per_ticket * max(len(ticket_numbers or [1]), 1)).execute()
+        res = q.order("timestamp", desc=True).limit(row_cap).execute()
     except Exception:
         return {}
     grouped: dict[str, list[dict]] = {}
@@ -3056,7 +3096,7 @@ def _render_manual_field_response_editor(
             st.success(f"{picked} → **Open** (field response saved).")
         else:
             st.success(f"{picked}: field response updated.")
-        _get_supabase_client.clear()
+        _invalidate_dashboard_data_cache()
         st.rerun()
 
 
@@ -3989,8 +4029,9 @@ def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
     )
 
 
-def _fetch_latest_attendance_timestamp() -> datetime | None:
-    """Return newest log row timestamp, or None if table empty / unreadable."""
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_latest_attendance_ts_cached() -> str | None:
+    """ISO timestamp string for cache serialization, or None."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
     client = _get_supabase_client()
@@ -4011,6 +4052,17 @@ def _fetch_latest_attendance_timestamp() -> datetime | None:
     if raw is None:
         return None
     ts = pd.to_datetime(raw, utc=True, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.to_pydatetime().isoformat()
+
+
+def _fetch_latest_attendance_timestamp() -> datetime | None:
+    """Return newest log row timestamp, or None if table empty / unreadable."""
+    iso = _fetch_latest_attendance_ts_cached()
+    if not iso:
+        return None
+    ts = pd.to_datetime(iso, utc=True, errors="coerce")
     if pd.isna(ts):
         return None
     return ts.to_pydatetime()
@@ -4926,7 +4978,7 @@ def _render_reassign_editor(
         f"**{picked}** reassigned → **Daily Task** ({handle}, {cat})."
         + (f" {tg_note}" if tg_note else "")
     )
-    _get_supabase_client.clear()
+    _invalidate_dashboard_data_cache()
     st.rerun()
 
 
@@ -4962,7 +5014,8 @@ def _normalize_engineer_dir_handle(raw: str) -> str:
     return cleaned
 
 
-def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_field_engineer_usernames() -> tuple[tuple[str, ...], bool]:
     """Return ``(usernames_without_at, table_missing)`` sorted case-insensitively."""
     client = _get_supabase_client()
     try:
@@ -4974,14 +5027,19 @@ def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
         )
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
-            return [], True
+            return (), True
         if is_transient_supabase_error(exc):
             _note_supabase_unreachable(exc)
-            return [], False
+            return (), False
         raise
     rows = res.data or []
     names = [str(r["username"]) for r in rows if r.get("username")]
-    return sorted(set(names), key=str.lower), False
+    return tuple(sorted(set(names), key=str.lower)), False
+
+
+def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
+    names, missing = _cached_field_engineer_usernames()
+    return list(names), missing
 
 
 def _insert_field_engineer(username: str) -> None:
@@ -5009,19 +5067,26 @@ def _ensure_task_categories_synced(client) -> None:
     st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = True
 
 
-def _try_fetch_task_categories() -> tuple[list[str], bool]:
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_task_categories() -> tuple[tuple[str, ...], bool]:
     """Return ``(category names, table_missing)`` from Supabase."""
     client = _get_supabase_client()
     _ensure_task_categories_synced(client)
     try:
-        return fetch_task_category_names(client)
+        names, missing = fetch_task_category_names(client)
+        return tuple(names), missing
     except Exception as exc:
         if _looks_like_missing_table_error(exc):
-            return [], True
+            return (), True
         if is_transient_supabase_error(exc):
             _note_supabase_unreachable(exc)
-            return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
+            return tuple(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
         raise
+
+
+def _try_fetch_task_categories() -> tuple[list[str], bool]:
+    names, missing = _cached_task_categories()
+    return list(names), missing
 
 
 def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
@@ -5045,6 +5110,7 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
             ):
                 try:
                     delete_task_category(_get_supabase_client(), cat)
+                    _cached_task_categories.clear()
                     st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
                     st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
                     st.rerun()
@@ -5072,6 +5138,7 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
                         st.warning(f"**{norm}** is already listed.")
                     else:
                         upsert_task_category(_get_supabase_client(), norm)
+                        _cached_task_categories.clear()
                         st.session_state.pop("cc_new_category", None)
                         st.session_state[_CC_CATEGORY_SELECT_PENDING_KEY] = norm
                         st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
@@ -5129,6 +5196,7 @@ def _field_team_manage_popover(names: list[str], *, missing: bool) -> None:
             ):
                 try:
                     _delete_field_engineer(u)
+                    _cached_field_engineer_usernames.clear()
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
@@ -5154,6 +5222,7 @@ def _field_team_manage_popover(names: list[str], *, missing: bool) -> None:
                         st.warning(f"**@{norm}** is already listed.")
                     else:
                         _insert_field_engineer(norm)
+                        _cached_field_engineer_usernames.clear()
                         st.session_state.pop("fe_new_handle", None)
                         st.rerun()
                 except ValueError as ve:
@@ -5266,7 +5335,7 @@ def _sc_insert_intake_case(
         st.rerun()
         return
 
-    _get_supabase_client.clear()
+    _invalidate_dashboard_data_cache()
     _sc_set_sales_flash(
         f"Case created — see **{status}** under **Sales Cases**."
     )
@@ -5528,7 +5597,7 @@ def _sidebar_field_assign() -> None:
             _cc_set_flash(f"Could not queue ticket: {exc}", level="error")
             st.rerun()
             return
-        _get_supabase_client.clear()
+        _invalidate_dashboard_data_cache()
         _cc_set_flash(summary, level="success")
         _cc_schedule_assign_form_clear()
         st.rerun()
@@ -5709,7 +5778,7 @@ def _sidebar_controls() -> tuple[bool, int, int]:
             else:
                 interval_minutes = DEFAULT_REFRESH_MINUTES
             if st.button("Refresh Now", use_container_width=True):
-                _get_supabase_client.clear()
+                _invalidate_dashboard_data_cache()
                 st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
                 st.rerun()
             lookup = st.text_input(
@@ -6849,7 +6918,8 @@ def _sc_show_sales_flash() -> None:
         st.success(msg)
 
 
-def _fetch_sales_cases_df() -> pd.DataFrame | None:
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_sales_cases_cached() -> pd.DataFrame | None:
     """Return sales-case rows, empty DataFrame if none, or ``None`` if table missing."""
     client = _get_supabase_client()
     try:
@@ -6873,6 +6943,10 @@ def _fetch_sales_cases_df() -> pd.DataFrame | None:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+
+def _fetch_sales_cases_df() -> pd.DataFrame | None:
+    return _fetch_sales_cases_cached()
 
 
 def _sales_cases_update_row(row_id: str, payload: dict) -> None:
@@ -7280,7 +7354,7 @@ def _render_sales_case_delete_popover(
                 except Exception as exc:
                     st.error(f"**{cref}**: {exc}")
             if ok:
-                _get_supabase_client.clear()
+                _invalidate_dashboard_data_cache()
                 st.session_state[_sc_case_selection_session_key(key_prefix)] = []
                 _sc_set_sales_flash(f"Removed **{ok}** sales case(s).")
                 st.rerun()
@@ -7615,7 +7689,7 @@ def _render_sales_case_work_panel(
                         "additional_info": notes,
                     },
                 )
-                _get_supabase_client.clear()
+                _invalidate_dashboard_data_cache()
                 _sc_set_sales_flash("Case details saved.")
                 st.rerun()
             except Exception as exc:
@@ -7667,7 +7741,7 @@ def _render_sales_case_work_panel(
                     if err:
                         st.warning(err)
                     else:
-                        _get_supabase_client.clear()
+                        _invalidate_dashboard_data_cache()
                         _sc_set_sales_flash(f"Case moved to **{target}**.")
                         st.rerun()
 
@@ -7769,7 +7843,7 @@ def _render_sales_case_work_panel(
                                     )
                         try:
                             _sales_cases_update_row(row_id, patch)
-                            _get_supabase_client.clear()
+                            _invalidate_dashboard_data_cache()
                             msg = f"Engineer **{handle}** assigned for **{region_label}**."
                             if post_tg and tg_ok:
                                 msg += " Telegram posted."
@@ -7984,6 +8058,22 @@ def _render_dashboard(
 ) -> None:
     day_word = "day" if lookback_days == 1 else "days"
     refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    _apply_pending_dashboard_nav()
+    _render_dashboard_header(refreshed_at=refreshed_at)
+    main_nav = _render_main_navigation()
+
+    if main_nav == "Log":
+        _render_attendance_tab(lookback_days=lookback_days)
+        return
+
+    if main_nav == "Performance":
+        _render_field_performance_tab(lookback_days=lookback_days)
+        return
+
+    if main_nav == "Sales Cases":
+        _render_sales_cases_dashboard()
+        return
+
     _maybe_run_unattended_close()
 
     try:
@@ -8078,7 +8168,6 @@ def _render_dashboard(
             f"**{total_other}** ticket(s) use a status not shown in the queue tabs: {detail}. "
             "Run migration `20260625_rename_no_answer_to_on_hold.sql` or move them manually."
         )
-    _apply_pending_dashboard_nav()
     (
         pending_label,
         open_label,
@@ -8095,40 +8184,25 @@ def _render_dashboard(
         total_completed=total_completed,
     )
 
-    _render_dashboard_header(refreshed_at=refreshed_at)
-    main_nav = _render_main_navigation()
-    if main_nav == "Tickets":
-        _render_assign_day_metrics(df_all, df_in_view=df)
-        _render_queue_summary_metrics(
-            total_pending=total_pending,
-            total_on_hold=total_on_hold,
-            total_open=total_open,
-            total_investigation=total_investigation,
-            total_unattended=total_unattended,
-            total_completed=total_completed,
-            pending_label=pending_label,
-            open_label=open_label,
-            on_hold_label=on_hold_label,
-            investigation_label=investigation_label,
-            completed_label=completed_label,
-            unattended_label=unattended_label,
-            total_in_view=total_in_view,
-            total_in_tabs=total_in_tabs,
-            total_other=total_other,
-        )
+    _render_assign_day_metrics(df_all, df_in_view=df)
+    _render_queue_summary_metrics(
+        total_pending=total_pending,
+        total_on_hold=total_on_hold,
+        total_open=total_open,
+        total_investigation=total_investigation,
+        total_unattended=total_unattended,
+        total_completed=total_completed,
+        pending_label=pending_label,
+        open_label=open_label,
+        on_hold_label=on_hold_label,
+        investigation_label=investigation_label,
+        completed_label=completed_label,
+        unattended_label=unattended_label,
+        total_in_view=total_in_view,
+        total_in_tabs=total_in_tabs,
+        total_other=total_other,
+    )
     queue_view = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
-
-    if main_nav == "Log":
-        _render_attendance_tab(lookback_days=lookback_days)
-        return
-
-    if main_nav == "Performance":
-        _render_field_performance_tab(lookback_days=lookback_days)
-        return
-
-    if main_nav == "Sales Cases":
-        _render_sales_cases_dashboard()
-        return
 
     if queue_view == STATUS_DAILY_TASK:
         st.markdown(f"##### {STATUS_DAILY_TASK} — Waiting on Field")
