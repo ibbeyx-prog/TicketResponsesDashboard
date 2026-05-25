@@ -6812,9 +6812,10 @@ def _sync_dashboard_nav_state(
     total_unattended: int,
     total_completed: int,
 ) -> tuple[str, str, str, str, str, str]:
-    """Keep queue session keys valid; return option labels for metrics."""
-    _migrate_legacy_queue_nav()
+    """Keep queue session keys valid; return option labels for metrics.
 
+    Must run **before** ``_render_main_navigation()`` (widget keys are read-only after).
+    """
     if st.session_state.get(_DASH_MAIN_NAV_KEY) not in _DASH_MAIN_NAV_OPTIONS:
         st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
 
@@ -8059,19 +8060,22 @@ def _render_dashboard(
     day_word = "day" if lookback_days == 1 else "days"
     refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
     _apply_pending_dashboard_nav()
+    _migrate_legacy_queue_nav()
+    nav_intent = str(st.session_state.get(_DASH_MAIN_NAV_KEY, "Tickets"))
+    if nav_intent not in _DASH_MAIN_NAV_OPTIONS:
+        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
+        nav_intent = "Tickets"
+
     _render_dashboard_header(refreshed_at=refreshed_at)
-    main_nav = _render_main_navigation()
 
-    if main_nav == "Log":
-        _render_attendance_tab(lookback_days=lookback_days)
-        return
-
-    if main_nav == "Performance":
-        _render_field_performance_tab(lookback_days=lookback_days)
-        return
-
-    if main_nav == "Sales Cases":
-        _render_sales_cases_dashboard()
+    if nav_intent in ("Log", "Performance", "Sales Cases"):
+        main_nav = _render_main_navigation()
+        if main_nav == "Log":
+            _render_attendance_tab(lookback_days=lookback_days)
+        elif main_nav == "Performance":
+            _render_field_performance_tab(lookback_days=lookback_days)
+        else:
+            _render_sales_cases_dashboard()
         return
 
     _maybe_run_unattended_close()
@@ -8183,6 +8187,17 @@ def _render_dashboard(
         total_unattended=total_unattended,
         total_completed=total_completed,
     )
+
+    main_nav = _render_main_navigation()
+    if main_nav == "Log":
+        _render_attendance_tab(lookback_days=lookback_days)
+        return
+    if main_nav == "Performance":
+        _render_field_performance_tab(lookback_days=lookback_days)
+        return
+    if main_nav == "Sales Cases":
+        _render_sales_cases_dashboard()
+        return
 
     _render_assign_day_metrics(df_all, df_in_view=df)
     _render_queue_summary_metrics(
