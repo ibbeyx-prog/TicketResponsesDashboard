@@ -1693,7 +1693,7 @@ _DASH_SUPABASE_DOWN_KEY = "_dash_supabase_unreachable"
 _DASH_UNATTENDED_TICK_KEY = "_dash_unattended_last_tick"
 _DASH_MISMATCH_CACHE_KEY = "_dash_pending_mismatch_cache"
 _DASH_DATA_CACHE_TTL_SEC = max(
-    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "60") or "60"))
+    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "20") or "20"))
 )
 
 
@@ -4069,7 +4069,8 @@ def _fetch_latest_attendance_timestamp() -> datetime | None:
 
 
 def _maybe_toast_new_telegram_activity() -> None:
-    """Toast when ``ticket_attendance_logs`` grows (assignments + field replies)."""
+    """Detect new bot/field log rows; refresh ticket cache so queues update."""
+    _fetch_latest_attendance_ts_cached.clear()
     try:
         latest = _fetch_latest_attendance_timestamp()
     except Exception:
@@ -4091,11 +4092,13 @@ def _maybe_toast_new_telegram_activity() -> None:
         return
     prev_dt = prev.to_pydatetime()
     if latest > prev_dt:
+        st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
+        _invalidate_dashboard_data_cache()
         st.toast(
-            "New activity — check **Daily Task**, **Open**, **Log**, or **Performance**.",
+            "New field activity — refreshing **Open** / **Daily Task** queues.",
             icon="📥",
         )
-        st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
+        st.rerun()
 
 
 def _parse_ts(series: pd.Series) -> pd.Series:
@@ -8079,10 +8082,10 @@ def _render_dashboard(
         return
 
     _maybe_run_unattended_close()
+    _maybe_toast_new_telegram_activity()
 
     try:
         df_all = _fetch_tickets()
-        _maybe_toast_new_telegram_activity()
     except _TableMissingError as missing:
         _render_missing_table_help(missing.table)
         return
