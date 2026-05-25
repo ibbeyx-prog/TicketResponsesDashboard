@@ -8344,12 +8344,6 @@ def _render_dashboard(
 
     elif queue_view == STATUS_ON_HOLD:
         st.markdown("##### On Hold — Admin Chase Queue")
-        st.caption(
-            "Tickets land here only when an admin uses **Action → On Hold** "
-            "(from **Daily Task**, **Needs Review**, or **Investigation**). "
-            "**Record response** when the engineer replies → **Needs Review**. "
-            "**Reassign** clears the visit for a fresh assignment."
-        )
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -8372,10 +8366,6 @@ def _render_dashboard(
                 _render_admin_ticket_toolbar(
                     na_df,
                     key_prefix="on_hold",
-                    caption=(
-                        "**Action**: **Under Investigation** to park, or **Reassign** / "
-                        "**Record response** (one ticket selected)."
-                    ),
                     status_actions=(
                         (
                             "Under Investigation",
