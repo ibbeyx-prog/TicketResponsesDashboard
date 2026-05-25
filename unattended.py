@@ -11,8 +11,11 @@ log = logging.getLogger("unattended")
 
 STATUS_UNATTENDED = "Unattended"
 STATUS_DAILY_TASK = "Daily Task"
+# Legacy rows may still say Pending before migration 20260626.
+DAILY_TASK_STATUSES: tuple[str, ...] = (STATUS_DAILY_TASK, "Pending")
 
 UNATTENDED_NUDGE_HOURS = float(os.getenv("UNATTENDED_NUDGE_HOURS", "6"))
+UNATTENDED_POLL_MINUTES = float(os.getenv("UNATTENDED_POLL_MINUTES", "15"))
 ASSIGN_DAY_CUTOFF_HOUR = int(os.getenv("ASSIGN_DAY_CUTOFF_HOUR", "23"))
 ASSIGN_DAY_CUTOFF_MINUTE = int(os.getenv("ASSIGN_DAY_CUTOFF_MINUTE", "59"))
 # UTC+5 — match app.py LOCAL_TZ
@@ -60,7 +63,7 @@ def has_field_response_since_assign(row: dict) -> bool:
 
 def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> bool:
     """Pending with no same-day (or prior-day) field response after assign-day cutoff."""
-    if str(row.get("status") or "").strip() != STATUS_DAILY_TASK:
+    if not is_daily_task_status(row.get("status")):
         return False
     if has_field_response_since_assign(row):
         return False
@@ -82,7 +85,7 @@ def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> boo
 
 def should_send_nudge(row: dict, *, now: datetime | None = None) -> bool:
     """Pending, no response, same assign day, past nudge delay, nudge not sent yet."""
-    if str(row.get("status") or "").strip() != STATUS_DAILY_TASK:
+    if not is_daily_task_status(row.get("status")):
         return False
     if has_field_response_since_assign(row):
         return False
@@ -123,7 +126,7 @@ def _fetch_pending_tickets(client: Any, *, tickets_table: str) -> list[dict]:
             "ticket_number, assigned_to, task_category, status, "
             "last_assigned_at, responded_at, unattended_nudge_sent_at"
         )
-        .eq("status", STATUS_DAILY_TASK)
+        .in_("status", list(DAILY_TASK_STATUSES))
         .limit(500)
         .execute()
     )

@@ -98,6 +98,7 @@ from unattended import (
     STATUS_DAILY_TASK,
     STATUS_UNATTENDED,
     UNATTENDED_NUDGE_HOURS,
+    run_unattended_close,
 )
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
@@ -1268,6 +1269,35 @@ def _render_login_page_styles() -> None:
             border: none !important;
             padding: 0 !important;
         }
+        div.st-key-login_shell .stTextInput input,
+        [data-testid="stAppViewContainer"] section.main .stTextInput input {
+            background-color: #141414 !important;
+            color: #e8e6e3 !important;
+            border: 1px solid rgba(215, 180, 145, 0.45) !important;
+            border-radius: 8px !important;
+            -webkit-text-fill-color: #e8e6e3 !important;
+            caret-color: #e8e6e3 !important;
+        }
+        div.st-key-login_shell .stTextInput input:focus,
+        [data-testid="stAppViewContainer"] section.main .stTextInput input:focus {
+            border-color: #D7B491 !important;
+            box-shadow: 0 0 0 1px #D7B491 !important;
+        }
+        div.st-key-login_shell .stTextInput input:-webkit-autofill,
+        div.st-key-login_shell .stTextInput input:-webkit-autofill:hover,
+        div.st-key-login_shell .stTextInput input:-webkit-autofill:focus,
+        div.st-key-login_shell .stTextInput input:-webkit-autofill:active,
+        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill,
+        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill:hover,
+        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill:focus,
+        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill:active {
+            -webkit-box-shadow: 0 0 0 1000px #141414 inset !important;
+            box-shadow: 0 0 0 1000px #141414 inset !important;
+            -webkit-text-fill-color: #e8e6e3 !important;
+            caret-color: #e8e6e3 !important;
+            border: 1px solid rgba(215, 180, 145, 0.45) !important;
+            transition: background-color 99999s ease-out 0s;
+        }
         [data-testid="stAppViewContainer"] section.main button[kind="primary"] {
             background: linear-gradient(90deg, #F15A29, #F7931E) !important;
             border: 1px solid rgba(255,255,255,0.1) !important;
@@ -1617,6 +1647,32 @@ def _check_password() -> None:
 
 _SUPABASE_HTTP_TIMEOUT_SEC = float(os.getenv("SUPABASE_HTTP_TIMEOUT_SEC", "25"))
 _DASH_SUPABASE_DOWN_KEY = "_dash_supabase_unreachable"
+_DASH_UNATTENDED_TICK_KEY = "_dash_unattended_last_tick"
+
+
+def _maybe_run_unattended_close() -> None:
+    """Backup path when bot cron/background worker is not running."""
+    if st.session_state.get(_DASH_SUPABASE_DOWN_KEY):
+        return
+    last = st.session_state.get(_DASH_UNATTENDED_TICK_KEY)
+    now = datetime.now(timezone.utc)
+    if isinstance(last, datetime) and (now - last).total_seconds() < 300:
+        return
+    try:
+        stats = run_unattended_close(
+            _get_supabase_client(),
+            tickets_table=TICKETS_TABLE,
+            attendance_table=ATTENDANCE_LOGS_TABLE,
+        )
+        st.session_state[_DASH_UNATTENDED_TICK_KEY] = now
+        closed = int(stats.get("closed") or 0)
+        if closed:
+            st.toast(
+                f"Moved {closed} ticket(s) to **Unattended** "
+                "(no field reply before assign-day cutoff)."
+            )
+    except Exception:
+        pass
 
 
 def _render_login_supabase_status() -> None:
@@ -5764,6 +5820,27 @@ _BON_THEME_CSS = """
         border-color: var(--bon-oak) !important;
         box-shadow: 0 0 0 1px var(--bon-oak) !important;
     }
+    [data-testid="stSidebar"] .stTextInput input,
+    [data-testid="stMain"] .stTextInput input {
+        background-color: var(--bon-card) !important;
+        color: var(--bon-text) !important;
+        -webkit-text-fill-color: var(--bon-text) !important;
+        caret-color: var(--bon-text) !important;
+    }
+    [data-testid="stSidebar"] .stTextInput input:-webkit-autofill,
+    [data-testid="stSidebar"] .stTextInput input:-webkit-autofill:hover,
+    [data-testid="stSidebar"] .stTextInput input:-webkit-autofill:focus,
+    [data-testid="stSidebar"] .stTextInput input:-webkit-autofill:active,
+    [data-testid="stMain"] .stTextInput input:-webkit-autofill,
+    [data-testid="stMain"] .stTextInput input:-webkit-autofill:hover,
+    [data-testid="stMain"] .stTextInput input:-webkit-autofill:focus,
+    [data-testid="stMain"] .stTextInput input:-webkit-autofill:active {
+        -webkit-box-shadow: 0 0 0 1000px var(--bon-card) inset !important;
+        box-shadow: 0 0 0 1000px var(--bon-card) inset !important;
+        -webkit-text-fill-color: var(--bon-text) !important;
+        caret-color: var(--bon-text) !important;
+        transition: background-color 99999s ease-out 0s;
+    }
     /* SALES intake: prominent ticket + account fields */
     [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_case_ref"],
     [data-testid="stSidebar"] div.st-key-sc_cc_intake_block div[class*="st-key-sc_cc_st_account"] {
@@ -7639,6 +7716,7 @@ def _render_dashboard(
 ) -> None:
     day_word = "day" if lookback_days == 1 else "days"
     refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    _maybe_run_unattended_close()
 
     try:
         df_all = _fetch_tickets()
@@ -8048,17 +8126,9 @@ def _render_dashboard(
             if open_df.empty:
                 st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
             else:
-                st.caption(
-                    "Select ticket(s) with **Select**, then: **Mark Resolved** (bulk OK) · "
-                    "**Under Investigation** (park, no ●) · **Follow-up** (one ticket + note, ● tracked)."
-                )
                 _render_admin_ticket_toolbar(
                     open_df,
                     key_prefix="open",
-                    caption=(
-                        "**Action** menu: **Mark Resolved** or **Under Investigation** (no follow-up marker). "
-                        "**Follow-up** popover = individual tracked case. **Reassign** → **Daily Task**."
-                    ),
                     status_actions=(
                         ("Mark Resolved", STATUS_RESOLVED, "Resolved"),
                         (

@@ -75,6 +75,7 @@ Database expectations
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import html
 import logging
@@ -2868,6 +2869,32 @@ def _verify_webhook_secret(request: Request) -> None:
 bot_app = _build_bot_app()
 
 
+async def _unattended_background_loop() -> None:
+    """Close/nudge Daily Task tickets on a timer (no external Railway cron required)."""
+    await asyncio.sleep(30)
+    interval_sec = max(300.0, UNATTENDED_POLL_MINUTES * 60.0)
+    while True:
+        try:
+            close_stats = run_unattended_close(
+                supabase,
+                tickets_table=TICKETS_TABLE,
+                attendance_table=ATTENDANCE_LOGS_TABLE,
+            )
+            if close_stats.get("closed"):
+                log.info("unattended auto-close: %s", close_stats)
+            nudge_stats = await run_unattended_nudges(
+                supabase,
+                tickets_table=TICKETS_TABLE,
+                attendance_table=ATTENDANCE_LOGS_TABLE,
+                send_telegram=_send_unattended_nudge_telegram,
+            )
+            if nudge_stats.get("sent"):
+                log.info("unattended auto-nudge: %s", nudge_stats)
+        except Exception:
+            log.exception("unattended background tick failed")
+        await asyncio.sleep(interval_sec)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await bot_app.initialize()
@@ -2951,9 +2978,22 @@ async def lifespan(_: FastAPI):
             "WEBHOOK_FULL_URL); Telegram webhook not registered."
         )
 
+    unattended_task = asyncio.create_task(_unattended_background_loop())
+    log.info(
+        "Unattended worker started (poll every %.0f min; close after assign-day cutoff %02d:%02d UTC+5)",
+        UNATTENDED_POLL_MINUTES,
+        int(os.getenv("ASSIGN_DAY_CUTOFF_HOUR", "23")),
+        int(os.getenv("ASSIGN_DAY_CUTOFF_MINUTE", "59")),
+    )
+
     try:
         yield
     finally:
+        unattended_task.cancel()
+        try:
+            await unattended_task
+        except asyncio.CancelledError:
+            pass
         if telethon_sidecar_client is not None:
             try:
                 await telethon_sidecar_client.disconnect()
@@ -3001,6 +3041,7 @@ async def health() -> dict[str, str]:
         # old "Recorded …" / "✓ Ticket …" lines in Telegram, redeploy this service.
         "group_operational_replies": "off",
         "unattended_nudge_hours": str(os.getenv("UNATTENDED_NUDGE_HOURS", "6")),
+        "unattended_poll_minutes": str(UNATTENDED_POLL_MINUTES),
         "telethon_group_ingest": (
             "on"
             if _env_str("TG_API_ID", "TELEGRAM_API_ID")
