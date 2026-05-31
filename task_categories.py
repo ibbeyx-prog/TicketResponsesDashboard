@@ -86,7 +86,15 @@ def upsert_task_category(client: Any, name: str, *, table: str | None = None) ->
 
 def delete_task_category(client: Any, name: str, *, table: str | None = None) -> None:
     tbl = table or task_categories_table()
-    client.table(tbl).delete().eq("name", name).execute()
+    norm = normalize_task_category_name(name)
+    client.table(tbl).delete().eq("name", norm).execute()
+    still = (
+        client.table(tbl).select("name").eq("name", norm).limit(1).execute()
+    )
+    if still.data:
+        raise RuntimeError(
+            f"Could not remove **{norm}** — check Supabase permissions or try again."
+        )
 
 
 def sync_ticket_categories_into_table(

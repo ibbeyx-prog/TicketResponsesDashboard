@@ -128,7 +128,6 @@ SALES_REGION_CODES: tuple[str, ...] = (
     "CENTRAL",
 )
 SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Standard")
-SALES_ATTENDED_BY_OPTIONS: tuple[str, ...] = ("Mular_s", "Ibbe")
 DEFAULT_SALES_CASE_CATEGORIES: tuple[str, ...] = (
     "QOS Issue",
     "Call Drop Issues",
@@ -145,6 +144,14 @@ SC_STATUS_RESOLVED = STATUS_RESOLVED
 _SC_INVESTIGATION_QUEUE_STATUSES: tuple[str, ...] = (
     SC_STATUS_INVESTIGATION,
     SC_STATUS_REGIONAL,
+)
+_SC_ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
+    {
+        SC_STATUS_SALES_TICKET,
+        SC_STATUS_INVESTIGATION,
+        SC_STATUS_REGIONAL,
+        SC_STATUS_DESIGN,
+    }
 )
 
 # Older rows / labels (mapped in UI until backfill migration runs).
@@ -164,6 +171,11 @@ _SC_LEGACY_STATUS_MAP: dict[str, str] = {
 def _sc_effective_status(raw: object) -> str:
     s = str(raw or "").strip()
     return _SC_LEGACY_STATUS_MAP.get(s, s)
+
+
+def _sc_row_text(val: object) -> str:
+    s = str(val or "").strip()
+    return "" if not s or s.lower() == "nan" else s
 
 
 def _sc_status_actions_for_queue(queue_status: str) -> tuple[tuple[str, str], ...]:
@@ -593,7 +605,8 @@ _DASH_SALES_QUEUE_KEY = "_dash_sales_queue"
 _DASH_PENDING_MAIN_NAV_KEY = "_dash_pending_main_nav"
 _DASH_PENDING_TICKET_QUEUE_KEY = "_dash_pending_ticket_queue"
 _DASH_PENDING_SALES_QUEUE_KEY = "_dash_pending_sales_queue"
-_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = ("Tickets", "Sales Cases", "Log", "Performance")
+_DASH_NAV_CSM = "CSM Cases"
+_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = (_DASH_NAV_CSM, "Sales Cases", "Log", "Performance")
 _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 _CC_FE_SELECT_KEY = "cc_fe_select"
@@ -604,18 +617,32 @@ _CC_CLEAR_ASSIGN_KEY = "_cc_clear_assign_form"
 _CC_ADD_UNASSIGNED_KEY = "cc_add_unassigned"
 _CC_CATEGORY_SELECT_KEY = "cc_category_select"
 _CC_CATEGORY_SELECT_PENDING_KEY = "_cc_category_select_pending"
+_SC_CC_ST_SCAT_PENDING_KEY = "_sc_cc_st_scat_pending"
+_SC_EDIT_SCAT_PENDING_KEY = "_sc_edit_scat_pending"
 _SC_CC_ST_REF_KEY = "sc_cc_st_case_ref"
 _SC_CC_ST_ACCOUNT_KEY = "sc_cc_st_account"
-_SC_CC_ST_ATTENDED_KEY = "sc_cc_st_attended"
 _SC_CC_ST_PRIORITY_KEY = "sc_cc_st_priority"
 _SC_CC_ST_REGION_KEY = "sc_cc_st_region"
 _SC_CC_ST_SCAT_KEY = "sc_cc_st_scat"
 _SC_CC_ST_DESC_KEY = "sc_cc_st_desc"
+_SC_CC_SKIP_ASSIGN_KEY = "sc_cc_skip_field_assign"
+_SC_CC_FE_SELECT_KEY = "sc_cc_fe_select"
+_SC_CC_FE_MANUAL_KEY = "sc_cc_fe_manual"
 _SC_CC_CLEAR_ST_INTAKE_KEY = "_sc_cc_clear_st_intake"
 _CC_SIDEBAR_TAB_KEY = "_cc_sidebar_tab"
 CC_TAB_CSM = "CSM"
 CC_TAB_SALES = "SALES"
 _CC_SIDEBAR_TAB_OPTIONS: tuple[str, ...] = (CC_TAB_CSM, CC_TAB_SALES)
+
+
+def _normalize_dash_main_nav(value: object) -> str:
+    """Map legacy nav labels (e.g. Tickets, CSM) to current options."""
+    nav = str(value or _DASH_NAV_CSM).strip()
+    if nav in ("Tickets", "CSM"):
+        return _DASH_NAV_CSM
+    if nav == "Sales cases":
+        return "Sales Cases"
+    return nav
 
 
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
@@ -642,9 +669,23 @@ def _reassign_session_keys(prefix: str) -> dict[str, str]:
 
 def _clear_reassign_panels_except(active_prefix: str) -> None:
     """Close reassign forms from other queues so status checks stay aligned."""
-    for prefix in ("assigned", "open", "on_hold", "investigation"):
+    for prefix in (
+        "assigned",
+        "open",
+        "on_hold",
+        "investigation",
+        "sc_sales_ticket",
+        "sc_investigation",
+        "sc_design",
+    ):
         if prefix != active_prefix:
             st.session_state.pop(_reassign_session_keys(prefix)["show"], None)
+
+
+def _clear_sc_assignment_edit_panels_except(active_prefix: str) -> None:
+    for prefix in ("sc_sales_ticket", "sc_investigation", "sc_design"):
+        if prefix != active_prefix:
+            st.session_state.pop(_assignment_edit_session_keys(prefix)["show"], None)
 
 
 def _manual_field_response_session_keys(prefix: str) -> dict[str, str]:
@@ -1418,6 +1459,17 @@ def _session_operator_id() -> str | None:
     return s or None
 
 
+def _sc_attended_by_for_session() -> str:
+    """Sales case ``attended_by`` — the signed-in dashboard operator."""
+    op = _session_operator_id()
+    if op:
+        return op
+    user = _session_dashboard_username()
+    if user:
+        return user
+    return "unknown"
+
+
 def _cc_assignment_log_note(additional_info: str | None, operator_id: str) -> str | None:
     """Prefix attendance-log note with who used Command Center."""
     parts: list[str] = [f"Dashboard operator: {operator_id.strip()}"]
@@ -2065,7 +2117,7 @@ def _move_to_on_hold(ticket_number: str, *, operator_id: str) -> None:
 
 
 def _navigate_to_on_hold_queue() -> None:
-    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Tickets"
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
     st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_ON_HOLD
 
 
@@ -3031,6 +3083,75 @@ def _render_ticket_delete_popover(
                 st.rerun()
 
 
+def _render_ticket_transfer_to_sales_popover(
+    *,
+    key_prefix: str,
+    options: list[str],
+) -> None:
+    with st.popover("Move to Sales", use_container_width=True):
+        picked_list = _get_selected_queue_tickets(key_prefix, options)
+        if not picked_list:
+            st.caption("Select ticket(s), then open **Move to Sales** again.")
+            return
+        st.markdown("**" + "**, **".join(picked_list[:12]) + "**")
+        if len(picked_list) > 12:
+            st.caption(f"+ {len(picked_list) - 12} more")
+        st.caption(
+            "Creates a **Sales case** and removes the CSM ticket. "
+            "**Log** keeps attendance history."
+        )
+        op = _session_operator_id()
+        if not op:
+            st.warning("Sign in with an **Operator ID** first.")
+            return
+        account_name = ""
+        if len(picked_list) == 1:
+            account_name = st.text_input(
+                "Resort / company name (optional)",
+                placeholder=f"Defaults to Ticket {picked_list[0]}",
+                key=f"{key_prefix}_xfer_sales_account",
+            )
+        region = st.selectbox(
+            "Region Team",
+            options=list(SALES_REGION_CODES),
+            key=f"{key_prefix}_xfer_sales_region",
+        )
+        confirm = st.checkbox(
+            "Yes, move to Sales Cases",
+            value=False,
+            key=f"{key_prefix}_xfer_sales_confirm",
+        )
+        if st.button(
+            "Move",
+            key=f"{key_prefix}_xfer_sales_btn",
+            type="secondary",
+            use_container_width=True,
+            disabled=not confirm,
+        ):
+            ok = 0
+            for picked in picked_list:
+                try:
+                    an = account_name.strip() if len(picked_list) == 1 else None
+                    _cc_transfer_ticket_to_sales_case(
+                        picked,
+                        operator_id=op,
+                        account_name=an,
+                        account_region=region,
+                    )
+                    ok += 1
+                except Exception as exc:
+                    st.error(f"**{picked}**: {exc}")
+            if ok:
+                _invalidate_dashboard_data_cache()
+                st.session_state[_ticket_selection_session_key(key_prefix)] = []
+                st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
+                st.session_state[_DASH_PENDING_SALES_QUEUE_KEY] = _queue_segment_label(
+                    SC_STATUS_SALES_TICKET, 1
+                )
+                st.success(f"Moved **{ok}** ticket(s) to **Sales Cases**.")
+                st.rerun()
+
+
 def _sync_manual_field_response_widgets(
     *,
     keys: dict[str, str],
@@ -3226,7 +3347,7 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
                 st.error(f"Could not mark follow-up: {exc}")
                 return
             st.session_state[_ticket_selection_session_key(key_prefix)] = []
-            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Tickets"
+            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
             st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
             st.session_state[_CC_FLASH_KEY] = (
                 f"**{ticket}** → **Under Investigation** (follow-up tracked ●)."
@@ -3242,6 +3363,7 @@ def _render_admin_ticket_toolbar(
     caption: str | None = None,
     status_actions: tuple[tuple[str, str, str], ...] = (),
     allow_delete: bool = True,
+    allow_transfer_to_sales: bool = True,
     allow_edit_assignment: bool = False,
     allow_manual_field_response: bool = False,
     allow_reassign: bool = False,
@@ -3273,6 +3395,8 @@ def _render_admin_ticket_toolbar(
     if allow_edit_assignment:
         slot_count += 1
     if allow_mark_follow_up:
+        slot_count += 1
+    if allow_transfer_to_sales and _session_operator_id():
         slot_count += 1
     if allow_delete:
         slot_count += 1
@@ -3379,6 +3503,14 @@ def _render_admin_ticket_toolbar(
         if allow_mark_follow_up:
             with cols[idx]:
                 _render_mark_follow_up_popover(
+                    key_prefix=key_prefix,
+                    options=options,
+                )
+            idx += 1
+
+        if allow_transfer_to_sales and _session_operator_id():
+            with cols[idx]:
+                _render_ticket_transfer_to_sales_popover(
                     key_prefix=key_prefix,
                     options=options,
                 )
@@ -4361,6 +4493,68 @@ def _cc_insert_pending_unassigned(
     )
 
 
+def _cc_map_sales_status_to_csm(sales_status: str) -> str:
+    """Pick a CSM queue when moving a sales case to field tickets."""
+    if str(sales_status or "").strip() == SC_STATUS_RESOLVED:
+        return STATUS_RESOLVED
+    return STATUS_DAILY_TASK
+
+
+def _cc_insert_transferred_ticket(
+    client,
+    ticket_number: str,
+    *,
+    task_category: str,
+    status: str,
+    assigned_to: str | None,
+    additional_info: str | None,
+    operator_id: str,
+) -> None:
+    """Insert a CSM ticket row when moving from Sales Cases."""
+    now_iso = _cc_utc_now_iso()
+    handle: str | None = None
+    if assigned_to:
+        handle = _cc_normalize_handle(assigned_to)
+    row: dict = {
+        "ticket_number": ticket_number,
+        "assigned_to": handle,
+        "task_category": task_category,
+        "status": status,
+        "field_response": None,
+        "field_responded_by": None,
+        "photo_url": None,
+        "additional_info": additional_info,
+        "dashboard_assigned_by": operator_id,
+        "unattended_nudge_sent_at": None,
+    }
+    if handle:
+        row["last_assigned_at"] = now_iso
+    for _ in range(4):
+        try:
+            client.table(TICKETS_TABLE).insert(row).execute()
+            break
+        except Exception as exc:
+            col = _cc_parse_missing_column(str(exc))
+            if not col or col not in row:
+                raise
+            _TICKETS_MISSING_COLUMNS.add(col)
+            row.pop(col, None)
+    else:
+        raise RuntimeError(
+            f"insert into {TICKETS_TABLE} failed: too many missing-column retries"
+        )
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=f"@{operator_id.lstrip('@')}",
+        action_type="TransferredFromSales",
+        note=_cc_assignment_log_note(
+            f"Moved from Sales Cases → **{status}**.",
+            operator_id,
+        ),
+    )
+
+
 def _cc_queue_pending_unassigned(
     ticket_number: str,
     task_category: str,
@@ -5017,6 +5211,465 @@ def _render_reassign_editor(
     st.rerun()
 
 
+def _sc_patch_assignment_fields(
+    row_id: str,
+    *,
+    assigned_to: str,
+    field_task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+    account_region: str | None = None,
+) -> dict:
+    """Update sales case field assignment (same fields as CSM edit assignment)."""
+    row = _fetch_sales_case_row_by_id(row_id)
+    if not row:
+        raise ValueError("Sales case not found.")
+    if _sc_effective_status(row.get("status")) == SC_STATUS_RESOLVED:
+        raise ValueError("Cannot edit assignment on a **Resolved** sales case.")
+
+    prev_handle = str(row.get("assigned_to") or "").strip()
+    patch: dict[str, object] = {
+        "assigned_to": assigned_to,
+        "field_task_category": field_task_category,
+        "additional_info": additional_info,
+        "admin_owner": operator_id,
+    }
+    region = (account_region or "").strip()
+    if region:
+        if region not in SALES_REGION_CODES:
+            raise ValueError("Pick a valid **Region Team**.")
+        patch["account_region"] = region
+        patch["dispatch_region"] = region
+    _sc_stamp_last_assigned_at_if_first(patch, prev_assigned_to=prev_handle)
+    _sales_cases_update_row(row_id, patch)
+    updated = _fetch_sales_case_row_by_id(row_id)
+    return updated or row
+
+
+async def _sc_sync_assignment_to_telegram(
+    *,
+    case_ref: str,
+    assigned_to: str,
+    task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+    token: str,
+    chat_id: int | str,
+) -> str:
+    """Edit linked Telegram message or post a new one for a sales case."""
+    assigned_by = f"{operator_id} (updated)"
+    api_id = _read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None
+    api_hash = _read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None
+
+    found = await find_assignment_telegram_ref(
+        case_ref,
+        group_id=chat_id,
+        bot_token=token,
+        api_id=api_id,
+        api_hash=api_hash,
+    )
+    if found:
+        try:
+            await update_telegram_assignment_message(
+                int(found.chat_id),
+                int(found.message_id),
+                assigned_to,
+                case_ref,
+                task_category,
+                additional_info=additional_info,
+                assigned_by=None,
+                updated=False,
+                api_id=api_id,
+                api_hash=api_hash,
+                bot_token=token,
+            )
+            return (
+                "The **same** Telegram assignment message was updated in the group "
+                "(no new post; notes refreshed in place)."
+            )
+        except Exception:
+            pass
+
+    await notify_telegram_group(
+        assigned_to,
+        case_ref,
+        task_category,
+        additional_info=additional_info,
+        assigned_by=assigned_by,
+        updated=True,
+        api_id=api_id,
+        api_hash=api_hash,
+        bot_token=token,
+        group_id=chat_id,
+    )
+    return (
+        "Posted a **new** assignment message at the bottom of the group "
+        "(starts with “Assignment updated”). Use that message for field replies."
+    )
+
+
+def _render_sales_assignment_editor(
+    *,
+    key_prefix: str,
+    edit_key_prefix: str,
+    field_cats: list[str],
+    fe_names: list[str],
+    fe_missing: bool,
+    case_options: list[str],
+    df: pd.DataFrame,
+) -> None:
+    """Edit sales case field assignment — same form template as CSM."""
+    if not case_options:
+        return
+
+    keys = _assignment_edit_session_keys(edit_key_prefix)
+    row_id, cref, r0 = _picked_sales_case_from_selection(
+        df, key_prefix=key_prefix, case_options=case_options
+    )
+    if not row_id or r0 is None or not cref:
+        return
+
+    if _sc_effective_status(r0.get("status")) == SC_STATUS_RESOLVED:
+        st.info(f"Pick an active sales case — **{cref}** is **Resolved**.")
+        return
+
+    st.caption(
+        f"Editing **{cref}** — saves to the dashboard. "
+        "Telegram: tries to **edit the original** post when found; otherwise posts "
+        "“Assignment updated” at the bottom of the group."
+    )
+
+    current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
+    current_cat = _sc_row_text(r0.get("field_task_category")) or _sc_row_text(
+        r0.get("sales_category")
+    )
+    current_notes = _sc_row_text(r0.get("additional_info")) or _sc_row_text(
+        r0.get("description")
+    )
+
+    cats = field_cats if field_cats else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    if current_cat and current_cat not in cats:
+        cats = [current_cat, *cats]
+
+    _sync_assignment_edit_widgets(
+        keys=keys,
+        picked=cref,
+        current_handle=current_handle,
+        current_cat=current_cat,
+        current_notes=current_notes,
+        cats=cats,
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+    )
+    region_key = f"{edit_key_prefix}_sc_edit_assign_region"
+    synced_key = f"{edit_key_prefix}_sc_edit_assign_synced"
+    if st.session_state.get(synced_key) != cref:
+        st.session_state[synced_key] = cref
+        cur_region = _sc_row_text(r0.get("account_region"))
+        st.session_state[region_key] = (
+            cur_region if cur_region in SALES_REGION_CODES else SALES_REGION_CODES[0]
+        )
+
+    with st.form(f"{edit_key_prefix}_sc_assignment_edit_form", clear_on_submit=False):
+        st.selectbox(
+            "Region Team",
+            options=list(SALES_REGION_CODES),
+            key=region_key,
+        )
+        if fe_names and not fe_missing:
+            st.selectbox(
+                "Engineer",
+                options=[f"@{n}" for n in fe_names],
+                key=keys["engineer"],
+            )
+        else:
+            st.text_input(
+                "Engineer",
+                placeholder="username",
+                key=keys["engineer"],
+            )
+        st.selectbox(
+            "Category",
+            options=cats,
+            key=keys["category"],
+        )
+        st.text_area(
+            "Notes (Additional Info)",
+            height=80,
+            key=keys["notes"],
+        )
+        st.checkbox(
+            "Update Telegram Assignment Message",
+            value=True,
+            key=keys["sync_tg"],
+        )
+        submitted = st.form_submit_button(
+            "Save assignment changes",
+            use_container_width=True,
+        )
+
+    if not submitted:
+        return
+
+    try:
+        if fe_names and not fe_missing:
+            handle = _cc_normalize_handle(
+                str(st.session_state.get(keys["engineer"], ""))
+            )
+        else:
+            raw = str(st.session_state.get(keys["engineer"], "")).strip()
+            handle = _cc_normalize_handle(raw) if raw else ""
+            if not handle:
+                raise ValueError("Enter an engineer username.")
+        cat = str(st.session_state.get(keys["category"], "")).strip()
+        if not cat:
+            raise ValueError("Pick a category.")
+        notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        region = str(st.session_state.get(region_key, "")).strip()
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    op = _session_operator_id()
+    if not op:
+        st.error("Sign in again — operator session is missing.")
+        return
+
+    try:
+        _sc_patch_assignment_fields(
+            row_id,
+            assigned_to=handle,
+            field_task_category=cat,
+            additional_info=notes,
+            operator_id=op,
+            account_region=region,
+        )
+    except Exception as exc:
+        st.error(f"Could not save: {exc}")
+        return
+
+    tg_note = ""
+    if st.session_state.get(keys["sync_tg"]):
+        token, chat_id = _cc_resolve_telegram_credentials()
+        if not token or chat_id is None:
+            st.warning(
+                "Saved in dashboard. Telegram not updated — set **TELEGRAM_TOKEN** and "
+                "**TELEGRAM_GROUP_CHAT_ID** in `.env` / Secrets."
+            )
+        else:
+            try:
+                tg_note = asyncio.run(
+                    _sc_sync_assignment_to_telegram(
+                        case_ref=cref,
+                        assigned_to=handle,
+                        task_category=cat,
+                        additional_info=notes,
+                        operator_id=op,
+                        token=token,
+                        chat_id=chat_id,
+                    )
+                )
+            except Exception as exc:
+                st.warning(f"Saved in dashboard. Telegram update failed: {exc}")
+                tg_note = ""
+
+    st.session_state[keys["show"]] = False
+    flash = f"Updated assignment for **{cref}**."
+    if tg_note:
+        flash += f" {tg_note}"
+    _sc_set_sales_flash(flash)
+    _invalidate_dashboard_data_cache()
+    st.rerun()
+
+
+def _sc_dashboard_reassign_case(
+    row_id: str,
+    *,
+    assigned_to: str,
+    field_task_category: str,
+    additional_info: str | None,
+    operator_id: str,
+) -> dict:
+    """Reassign field engineer on a sales case (same intent as CSM reassign)."""
+    row = _fetch_sales_case_row_by_id(row_id)
+    if not row:
+        raise ValueError("Sales case not found.")
+    status = _sc_effective_status(row.get("status"))
+    if status == SC_STATUS_RESOLVED:
+        raise ValueError("Cannot reassign a **Resolved** sales case.")
+
+    patch: dict[str, object] = {
+        "assigned_to": assigned_to,
+        "field_task_category": field_task_category,
+        "admin_owner": operator_id,
+    }
+    if additional_info is not None:
+        patch["additional_info"] = additional_info
+    _sc_stamp_last_assigned_at(patch)
+    _sales_cases_update_row(row_id, patch)
+    updated = _fetch_sales_case_row_by_id(row_id)
+    return updated or row
+
+
+def _render_sales_reassign_editor(
+    *,
+    key_prefix: str,
+    edit_key_prefix: str,
+    field_cats: list[str],
+    fe_names: list[str],
+    fe_missing: bool,
+    case_options: list[str],
+    df: pd.DataFrame,
+) -> None:
+    """Reassign field engineer on a sales case; optional new Telegram post."""
+    if not case_options:
+        return
+
+    keys = _reassign_session_keys(edit_key_prefix)
+    row_id, cref, r0 = _picked_sales_case_from_selection(
+        df, key_prefix=key_prefix, case_options=case_options
+    )
+    if not row_id or r0 is None or not cref:
+        st.info("Select a case in this queue, then click **Reassign** again.")
+        return
+    if cref not in case_options:
+        st.info("Select a case in this queue, then click **Reassign** again.")
+        return
+
+    status = _sc_effective_status(r0.get("status"))
+    if status == SC_STATUS_RESOLVED:
+        st.info(f"Cannot reassign — case **{cref}** is **Resolved**.")
+        return
+
+    st.caption(
+        f"Reassign **{cref}** to a different field engineer. "
+        "Posts a **new** assignment line in Telegram when enabled below."
+    )
+
+    current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
+    current_cat = _sc_row_text(r0.get("field_task_category")) or _sc_row_text(
+        r0.get("sales_category")
+    )
+    current_notes = _sc_row_text(r0.get("additional_info")) or _sc_row_text(
+        r0.get("description")
+    )
+
+    cats = field_cats if field_cats else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    if current_cat and current_cat not in cats:
+        cats = [current_cat, *cats]
+
+    _sync_assignment_edit_widgets(
+        keys=keys,
+        picked=cref,
+        current_handle=current_handle,
+        current_cat=current_cat,
+        current_notes=current_notes,
+        cats=cats,
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+    )
+
+    with st.form(f"{edit_key_prefix}_sc_reassign_form", clear_on_submit=False):
+        if fe_names and not fe_missing:
+            st.selectbox(
+                "Engineer",
+                options=[f"@{n}" for n in fe_names],
+                key=keys["engineer"],
+            )
+        else:
+            st.text_input("Engineer", placeholder="username", key=keys["engineer"])
+        st.selectbox("Category", options=cats, key=keys["category"])
+        st.text_area("Notes (Additional Info)", height=80, key=keys["notes"])
+        st.checkbox(
+            "Post New Telegram Assignment",
+            value=True,
+            key=keys["sync_tg"],
+        )
+        submitted = st.form_submit_button(
+            "Reassign engineer",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if not submitted:
+        return
+
+    try:
+        if fe_names and not fe_missing:
+            handle = _cc_normalize_handle(str(st.session_state.get(keys["engineer"], "")))
+        else:
+            raw = str(st.session_state.get(keys["engineer"], "")).strip()
+            handle = _cc_normalize_handle(raw) if raw else ""
+            if not handle:
+                raise ValueError("Enter an engineer username.")
+        cat = str(st.session_state.get(keys["category"], "")).strip()
+        if not cat:
+            raise ValueError("Pick a category.")
+        notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    op = _session_operator_id()
+    if not op:
+        st.error("Sign in again — operator session is missing.")
+        return
+
+    try:
+        _sc_dashboard_reassign_case(
+            row_id,
+            assigned_to=handle,
+            field_task_category=cat,
+            additional_info=notes,
+            operator_id=op,
+        )
+    except Exception as exc:
+        st.error(f"Could not reassign: {exc}")
+        return
+
+    tg_note = ""
+    if st.session_state.get(keys["sync_tg"]):
+        token, chat_id = _cc_resolve_telegram_credentials()
+        if not token or chat_id is None:
+            st.warning(
+                "Reassigned in dashboard. Telegram not posted — set **TELEGRAM_TOKEN** and "
+                "**TELEGRAM_GROUP_CHAT_ID**."
+            )
+        else:
+            try:
+                asyncio.run(
+                    notify_telegram_group(
+                        handle.lstrip("@"),
+                        cref,
+                        cat,
+                        additional_info=notes,
+                        assigned_by=f"{op} (reassigned)",
+                        api_id=_read_setting("TG_API_ID")
+                        or _read_setting("TELEGRAM_API_ID")
+                        or None,
+                        api_hash=_read_setting("TG_API_HASH")
+                        or _read_setting("TELEGRAM_API_HASH")
+                        or None,
+                        bot_token=token,
+                        group_id=chat_id,
+                    )
+                )
+                tg_note = (
+                    "Posted a **new** assignment message in the group — "
+                    "field must swipe-reply to that line."
+                )
+            except Exception as exc:
+                st.warning(f"Reassigned in dashboard. Telegram post failed: {exc}")
+
+    st.session_state[keys["show"]] = False
+    flash = f"**{cref}** reassigned to **{handle}** ({cat})."
+    if tg_note:
+        flash += f" {tg_note}"
+    _sc_set_sales_flash(flash)
+    _invalidate_dashboard_data_cache()
+    st.rerun()
+
+
 def _parse_telegram_group_chat_id(raw: str) -> tuple[int | str | None, str | None]:
     """Return a ``chat_id`` for ``send_message`` (int or ``@public_group``).
 
@@ -5124,14 +5777,71 @@ def _try_fetch_task_categories() -> tuple[list[str], bool]:
     return list(names), missing
 
 
-def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
-    if missing:
+def _try_fetch_task_categories_db_only() -> tuple[list[str], bool]:
+    """Categories stored in Supabase (no built-in defaults) — for add/remove UI."""
+    client = _get_supabase_client()
+    try:
+        names, missing = fetch_task_category_names(
+            client, include_defaults_if_empty=False
+        )
+        return list(names), missing
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            return [], True
+        if is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return [], False
+        raise
+
+
+def _merge_category_option_lists(*lists: list[str] | tuple[str, ...]) -> list[str]:
+    """Dedupe category labels case-insensitively; preserve first-seen order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for lst in lists:
+        for raw in lst:
+            name = str(raw).strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def _sales_category_options(
+    task_categories: list[str] | None = None,
+) -> list[str]:
+    """Sales Category (Intent): sales defaults plus all CSM field categories."""
+    if task_categories is None:
+        task_categories, _ = _try_fetch_task_categories()
+    field_cats = (
+        task_categories
+        if task_categories
+        else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    )
+    return _merge_category_option_lists(DEFAULT_SALES_CASE_CATEGORIES, field_cats)
+
+
+def _categories_manage_popover(
+    *,
+    missing: bool,
+    select_key: str = _CC_CATEGORY_SELECT_KEY,
+    pending_key: str = _CC_CATEGORY_SELECT_PENDING_KEY,
+    new_category_key: str = "cc_new_category",
+    add_button_key: str = "cc_cat_add_btn",
+    remove_button_prefix: str = "cat_rm",
+) -> None:
+    db_cats, db_missing = _try_fetch_task_categories_db_only()
+    if db_missing or missing:
         st.caption(f"Category table missing — apply `{TASK_CATEGORIES_TABLE}` migration.")
         return
 
-    if not categories:
-        st.caption("No categories yet.")
-    for cat in categories:
+    if not db_cats:
+        st.caption("No categories in Supabase yet — add one below.")
+    for cat in db_cats:
         c_name, c_rm = st.columns([5, 1], gap="small", vertical_alignment="center")
         with c_name:
             st.markdown(f"**{cat}**")
@@ -5139,15 +5849,14 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
             hkey = hashlib.sha256(cat.encode("utf-8")).hexdigest()[:16]
             if st.button(
                 "×",
-                key=f"cat_rm_{hkey}",
+                key=f"{remove_button_prefix}_{hkey}",
                 help=f"Remove {cat}",
                 type="secondary",
             ):
                 try:
                     delete_task_category(_get_supabase_client(), cat)
                     _cached_task_categories.clear()
-                    st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
-                    st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
+                    st.session_state.pop(select_key, None)
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
@@ -5156,31 +5865,38 @@ def _categories_manage_popover(categories: list[str], *, missing: bool) -> None:
     with c_add:
         st.text_input(
             "Add Category",
-            key="cc_new_category",
+            key=new_category_key,
             placeholder="e.g. Site Survey",
             label_visibility="collapsed",
         )
     with c_go:
-        if st.button("+", key="cc_cat_add_btn", help="Add Category", type="secondary"):
-            raw = str(st.session_state.get("cc_new_category") or "").strip()
+        if st.button("+", key=add_button_key, help="Add Category", type="secondary"):
+            raw = str(st.session_state.get(new_category_key) or "").strip()
             if not raw:
                 st.warning("Type a category name first.")
             else:
                 try:
                     norm = normalize_task_category_name(raw)
-                    existing, _ = _try_fetch_task_categories()
-                    if any(c.lower() == norm.lower() for c in existing):
+                    if any(c.lower() == norm.lower() for c in db_cats):
                         st.warning(f"**{norm}** is already listed.")
                     else:
                         upsert_task_category(_get_supabase_client(), norm)
                         _cached_task_categories.clear()
-                        st.session_state.pop("cc_new_category", None)
-                        st.session_state[_CC_CATEGORY_SELECT_PENDING_KEY] = norm
-                        st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = False
-                        st.session_state[_CC_FLASH_KEY] = (
-                            f"Category **{norm}** saved to Supabase — "
-                            "assign picker and Telegram bot use it on the next assignment."
-                        )
+                        st.session_state.pop(new_category_key, None)
+                        st.session_state[pending_key] = norm
+                        if pending_key == _CC_CATEGORY_SELECT_PENDING_KEY:
+                            st.session_state[_CC_FLASH_KEY] = (
+                                f"Category **{norm}** saved to Supabase — "
+                                "assign picker and Telegram bot use it on the next assignment."
+                            )
+                        elif pending_key in (
+                            _SC_CC_ST_SCAT_PENDING_KEY,
+                            _SC_EDIT_SCAT_PENDING_KEY,
+                        ):
+                            st.session_state[_SC_SALES_FLASH_KEY] = (
+                                f"Category **{norm}** saved — available in Sales and CSM pickers."
+                            )
+                            st.session_state[_SC_SALES_FLASH_LEVEL_KEY] = "success"
                         st.rerun()
                 except ValueError as ve:
                     st.error(str(ve))
@@ -5203,7 +5919,43 @@ def _render_cc_category_row(categories: list[str], *, missing: bool) -> None:
             st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
     st.selectbox("Category", options=opts, key=_CC_CATEGORY_SELECT_KEY)
     with st.popover("Edit categories", key="cc_categories_popover"):
-        _categories_manage_popover(categories or opts, missing=missing)
+        _categories_manage_popover(missing=missing)
+
+
+def _render_sales_category_row(
+    task_categories: list[str],
+    *,
+    missing: bool,
+    select_key: str = _SC_CC_ST_SCAT_KEY,
+    pending_key: str = _SC_CC_ST_SCAT_PENDING_KEY,
+    popover_key: str = "sc_categories_popover",
+    key_prefix: str = "sc_cat",
+    label: str = "Sales Category (Intent)",
+    help: str | None = (
+        "Used for the sales case and for Telegram field assignment when assigning."
+    ),
+    extra_options: list[str] | None = None,
+) -> None:
+    opts = _sales_category_options(task_categories)
+    if extra_options:
+        opts = _merge_category_option_lists(extra_options, opts)
+    pending = st.session_state.pop(pending_key, None)
+    if pending is not None and pending in opts:
+        st.session_state[select_key] = pending
+    else:
+        current = st.session_state.get(select_key)
+        if current not in opts and opts:
+            st.session_state[select_key] = opts[0]
+    st.selectbox(label, options=opts, key=select_key, help=help)
+    with st.popover("Edit categories", key=popover_key):
+        _categories_manage_popover(
+            missing=missing,
+            select_key=select_key,
+            pending_key=pending_key,
+            new_category_key=f"{key_prefix}_new_category",
+            add_button_key=f"{key_prefix}_add_btn",
+            remove_button_prefix=f"{key_prefix}_rm",
+        )
 
 
 def _field_team_manage_popover(names: list[str], *, missing: bool) -> None:
@@ -5270,7 +6022,14 @@ def _field_team_manage_popover(names: list[str], *, missing: bool) -> None:
                         st.error(str(exc))
 
 
-def _render_cc_engineer_row(names: list[str], *, missing: bool) -> None:
+def _render_cc_engineer_row(
+    names: list[str],
+    *,
+    missing: bool,
+    select_key: str = _CC_FE_SELECT_KEY,
+    manual_key: str = _CC_FE_MANUAL_KEY,
+    team_popover_key: str = "cc_team_popover",
+) -> None:
     """Engineer picker + team list popover."""
     if missing:
         st.info(
@@ -5280,7 +6039,7 @@ def _render_cc_engineer_row(names: list[str], *, missing: bool) -> None:
         st.text_input(
             "Engineer",
             placeholder="@ibeyx",
-            key=_CC_FE_MANUAL_KEY,
+            key=manual_key,
         )
         return
 
@@ -5288,16 +6047,16 @@ def _render_cc_engineer_row(names: list[str], *, missing: bool) -> None:
         st.selectbox(
             "Engineer",
             options=[f"@{n}" for n in names],
-            key=_CC_FE_SELECT_KEY,
+            key=select_key,
         )
     else:
         st.text_input(
             "Engineer",
             placeholder="@ibeyx",
-            key=_CC_FE_MANUAL_KEY,
+            key=manual_key,
         )
 
-    with st.popover("Edit team", key="cc_team_popover"):
+    with st.popover("Edit team", key=team_popover_key):
         _field_team_manage_popover(names, missing=missing)
 
 
@@ -5329,11 +6088,46 @@ def _cc_schedule_assign_form_clear() -> None:
     st.session_state[_CC_CLEAR_ASSIGN_KEY] = True
 
 
+def _cc_resolve_intake_engineer_handle(
+    fe_names: list[str],
+    *,
+    fe_missing: bool,
+    select_key: str,
+    manual_key: str,
+) -> str:
+    if fe_names and not fe_missing:
+        pick = st.session_state.get(select_key)
+        if not pick or not str(pick).strip():
+            raise ValueError("Pick an engineer from the list.")
+        return _cc_normalize_handle(str(pick))
+    raw = str(st.session_state.get(manual_key, "")).strip()
+    if not raw:
+        raise ValueError("Enter an engineer Telegram username.")
+    return _cc_normalize_handle(raw)
+
+
+def _cc_resolve_telegram_credentials_for_form() -> tuple[str | None, int | str | None, str | None]:
+    """Token + group id from env/secrets, with session-only form fallbacks."""
+    token = (
+        _read_setting("TG_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_TOKEN").strip()
+        or str(st.session_state.get(_CC_SESSION_TOKEN_KEY, "")).strip()
+    )
+    env_chat_raw = _read_telegram_group_chat_raw()
+    chat_raw = env_chat_raw or str(st.session_state.get(_CC_SESSION_GROUP_KEY, "")).strip()
+    chat_id: int | str | None = None
+    warn: str | None = None
+    if chat_raw:
+        chat_id, warn = _parse_telegram_group_chat_id(chat_raw)
+    return token or None, chat_id, warn
+
+
 def _reset_sc_cc_sales_ticket_form() -> None:
     st.session_state[_SC_CC_ST_REF_KEY] = ""
     st.session_state[_SC_CC_ST_ACCOUNT_KEY] = ""
-    st.session_state[_SC_CC_ST_ATTENDED_KEY] = SALES_ATTENDED_BY_OPTIONS[0]
     st.session_state[_SC_CC_ST_DESC_KEY] = ""
+    st.session_state[_SC_CC_SKIP_ASSIGN_KEY] = False
     if _SC_CC_ST_PRIORITY_KEY in st.session_state:
         st.session_state[_SC_CC_ST_PRIORITY_KEY] = SALES_PRIORITY_OPTIONS[-1]
 
@@ -5350,30 +6144,73 @@ def _sc_insert_intake_case(
     status: str,
     queue_metric_label: str,
     clear_sales_ticket_form: bool = False,
+    assigned_to: str | None = None,
+    field_task_category: str | None = None,
+    post_telegram: bool = False,
+    operator_id: str = "",
 ) -> None:
+    row: dict[str, object] = {
+        "case_ref": case_ref,
+        "account_name": account_name,
+        "attended_by": attended_by,
+        "sales_priority": sales_priority,
+        "account_region": account_region,
+        "sales_category": sales_category,
+        "description": description,
+        "status": status,
+        "admin_owner": operator_id or attended_by,
+    }
+    if description:
+        row["additional_info"] = description
+    if assigned_to:
+        row["assigned_to"] = assigned_to
+        row["field_task_category"] = field_task_category
+        row["dispatch_region"] = account_region
+        row["last_assigned_at"] = _cc_utc_now_iso()
     try:
-        _sales_cases_insert_row(
-            {
-                "case_ref": case_ref,
-                "account_name": account_name,
-                "attended_by": attended_by,
-                "sales_priority": sales_priority,
-                "account_region": account_region,
-                "sales_category": sales_category,
-                "description": description,
-                "status": status,
-                "admin_owner": None,
-            }
-        )
+        _sales_cases_insert_row(row)
     except Exception as exc:
         _sc_set_sales_flash(f"Could not create case: {exc}", level="error")
         st.rerun()
         return
 
+    flash = f"Case created — see **{status}** under **Sales Cases**."
+    level = "success"
+
+    if post_telegram and assigned_to and field_task_category:
+        token, chat_id, chat_warn = _cc_resolve_telegram_credentials_for_form()
+        if chat_warn:
+            flash += f" Telegram skipped: {chat_warn}"
+            level = "warning"
+        elif not token or chat_id is None:
+            flash += " Engineer saved on case; Telegram skipped (missing bot token or group id)."
+            level = "warning"
+        else:
+            try:
+                asyncio.run(
+                    notify_telegram_group(
+                        assigned_to.lstrip("@"),
+                        case_ref,
+                        field_task_category,
+                        additional_info=description,
+                        assigned_by=operator_id or attended_by,
+                        api_id=_read_setting("TG_API_ID")
+                        or _read_setting("TELEGRAM_API_ID")
+                        or None,
+                        api_hash=_read_setting("TG_API_HASH")
+                        or _read_setting("TELEGRAM_API_HASH")
+                        or None,
+                        bot_token=token,
+                        group_id=chat_id,
+                    )
+                )
+                flash += " Telegram assignment posted."
+            except Exception as exc:
+                flash += f" Engineer saved; Telegram post failed: {exc}"
+                level = "warning"
+
     _invalidate_dashboard_data_cache()
-    _sc_set_sales_flash(
-        f"Case created — see **{status}** under **Sales Cases**."
-    )
+    _sc_set_sales_flash(flash, level=level)
     st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
     st.session_state[_DASH_PENDING_SALES_QUEUE_KEY] = _queue_segment_label(
         queue_metric_label, 1
@@ -5384,7 +6221,7 @@ def _sc_insert_intake_case(
 
 
 def _sidebar_sales_intake() -> None:
-    """SALES intake — new sales cases from the sidebar (no field Telegram)."""
+    """SALES intake — same assign / skip pattern as CSM sidebar."""
     try:
         probe = _fetch_sales_cases_df()
     except Exception:
@@ -5396,16 +6233,58 @@ def _sidebar_sales_intake() -> None:
         )
         return
 
-    st.caption("Cases start in **Sales Ticket** — no Telegram post.")
+    op = _session_operator_id()
+    if not op:
+        st.caption("Sign in with an **Operator ID** to create sales cases.")
+        return
+
+    attended_by = _sc_attended_by_for_session()
+    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+    cat_names, cat_missing = _try_fetch_task_categories()
+    token_env = (
+        _read_setting("TG_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+        or _read_setting("TELEGRAM_TOKEN").strip()
+    )
+    env_chat_raw = _read_telegram_group_chat_raw()
+    env_group_parsed: int | str | None = None
+    env_group_warn: str | None = None
+    if env_chat_raw:
+        env_group_parsed, env_group_warn = _parse_telegram_group_chat_id(env_chat_raw)
+        if env_group_warn:
+            st.warning(
+                "Group ID from env / Streamlit Secrets is invalid. "
+                + env_group_warn
+                + " Fix **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID**) in Secrets / `.env` and restart."
+            )
+    env_group_ok = env_group_parsed is not None
 
     if st.session_state.pop(_SC_CC_CLEAR_ST_INTAKE_KEY, False):
         _reset_sc_cc_sales_ticket_form()
 
-    sales_cats = list(DEFAULT_SALES_CASE_CATEGORIES)
-
     with st.container(border=True, key="sc_cc_intake_block"):
         st.markdown("##### SALES")
-        st.caption("Ticket # and Resort/Company.")
+        st.caption("Field Assignment → Telegram Group.")
+        skip_assign = st.checkbox(
+            "Add to Daily Task Only (No Engineer, No Telegram)",
+            key=_SC_CC_SKIP_ASSIGN_KEY,
+            help=(
+                "Creates the **Sales case** without posting to the field group. "
+                "Assign an engineer later from the sales work panel."
+            ),
+        )
+        if not skip_assign:
+            _render_cc_engineer_row(
+                fe_names,
+                missing=fe_missing,
+                select_key=_SC_CC_FE_SELECT_KEY,
+                manual_key=_SC_CC_FE_MANUAL_KEY,
+                team_popover_key="sc_cc_team_popover",
+            )
+        else:
+            st.caption(
+                "No engineer yet — assign from the sales case work panel later."
+            )
         st.text_input(
             "Ticket Number",
             key=_SC_CC_ST_REF_KEY,
@@ -5415,11 +6294,6 @@ def _sidebar_sales_intake() -> None:
             "Resort Name / Company Name",
             key=_SC_CC_ST_ACCOUNT_KEY,
             placeholder="Resort or company name",
-        )
-        st.selectbox(
-            "Attended by",
-            options=list(SALES_ATTENDED_BY_OPTIONS),
-            key=_SC_CC_ST_ATTENDED_KEY,
         )
         r3, r4 = st.columns(2)
         with r3:
@@ -5434,19 +6308,30 @@ def _sidebar_sales_intake() -> None:
                 options=list(SALES_REGION_CODES),
                 key=_SC_CC_ST_REGION_KEY,
             )
-        st.selectbox(
-            "Sales Category (Intent)",
-            options=sales_cats,
-            key=_SC_CC_ST_SCAT_KEY,
-        )
+        _render_sales_category_row(cat_names, missing=cat_missing)
         st.text_area(
-            "Description (Optional)",
+            "Notes (Optional)",
             key=_SC_CC_ST_DESC_KEY,
             height=64,
-            placeholder="Short summary for the admin team",
+            placeholder="Context for the field team",
         )
+        if not skip_assign:
+            if not token_env:
+                st.text_input(
+                    "Bot Token (Session Only)",
+                    type="password",
+                    key=_CC_SESSION_TOKEN_KEY,
+                    placeholder="If missing from Secrets",
+                )
+            if not env_group_ok:
+                st.text_input(
+                    "Group Chat ID",
+                    key=_CC_SESSION_GROUP_KEY,
+                    placeholder="-100… or @group",
+                )
+        submit_label = "Create Sales Case" if skip_assign else "Assign"
         submit_st = st.button(
-            "Create Sales Case",
+            submit_label,
             type="primary",
             use_container_width=True,
             key="sc_cc_st_submit",
@@ -5462,23 +6347,90 @@ def _sidebar_sales_intake() -> None:
             )
             st.rerun()
             return
+
+        sales_cat = str(st.session_state.get(_SC_CC_ST_SCAT_KEY, "")).strip()
+        if not sales_cat:
+            _sc_set_sales_flash("Pick **Sales Category (Intent)**.", level="error")
+            st.rerun()
+            return
+
+        skip_assign = bool(st.session_state.get(_SC_CC_SKIP_ASSIGN_KEY))
+        assigned_to: str | None = None
+        field_cat: str | None = None
+        post_telegram = not skip_assign
+
+        if post_telegram:
+            field_cat = sales_cat
+            try:
+                assigned_to = _cc_resolve_intake_engineer_handle(
+                    fe_names,
+                    fe_missing=fe_missing,
+                    select_key=_SC_CC_FE_SELECT_KEY,
+                    manual_key=_SC_CC_FE_MANUAL_KEY,
+                )
+            except ValueError as exc:
+                _sc_set_sales_flash(str(exc), level="error")
+                st.rerun()
+                return
+            token = token_env or str(
+                st.session_state.get(_CC_SESSION_TOKEN_KEY, "")
+            ).strip()
+            chat_raw = (env_chat_raw if env_group_ok else "") or str(
+                st.session_state.get(_CC_SESSION_GROUP_KEY, "")
+            ).strip()
+            chat_id: int | str | None = None
+            chat_parse_err: str | None = None
+            if chat_raw:
+                chat_id, chat_parse_err = _parse_telegram_group_chat_id(chat_raw)
+            if chat_parse_err:
+                _sc_set_sales_flash(chat_parse_err, level="warning")
+                st.rerun()
+                return
+            if not token or chat_id is None:
+                missing_bits: list[str] = []
+                if not token:
+                    missing_bits.append(
+                        "no bot token — set **TELEGRAM_TOKEN** (or **TELEGRAM_BOT_TOKEN** / **TG_BOT_TOKEN**)"
+                    )
+                if not chat_raw:
+                    missing_bits.append(
+                        "no group id — set **TELEGRAM_GROUP_CHAT_ID** (or **TG_GROUP_ID** / **FIELD_GROUP_CHAT_ID**), "
+                        "including under `[telegram]` in Secrets if you use a subsection, "
+                        "or paste into **Group chat id (only if missing from Secrets)** in this form"
+                    )
+                elif chat_id is None:
+                    missing_bits.append(
+                        f"group id **{chat_raw[:72]}** is not a valid integer or **@** public username"
+                    )
+                _sc_set_sales_flash(
+                    "Cannot post to Telegram yet. " + " · ".join(missing_bits) + ". "
+                    "If the bot token is missing, use the **session-only** token field in this form or set "
+                    "**TELEGRAM_TOKEN** in Secrets. "
+                    "For the group, use top-level Secrets keys or `[telegram]` / `group_chat_id` style keys; "
+                    "restart after editing Secrets. If the id still is not picked up, paste it in the "
+                    "**Group chat id (only if missing from Secrets)** field and Assign again.",
+                    level="error",
+                )
+                st.rerun()
+                return
+
         _sc_insert_intake_case(
             case_ref=cr,
             account_name=an,
-            attended_by=str(
-                st.session_state.get(
-                    _SC_CC_ST_ATTENDED_KEY, SALES_ATTENDED_BY_OPTIONS[0]
-                )
-            ).strip(),
+            attended_by=attended_by,
             sales_priority=str(
                 st.session_state.get(_SC_CC_ST_PRIORITY_KEY, "Standard")
             ).strip(),
             account_region=str(st.session_state.get(_SC_CC_ST_REGION_KEY, "")).strip(),
-            sales_category=str(st.session_state.get(_SC_CC_ST_SCAT_KEY, "")).strip(),
+            sales_category=sales_cat,
             description=str(st.session_state.get(_SC_CC_ST_DESC_KEY, "")).strip() or None,
             status=SC_STATUS_SALES_TICKET,
             queue_metric_label=SC_STATUS_SALES_TICKET,
             clear_sales_ticket_form=True,
+            assigned_to=assigned_to,
+            field_task_category=field_cat,
+            post_telegram=post_telegram,
+            operator_id=op,
         )
 
 
@@ -6159,59 +7111,6 @@ _BON_THEME_CSS = """
         margin-top: 0.75rem;
         padding: 0.25rem 0 0.5rem 0;
     }
-    .sc-case-hero {
-        border: 1px solid var(--bon-box-border);
-        border-radius: var(--bon-box-radius);
-        background: linear-gradient(
-            135deg,
-            rgba(215, 180, 145, 0.14) 0%,
-            rgba(215, 180, 145, 0.04) 55%,
-            transparent 100%
-        );
-        padding: 1rem 1.15rem 1.1rem;
-        margin-bottom: 0.35rem;
-    }
-    .sc-case-hero__eyebrow {
-        font-size: 0.68rem;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--bon-muted);
-        margin-bottom: 0.35rem;
-    }
-    .sc-case-hero__ticket {
-        font-size: 1.15rem;
-        font-weight: 600;
-        color: var(--bon-text);
-        line-height: 1.3;
-    }
-    .sc-case-hero__account {
-        font-size: 0.95rem;
-        color: var(--bon-muted);
-        margin-top: 0.2rem;
-        margin-bottom: 0.75rem;
-        line-height: 1.35;
-    }
-    .sc-case-hero__pills {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.4rem 0.5rem;
-    }
-    .sc-meta-pill {
-        display: inline-block;
-        font-size: 0.78rem;
-        padding: 0.28rem 0.55rem;
-        border-radius: 999px;
-        border: 1px solid rgba(215, 180, 145, 0.35);
-        background: rgba(0, 0, 0, 0.25);
-        color: var(--bon-text);
-        white-space: nowrap;
-    }
-    .sc-meta-pill--accent {
-        border-color: var(--bon-oak);
-        background: rgba(215, 180, 145, 0.18);
-        color: var(--bon-oak);
-        font-weight: 600;
-    }
     div[class*="st-key-"][class*="_sc_details_box"] [data-testid="stForm"],
     div[class*="st-key-"][class*="_sc_next_box"] {
         border: none !important;
@@ -6369,7 +7268,7 @@ _BON_THEME_CSS = """
     [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
         display: none !important;
     }
-    /* Dashboard nav: one row (Tickets | Log | Performance) */
+    /* Dashboard nav: one row (CSM Cases | Sales Cases | Log | Performance) */
     [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] {
         flex-direction: row !important;
         flex-wrap: wrap !important;
@@ -6551,6 +7450,36 @@ def _dashboard_tickets_in_view(
     return merged, len(in_range)
 
 
+def _dashboard_sales_cases_in_view(
+    df_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> tuple[pd.DataFrame, int]:
+    """Sales cases in the sidebar range plus active queue rows (never hide open work)."""
+    if df_all.empty:
+        return df_all, 0
+    in_range = _apply_dash_time_range(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if "status" not in df_all.columns:
+        return in_range, len(in_range)
+    effective = df_all["status"].astype(str).str.strip().map(_sc_effective_status)
+    active = df_all[effective.isin(_SC_ACTIVE_QUEUE_STATUSES)].copy()
+    if in_range.empty:
+        return active, 0
+    if active.empty:
+        return in_range, len(in_range)
+    key = "case_ref" if "case_ref" in df_all.columns else None
+    if key:
+        merged = pd.concat([in_range, active], ignore_index=True).drop_duplicates(
+            subset=[key], keep="first"
+        )
+    else:
+        merged = pd.concat([in_range, active], ignore_index=True).drop_duplicates()
+    return merged, len(in_range)
+
+
 def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     """Boolean masks per queue tab (mutually exclusive on normalized status)."""
     empty = pd.Series(dtype=bool)
@@ -6661,7 +7590,7 @@ def _migrate_legacy_queue_nav() -> None:
     if base in ("Log", "Performance"):
         st.session_state[_DASH_MAIN_NAV_KEY] = base
     else:
-        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
+        st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_CSM
         st.session_state[_DASH_TICKET_QUEUE_KEY] = legacy
 
 
@@ -6677,7 +7606,7 @@ def _apply_pending_dashboard_nav() -> None:
     pending_ticket_queue = st.session_state.pop(_DASH_PENDING_TICKET_QUEUE_KEY, None)
     pending_sales_queue = st.session_state.pop(_DASH_PENDING_SALES_QUEUE_KEY, None)
     if pending_main is not None:
-        st.session_state[_DASH_MAIN_NAV_KEY] = pending_main
+        st.session_state[_DASH_MAIN_NAV_KEY] = _normalize_dash_main_nav(pending_main)
     if pending_ticket_queue is not None:
         st.session_state[_DASH_TICKET_QUEUE_KEY] = pending_ticket_queue
     if pending_sales_queue is not None:
@@ -6693,9 +7622,9 @@ def _render_clickable_queue_metric(
     option_label: str,
 ) -> None:
     """Metric-style control — click to open that ticket queue."""
-    main_nav = str(st.session_state.get(_DASH_MAIN_NAV_KEY, "Tickets"))
+    main_nav = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM))
     q_base = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
-    active = main_nav == "Tickets" and q_base == queue_name
+    active = main_nav == _DASH_NAV_CSM and q_base == queue_name
     label = f"{title}\n{value:,}"
     with col:
         if st.button(
@@ -6705,7 +7634,7 @@ def _render_clickable_queue_metric(
             use_container_width=True,
             disabled=active,
         ):
-            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Tickets"
+            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
             st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = option_label
             st.rerun()
 
@@ -6714,11 +7643,10 @@ def _render_assign_day_metrics(
     df_all: pd.DataFrame,
     *,
     df_in_view: pd.DataFrame | None = None,
+    sc_all: pd.DataFrame | None = None,
+    sc_in_view: pd.DataFrame | None = None,
 ) -> None:
     """Today's assignment funnel (ops timezone, UTC+5)."""
-    if df_all.empty:
-        return
-    view = df_in_view if df_in_view is not None else df_all
     today = datetime.now(OPS_TZ).date()
     start = _local_date_start(today)
     end = _local_date_end(today)
@@ -6726,26 +7654,83 @@ def _render_assign_day_metrics(
     responded_today = 0
     unattended_in_view = 0
     pending_in_view = 0
-    if "last_assigned_at" in df_all.columns:
-        la = _parse_ts(df_all["last_assigned_at"])
-        assigned_today = int(((la >= start) & (la <= end)).sum())
-    if "responded_at" in df_all.columns:
-        rp = _parse_ts(df_all["responded_at"])
-        responded_today = int(((rp >= start) & (rp <= end)).sum())
-    if not view.empty and "status" in view.columns:
-        masks = _ticket_queue_count_masks(view)
-        pending_in_view = int(masks["pending"].sum())
-        unattended_in_view = int(masks["unattended"].sum())
+    if not df_all.empty:
+        view = df_in_view if df_in_view is not None else df_all
+        if "last_assigned_at" in df_all.columns:
+            la = _parse_ts(df_all["last_assigned_at"])
+            assigned_today = int(((la >= start) & (la <= end)).sum())
+        if "responded_at" in df_all.columns:
+            rp = _parse_ts(df_all["responded_at"])
+            responded_today = int(((rp >= start) & (rp <= end)).sum())
+        if not view.empty and "status" in view.columns:
+            masks = _ticket_queue_count_masks(view)
+            pending_in_view = int(masks["pending"].sum())
+            unattended_in_view = int(masks["unattended"].sum())
+    if sc_all is not None and not sc_all.empty:
+        if "last_assigned_at" in sc_all.columns:
+            sc_la = _parse_ts(sc_all["last_assigned_at"])
+            assigned_today += int(((sc_la >= start) & (sc_la <= end)).sum())
+        if "created_at" in sc_all.columns:
+            created = _parse_ts(sc_all["created_at"])
+            attended_today = (created >= start) & (created <= end)
+            if "attended_by" in sc_all.columns:
+                ab = sc_all["attended_by"].fillna("").astype(str).str.strip()
+                attended_today = attended_today & ab.ne("")
+            responded_today += int(attended_today.sum())
+        sc_view = sc_in_view if sc_in_view is not None else sc_all
+        if not sc_view.empty and "status" in sc_view.columns:
+            effective = sc_view["status"].astype(str).str.strip().map(_sc_effective_status)
+            pending_in_view += int(effective.eq(SC_STATUS_SALES_TICKET).sum())
+    if (
+        assigned_today == 0
+        and responded_today == 0
+        and pending_in_view == 0
+        and unattended_in_view == 0
+    ):
+        return
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Assigned today", assigned_today)
     c2.metric("Responded today", responded_today)
     c3.metric(f"{STATUS_DAILY_TASK} (in view)", pending_in_view)
     c4.metric("Unattended (in view)", unattended_in_view)
-    nudge_h = int(UNATTENDED_NUDGE_HOURS) if UNATTENDED_NUDGE_HOURS == int(UNATTENDED_NUDGE_HOURS) else UNATTENDED_NUDGE_HOURS
-    st.caption(
-        f"Assign day ends {os.getenv('ASSIGN_DAY_CUTOFF_HOUR', '23')}:{os.getenv('ASSIGN_DAY_CUTOFF_MINUTE', '59').zfill(2)} "
-        f"{LOCAL_TZ_LABEL}. Auto nudge after **{nudge_h}h** with no field reply; "
-        "no same-day response → **Unattended**."
+
+
+def _render_global_assign_day_metrics() -> None:
+    """Assign-day funnel under the page title — shown on every main nav tab."""
+    try:
+        df_all = _fetch_tickets()
+    except _TableMissingError:
+        df_all = pd.DataFrame()
+    except Exception:
+        return
+
+    sc_all: pd.DataFrame | None
+    try:
+        sc_all = _fetch_sales_cases_df()
+    except Exception:
+        sc_all = None
+    if sc_all is None:
+        sc_all = pd.DataFrame()
+
+    if df_all.empty and sc_all.empty:
+        return
+
+    range_start, range_end = _get_dash_range()
+    df_in_view: pd.DataFrame | None = None
+    if not df_all.empty and "status" in df_all.columns:
+        df_in_view, _ = _dashboard_tickets_in_view(
+            df_all, range_start=range_start, range_end=range_end
+        )
+    sc_in_view: pd.DataFrame | None = None
+    if not sc_all.empty and "status" in sc_all.columns:
+        sc_in_view, _ = _dashboard_sales_cases_in_view(
+            sc_all, range_start=range_start, range_end=range_end
+        )
+    _render_assign_day_metrics(
+        df_all,
+        df_in_view=df_in_view,
+        sc_all=sc_all if not sc_all.empty else None,
+        sc_in_view=sc_in_view,
     )
 
 
@@ -6849,11 +7834,9 @@ def _sync_dashboard_nav_state(
 ) -> tuple[str, str, str, str, str, str]:
     """Keep queue session keys valid; return option labels for metrics.
 
-    Must run **before** ``_render_main_navigation()`` (widget keys are read-only after).
+    Do not assign ``_DASH_MAIN_NAV_KEY`` here — main nav radio is already drawn.
+    Use ``_DASH_PENDING_*`` keys and ``st.rerun()`` when auto-switching tabs.
     """
-    if st.session_state.get(_DASH_MAIN_NAV_KEY) not in _DASH_MAIN_NAV_OPTIONS:
-        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
-
     pending_label = _queue_segment_label(STATUS_DAILY_TASK, total_pending)
     on_hold_label = _queue_segment_label(STATUS_ON_HOLD, total_on_hold)
     open_label = _queue_segment_label("Open", total_open)
@@ -6876,14 +7859,15 @@ def _sync_dashboard_nav_state(
         st.session_state[_DASH_TICKET_QUEUE_KEY] = completed_label
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
+    st.session_state["_dash_prev_open_count"] = total_open
     if total_open > prev_open:
-        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
-        st.session_state[_DASH_TICKET_QUEUE_KEY] = open_label
+        st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+        st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = open_label
+        st.rerun()
     elif st.session_state.get(_DASH_TICKET_QUEUE_KEY) not in ticket_options:
         st.session_state[_DASH_TICKET_QUEUE_KEY] = (
             open_label if total_open > 0 else pending_label
         )
-    st.session_state["_dash_prev_open_count"] = total_open
     return (
         pending_label,
         open_label,
@@ -6895,10 +7879,7 @@ def _sync_dashboard_nav_state(
 
 
 def _render_main_navigation() -> str:
-    """Top row: Tickets | Sales Cases | Log | Performance."""
-    legacy_nav = st.session_state.get(_DASH_MAIN_NAV_KEY)
-    if legacy_nav == "Sales cases":
-        st.session_state[_DASH_MAIN_NAV_KEY] = "Sales Cases"
+    """Top row: CSM Cases | Sales Cases | Log | Performance."""
     return str(
         st.radio(
             "View",
@@ -6985,6 +7966,24 @@ def _fetch_sales_cases_df() -> pd.DataFrame | None:
     return _fetch_sales_cases_cached()
 
 
+def _sc_stamp_last_assigned_at(patch: dict[str, object]) -> None:
+    """Set ``last_assigned_at`` when ``assigned_to`` is present (reassign / new assign)."""
+    if str(patch.get("assigned_to") or "").strip():
+        patch["last_assigned_at"] = _cc_utc_now_iso()
+
+
+def _sc_stamp_last_assigned_at_if_first(
+    patch: dict[str, object], *, prev_assigned_to: object
+) -> None:
+    """Set ``last_assigned_at`` on first engineer assignment (edit-assignment form)."""
+    assignee = str(patch.get("assigned_to") or "").strip()
+    if not assignee:
+        return
+    prev = str(prev_assigned_to or "").strip().lstrip("@").casefold()
+    if not prev:
+        patch["last_assigned_at"] = _cc_utc_now_iso()
+
+
 def _sales_cases_update_row(row_id: str, payload: dict) -> None:
     client = _get_supabase_client()
     body = {**payload, "updated_at": _cc_utc_now_iso()}
@@ -7007,39 +8006,6 @@ def _sc_filter_sales_df(df: pd.DataFrame, statuses: tuple[str, ...]) -> pd.DataF
         return df.iloc[0:0].copy()
     effective = df["status"].astype(str).str.strip().map(_sc_effective_status)
     return df[effective.isin(statuses)].copy()
-
-
-def _render_sc_selected_case_card(row: pd.Series) -> None:
-    """Hero summary for the one selected case."""
-    cref = html.escape(str(row.get("case_ref") or "—"))
-    account = html.escape(str(row.get("account_name") or "—"))
-    attended = html.escape(str(row.get("attended_by") or "—"))
-    status = html.escape(_sc_effective_status(row.get("status")))
-    priority = html.escape(str(row.get("sales_priority") or "—"))
-    region = html.escape(str(row.get("account_region") or "—"))
-    category = html.escape(str(row.get("sales_category") or "—"))
-    assignee = html.escape(str(row.get("assigned_to") or "").strip())
-    engineer_pill = (
-        f'<span class="sc-meta-pill">Engineer · {assignee}</span>' if assignee else ""
-    )
-    st.markdown(
-        f"""
-<div class="sc-case-hero">
-  <div class="sc-case-hero__eyebrow">Selected case</div>
-  <div class="sc-case-hero__ticket">{cref}</div>
-  <div class="sc-case-hero__account">{account}</div>
-  <div class="sc-case-hero__pills">
-    <span class="sc-meta-pill sc-meta-pill--accent">{status}</span>
-    <span class="sc-meta-pill">Attended · {attended}</span>
-    <span class="sc-meta-pill">{priority}</span>
-    <span class="sc-meta-pill">{region}</span>
-    <span class="sc-meta-pill">{category}</span>
-    {engineer_pill}
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
 
 
 def _sc_sales_case_display_cols() -> tuple[str, ...]:
@@ -7094,10 +8060,6 @@ def _sc_sync_case_edit_widgets(
         cat_opts = [scat, *cat_opts]
     st.session_state["sc_edit_scat"] = scat if scat in cat_opts else cat_opts[0]
     st.session_state["sc_edit_admin_notes"] = str(row.get("additional_info") or "")
-    att = str(row.get("attended_by") or "").strip()
-    st.session_state["sc_edit_attended_by"] = (
-        att if att in SALES_ATTENDED_BY_OPTIONS else SALES_ATTENDED_BY_OPTIONS[0]
-    )
 
 
 _SC_QUEUE_TABLE_COLS: tuple[str, ...] = (
@@ -7415,6 +8377,200 @@ def _fetch_sales_case_row_by_ref(case_ref: str) -> dict | None:
         return None
 
 
+def _fetch_sales_case_row_by_id(row_id: str) -> dict | None:
+    rid = str(row_id or "").strip()
+    if not rid:
+        return None
+    try:
+        res = (
+            _get_supabase_client()
+            .table(SALES_CASES_TABLE)
+            .select("*")
+            .eq("id", rid)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _cc_transfer_ticket_to_sales_case(
+    ticket_number: str,
+    *,
+    operator_id: str,
+    account_name: str | None = None,
+    account_region: str = "CENTRAL",
+) -> None:
+    """Move a CSM field ticket into Sales Cases (removes the ticket row)."""
+    tid = str(ticket_number or "").strip()
+    row = _fetch_ticket_row(tid)
+    if not row:
+        raise ValueError(f"Ticket **{tid}** not found.")
+    if _fetch_sales_case_row_by_ref(tid):
+        raise ValueError(
+            f"Sales case **{tid}** already exists — remove or merge the duplicate first."
+        )
+
+    task_cat = str(row.get("task_category") or "").strip() or "Coverage Check"
+    notes = str(row.get("additional_info") or "").strip() or None
+    assigned = str(row.get("assigned_to") or "").strip() or None
+    attended = str(row.get("dashboard_assigned_by") or "").strip() or operator_id
+    region = (
+        account_region
+        if account_region in SALES_REGION_CODES
+        else SALES_REGION_CODES[0]
+    )
+    an = (account_name or "").strip() or f"Ticket {tid}"
+
+    sales_row: dict[str, object] = {
+        "case_ref": tid,
+        "account_name": an,
+        "attended_by": attended,
+        "sales_priority": "Standard",
+        "account_region": region,
+        "sales_category": task_cat,
+        "description": notes,
+        "status": SC_STATUS_SALES_TICKET,
+        "admin_owner": operator_id,
+    }
+    if notes:
+        sales_row["additional_info"] = notes
+    if assigned:
+        sales_row["assigned_to"] = assigned
+        sales_row["field_task_category"] = task_cat
+        sales_row["dispatch_region"] = region
+        la = row.get("last_assigned_at")
+        sales_row["last_assigned_at"] = la if la else _cc_utc_now_iso()
+
+    _sales_cases_insert_row(sales_row)
+
+    client = _get_supabase_client()
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=tid,
+        member_username=f"@{operator_id.lstrip('@')}",
+        action_type="TransferredToSales",
+        note=_cc_assignment_log_note(
+            "Moved to Sales Cases (ticket row removed).",
+            operator_id,
+        ),
+    )
+    _delete_ticket(tid, actor=f"@{operator_id.lstrip('@')}")
+
+
+def _cc_transfer_sales_case_to_ticket(
+    row_id: str,
+    *,
+    operator_id: str,
+) -> str:
+    """Move a sales case into CSM tickets (removes the sales case row). Returns ticket number."""
+    sales_row = _fetch_sales_case_row_by_id(row_id)
+    if not sales_row:
+        raise ValueError("Sales case not found.")
+
+    case_ref = str(sales_row.get("case_ref") or "").strip()
+    if not case_ref:
+        raise ValueError("Sales case has no ticket / case reference.")
+    try:
+        tid = _cc_validate_ticket_number(case_ref)
+    except ValueError as exc:
+        raise ValueError(
+            f"Case ref **{case_ref}** must be **9** or **16** digits to move to CSM."
+        ) from exc
+
+    if _fetch_ticket_row(tid):
+        raise ValueError(
+            f"CSM ticket **{tid}** already exists — resolve the duplicate first."
+        )
+
+    task_cat = (
+        str(sales_row.get("field_task_category") or "").strip()
+        or str(sales_row.get("sales_category") or "").strip()
+        or "Coverage Check"
+    )
+    notes = (
+        str(sales_row.get("additional_info") or "").strip()
+        or str(sales_row.get("description") or "").strip()
+        or None
+    )
+    assigned = str(sales_row.get("assigned_to") or "").strip() or None
+    csm_status = _cc_map_sales_status_to_csm(str(sales_row.get("status") or ""))
+
+    client = _get_supabase_client()
+    _cc_insert_transferred_ticket(
+        client,
+        tid,
+        task_category=task_cat,
+        status=csm_status,
+        assigned_to=assigned,
+        additional_info=notes,
+        operator_id=operator_id,
+    )
+    _sales_cases_delete_row(row_id)
+    return tid
+
+
+def _render_sales_case_transfer_to_csm_popover(
+    *,
+    key_prefix: str,
+    options: list[str],
+    op: str,
+) -> None:
+    with st.popover("Move to CSM", use_container_width=True):
+        picked_list = _get_selected_queue_sales_cases(key_prefix, options)
+        if not picked_list:
+            st.caption("Select case(s), then open **Move to CSM** again.")
+            return
+        st.markdown("**" + "**, **".join(picked_list[:12]) + "**")
+        if len(picked_list) > 12:
+            st.caption(f"+ {len(picked_list) - 12} more")
+        st.caption(
+            "Creates a CSM field ticket (**Daily Task** or **Resolved**) and "
+            "removes the sales case. Case ref must be **9** or **16** digits."
+        )
+        confirm = st.checkbox(
+            "Yes, move to CSM tickets",
+            value=False,
+            key=f"{key_prefix}_xfer_csm_confirm",
+        )
+        if st.button(
+            "Move",
+            key=f"{key_prefix}_xfer_csm_btn",
+            type="secondary",
+            use_container_width=True,
+            disabled=not confirm,
+        ):
+            ok = 0
+            moved: list[str] = []
+            for cref in picked_list:
+                row = _fetch_sales_case_row_by_ref(cref)
+                if not row:
+                    st.warning(f"**{cref}** not found.")
+                    continue
+                row_id = str(row.get("id") or "").strip()
+                if not row_id:
+                    continue
+                try:
+                    tid = _cc_transfer_sales_case_to_ticket(
+                        row_id, operator_id=op
+                    )
+                    ok += 1
+                    moved.append(tid)
+                except Exception as exc:
+                    st.error(f"**{cref}**: {exc}")
+            if ok:
+                _invalidate_dashboard_data_cache()
+                st.session_state[_sc_case_selection_session_key(key_prefix)] = []
+                st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+                st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_DAILY_TASK
+                _sc_set_sales_flash(
+                    f"Moved **{ok}** case(s) to CSM (**Daily Task** / **Resolved**)."
+                )
+                st.rerun()
+
+
 def _render_sales_case_toolbar(
     df: pd.DataFrame,
     *,
@@ -7423,6 +8579,8 @@ def _render_sales_case_toolbar(
     status_actions: tuple[tuple[str, str], ...] = (),
     op: str = "",
     allow_delete: bool = True,
+    allow_transfer_to_csm: bool = True,
+    allow_reassign: bool = False,
     allow_edit_assignment: bool = False,
 ) -> None:
     """Select all / Clear / status + admin actions for sales case queues."""
@@ -7442,6 +8600,10 @@ def _render_sales_case_toolbar(
     if status_labels:
         slot_count += 1 if len(status_labels) > 1 else 1
     if allow_edit_assignment:
+        slot_count += 1
+    if allow_reassign and op:
+        slot_count += 1
+    if allow_transfer_to_csm and op:
         slot_count += 1
     if allow_delete:
         slot_count += 1
@@ -7472,6 +8634,7 @@ def _render_sales_case_toolbar(
         idx += 1
 
         if allow_edit_assignment:
+            edit_keys = _assignment_edit_session_keys(key_prefix)
             with cols[idx]:
                 if st.button(
                     "Edit assignment",
@@ -7485,8 +8648,36 @@ def _render_sales_case_toolbar(
                     ):
                         pass
                     else:
-                        _sc_clear_toolbar_panels_except(key_prefix)
-                        st.session_state[panel_keys["details"]] = True
+                        _clear_sc_assignment_edit_panels_except(key_prefix)
+                        st.session_state.pop(
+                            _reassign_session_keys(key_prefix)["show"], None
+                        )
+                        st.session_state.pop(panel_keys["details"], None)
+                        st.session_state[edit_keys["show"]] = True
+                        st.rerun()
+            idx += 1
+
+        if allow_reassign and op:
+            reassign_keys = _reassign_session_keys(key_prefix)
+            with cols[idx]:
+                if st.button(
+                    "Reassign",
+                    key=f"{key_prefix}_sc_reassign_btn",
+                    use_container_width=True,
+                ):
+                    if _require_selected_sales_cases(
+                        key_prefix=key_prefix,
+                        options=options,
+                        exactly_one=True,
+                    ):
+                        _clear_reassign_panels_except(key_prefix)
+                        st.session_state.pop(
+                            _assignment_edit_session_keys(key_prefix)["show"], None
+                        )
+                        st.session_state.pop(
+                            _sc_toolbar_panel_keys(key_prefix)["details"], None
+                        )
+                        st.session_state[reassign_keys["show"]] = True
                         st.rerun()
             idx += 1
 
@@ -7520,6 +8711,15 @@ def _render_sales_case_toolbar(
                     )
                 idx += 1
 
+        if allow_transfer_to_csm and op:
+            with cols[idx]:
+                _render_sales_case_transfer_to_csm_popover(
+                    key_prefix=key_prefix,
+                    options=options,
+                    op=op,
+                )
+            idx += 1
+
         if allow_delete:
             with cols[idx]:
                 _render_sales_case_delete_popover(
@@ -7536,7 +8736,7 @@ def _render_clickable_sales_queue_metric(
     queue_name: str,
     option_label: str,
 ) -> None:
-    main_nav = str(st.session_state.get(_DASH_MAIN_NAV_KEY, "Tickets"))
+    main_nav = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM))
     q_base = _sc_queue_segment_base(st.session_state.get(_DASH_SALES_QUEUE_KEY))
     active = main_nav == "Sales Cases" and q_base == queue_name
     label = f"{title}\n{value:,}"
@@ -7648,10 +8848,11 @@ def _render_sales_case_work_panel(
     cur_status = _sc_effective_status(r0.get("status"))
     _sc_sync_case_edit_widgets(row_id=row_id, row=r0, sales_cats=sales_cats)
     _sc_sync_case_note_widgets(row_id=row_id, row=r0)
-    edit_cat_opts = list(sales_cats)
     cur_scat = str(r0.get("sales_category") or "").strip()
-    if cur_scat and cur_scat not in edit_cat_opts:
-        edit_cat_opts = [cur_scat, *edit_cat_opts]
+    scat_extra = (
+        [cur_scat] if cur_scat and cur_scat not in sales_cats else None
+    )
+    cat_names, cat_missing = _try_fetch_task_categories()
 
     status_actions = _sc_status_actions_for_case(cur_status)
     show_site_visit = cur_status == SC_STATUS_REGIONAL
@@ -7661,7 +8862,6 @@ def _render_sales_case_work_panel(
     if show_site_visit:
         tab_names.append("Site Visit")
 
-    _render_sc_selected_case_card(r0)
     tabs = st.tabs(tab_names)
     tab_by_name = {name: i for i, name in enumerate(tab_names)}
     start_idx = tab_by_name.get(
@@ -7677,25 +8877,21 @@ def _render_sales_case_work_panel(
         with st.container(border=True, key=f"{key_prefix}_sc_details_box"):
             st.markdown("**Case Details**")
             st.caption("Region, category, and notes — does not change queue status.")
+            _render_sales_category_row(
+                cat_names,
+                missing=cat_missing,
+                select_key="sc_edit_scat",
+                pending_key=_SC_EDIT_SCAT_PENDING_KEY,
+                popover_key=f"{key_prefix}_sc_edit_cat_pop",
+                key_prefix=f"{key_prefix}_sc_edit_cat",
+                extra_options=scat_extra,
+            )
             with st.form(f"sc_edit_case_form_{key_prefix}", clear_on_submit=False):
                 st.selectbox(
-                    "Attended by",
-                    options=list(SALES_ATTENDED_BY_OPTIONS),
-                    key="sc_edit_attended_by",
+                    "Region Team",
+                    options=list(SALES_REGION_CODES),
+                    key="sc_edit_region",
                 )
-                e1, e2 = st.columns(2)
-                with e1:
-                    st.selectbox(
-                        "Region Team",
-                        options=list(SALES_REGION_CODES),
-                        key="sc_edit_region",
-                    )
-                with e2:
-                    st.selectbox(
-                        "Sales Category (Intent)",
-                        options=edit_cat_opts,
-                        key="sc_edit_scat",
-                    )
                 st.text_area(
                     "Case Note (Internal)",
                     key="sc_edit_admin_notes",
@@ -7713,9 +8909,6 @@ def _render_sales_case_work_panel(
                 _sales_cases_update_row(
                     row_id,
                     {
-                        "attended_by": str(
-                            st.session_state.get("sc_edit_attended_by", "")
-                        ).strip(),
                         "account_region": str(
                             st.session_state.get("sc_edit_region", "")
                         ).strip(),
@@ -7730,6 +8923,38 @@ def _render_sales_case_work_panel(
                 st.rerun()
             except Exception as exc:
                 st.error(f"Could not save: {exc}")
+
+        if op:
+            with st.container(border=True, key=f"{key_prefix}_sc_xfer_csm_box"):
+                st.markdown("**Wrong track?**")
+                st.caption(
+                    "Move this sales case to **CSM** field tickets. "
+                    "Case ref must be **9** or **16** digits."
+                )
+                xfer_confirm = st.checkbox(
+                    "Yes, move this case to CSM",
+                    key=f"{key_prefix}_panel_xfer_csm_confirm",
+                )
+                if st.button(
+                    "Move to CSM",
+                    key=f"{key_prefix}_panel_xfer_csm_btn",
+                    type="secondary",
+                    use_container_width=True,
+                    disabled=not xfer_confirm,
+                ):
+                    try:
+                        tid = _cc_transfer_sales_case_to_ticket(
+                            row_id, operator_id=op
+                        )
+                        _invalidate_dashboard_data_cache()
+                        st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+                        st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = (
+                            STATUS_DAILY_TASK
+                        )
+                        _sc_set_sales_flash(f"Case moved to CSM ticket **{tid}**.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
     if status_actions and op:
         with tabs[tab_idx]:
@@ -7829,7 +9054,8 @@ def _render_sales_case_work_panel(
                     except ValueError as ve:
                         st.error(str(ve))
                     else:
-                        patch = {"assigned_to": handle}
+                        patch: dict[str, object] = {"assigned_to": handle}
+                        _sc_stamp_last_assigned_at(patch)
                         post_tg = bool(st.session_state.get("sc_region_assign_post_tg"))
                         tg_ok = False
                         if post_tg:
@@ -7902,6 +9128,7 @@ def _render_sales_queue_segment(
     show_work_panel: bool = True,
     allow_delete: bool = True,
     allow_edit_assignment: bool = False,
+    allow_reassign: bool = False,
     op: str = "",
     sales_cats: list[str] | None = None,
     field_cats: list[str] | None = None,
@@ -7926,37 +9153,60 @@ def _render_sales_queue_segment(
         op=op,
         allow_delete=allow_delete,
         allow_edit_assignment=allow_edit_assignment,
+        allow_reassign=allow_reassign,
     )
     _render_selectable_sales_case_table(sub, key_prefix=key_prefix, cols=table_cols)
 
-    if show_work_panel and queue_status != SC_STATUS_RESOLVED:
+    reassign_open = bool(
+        op
+        and allow_reassign
+        and st.session_state.get(_reassign_session_keys(key_prefix)["show"])
+    )
+    edit_open = bool(
+        op
+        and allow_edit_assignment
+        and st.session_state.get(_assignment_edit_session_keys(key_prefix)["show"])
+    )
+
+    if edit_open:
+        with st.container(border=True, key=f"{key_prefix}_edit_panel"):
+            _render_sales_assignment_editor(
+                key_prefix=key_prefix,
+                edit_key_prefix=key_prefix,
+                field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
+                fe_names=fe_names or [],
+                fe_missing=fe_missing,
+                case_options=options,
+                df=sub,
+            )
+
+    if reassign_open:
+        with st.container(border=True, key=f"{key_prefix}_reassign_panel"):
+            _render_sales_reassign_editor(
+                key_prefix=key_prefix,
+                edit_key_prefix=key_prefix,
+                field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
+                fe_names=fe_names or [],
+                fe_missing=fe_missing,
+                case_options=options,
+                df=sub,
+            )
+
+    if (
+        show_work_panel
+        and queue_status != SC_STATUS_RESOLVED
+        and not reassign_open
+        and not edit_open
+    ):
         selected = _get_selected_queue_sales_cases(key_prefix, options)
-        panel_keys = _sc_toolbar_panel_keys(key_prefix)
-        force_details = bool(st.session_state.get(panel_keys["details"]))
-        if force_details:
-            if len(selected) != 1:
-                st.warning("Select **exactly one** case for this action.")
-            else:
-                with st.container(border=True, key=f"{key_prefix}_work_panel"):
-                    _render_sales_case_work_panel(
-                        sub,
-                        key_prefix=key_prefix,
-                        case_options=options,
-                        op=op,
-                        sales_cats=sales_cats or list(DEFAULT_SALES_CASE_CATEGORIES),
-                        field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
-                        fe_names=fe_names or [],
-                        fe_missing=fe_missing,
-                        open_tab="details",
-                    )
-        elif len(selected) == 1:
+        if len(selected) == 1:
             with st.container(border=True, key=f"{key_prefix}_work_panel"):
                 _render_sales_case_work_panel(
                     sub,
                     key_prefix=key_prefix,
                     case_options=options,
                     op=op,
-                    sales_cats=sales_cats or list(DEFAULT_SALES_CASE_CATEGORIES),
+                    sales_cats=sales_cats or _sales_category_options(),
                     field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
                     fe_names=fe_names or [],
                     fe_missing=fe_missing,
@@ -7996,7 +9246,7 @@ def _render_sales_cases_dashboard() -> None:
     field_cats = (
         cat_names if cat_names else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     )
-    sales_cats = list(DEFAULT_SALES_CASE_CATEGORIES)
+    sales_cats = _sales_category_options(cat_names)
     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
 
     total_sales_ticket = len(_sc_filter_sales_df(df, (SC_STATUS_SALES_TICKET,)))
@@ -8046,6 +9296,7 @@ def _render_sales_cases_dashboard() -> None:
             caption=None,
             toolbar_caption=None,
             allow_edit_assignment=True,
+            allow_reassign=True,
             **work_kw,
         )
     elif queue_view == SC_STATUS_INVESTIGATION:
@@ -8059,6 +9310,7 @@ def _render_sales_cases_dashboard() -> None:
             caption=None,
             table_cols=_SC_QUEUE_TABLE_COLS + ("dispatch_type",),
             allow_edit_assignment=True,
+            allow_reassign=True,
             **work_kw,
         )
     elif queue_view == SC_STATUS_DESIGN:
@@ -8070,6 +9322,7 @@ def _render_sales_cases_dashboard() -> None:
             empty_msg="No cases in **Design**.",
             caption=None,
             allow_edit_assignment=True,
+            allow_reassign=True,
             **work_kw,
         )
     elif queue_view == SC_STATUS_RESOLVED:
@@ -8096,21 +9349,25 @@ def _render_dashboard(
     refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
     _apply_pending_dashboard_nav()
     _migrate_legacy_queue_nav()
-    nav_intent = str(st.session_state.get(_DASH_MAIN_NAV_KEY, "Tickets"))
+    nav_intent = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM))
     if nav_intent not in _DASH_MAIN_NAV_OPTIONS:
-        st.session_state[_DASH_MAIN_NAV_KEY] = "Tickets"
-        nav_intent = "Tickets"
+        st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_CSM
+        nav_intent = _DASH_NAV_CSM
+    elif nav_intent != st.session_state.get(_DASH_MAIN_NAV_KEY):
+        st.session_state[_DASH_MAIN_NAV_KEY] = nav_intent
 
     _render_dashboard_header(refreshed_at=refreshed_at)
+    _render_global_assign_day_metrics()
+    main_nav = _render_main_navigation()
 
-    if nav_intent in ("Log", "Performance", "Sales Cases"):
-        main_nav = _render_main_navigation()
-        if main_nav == "Log":
-            _render_attendance_tab(lookback_days=lookback_days)
-        elif main_nav == "Performance":
-            _render_field_performance_tab(lookback_days=lookback_days)
-        else:
-            _render_sales_cases_dashboard()
+    if main_nav == "Log":
+        _render_attendance_tab(lookback_days=lookback_days)
+        return
+    if main_nav == "Performance":
+        _render_field_performance_tab(lookback_days=lookback_days)
+        return
+    if main_nav == "Sales Cases":
+        _render_sales_cases_dashboard()
         return
 
     _maybe_run_unattended_close()
@@ -8223,18 +9480,6 @@ def _render_dashboard(
         total_completed=total_completed,
     )
 
-    main_nav = _render_main_navigation()
-    if main_nav == "Log":
-        _render_attendance_tab(lookback_days=lookback_days)
-        return
-    if main_nav == "Performance":
-        _render_field_performance_tab(lookback_days=lookback_days)
-        return
-    if main_nav == "Sales Cases":
-        _render_sales_cases_dashboard()
-        return
-
-    _render_assign_day_metrics(df_all, df_in_view=df)
     _render_queue_summary_metrics(
         total_pending=total_pending,
         total_on_hold=total_on_hold,
@@ -8814,7 +10059,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         m5.metric("Investigation", len(investigation_f))
         m6.metric("Unattended", len(unattended_f))
         st.caption(
-            "**In view** matches the **Tickets** tab (time range + active queues). "
+            "**In view** matches the **CSM Cases** tab (time range + active queues). "
             "Queue counts above sum to **In view** when **All** assignees are selected. "
             f"**Handled** ({STATUS_RESOLVED} + Investigation) is in the overview table — not the same as **In view**."
         )
@@ -8985,7 +10230,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             "Focus attended by",
             options=sc_people,
             key="perf_sc_focus_person",
-            help="Filter to **Mular_s**, **Ibbe**, or **All**.",
+            help="Filter by **attended by** (dashboard operator), or **All**.",
         )
     with f_resort:
         sc_account = st.selectbox(
