@@ -398,17 +398,6 @@ def _sc_apply_status_to_selected_cases(
     return ok
 
 
-def _sc_sync_case_note_widgets(*, row_id: str, row: pd.Series) -> None:
-    if st.session_state.get("sc_note_synced_id") == row_id:
-        return
-    st.session_state["sc_note_synced_id"] = row_id
-    note = str(row.get("additional_info") or "")
-    st.session_state["sc_case_note"] = note
-    st.session_state["sc_close_note"] = str(row.get("close_note") or "")
-    st.session_state["sc_action_comment"] = ""
-    st.session_state["sc_edit_admin_notes"] = note
-
-
 _SC_SALES_FLASH_KEY = "_dash_sales_cases_flash"
 _SC_SALES_FLASH_LEVEL_KEY = "_dash_sales_cases_flash_level"
 
@@ -8040,28 +8029,6 @@ def _sc_rename_sales_case_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={k: v for k, v in mapping.items() if k in df.columns})
 
 
-def _sc_sync_case_edit_widgets(
-    *,
-    row_id: str,
-    row: pd.Series,
-    sales_cats: list[str],
-) -> None:
-    """Load selected case into edit widgets (Streamlit keeps stale keys otherwise)."""
-    if st.session_state.get("sc_edit_synced_id") == row_id:
-        return
-    st.session_state["sc_edit_synced_id"] = row_id
-    reg = str(row.get("account_region") or "").strip()
-    st.session_state["sc_edit_region"] = (
-        reg if reg in SALES_REGION_CODES else SALES_REGION_CODES[0]
-    )
-    scat = str(row.get("sales_category") or "").strip()
-    cat_opts = list(sales_cats)
-    if scat and scat not in cat_opts:
-        cat_opts = [scat, *cat_opts]
-    st.session_state["sc_edit_scat"] = scat if scat in cat_opts else cat_opts[0]
-    st.session_state["sc_edit_admin_notes"] = str(row.get("additional_info") or "")
-
-
 _SC_QUEUE_TABLE_COLS: tuple[str, ...] = (
     "case_ref",
     "account_name",
@@ -8257,8 +8224,7 @@ def _render_selectable_sales_case_table(
 
 def _sc_clear_work_panel_tabs(key_prefix: str) -> None:
     """Reset per-queue selection helpers when clearing the table."""
-    st.session_state.pop("sc_edit_synced_id", None)
-    st.session_state.pop("sc_note_synced_id", None)
+    st.session_state.pop("sc_action_synced_id", None)
     panel = _sc_toolbar_panel_keys(key_prefix)
     for k in panel.values():
         st.session_state.pop(k, None)
@@ -8836,9 +8802,9 @@ def _render_sales_case_work_panel(
     field_cats: list[str],
     fe_names: list[str],
     fe_missing: bool,
-    open_tab: str = "details",
+    open_tab: str = "next_step",
 ) -> None:
-    """Actions for exactly one selected case (edit, dispatch, resolve, assign)."""
+    """Actions for exactly one selected case (queue moves, site visit assign)."""
     row_id, _cref, r0 = _picked_sales_case_from_selection(
         df, key_prefix=key_prefix, case_options=case_options
     )
@@ -8846,117 +8812,37 @@ def _render_sales_case_work_panel(
         return
 
     cur_status = _sc_effective_status(r0.get("status"))
-    _sc_sync_case_edit_widgets(row_id=row_id, row=r0, sales_cats=sales_cats)
-    _sc_sync_case_note_widgets(row_id=row_id, row=r0)
-    cur_scat = str(r0.get("sales_category") or "").strip()
-    scat_extra = (
-        [cur_scat] if cur_scat and cur_scat not in sales_cats else None
-    )
-    cat_names, cat_missing = _try_fetch_task_categories()
+    if st.session_state.get("sc_action_synced_id") != row_id:
+        st.session_state["sc_action_synced_id"] = row_id
+        st.session_state["sc_action_comment"] = ""
 
     status_actions = _sc_status_actions_for_case(cur_status)
     show_site_visit = cur_status == SC_STATUS_REGIONAL
-    tab_names = ["Case Details"]
-    if status_actions and op:
+    show_next_step = bool(status_actions and op)
+    if not show_next_step and not show_site_visit:
+        return
+
+    tab_names: list[str] = []
+    if show_next_step:
         tab_names.append("Next Step")
     if show_site_visit:
         tab_names.append("Site Visit")
 
-    tabs = st.tabs(tab_names)
-    tab_by_name = {name: i for i, name in enumerate(tab_names)}
-    start_idx = tab_by_name.get(
-        "Site Visit" if open_tab == "site_visit" and "Site Visit" in tab_by_name else "Case Details",
-        0,
-    )
-    if start_idx > 0:
-        st.caption(f"Opened **{tab_names[start_idx]}** — use the tabs to switch.")
+    use_tabs = len(tab_names) > 1
+    if use_tabs:
+        tabs = st.tabs(tab_names)
+        tab_by_name = {name: i for i, name in enumerate(tab_names)}
+        start_idx = tab_by_name.get(
+            "Site Visit" if open_tab == "site_visit" else "Next Step",
+            0,
+        )
+        if start_idx > 0:
+            st.caption(f"Opened **{tab_names[start_idx]}** — use the tabs to switch.")
+    else:
+        tabs = [st.container()]
 
     tab_idx = 0
-    with tabs[tab_idx]:
-        tab_idx += 1
-        with st.container(border=True, key=f"{key_prefix}_sc_details_box"):
-            st.markdown("**Case Details**")
-            st.caption("Region, category, and notes — does not change queue status.")
-            _render_sales_category_row(
-                cat_names,
-                missing=cat_missing,
-                select_key="sc_edit_scat",
-                pending_key=_SC_EDIT_SCAT_PENDING_KEY,
-                popover_key=f"{key_prefix}_sc_edit_cat_pop",
-                key_prefix=f"{key_prefix}_sc_edit_cat",
-                extra_options=scat_extra,
-            )
-            with st.form(f"sc_edit_case_form_{key_prefix}", clear_on_submit=False):
-                st.selectbox(
-                    "Region Team",
-                    options=list(SALES_REGION_CODES),
-                    key="sc_edit_region",
-                )
-                st.text_area(
-                    "Case Note (Internal)",
-                    key="sc_edit_admin_notes",
-                    height=140,
-                    placeholder="What the team needs to know while working this case…",
-                )
-                save_edit = st.form_submit_button(
-                    "Save Details",
-                    type="primary",
-                    use_container_width=True,
-                )
-        if save_edit:
-            notes = str(st.session_state.get("sc_edit_admin_notes", "")).strip() or None
-            try:
-                _sales_cases_update_row(
-                    row_id,
-                    {
-                        "account_region": str(
-                            st.session_state.get("sc_edit_region", "")
-                        ).strip(),
-                        "sales_category": str(
-                            st.session_state.get("sc_edit_scat", "")
-                        ).strip(),
-                        "additional_info": notes,
-                    },
-                )
-                _invalidate_dashboard_data_cache()
-                _sc_set_sales_flash("Case details saved.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not save: {exc}")
-
-        if op:
-            with st.container(border=True, key=f"{key_prefix}_sc_xfer_csm_box"):
-                st.markdown("**Wrong track?**")
-                st.caption(
-                    "Move this sales case to **CSM** field tickets. "
-                    "Case ref must be **9** or **16** digits."
-                )
-                xfer_confirm = st.checkbox(
-                    "Yes, move this case to CSM",
-                    key=f"{key_prefix}_panel_xfer_csm_confirm",
-                )
-                if st.button(
-                    "Move to CSM",
-                    key=f"{key_prefix}_panel_xfer_csm_btn",
-                    type="secondary",
-                    use_container_width=True,
-                    disabled=not xfer_confirm,
-                ):
-                    try:
-                        tid = _cc_transfer_sales_case_to_ticket(
-                            row_id, operator_id=op
-                        )
-                        _invalidate_dashboard_data_cache()
-                        st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
-                        st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = (
-                            STATUS_DAILY_TASK
-                        )
-                        _sc_set_sales_flash(f"Case moved to CSM ticket **{tid}**.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(str(exc))
-
-    if status_actions and op:
+    if show_next_step:
         with tabs[tab_idx]:
             tab_idx += 1
             with st.container(border=True, key=f"{key_prefix}_sc_next_box"):
