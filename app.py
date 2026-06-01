@@ -1408,8 +1408,14 @@ def _render_login_page_styles() -> None:
             background: linear-gradient(90deg, #F15A29, #F7931E) !important;
             border: 1px solid rgba(255,255,255,0.1) !important;
         }
-        /* Login row: Forgot Password on one line */
-        div.st-key-login_shell [data-testid="stForm"] [data-testid="column"]:last-child button {
+        /* Login row: Forgot Password beside Save Password (outside form) */
+        div.st-key-login_forgot_slot {
+            margin-top: -4.35rem;
+            margin-bottom: 0.9rem;
+            position: relative;
+            z-index: 2;
+        }
+        div.st-key-login_forgot_slot button {
             font-size: 0.72rem !important;
             white-space: nowrap !important;
             padding: 0.28rem 0.45rem !important;
@@ -1501,17 +1507,12 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     autocomplete="current-password",
                     key=_LOGIN_PWD_WIDGET_KEY,
                 )
-                save_col, forgot_col = st.columns([1.35, 1.05], vertical_alignment="bottom")
+                save_col, _forgot_pad = st.columns([1.35, 1.05], vertical_alignment="bottom")
                 with save_col:
                     st.checkbox(
                         "Save Password",
                         key=_LOGIN_SAVE_PW_KEY,
                         help="Stores an encrypted login token in this browser only.",
-                    )
-                with forgot_col:
-                    forgot_clicked = st.form_submit_button(
-                        "Forgot Password",
-                        use_container_width=True,
                     )
             else:
                 st.caption(
@@ -1533,6 +1534,18 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                 )
                 forgot_clicked = False
             submitted = st.form_submit_button("Sign In", use_container_width=True)
+
+        if per_user:
+            _pad, forgot_wrap = st.columns([1.35, 1.05])
+            with forgot_wrap:
+                with st.container(key="login_forgot_slot"):
+                    if st.button(
+                        "Forgot Password",
+                        key="login_forgot_btn",
+                        use_container_width=True,
+                        type="secondary",
+                    ):
+                        forgot_clicked = True
 
     if per_user and forgot_clicked:
         st.session_state[_LOGIN_VIEW_KEY] = "forgot_request"
