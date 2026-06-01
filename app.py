@@ -2432,9 +2432,61 @@ def _ticket_selection_session_key(key_prefix: str) -> str:
     return f"{key_prefix}_selected_tickets"
 
 
-def _get_selected_queue_tickets(key_prefix: str, options: list[str]) -> list[str]:
+def _ticket_select_editor_key(key_prefix: str) -> str:
+    return f"{key_prefix}_ticket_select_editor"
+
+
+def _sc_case_select_editor_key(key_prefix: str) -> str:
+    return f"{key_prefix}_case_select_editor"
+
+
+def _selection_from_data_editor_state(
+    editor_key: str,
+    *,
+    id_column_candidates: tuple[str, ...],
+    options: list[str],
+) -> list[str] | None:
+    """Read checkbox column from the data_editor widget state (fresher than deferred sync)."""
+    raw = st.session_state.get(editor_key)
+    if raw is None:
+        return None
+    edited: pd.DataFrame | None = None
+    if isinstance(raw, pd.DataFrame):
+        edited = raw
+    elif isinstance(raw, dict):
+        data = raw.get("data")
+        if data is not None:
+            cols = raw.get("columns")
+            if isinstance(cols, list) and cols and isinstance(cols[0], dict):
+                names = [str(c.get("name") or c.get("field") or "") for c in cols]
+                edited = pd.DataFrame(data, columns=names)
+            else:
+                edited = pd.DataFrame(data)
+    if edited is None or edited.empty or "Select" not in edited.columns:
+        return None
+    id_col = next((c for c in id_column_candidates if c in edited.columns), None)
+    if not id_col:
+        return None
     allowed = set(options)
-    raw = st.session_state.get(_ticket_selection_session_key(key_prefix), [])
+    select_on = edited["Select"].fillna(False).astype(bool)
+    return [
+        str(t)
+        for t in edited.loc[select_on, id_col].astype(str).tolist()
+        if str(t) in allowed
+    ]
+
+
+def _get_selected_queue_tickets(key_prefix: str, options: list[str]) -> list[str]:
+    sel_key = _ticket_selection_session_key(key_prefix)
+    synced = _selection_from_data_editor_state(
+        _ticket_select_editor_key(key_prefix),
+        id_column_candidates=("ticket_number", "Ticket Number"),
+        options=options,
+    )
+    if synced is not None:
+        st.session_state[sel_key] = synced
+    allowed = set(options)
+    raw = st.session_state.get(sel_key, [])
     if not isinstance(raw, list):
         return []
     return [str(t) for t in raw if str(t) in allowed]
@@ -2634,14 +2686,15 @@ def _render_selectable_ticket_table(
         table,
         hide_index=True,
         use_container_width=True,
-        key=f"{key_prefix}_ticket_select_editor",
+        key=_ticket_select_editor_key(key_prefix),
         column_config=col_cfg,
         disabled=disabled_cols,
     )
 
+    select_on = edited["Select"].fillna(False).astype(bool)
     selected = [
         str(t)
-        for t in edited.loc[edited["Select"] == True, "ticket_number"].astype(str).tolist()
+        for t in edited.loc[select_on, "ticket_number"].astype(str).tolist()
         if str(t) in options
     ]
     st.session_state[sel_key] = selected
@@ -3251,21 +3304,24 @@ def _render_ticket_status_action_popover(
 ) -> None:
     """Action picker: trigger shows choice; menu lists options; Apply commits."""
     sel_key = f"{key_prefix}_action_sel"
-    if sel_key not in st.session_state or st.session_state[sel_key] not in status_labels:
-        st.session_state[sel_key] = status_labels[0]
-    trigger = str(st.session_state[sel_key])
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = ""
+    elif st.session_state[sel_key] not in status_labels:
+        st.session_state[sel_key] = ""
+    current = str(st.session_state.get(sel_key, "") or "")
+    trigger = current if current in status_labels else "Action"
 
     with st.popover(trigger, use_container_width=True):
-        st.caption("Choose action")
+        st.caption("Choose action — click again to clear")
         for label in status_labels:
-            picked = label == st.session_state[sel_key]
+            picked = label == current
             if st.button(
                 label,
                 key=f"{key_prefix}_pick_{label.replace(' ', '_')}",
                 type="primary" if picked else "secondary",
                 use_container_width=True,
             ):
-                st.session_state[sel_key] = label
+                st.session_state[sel_key] = "" if picked else label
                 st.rerun()
         st.divider()
         if st.button(
@@ -3273,6 +3329,7 @@ def _render_ticket_status_action_popover(
             key=f"{key_prefix}_apply",
             type="primary",
             use_container_width=True,
+            disabled=current not in status_labels,
         ):
             choice = str(st.session_state.get(sel_key, ""))
             picked_list = _require_selected_tickets(
@@ -3300,7 +3357,9 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
     with st.popover("Follow-up", use_container_width=True):
         picked = _get_selected_queue_tickets(key_prefix, options)
         if not picked:
-            st.caption("Select **one** ticket in the table, then open this again.")
+            st.caption(
+                "Tick **Select** on a ticket in the table below, then open **Follow-up**."
+            )
             return
         if len(picked) != 1:
             st.caption("Select **exactly one** ticket — follow-up is per case.")
@@ -3362,6 +3421,7 @@ def _render_admin_ticket_toolbar(
     options = _ticket_options_for_admin(df)
     if not options:
         return
+    _get_selected_queue_tickets(key_prefix, options)
 
     if caption:
         st.caption(caption)
@@ -3421,7 +3481,10 @@ def _render_admin_ticket_toolbar(
                     key=f"{key_prefix}_mfr_btn",
                     use_container_width=True,
                 ):
-                    st.session_state[mfr_keys["show"]] = True
+                    if st.session_state.get(mfr_keys["show"]):
+                        st.session_state.pop(mfr_keys["show"], None)
+                    else:
+                        st.session_state[mfr_keys["show"]] = True
                     st.rerun()
             idx += 1
 
@@ -3432,6 +3495,9 @@ def _render_admin_ticket_toolbar(
                     key=f"{key_prefix}_reassign_btn",
                     use_container_width=True,
                 ):
+                    if st.session_state.get(reassign_keys["show"]):
+                        st.session_state.pop(reassign_keys["show"], None)
+                        st.rerun()
                     _clear_reassign_panels_except(key_prefix)
                     st.session_state[reassign_keys["show"]] = True
                     st.rerun()
@@ -3444,6 +3510,9 @@ def _render_admin_ticket_toolbar(
                     key=f"{key_prefix}_edit_btn",
                     use_container_width=True,
                 ):
+                    if st.session_state.get(edit_keys["show"]):
+                        st.session_state.pop(edit_keys["show"], None)
+                        st.rerun()
                     st.session_state[edit_keys["show"]] = True
                     st.rerun()
             idx += 1
@@ -3513,6 +3582,27 @@ def _render_admin_ticket_toolbar(
                     status_actions=status_actions,
                     compact=True,
                 )
+
+
+def _render_ticket_toolbar_then_table(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    cols: tuple[str, ...],
+    highlight_follow_up: bool = False,
+    **toolbar_kwargs: object,
+) -> None:
+    """Toolbar above table; selection is synced from the editor widget before actions run."""
+    options = _ticket_options_for_admin(df)
+    if options:
+        _get_selected_queue_tickets(key_prefix, options)
+    _render_admin_ticket_toolbar(df, key_prefix=key_prefix, **toolbar_kwargs)
+    _render_selectable_ticket_table(
+        df,
+        key_prefix=key_prefix,
+        cols=cols,
+        highlight_follow_up=highlight_follow_up,
+    )
 
 
 def _fetch_attendance(
@@ -8083,8 +8173,16 @@ def _sc_case_options_for_admin(df: pd.DataFrame) -> list[str]:
 
 
 def _get_selected_queue_sales_cases(key_prefix: str, options: list[str]) -> list[str]:
+    sel_key = _sc_case_selection_session_key(key_prefix)
+    synced = _selection_from_data_editor_state(
+        _sc_case_select_editor_key(key_prefix),
+        id_column_candidates=("Ticket Number", "case_ref"),
+        options=options,
+    )
+    if synced is not None:
+        st.session_state[sel_key] = synced
     allowed = set(options)
-    raw = st.session_state.get(_sc_case_selection_session_key(key_prefix), [])
+    raw = st.session_state.get(sel_key, [])
     if not isinstance(raw, list):
         return []
     return [str(t) for t in raw if str(t) in allowed]
@@ -8199,14 +8297,15 @@ def _render_selectable_sales_case_table(
         table,
         hide_index=True,
         use_container_width=True,
-        key=f"{key_prefix}_case_select_editor",
+        key=_sc_case_select_editor_key(key_prefix),
         column_config=col_cfg,
         disabled=disabled_cols,
     )
 
+    select_on = edited["Select"].fillna(False).astype(bool)
     selected = [
         str(t)
-        for t in edited.loc[edited["Select"] == True, ticket_col].astype(str).tolist()
+        for t in edited.loc[select_on, ticket_col].astype(str).tolist()
         if str(t) in options
     ]
     st.session_state[sel_key] = selected
@@ -8242,21 +8341,24 @@ def _render_sales_case_action_popover(
     status_labels = [_sc_toolbar_action_label(lbl, tgt) for lbl, tgt in status_actions]
     label_to_target = _sc_toolbar_label_to_target(status_actions)
     sel_key = f"{key_prefix}_sc_action_sel"
-    if sel_key not in st.session_state or st.session_state[sel_key] not in status_labels:
-        st.session_state[sel_key] = status_labels[0]
-    trigger = str(st.session_state[sel_key])
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = ""
+    elif st.session_state[sel_key] not in status_labels:
+        st.session_state[sel_key] = ""
+    current = str(st.session_state.get(sel_key, "") or "")
+    trigger = current if current in status_labels else "Action"
 
     with st.popover(trigger, use_container_width=True):
-        st.caption("Choose action")
+        st.caption("Choose action — click again to clear")
         for label in status_labels:
-            picked = label == st.session_state[sel_key]
+            picked = label == current
             if st.button(
                 label,
                 key=f"{key_prefix}_sc_pick_{label.replace(' ', '_')}",
                 type="primary" if picked else "secondary",
                 use_container_width=True,
             ):
-                st.session_state[sel_key] = label
+                st.session_state[sel_key] = "" if picked else label
                 st.rerun()
         st.divider()
         if st.button(
@@ -8264,6 +8366,7 @@ def _render_sales_case_action_popover(
             key=f"{key_prefix}_sc_apply",
             type="primary",
             use_container_width=True,
+            disabled=current not in status_labels,
         ):
             choice = str(st.session_state.get(sel_key, ""))
             target = label_to_target.get(choice)
@@ -8285,7 +8388,7 @@ def _render_sales_case_delete_popover(
     with st.popover("Remove", use_container_width=True):
         picked_list = _get_selected_queue_sales_cases(key_prefix, options)
         if not picked_list:
-            st.caption("Select case(s) in the table, then open **Remove** again.")
+            st.caption("Tick **Select** on case(s) in the table below, then open **Remove**.")
             return
         st.markdown("**" + "**, **".join(picked_list[:12]) + "**")
         if len(picked_list) > 12:
@@ -8553,6 +8656,7 @@ def _render_sales_case_toolbar(
     options = _sc_case_options_for_admin(df)
     if not options:
         return
+    _get_selected_queue_sales_cases(key_prefix, options)
     if caption:
         st.caption(caption)
     sel_key = _sc_case_selection_session_key(key_prefix)
@@ -8607,6 +8711,13 @@ def _render_sales_case_toolbar(
                     key=f"{key_prefix}_sc_edit_btn",
                     use_container_width=True,
                 ):
+                    if st.session_state.get(edit_keys["show"]):
+                        st.session_state.pop(edit_keys["show"], None)
+                        st.session_state.pop(
+                            _reassign_session_keys(key_prefix)["show"], None
+                        )
+                        st.session_state.pop(panel_keys["details"], None)
+                        st.rerun()
                     if not _require_selected_sales_cases(
                         key_prefix=key_prefix,
                         options=options,
@@ -8631,6 +8742,13 @@ def _render_sales_case_toolbar(
                     key=f"{key_prefix}_sc_reassign_btn",
                     use_container_width=True,
                 ):
+                    if st.session_state.get(reassign_keys["show"]):
+                        st.session_state.pop(reassign_keys["show"], None)
+                        st.session_state.pop(
+                            _assignment_edit_session_keys(key_prefix)["show"], None
+                        )
+                        st.session_state.pop(panel_keys["details"], None)
+                        st.rerun()
                     if _require_selected_sales_cases(
                         key_prefix=key_prefix,
                         options=options,
@@ -8640,9 +8758,7 @@ def _render_sales_case_toolbar(
                         st.session_state.pop(
                             _assignment_edit_session_keys(key_prefix)["show"], None
                         )
-                        st.session_state.pop(
-                            _sc_toolbar_panel_keys(key_prefix)["details"], None
-                        )
+                        st.session_state.pop(panel_keys["details"], None)
                         st.session_state[reassign_keys["show"]] = True
                         st.rerun()
             idx += 1
@@ -9031,6 +9147,8 @@ def _render_sales_queue_segment(
         st.caption(caption)
     options = _sc_case_options_for_admin(sub)
     status_actions = _sc_status_actions_for_queue(queue_status)
+    if options:
+        _get_selected_queue_sales_cases(key_prefix, options)
     _render_sales_case_toolbar(
         sub,
         key_prefix=key_prefix,
@@ -9406,9 +9524,10 @@ def _render_dashboard(
                     )
                     if c in pend.columns
                 )
-                _render_admin_ticket_toolbar(
+                _render_ticket_toolbar_then_table(
                     pend,
                     key_prefix="assigned",
+                    cols=pend_show,
                     status_actions=(
                         (
                             "Under Investigation",
@@ -9421,11 +9540,6 @@ def _render_dashboard(
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=_is_dashboard_admin(),
-                )
-                _render_selectable_ticket_table(
-                    pend,
-                    key_prefix="assigned",
-                    cols=pend_show,
                 )
 
                 if _is_dashboard_admin():
@@ -9526,9 +9640,10 @@ def _render_dashboard(
                     )
                     if c in na_df.columns
                 )
-                _render_admin_ticket_toolbar(
+                _render_ticket_toolbar_then_table(
                     na_df,
                     key_prefix="on_hold",
+                    cols=na_show,
                     status_actions=(
                         (
                             "Under Investigation",
@@ -9540,11 +9655,6 @@ def _render_dashboard(
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=_is_dashboard_admin(),
-                )
-                _render_selectable_ticket_table(
-                    na_df,
-                    key_prefix="on_hold",
-                    cols=na_show,
                 )
                 if _is_dashboard_admin() and st.session_state.get(
                     _reassign_session_keys("on_hold")["show"]
@@ -9598,20 +9708,16 @@ def _render_dashboard(
                     "if the engineer never replied."
                 )
             else:
-                _render_admin_ticket_toolbar(
+                _render_ticket_toolbar_then_table(
                     unat,
                     key_prefix="unattended",
+                    cols=_TICKET_QUEUE_TABLE_COLS
+                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
                     caption="Reopen to **Daily Task** to reassign or chase again.",
                     status_actions=(
                         ("Reopen to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
                     ),
                     allow_delete=True,
-                )
-                _render_selectable_ticket_table(
-                    unat,
-                    key_prefix="unattended",
-                    cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
                 )
 
     elif queue_view == "Open":
@@ -9623,9 +9729,10 @@ def _render_dashboard(
             if open_df.empty:
                 st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
             else:
-                _render_admin_ticket_toolbar(
+                _render_ticket_toolbar_then_table(
                     open_df,
                     key_prefix="open",
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
                     status_actions=(
                         ("Mark Resolved", STATUS_RESOLVED, "Resolved"),
                         (
@@ -9640,11 +9747,6 @@ def _render_dashboard(
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=True,
                     allow_mark_follow_up=True,
-                )
-                _render_selectable_ticket_table(
-                    open_df,
-                    key_prefix="open",
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
                 )
 
                 if _is_dashboard_admin() and st.session_state.get(
@@ -9705,9 +9807,16 @@ def _render_dashboard(
                     "**Follow-up** cases (● in the Follow-up column) stay pinned on top. "
                     "Other **Under Investigation** tickets have no ●. Search by ticket # if needed."
                 )
-                _render_admin_ticket_toolbar(
+                inv_cols = list(
+                    _TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at")
+                )
+                if "follow_up_note" in inv_df.columns:
+                    inv_cols.extend(["follow_up_at", "follow_up_note"])
+                _render_ticket_toolbar_then_table(
                     inv_df,
                     key_prefix="investigation",
+                    cols=tuple(dict.fromkeys(c for c in inv_cols if c in inv_df.columns)),
+                    highlight_follow_up=True,
                     caption=None,
                     status_actions=(
                         ("Back to Open", "Open", "BackToOpenFromInvestigation"),
@@ -9717,17 +9826,6 @@ def _render_dashboard(
                     allow_delete=True,
                     allow_edit_assignment=True,
                     allow_reassign=True,
-                )
-                inv_cols = list(
-                    _TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at")
-                )
-                if "follow_up_note" in inv_df.columns:
-                    inv_cols.extend(["follow_up_at", "follow_up_note"])
-                _render_selectable_ticket_table(
-                    inv_df,
-                    key_prefix="investigation",
-                    cols=tuple(dict.fromkeys(c for c in inv_cols if c in inv_df.columns)),
-                    highlight_follow_up=True,
                 )
 
                 if st.session_state.get(
@@ -9770,19 +9868,15 @@ def _render_dashboard(
             if done.empty:
                 st.info(f"No resolved tickets in the last {lookback_days} {day_word}.")
             else:
-                _render_admin_ticket_toolbar(
+                _render_ticket_toolbar_then_table(
                     done,
                     key_prefix="completed",
+                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
                     caption="Send back to **Open** for more field work.",
                     status_actions=(
                         ("Send back to Open", "Open", "Reopened"),
                     ),
                     allow_delete=True,
-                )
-                _render_selectable_ticket_table(
-                    done,
-                    key_prefix="completed",
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
                 )
 
                 with st.expander("Photo gallery", expanded=False):
