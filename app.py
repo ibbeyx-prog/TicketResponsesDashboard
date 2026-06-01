@@ -547,6 +547,7 @@ _CATEGORIES_SYNCED_ONCE_KEY = "_dashboard_categories_synced_once"
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
 _CC_FLASH_LEVEL_KEY = "_ticket_dashboard_cc_flash_level"
+_QUEUE_ACTIONS_POPOVER_WIDTH_PX = 220
 
 
 def _cc_set_flash(message: str, *, level: str = "success") -> None:
@@ -2440,6 +2441,84 @@ def _sc_case_select_editor_key(key_prefix: str) -> str:
     return f"{key_prefix}_case_select_editor"
 
 
+def _data_editor_snapshot_key(editor_key: str) -> str:
+    return f"{editor_key}_snapshot"
+
+
+def _ticket_clear_select_flag_key(key_prefix: str) -> str:
+    return f"{key_prefix}_clear_ticket_select"
+
+
+def _sc_clear_select_flag_key(key_prefix: str) -> str:
+    return f"{key_prefix}_clear_case_select"
+
+
+def _reset_data_editor_queue_selection(*, sel_key: str, editor_key: str) -> None:
+    """Drop list selection and reset the data_editor widget so checkboxes clear."""
+    st.session_state[sel_key] = []
+    st.session_state.pop(editor_key, None)
+    snap_key = _data_editor_snapshot_key(editor_key)
+    snap = st.session_state.get(snap_key)
+    if isinstance(snap, pd.DataFrame) and not snap.empty and "Select" in snap.columns:
+        cleared = snap.copy()
+        cleared["Select"] = False
+        st.session_state[snap_key] = cleared
+
+
+def _clear_ticket_queue_selection(key_prefix: str) -> None:
+    _reset_data_editor_queue_selection(
+        sel_key=_ticket_selection_session_key(key_prefix),
+        editor_key=_ticket_select_editor_key(key_prefix),
+    )
+
+
+def _clear_sales_case_queue_selection(key_prefix: str) -> None:
+    _reset_data_editor_queue_selection(
+        sel_key=_sc_case_selection_session_key(key_prefix),
+        editor_key=_sc_case_select_editor_key(key_prefix),
+    )
+    _sc_clear_work_panel_tabs(key_prefix)
+
+
+def _maybe_apply_pending_ticket_selection_clear(key_prefix: str) -> None:
+    if st.session_state.pop(_ticket_clear_select_flag_key(key_prefix), False):
+        _clear_ticket_queue_selection(key_prefix)
+
+
+def _maybe_apply_pending_sales_case_selection_clear(key_prefix: str) -> None:
+    if st.session_state.pop(_sc_clear_select_flag_key(key_prefix), False):
+        _clear_sales_case_queue_selection(key_prefix)
+
+
+def _apply_data_editor_editing_state(
+    df: pd.DataFrame, state: dict[str, object]
+) -> pd.DataFrame:
+    """Apply Streamlit ``EditingState`` (edited_rows / deleted_rows) to a table snapshot."""
+    out = df.copy()
+    edited_rows = state.get("edited_rows")
+    if isinstance(edited_rows, dict):
+        for row_id, row_changes in edited_rows.items():
+            try:
+                row_pos = int(row_id)
+            except (TypeError, ValueError):
+                continue
+            if row_pos < 0 or row_pos >= len(out) or not isinstance(row_changes, dict):
+                continue
+            for col_name, value in row_changes.items():
+                if col_name in out.columns:
+                    out.iloc[row_pos, out.columns.get_loc(col_name)] = value
+    deleted = state.get("deleted_rows")
+    if isinstance(deleted, list) and deleted:
+        drop_idx = sorted(
+            {int(i) for i in deleted if 0 <= int(i) < len(out)},
+            reverse=True,
+        )
+        for i in drop_idx:
+            out = out.drop(out.index[i])
+        out = out.reset_index(drop=True)
+    return out
+
+
 def _selection_from_data_editor_state(
     editor_key: str,
     *,
@@ -2454,14 +2533,19 @@ def _selection_from_data_editor_state(
     if isinstance(raw, pd.DataFrame):
         edited = raw
     elif isinstance(raw, dict):
-        data = raw.get("data")
-        if data is not None:
-            cols = raw.get("columns")
-            if isinstance(cols, list) and cols and isinstance(cols[0], dict):
-                names = [str(c.get("name") or c.get("field") or "") for c in cols]
-                edited = pd.DataFrame(data, columns=names)
-            else:
-                edited = pd.DataFrame(data)
+        if "edited_rows" in raw or "added_rows" in raw or "deleted_rows" in raw:
+            snap = st.session_state.get(_data_editor_snapshot_key(editor_key))
+            if isinstance(snap, pd.DataFrame) and not snap.empty:
+                edited = _apply_data_editor_editing_state(snap, raw)
+        else:
+            data = raw.get("data")
+            if data is not None:
+                cols = raw.get("columns")
+                if isinstance(cols, list) and cols and isinstance(cols[0], dict):
+                    names = [str(c.get("name") or c.get("field") or "") for c in cols]
+                    edited = pd.DataFrame(data, columns=names)
+                else:
+                    edited = pd.DataFrame(data)
     if edited is None or edited.empty or "Select" not in edited.columns:
         return None
     id_col = next((c for c in id_column_candidates if c in edited.columns), None)
@@ -2620,6 +2704,7 @@ def _render_selectable_ticket_table(
     key_prefix: str,
     cols: tuple[str, ...],
     highlight_follow_up: bool = False,
+    show_selection_caption: bool = True,
 ) -> list[str]:
     """Table with a **Select** checkbox per row; returns chosen ticket numbers."""
     options = _ticket_options_for_admin(df)
@@ -2682,11 +2767,13 @@ def _render_selectable_ticket_table(
             help="● = tracked individual follow-up (Needs Review → Follow-up). Blank = general Under Investigation.",
             width="medium",
         )
+    editor_key = _ticket_select_editor_key(key_prefix)
+    st.session_state[_data_editor_snapshot_key(editor_key)] = table.copy()
     edited = st.data_editor(
         table,
         hide_index=True,
         use_container_width=True,
-        key=_ticket_select_editor_key(key_prefix),
+        key=editor_key,
         column_config=col_cfg,
         disabled=disabled_cols,
     )
@@ -2698,12 +2785,13 @@ def _render_selectable_ticket_table(
         if str(t) in options
     ]
     st.session_state[sel_key] = selected
-    if selected:
-        shown = ", ".join(selected[:6])
-        extra = f" (+{len(selected) - 6} more)" if len(selected) > 6 else ""
-        st.caption(f"**{len(selected)}** selected: {shown}{extra}")
-    else:
-        st.caption("Tick **Select** on ticket(s), then choose an action above.")
+    if show_selection_caption:
+        if selected:
+            shown = ", ".join(selected[:6])
+            extra = f" (+{len(selected) - 6} more)" if len(selected) > 6 else ""
+            st.caption(f"**{len(selected)}** selected: {shown}{extra}")
+        else:
+            st.caption("Tick **Select** on ticket(s) to show actions.")
     return selected
 
 
@@ -3404,6 +3492,503 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
             st.rerun()
 
 
+def _split_ticket_status_actions(
+    status_actions: tuple[tuple[str, str, str], ...],
+) -> tuple[tuple[str, str, str] | None, list[tuple[str, str, str]]]:
+    """Prefer **Mark Resolved** as the primary status action; others go to overflow."""
+    resolved: tuple[str, str, str] | None = None
+    other: list[tuple[str, str, str]] = []
+    for item in status_actions:
+        label, status, _ = item
+        if status == STATUS_RESOLVED or "resolved" in label.strip().lower():
+            if resolved is None:
+                resolved = item
+            else:
+                other.append(item)
+        else:
+            other.append(item)
+    return resolved, other
+
+
+def _apply_ticket_status_batch(
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str, str], ...],
+    choice_label: str,
+) -> None:
+    picked_list = _require_selected_tickets(key_prefix=key_prefix, options=options)
+    if not picked_list:
+        return
+    ok = 0
+    for picked in picked_list:
+        if _apply_admin_ticket_action(
+            picked=picked,
+            choice=choice_label,
+            confirm_del=False,
+            status_actions=status_actions,
+            do_rerun=False,
+        ):
+            ok += 1
+    if ok:
+        st.success(f"**{ok}** ticket(s) updated → **{choice_label}**.")
+        st.session_state[_ticket_selection_session_key(key_prefix)] = []
+        st.rerun()
+
+
+def _render_follow_up_form_inline(*, key_prefix: str, options: list[str]) -> None:
+    """Follow-up form (used inside overflow menu)."""
+    picked = _get_selected_queue_tickets(key_prefix, options)
+    if len(picked) != 1:
+        st.caption("Select **exactly one** ticket for follow-up.")
+        return
+    ticket = picked[0]
+    st.markdown(f"**{ticket}**")
+    note = st.text_area(
+        "Follow-up Note (Optional)",
+        placeholder="e.g. Revisit Tuesday — waiting for site access",
+        key=f"{key_prefix}_follow_up_note",
+        height=72,
+        label_visibility="collapsed",
+    )
+    if st.button(
+        "Confirm follow-up",
+        key=f"{key_prefix}_follow_up_confirm",
+        type="primary",
+        use_container_width=True,
+    ):
+        op = _session_operator_id()
+        if not op:
+            st.error("Sign in again — operator session is missing.")
+            return
+        try:
+            _mark_ticket_for_follow_up(ticket, note=note, operator_id=op)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        except Exception as exc:
+            st.error(f"Could not mark follow-up: {exc}")
+            return
+        st.session_state[_ticket_selection_session_key(key_prefix)] = []
+        st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+        st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
+        st.session_state[_CC_FLASH_KEY] = (
+            f"**{ticket}** → **Under Investigation** (follow-up tracked ●)."
+        )
+        st.session_state[_CC_FLASH_LEVEL_KEY] = "success"
+        st.rerun()
+
+
+def _render_ticket_overflow_menu(
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str, str], ...],
+    overflow_status: list[tuple[str, str, str]],
+    allow_reassign: bool,
+    allow_edit_assignment: bool,
+    allow_mark_follow_up: bool,
+    allow_transfer_to_sales: bool,
+    allow_delete: bool,
+) -> None:
+    """Secondary actions + destructive remove."""
+    edit_keys = _assignment_edit_session_keys(key_prefix)
+    reassign_keys = _reassign_session_keys(key_prefix)
+    picked = _get_selected_queue_tickets(key_prefix, options)
+
+    with st.popover("⋯", use_container_width=False):
+        if allow_reassign:
+            if st.button(
+                "Reassign",
+                key=f"{key_prefix}_ctx_reassign",
+                use_container_width=True,
+            ):
+                if st.session_state.get(reassign_keys["show"]):
+                    st.session_state.pop(reassign_keys["show"], None)
+                else:
+                    _clear_reassign_panels_except(key_prefix)
+                    st.session_state.pop(edit_keys["show"], None)
+                    st.session_state[reassign_keys["show"]] = True
+                st.rerun()
+        if allow_edit_assignment:
+            if st.button(
+                "Edit assignment",
+                key=f"{key_prefix}_ctx_edit",
+                use_container_width=True,
+            ):
+                if st.session_state.get(edit_keys["show"]):
+                    st.session_state.pop(edit_keys["show"], None)
+                else:
+                    st.session_state[edit_keys["show"]] = True
+                st.rerun()
+        if allow_mark_follow_up:
+            with st.expander("Follow-up", expanded=False):
+                _render_follow_up_form_inline(key_prefix=key_prefix, options=options)
+        if allow_transfer_to_sales and _session_operator_id():
+            with st.expander("Move to Sales", expanded=False):
+                picked_list = picked
+                if not picked_list:
+                    st.caption("No tickets selected.")
+                else:
+                    st.markdown("**" + "**, **".join(picked_list[:8]) + "**")
+                    region = st.selectbox(
+                        "Region Team",
+                        options=list(SALES_REGION_CODES),
+                        key=f"{key_prefix}_ctx_xfer_region",
+                        label_visibility="collapsed",
+                    )
+                    confirm = st.checkbox(
+                        "Yes, move to Sales Cases",
+                        key=f"{key_prefix}_ctx_xfer_confirm",
+                    )
+                    if st.button(
+                        "Move",
+                        key=f"{key_prefix}_ctx_xfer_btn",
+                        disabled=not confirm,
+                        use_container_width=True,
+                    ):
+                        op = _session_operator_id() or ""
+                        ok = 0
+                        for tid in picked_list:
+                            try:
+                                _cc_transfer_ticket_to_sales_case(
+                                    tid, operator_id=op, account_region=region
+                                )
+                                ok += 1
+                            except Exception as exc:
+                                st.error(f"**{tid}**: {exc}")
+                        if ok:
+                            _invalidate_dashboard_data_cache()
+                            st.session_state[
+                                _ticket_selection_session_key(key_prefix)
+                            ] = []
+                            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = (
+                                "Sales Cases"
+                            )
+                            _cc_set_flash(
+                                f"Moved **{ok}** ticket(s) to **Sales Cases**."
+                            )
+                            st.rerun()
+        for label, _status, _log in overflow_status:
+            if st.button(
+                label,
+                key=f"{key_prefix}_ctx_status_{label.replace(' ', '_')}",
+                use_container_width=True,
+            ):
+                _apply_ticket_status_batch(
+                    key_prefix=key_prefix,
+                    options=options,
+                    status_actions=status_actions,
+                    choice_label=label,
+                )
+        if allow_delete:
+            st.divider()
+            with st.container(key=f"{key_prefix}_ctx_remove"):
+                picked_list = picked
+                if not picked_list:
+                    st.caption("No tickets selected.")
+                else:
+                    st.caption("**" + "**, **".join(picked_list[:6]) + "**")
+                    confirm_del = st.checkbox(
+                        "Yes, remove permanently",
+                        key=f"{key_prefix}_ctx_del_confirm",
+                    )
+                    if st.button(
+                        "Remove",
+                        key=f"{key_prefix}_ctx_del_btn",
+                        use_container_width=True,
+                        disabled=not confirm_del,
+                    ):
+                        ok = 0
+                        for tid in picked_list:
+                            try:
+                                _delete_ticket(tid, delete_telegram=False)
+                                ok += 1
+                            except Exception as exc:
+                                _delete_ticket_error_ui(tid, exc)
+                        if ok:
+                            st.success(f"Removed **{ok}** ticket(s).")
+                            st.session_state[
+                                _ticket_selection_session_key(key_prefix)
+                            ] = []
+                            st.rerun()
+
+
+def _render_ticket_table_selection_hint(key_prefix: str, options: list[str]) -> None:
+    """Deprecated — use :func:`_render_ticket_queue_actions_row`."""
+    _render_ticket_queue_actions_row(
+        pd.DataFrame(),
+        key_prefix=key_prefix,
+        options_override=options,
+    )
+
+
+def _render_ticket_actions_popover(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str, str], ...],
+    allow_delete: bool = True,
+    allow_transfer_to_sales: bool = True,
+    allow_edit_assignment: bool = False,
+    allow_manual_field_response: bool = False,
+    allow_reassign: bool = False,
+    allow_mark_follow_up: bool = False,
+) -> None:
+    """Actions menu — only enabled when at least one ticket is selected."""
+    picked = _get_selected_queue_tickets(key_prefix, options)
+    with st.popover("Actions", width=_QUEUE_ACTIONS_POPOVER_WIDTH_PX):
+        with st.container(key=f"{key_prefix}_queue_actions_pop"):
+            if not picked:
+                st.caption(
+                    "Tick **Select** on at least one ticket in the table below. "
+                    "No action runs until you do."
+                )
+                return
+            shown = ", ".join(picked[:6])
+            extra = f" (+{len(picked) - 6} more)" if len(picked) > 6 else ""
+            st.caption(f"**{len(picked)}** selected · {shown}{extra}")
+            st.divider()
+            _render_ticket_actions_popover_body(
+                df,
+                key_prefix=key_prefix,
+                options=options,
+                status_actions=status_actions,
+                allow_delete=allow_delete,
+                allow_transfer_to_sales=allow_transfer_to_sales,
+                allow_edit_assignment=allow_edit_assignment,
+                allow_manual_field_response=allow_manual_field_response,
+                allow_reassign=allow_reassign,
+                allow_mark_follow_up=allow_mark_follow_up,
+            )
+
+
+def _render_ticket_actions_popover_body(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str, str], ...],
+    allow_delete: bool,
+    allow_transfer_to_sales: bool,
+    allow_edit_assignment: bool,
+    allow_manual_field_response: bool,
+    allow_reassign: bool,
+    allow_mark_follow_up: bool,
+) -> None:
+    """Action buttons inside the Actions popover (selection already verified)."""
+    if not _is_dashboard_admin():
+        status_actions = tuple(a for a in status_actions if a[2] != "OnHold")
+    resolved_action, overflow_status = _split_ticket_status_actions(status_actions)
+    mfr_keys = _manual_field_response_session_keys(key_prefix)
+    edit_keys = _assignment_edit_session_keys(key_prefix)
+    reassign_keys = _reassign_session_keys(key_prefix)
+    btn_kw = {"use_container_width": True}
+    has_workflow = allow_reassign or allow_edit_assignment
+
+    if allow_manual_field_response:
+        if st.button(
+            "Record response",
+            key=f"{key_prefix}_pop_mfr",
+            type="secondary",
+            **btn_kw,
+        ):
+            if st.session_state.get(mfr_keys["show"]):
+                st.session_state.pop(mfr_keys["show"], None)
+            else:
+                st.session_state[mfr_keys["show"]] = True
+            st.rerun()
+    if resolved_action:
+        if st.button(
+            resolved_action[0],
+            key=f"{key_prefix}_pop_resolved",
+            type="secondary",
+            **btn_kw,
+        ):
+            _apply_ticket_status_batch(
+                key_prefix=key_prefix,
+                options=options,
+                status_actions=status_actions,
+                choice_label=resolved_action[0],
+            )
+    elif len(status_actions) == 1:
+        only = status_actions[0]
+        if st.button(
+            only[0],
+            key=f"{key_prefix}_pop_only_status",
+            type="secondary",
+            **btn_kw,
+        ):
+            _apply_ticket_status_batch(
+                key_prefix=key_prefix,
+                options=options,
+                status_actions=status_actions,
+                choice_label=only[0],
+            )
+
+    has_primary = (
+        allow_manual_field_response
+        or bool(resolved_action)
+        or len(status_actions) == 1
+    )
+    has_below_primary = (
+        has_workflow
+        or allow_mark_follow_up
+        or (allow_transfer_to_sales and _session_operator_id())
+        or bool(overflow_status)
+        or allow_delete
+    )
+    if has_primary and has_below_primary:
+        st.divider()
+
+    if allow_reassign:
+        if st.button(
+            "Reassign",
+            key=f"{key_prefix}_pop_reassign",
+            type="secondary",
+            **btn_kw,
+        ):
+            if st.session_state.get(reassign_keys["show"]):
+                st.session_state.pop(reassign_keys["show"], None)
+            else:
+                _clear_reassign_panels_except(key_prefix)
+                st.session_state.pop(edit_keys["show"], None)
+                st.session_state[reassign_keys["show"]] = True
+            st.rerun()
+    if allow_edit_assignment:
+        if st.button(
+            "Edit assignment",
+            key=f"{key_prefix}_pop_edit",
+            type="secondary",
+            **btn_kw,
+        ):
+            if st.session_state.get(edit_keys["show"]):
+                st.session_state.pop(edit_keys["show"], None)
+            else:
+                st.session_state[edit_keys["show"]] = True
+            st.rerun()
+
+    if allow_mark_follow_up:
+        with st.expander("Follow-up", expanded=False):
+            _render_follow_up_form_inline(key_prefix=key_prefix, options=options)
+    if allow_transfer_to_sales and _session_operator_id():
+        with st.expander("Move to Sales", expanded=False):
+            picked_list = _get_selected_queue_tickets(key_prefix, options)
+            if picked_list:
+                region = st.selectbox(
+                    "Region",
+                    options=list(SALES_REGION_CODES),
+                    key=f"{key_prefix}_pop_xfer_region",
+                )
+                confirm = st.checkbox(
+                    "Confirm move to Sales",
+                    key=f"{key_prefix}_pop_xfer_confirm",
+                )
+                if st.button(
+                    "Move",
+                    key=f"{key_prefix}_pop_xfer_btn",
+                    type="secondary",
+                    disabled=not confirm,
+                    **btn_kw,
+                ):
+                    op = _session_operator_id() or ""
+                    ok = 0
+                    for tid in picked_list:
+                        try:
+                            _cc_transfer_ticket_to_sales_case(
+                                tid, operator_id=op, account_region=region
+                            )
+                            ok += 1
+                        except Exception as exc:
+                            st.error(f"**{tid}**: {exc}")
+                    if ok:
+                        _invalidate_dashboard_data_cache()
+                        st.session_state[_ticket_selection_session_key(key_prefix)] = []
+                        st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
+                        _cc_set_flash(f"Moved **{ok}** ticket(s) to **Sales Cases**.")
+                        st.rerun()
+
+    for label, _status, _log in overflow_status:
+            if st.button(
+                label,
+                key=f"{key_prefix}_pop_status_{label.replace(' ', '_')}",
+                type="secondary",
+                **btn_kw,
+            ):
+                _apply_ticket_status_batch(
+                    key_prefix=key_prefix,
+                    options=options,
+                    status_actions=status_actions,
+                    choice_label=label,
+                )
+
+    if allow_delete:
+        st.divider()
+        with st.container(key=f"{key_prefix}_ctx_remove"):
+            confirm_del = st.checkbox(
+                "Confirm permanent remove",
+                key=f"{key_prefix}_pop_del_confirm",
+            )
+            if st.button(
+                "Remove",
+                key=f"{key_prefix}_pop_del_btn",
+                type="secondary",
+                disabled=not confirm_del,
+                **btn_kw,
+            ):
+                picked_list = _get_selected_queue_tickets(key_prefix, options)
+                ok = 0
+                for tid in picked_list:
+                    try:
+                        _delete_ticket(tid, delete_telegram=False)
+                        ok += 1
+                    except Exception as exc:
+                        _delete_ticket_error_ui(tid, exc)
+                if ok:
+                    st.success(f"Removed **{ok}** ticket(s).")
+                    st.session_state[_ticket_selection_session_key(key_prefix)] = []
+                    st.rerun()
+
+
+def _render_ticket_queue_actions_row(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    options_override: list[str] | None = None,
+    **toolbar_kwargs: object,
+) -> None:
+    """Selection summary + Actions popover above the table."""
+    options = options_override or _ticket_options_for_admin(df)
+    if not options:
+        return
+    picked = _get_selected_queue_tickets(key_prefix, options)
+    sel_key = _ticket_selection_session_key(key_prefix)
+
+    with st.container(key=f"{key_prefix}_ctx_toolbar"):
+        left, right = st.columns([4.1, 1.05], vertical_alignment="center", gap="small")
+        with left:
+            if picked:
+                lc1, lc2 = st.columns([1.2, 1.3], vertical_alignment="center")
+                with lc1:
+                    word = "ticket" if len(picked) == 1 else "tickets"
+                    st.markdown(f"**{len(picked):,}** {word} selected")
+                with lc2:
+                    if st.button(
+                        "Clear selection",
+                        key=f"{key_prefix}_ctx_clear",
+                        type="secondary",
+                    ):
+                        st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+                        st.rerun()
+            else:
+                st.caption(
+                    "Tick **Select** on ticket(s) in the table below, then open **Actions**."
+                )
+        with right:
+            _render_ticket_actions_popover(df, key_prefix=key_prefix, options=options, **toolbar_kwargs)
+
+
 def _render_admin_ticket_toolbar(
     df: pd.DataFrame,
     *,
@@ -3416,172 +4001,22 @@ def _render_admin_ticket_toolbar(
     allow_manual_field_response: bool = False,
     allow_reassign: bool = False,
     allow_mark_follow_up: bool = False,
+    selected: list[str] | None = None,
 ) -> None:
-    """One compact row: Select all, Clear, status + admin actions (+ Remove)."""
-    options = _ticket_options_for_admin(df)
-    if not options:
-        return
-    _get_selected_queue_tickets(key_prefix, options)
-
+    """Legacy entry point — delegates to the queue actions row + Actions popover."""
     if caption:
         st.caption(caption)
-
-    if not _is_dashboard_admin():
-        status_actions = tuple(a for a in status_actions if a[2] != "OnHold")
-    status_labels = [a[0] for a in status_actions]
-    edit_keys = _assignment_edit_session_keys(key_prefix)
-    mfr_keys = _manual_field_response_session_keys(key_prefix)
-    reassign_keys = _reassign_session_keys(key_prefix)
-    sel_key = _ticket_selection_session_key(key_prefix)
-
-    slot_count = 2  # Select all, Clear
-    if status_labels:
-        slot_count += 1 if len(status_labels) > 1 else 1
-    if allow_manual_field_response:
-        slot_count += 1
-    if allow_reassign:
-        slot_count += 1
-    if allow_edit_assignment:
-        slot_count += 1
-    if allow_mark_follow_up:
-        slot_count += 1
-    if allow_transfer_to_sales and _session_operator_id():
-        slot_count += 1
-    if allow_delete:
-        slot_count += 1
-
-    with st.container(key=f"{key_prefix}_tq_toolbar"):
-        cols = st.columns(slot_count, gap="small", vertical_alignment="bottom")
-        idx = 0
-
-        with cols[idx]:
-            if st.button(
-                "Select all",
-                key=f"{key_prefix}_sel_all",
-                use_container_width=True,
-            ):
-                st.session_state[sel_key] = list(options)
-                st.rerun()
-        idx += 1
-
-        with cols[idx]:
-            if st.button(
-                "Clear",
-                key=f"{key_prefix}_sel_clear",
-                use_container_width=True,
-            ):
-                st.session_state[sel_key] = []
-                st.rerun()
-        idx += 1
-
-        if allow_manual_field_response:
-            with cols[idx]:
-                if st.button(
-                    "Record response",
-                    key=f"{key_prefix}_mfr_btn",
-                    use_container_width=True,
-                ):
-                    if st.session_state.get(mfr_keys["show"]):
-                        st.session_state.pop(mfr_keys["show"], None)
-                    else:
-                        st.session_state[mfr_keys["show"]] = True
-                    st.rerun()
-            idx += 1
-
-        if allow_reassign:
-            with cols[idx]:
-                if st.button(
-                    "Reassign",
-                    key=f"{key_prefix}_reassign_btn",
-                    use_container_width=True,
-                ):
-                    if st.session_state.get(reassign_keys["show"]):
-                        st.session_state.pop(reassign_keys["show"], None)
-                        st.rerun()
-                    _clear_reassign_panels_except(key_prefix)
-                    st.session_state[reassign_keys["show"]] = True
-                    st.rerun()
-            idx += 1
-
-        if allow_edit_assignment:
-            with cols[idx]:
-                if st.button(
-                    "Edit assignment",
-                    key=f"{key_prefix}_edit_btn",
-                    use_container_width=True,
-                ):
-                    if st.session_state.get(edit_keys["show"]):
-                        st.session_state.pop(edit_keys["show"], None)
-                        st.rerun()
-                    st.session_state[edit_keys["show"]] = True
-                    st.rerun()
-            idx += 1
-
-        if status_labels:
-            if len(status_labels) == 1:
-                label = status_labels[0]
-                with cols[idx]:
-                    if st.button(
-                        label,
-                        key=f"{key_prefix}_apply",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        picked_list = _require_selected_tickets(
-                            key_prefix=key_prefix, options=options
-                        )
-                        if picked_list:
-                            ok = 0
-                            for picked in picked_list:
-                                if _apply_admin_ticket_action(
-                                    picked=picked,
-                                    choice=label,
-                                    confirm_del=False,
-                                    status_actions=status_actions,
-                                    do_rerun=False,
-                                ):
-                                    ok += 1
-                            if ok:
-                                st.success(
-                                    f"**{ok}** ticket(s) updated → **{label}**."
-                                )
-                                st.session_state[sel_key] = []
-                                st.rerun()
-                idx += 1
-            else:
-                with cols[idx]:
-                    _render_ticket_status_action_popover(
-                        key_prefix=key_prefix,
-                        options=options,
-                        status_actions=status_actions,
-                        status_labels=status_labels,
-                    )
-                idx += 1
-
-        if allow_mark_follow_up:
-            with cols[idx]:
-                _render_mark_follow_up_popover(
-                    key_prefix=key_prefix,
-                    options=options,
-                )
-            idx += 1
-
-        if allow_transfer_to_sales and _session_operator_id():
-            with cols[idx]:
-                _render_ticket_transfer_to_sales_popover(
-                    key_prefix=key_prefix,
-                    options=options,
-                )
-            idx += 1
-
-        if allow_delete:
-            with cols[idx]:
-                _render_ticket_delete_popover(
-                    key_prefix=key_prefix,
-                    options=options,
-                    status_actions=status_actions,
-                    compact=True,
-                )
+    _render_ticket_queue_actions_row(
+        df,
+        key_prefix=key_prefix,
+        status_actions=status_actions,
+        allow_delete=allow_delete,
+        allow_transfer_to_sales=allow_transfer_to_sales,
+        allow_edit_assignment=allow_edit_assignment,
+        allow_manual_field_response=allow_manual_field_response,
+        allow_reassign=allow_reassign,
+        allow_mark_follow_up=allow_mark_follow_up,
+    )
 
 
 def _render_ticket_toolbar_then_table(
@@ -3592,17 +4027,25 @@ def _render_ticket_toolbar_then_table(
     highlight_follow_up: bool = False,
     **toolbar_kwargs: object,
 ) -> None:
-    """Toolbar above table; selection is synced from the editor widget before actions run."""
+    """Actions row above table; selection is synced from the editor widget before actions run."""
+    caption = toolbar_kwargs.pop("caption", None)
+    if caption:
+        st.caption(caption)
+
+    _maybe_apply_pending_ticket_selection_clear(key_prefix)
     options = _ticket_options_for_admin(df)
-    if options:
-        _get_selected_queue_tickets(key_prefix, options)
-    _render_admin_ticket_toolbar(df, key_prefix=key_prefix, **toolbar_kwargs)
-    _render_selectable_ticket_table(
-        df,
-        key_prefix=key_prefix,
-        cols=cols,
-        highlight_follow_up=highlight_follow_up,
-    )
+    with st.container(key=f"{key_prefix}_queue_block"):
+        _render_selectable_ticket_table(
+            df,
+            key_prefix=key_prefix,
+            cols=cols,
+            highlight_follow_up=highlight_follow_up,
+            show_selection_caption=True,
+        )
+        if options:
+            _render_ticket_queue_actions_row(
+                df, key_prefix=key_prefix, **toolbar_kwargs
+            )
 
 
 def _fetch_attendance(
@@ -7168,7 +7611,102 @@ _BON_THEME_CSS = """
         padding: 0.35rem 0.85rem 0.85rem !important;
         border-top: 1px solid rgba(215, 180, 145, 0.22);
     }
-    /* Ticket / sales queue: one compact toolbar row (Select all … Apply) */
+    /* Contextual queue toolbar (selection + primary actions) */
+    div[class*="st-key-"][class*="_ctx_toolbar"] {
+        margin: 0 0 0.5rem 0 !important;
+        padding: 0.5rem 0.65rem !important;
+        border: 1px solid rgba(215, 180, 145, 0.28) !important;
+        border-radius: 8px !important;
+        background: linear-gradient(
+            180deg,
+            rgba(215, 180, 145, 0.08) 0%,
+            rgba(0, 0, 0, 0.15) 100%
+        ) !important;
+    }
+    div[class*="st-key-"][class*="_ctx_toolbar"] .stMarkdown p {
+        margin: 0 !important;
+        font-size: 0.88rem !important;
+    }
+    div[class*="st-key-"][class*="_ctx_toolbar"] .stButton > button {
+        font-size: 0.78rem !important;
+        min-height: 2rem !important;
+        padding: 0.25rem 0.65rem !important;
+    }
+    /* Queue Actions popover — clean readable menu */
+    [data-testid="stPopoverBody"] {
+        min-width: 13.25rem !important;
+        max-width: 14.75rem !important;
+        padding: 0.45rem 0.5rem !important;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] [data-testid="stVerticalBlock"],
+    [data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {
+        gap: 0.28rem !important;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] .stButton > button,
+    [data-testid="stPopoverBody"] .stButton > button {
+        font-size: 0.8125rem !important;
+        min-height: 2rem !important;
+        padding: 0.28rem 0.55rem !important;
+        line-height: 1.25 !important;
+        white-space: nowrap !important;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] [data-testid="stExpander"],
+    [data-testid="stPopoverBody"] [data-testid="stExpander"] {
+        margin: 0 !important;
+        border: 1px solid rgba(215, 180, 145, 0.22) !important;
+        border-radius: 6px !important;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] [data-testid="stExpander"] summary,
+    [data-testid="stPopoverBody"] [data-testid="stExpander"] summary {
+        min-height: 2rem !important;
+        padding: 0.28rem 0.55rem !important;
+        font-size: 0.8125rem !important;
+        font-weight: 500 !important;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] [data-testid="stExpander"] details[open] > div,
+    [data-testid="stPopoverBody"] [data-testid="stExpander"] details[open] > div {
+        padding: 0.35rem 0.5rem 0.45rem !important;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] [data-testid="stCaptionContainer"],
+    div[class*="st-key-"][class*="_queue_actions_pop"] .stMarkdown p,
+    [data-testid="stPopoverBody"] [data-testid="stCaptionContainer"],
+    [data-testid="stPopoverBody"] .stMarkdown p {
+        font-size: 0.75rem !important;
+        line-height: 1.3 !important;
+        margin: 0 0 0.15rem 0 !important;
+        opacity: 0.92;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] hr,
+    [data-testid="stPopoverBody"] hr {
+        margin: 0.35rem 0 !important;
+        opacity: 0.35;
+    }
+    div[class*="st-key-"][class*="_queue_actions_pop"] [data-testid="stCheckbox"] label,
+    [data-testid="stPopoverBody"] [data-testid="stCheckbox"] label {
+        font-size: 0.75rem !important;
+    }
+    div[class*="st-key-"][class*="_ctx_toolbar"] [data-testid="stPopover"] > button,
+    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stPopover"] > button {
+        min-height: 1.85rem !important;
+        font-size: 0.8125rem !important;
+        line-height: 1.2 !important;
+        padding: 0.22rem 0.55rem !important;
+    }
+    /* Queue block: render table before toolbar in code; show toolbar on top */
+    div[class*="st-key-"][class*="_queue_block"] {
+        display: flex !important;
+        flex-direction: column-reverse !important;
+        gap: 0.65rem !important;
+    }
+    div[class*="st-key-"][class*="_ctx_remove"] .stButton > button {
+        color: #e57373 !important;
+        border-color: rgba(229, 115, 115, 0.45) !important;
+    }
+    div[class*="st-key-"][class*="_ctx_remove"] .stButton > button:hover {
+        color: #ff8a80 !important;
+        background: rgba(229, 115, 115, 0.12) !important;
+    }
+    /* Legacy ticket toolbar (unused) */
     div[class*="st-key-"][class*="_tq_toolbar"] .stButton > button,
     div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stPopover"] > button,
     div[class*="st-key-"][class*="_sc_toolbar"] .stButton > button {
@@ -8293,11 +8831,13 @@ def _render_selectable_sales_case_table(
         ),
         **_dataframe_column_config(view),
     }
+    editor_key = _sc_case_select_editor_key(key_prefix)
+    st.session_state[_data_editor_snapshot_key(editor_key)] = table.copy()
     edited = st.data_editor(
         table,
         hide_index=True,
         use_container_width=True,
-        key=_sc_case_select_editor_key(key_prefix),
+        key=editor_key,
         column_config=col_cfg,
         disabled=disabled_cols,
     )
@@ -8640,6 +9180,250 @@ def _render_sales_case_transfer_to_csm_popover(
                 st.rerun()
 
 
+def _render_sales_case_actions_popover(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str], ...],
+    op: str,
+    allow_delete: bool,
+    allow_transfer_to_csm: bool,
+    allow_reassign: bool,
+    allow_edit_assignment: bool,
+) -> None:
+    """Actions menu — only enabled when at least one sales case is selected."""
+    picked = _get_selected_queue_sales_cases(key_prefix, options)
+    with st.popover("Actions", width=_QUEUE_ACTIONS_POPOVER_WIDTH_PX):
+        with st.container(key=f"{key_prefix}_queue_actions_pop"):
+            if not picked:
+                st.caption(
+                    "Tick **Select** on at least one case in the table below. "
+                    "No action runs until you do."
+                )
+                return
+            shown = ", ".join(picked[:6])
+            extra = f" (+{len(picked) - 6} more)" if len(picked) > 6 else ""
+            st.caption(f"**{len(picked)}** selected · {shown}{extra}")
+            st.divider()
+            _render_sales_case_actions_popover_body(
+                df,
+                key_prefix=key_prefix,
+                options=options,
+                status_actions=status_actions,
+                op=op,
+                allow_delete=allow_delete,
+                allow_transfer_to_csm=allow_transfer_to_csm,
+                allow_reassign=allow_reassign,
+                allow_edit_assignment=allow_edit_assignment,
+            )
+
+
+def _render_sales_case_actions_popover_body(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    options: list[str],
+    status_actions: tuple[tuple[str, str], ...],
+    op: str,
+    allow_delete: bool,
+    allow_transfer_to_csm: bool,
+    allow_reassign: bool,
+    allow_edit_assignment: bool,
+) -> None:
+    """Action buttons inside the Actions popover (selection already verified)."""
+    panel_keys = _sc_toolbar_panel_keys(key_prefix)
+    edit_keys = _assignment_edit_session_keys(key_prefix)
+    reassign_keys = _reassign_session_keys(key_prefix)
+    btn_kw = {"use_container_width": True}
+
+    if op and status_actions:
+        for lbl, tgt in status_actions:
+            label = _sc_toolbar_action_label(lbl, tgt)
+            if st.button(
+                label,
+                key=f"{key_prefix}_pop_sc_{tgt}",
+                type="secondary",
+                **btn_kw,
+            ):
+                _sc_apply_status_to_selected_cases(
+                    df,
+                    key_prefix=key_prefix,
+                    case_options=options,
+                    target_status=tgt,
+                    op=op,
+                )
+
+    has_primary = bool(op and status_actions)
+    has_below = (
+        allow_edit_assignment
+        or (allow_reassign and op)
+        or (allow_transfer_to_csm and op)
+        or allow_delete
+    )
+    if has_primary and has_below:
+        st.divider()
+
+    if allow_edit_assignment:
+        if st.button(
+            "Edit assignment",
+            key=f"{key_prefix}_pop_sc_edit",
+            type="secondary",
+            **btn_kw,
+        ):
+            if st.session_state.get(edit_keys["show"]):
+                st.session_state.pop(edit_keys["show"], None)
+                st.session_state.pop(reassign_keys["show"], None)
+                st.session_state.pop(panel_keys["details"], None)
+                st.rerun()
+            elif _require_selected_sales_cases(
+                key_prefix=key_prefix, options=options, exactly_one=True
+            ):
+                _clear_sc_assignment_edit_panels_except(key_prefix)
+                st.session_state.pop(reassign_keys["show"], None)
+                st.session_state.pop(panel_keys["details"], None)
+                st.session_state[edit_keys["show"]] = True
+                st.rerun()
+
+    if allow_reassign and op:
+        if st.button(
+            "Reassign",
+            key=f"{key_prefix}_pop_sc_reassign",
+            type="secondary",
+            **btn_kw,
+        ):
+            if st.session_state.get(reassign_keys["show"]):
+                st.session_state.pop(reassign_keys["show"], None)
+                st.session_state.pop(edit_keys["show"], None)
+                st.session_state.pop(panel_keys["details"], None)
+                st.rerun()
+            elif _require_selected_sales_cases(
+                key_prefix=key_prefix, options=options, exactly_one=True
+            ):
+                _clear_reassign_panels_except(key_prefix)
+                st.session_state.pop(edit_keys["show"], None)
+                st.session_state.pop(panel_keys["details"], None)
+                st.session_state[reassign_keys["show"]] = True
+                st.rerun()
+
+    if allow_transfer_to_csm and op:
+        with st.expander("Move to CSM", expanded=False):
+            confirm = st.checkbox(
+                "Confirm move to CSM",
+                key=f"{key_prefix}_pop_xfer_csm_confirm",
+            )
+            if st.button(
+                "Move",
+                key=f"{key_prefix}_pop_xfer_csm_btn",
+                type="secondary",
+                disabled=not confirm,
+                **btn_kw,
+            ):
+                picked_list = _get_selected_queue_sales_cases(key_prefix, options)
+                ok = 0
+                for cref in picked_list:
+                    row = _fetch_sales_case_row_by_ref(cref)
+                    if not row:
+                        st.warning(f"**{cref}** not found.")
+                        continue
+                    row_id = str(row.get("id") or "").strip()
+                    if not row_id:
+                        continue
+                    try:
+                        _cc_transfer_sales_case_to_ticket(
+                            row_id, operator_id=op
+                        )
+                        ok += 1
+                    except Exception as exc:
+                        st.error(f"**{cref}**: {exc}")
+                if ok:
+                    _invalidate_dashboard_data_cache()
+                    st.session_state[_sc_case_selection_session_key(key_prefix)] = []
+                    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+                    st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_DAILY_TASK
+                    _sc_set_sales_flash(
+                        f"Moved **{ok}** case(s) to CSM (**Daily Task** / **Resolved**)."
+                    )
+                    st.rerun()
+
+    if allow_delete:
+        st.divider()
+        with st.container(key=f"{key_prefix}_ctx_remove"):
+            confirm_del = st.checkbox(
+                "Confirm permanent remove",
+                key=f"{key_prefix}_pop_sc_del_confirm",
+            )
+            if st.button(
+                "Remove",
+                key=f"{key_prefix}_pop_sc_del_btn",
+                type="secondary",
+                disabled=not confirm_del,
+                **btn_kw,
+            ):
+                picked_list = _get_selected_queue_sales_cases(key_prefix, options)
+                ok = 0
+                for cref in picked_list:
+                    row = _fetch_sales_case_row_by_ref(cref)
+                    if not row:
+                        st.warning(f"**{cref}** not found.")
+                        continue
+                    row_id = str(row.get("id") or "").strip()
+                    if not row_id:
+                        continue
+                    try:
+                        _sales_cases_delete_row(row_id)
+                        ok += 1
+                    except Exception as exc:
+                        st.error(f"**{cref}**: {exc}")
+                if ok:
+                    _invalidate_dashboard_data_cache()
+                    st.session_state[_sc_case_selection_session_key(key_prefix)] = []
+                    _sc_set_sales_flash(f"Removed **{ok}** sales case(s).")
+                    st.rerun()
+
+
+def _render_sales_case_queue_actions_row(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    caption: str | None = None,
+    **toolbar_kwargs: object,
+) -> None:
+    """Selection summary + Actions popover above the sales case table."""
+    options = _sc_case_options_for_admin(df)
+    if not options:
+        return
+    if caption:
+        st.caption(caption)
+    picked = _get_selected_queue_sales_cases(key_prefix, options)
+    sel_key = _sc_case_selection_session_key(key_prefix)
+
+    with st.container(key=f"{key_prefix}_sc_toolbar"):
+        left, right = st.columns([4.1, 1.05], vertical_alignment="center", gap="small")
+        with left:
+            if picked:
+                lc1, lc2 = st.columns([1.2, 1.3], vertical_alignment="center")
+                with lc1:
+                    word = "case" if len(picked) == 1 else "cases"
+                    st.markdown(f"**{len(picked):,}** {word} selected")
+                with lc2:
+                    if st.button(
+                        "Clear selection",
+                        key=f"{key_prefix}_sc_ctx_clear",
+                        type="secondary",
+                    ):
+                        st.session_state[_sc_clear_select_flag_key(key_prefix)] = True
+                        st.rerun()
+            else:
+                st.caption(
+                    "Tick **Select** on case(s) in the table below, then open **Actions**."
+                )
+        with right:
+            _render_sales_case_actions_popover(
+                df, key_prefix=key_prefix, options=options, **toolbar_kwargs
+            )
+
+
 def _render_sales_case_toolbar(
     df: pd.DataFrame,
     *,
@@ -8652,162 +9436,18 @@ def _render_sales_case_toolbar(
     allow_reassign: bool = False,
     allow_edit_assignment: bool = False,
 ) -> None:
-    """Select all / Clear / status + admin actions for sales case queues."""
-    options = _sc_case_options_for_admin(df)
-    if not options:
-        return
-    _get_selected_queue_sales_cases(key_prefix, options)
-    if caption:
-        st.caption(caption)
-    sel_key = _sc_case_selection_session_key(key_prefix)
-    panel_keys = _sc_toolbar_panel_keys(key_prefix)
-    status_labels = (
-        [_sc_toolbar_action_label(lbl, tgt) for lbl, tgt in status_actions] if op else []
+    """Legacy entry point — delegates to queue actions row + Actions popover."""
+    _render_sales_case_queue_actions_row(
+        df,
+        key_prefix=key_prefix,
+        caption=caption,
+        status_actions=status_actions,
+        op=op,
+        allow_delete=allow_delete,
+        allow_transfer_to_csm=allow_transfer_to_csm,
+        allow_reassign=allow_reassign,
+        allow_edit_assignment=allow_edit_assignment,
     )
-    label_to_target = _sc_toolbar_label_to_target(status_actions) if op else {}
-
-    slot_count = 2
-    if status_labels:
-        slot_count += 1 if len(status_labels) > 1 else 1
-    if allow_edit_assignment:
-        slot_count += 1
-    if allow_reassign and op:
-        slot_count += 1
-    if allow_transfer_to_csm and op:
-        slot_count += 1
-    if allow_delete:
-        slot_count += 1
-
-    with st.container(key=f"{key_prefix}_sc_toolbar"):
-        cols = st.columns(slot_count, gap="small", vertical_alignment="bottom")
-        idx = 0
-
-        with cols[idx]:
-            if st.button(
-                "Select all",
-                key=f"{key_prefix}_sel_all",
-                use_container_width=True,
-            ):
-                st.session_state[sel_key] = list(options)
-                st.rerun()
-        idx += 1
-
-        with cols[idx]:
-            if st.button(
-                "Clear",
-                key=f"{key_prefix}_sel_clear",
-                use_container_width=True,
-            ):
-                st.session_state[sel_key] = []
-                _sc_clear_work_panel_tabs(key_prefix)
-                st.rerun()
-        idx += 1
-
-        if allow_edit_assignment:
-            edit_keys = _assignment_edit_session_keys(key_prefix)
-            with cols[idx]:
-                if st.button(
-                    "Edit assignment",
-                    key=f"{key_prefix}_sc_edit_btn",
-                    use_container_width=True,
-                ):
-                    if st.session_state.get(edit_keys["show"]):
-                        st.session_state.pop(edit_keys["show"], None)
-                        st.session_state.pop(
-                            _reassign_session_keys(key_prefix)["show"], None
-                        )
-                        st.session_state.pop(panel_keys["details"], None)
-                        st.rerun()
-                    if not _require_selected_sales_cases(
-                        key_prefix=key_prefix,
-                        options=options,
-                        exactly_one=True,
-                    ):
-                        pass
-                    else:
-                        _clear_sc_assignment_edit_panels_except(key_prefix)
-                        st.session_state.pop(
-                            _reassign_session_keys(key_prefix)["show"], None
-                        )
-                        st.session_state.pop(panel_keys["details"], None)
-                        st.session_state[edit_keys["show"]] = True
-                        st.rerun()
-            idx += 1
-
-        if allow_reassign and op:
-            reassign_keys = _reassign_session_keys(key_prefix)
-            with cols[idx]:
-                if st.button(
-                    "Reassign",
-                    key=f"{key_prefix}_sc_reassign_btn",
-                    use_container_width=True,
-                ):
-                    if st.session_state.get(reassign_keys["show"]):
-                        st.session_state.pop(reassign_keys["show"], None)
-                        st.session_state.pop(
-                            _assignment_edit_session_keys(key_prefix)["show"], None
-                        )
-                        st.session_state.pop(panel_keys["details"], None)
-                        st.rerun()
-                    if _require_selected_sales_cases(
-                        key_prefix=key_prefix,
-                        options=options,
-                        exactly_one=True,
-                    ):
-                        _clear_reassign_panels_except(key_prefix)
-                        st.session_state.pop(
-                            _assignment_edit_session_keys(key_prefix)["show"], None
-                        )
-                        st.session_state.pop(panel_keys["details"], None)
-                        st.session_state[reassign_keys["show"]] = True
-                        st.rerun()
-            idx += 1
-
-        if status_labels:
-            if len(status_labels) == 1:
-                only_label = status_labels[0]
-                only_target = label_to_target[only_label]
-                with cols[idx]:
-                    if st.button(
-                        only_label,
-                        key=f"{key_prefix}_sc_apply",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        _sc_apply_status_to_selected_cases(
-                            df,
-                            key_prefix=key_prefix,
-                            case_options=options,
-                            target_status=only_target,
-                            op=op,
-                        )
-                idx += 1
-            else:
-                with cols[idx]:
-                    _render_sales_case_action_popover(
-                        df,
-                        key_prefix=key_prefix,
-                        case_options=options,
-                        status_actions=status_actions,
-                        op=op,
-                    )
-                idx += 1
-
-        if allow_transfer_to_csm and op:
-            with cols[idx]:
-                _render_sales_case_transfer_to_csm_popover(
-                    key_prefix=key_prefix,
-                    options=options,
-                    op=op,
-                )
-            idx += 1
-
-        if allow_delete:
-            with cols[idx]:
-                _render_sales_case_delete_popover(
-                    key_prefix=key_prefix,
-                    options=options,
-                )
 
 
 def _render_clickable_sales_queue_metric(
@@ -9147,19 +9787,21 @@ def _render_sales_queue_segment(
         st.caption(caption)
     options = _sc_case_options_for_admin(sub)
     status_actions = _sc_status_actions_for_queue(queue_status)
-    if options:
-        _get_selected_queue_sales_cases(key_prefix, options)
-    _render_sales_case_toolbar(
-        sub,
-        key_prefix=key_prefix,
-        caption=toolbar_caption,
-        status_actions=status_actions if op else (),
-        op=op,
-        allow_delete=allow_delete,
-        allow_edit_assignment=allow_edit_assignment,
-        allow_reassign=allow_reassign,
-    )
-    _render_selectable_sales_case_table(sub, key_prefix=key_prefix, cols=table_cols)
+    _maybe_apply_pending_sales_case_selection_clear(key_prefix)
+    with st.container(key=f"{key_prefix}_queue_block"):
+        _render_selectable_sales_case_table(sub, key_prefix=key_prefix, cols=table_cols)
+        if options:
+            _get_selected_queue_sales_cases(key_prefix, options)
+            _render_sales_case_toolbar(
+                sub,
+                key_prefix=key_prefix,
+                caption=toolbar_caption,
+                status_actions=status_actions if op else (),
+                op=op,
+                allow_delete=allow_delete,
+                allow_edit_assignment=allow_edit_assignment,
+                allow_reassign=allow_reassign,
+            )
 
     reassign_open = bool(
         op
