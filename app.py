@@ -1408,6 +1408,14 @@ def _render_login_page_styles() -> None:
             background: linear-gradient(90deg, #F15A29, #F7931E) !important;
             border: 1px solid rgba(255,255,255,0.1) !important;
         }
+        /* Login row: Forgot Password on one line */
+        div.st-key-login_shell [data-testid="stForm"] [data-testid="column"]:last-child button {
+            font-size: 0.72rem !important;
+            white-space: nowrap !important;
+            padding: 0.28rem 0.45rem !important;
+            min-height: 1.75rem !important;
+            line-height: 1.15 !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1476,6 +1484,7 @@ def _read_dashboard_password() -> str:
 
 def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
     _login_remember_bootstrap()
+    forgot_clicked = False
 
     with st.container(border=True, key="login_shell"):
         with st.form("login_form", clear_on_submit=False):
@@ -1492,6 +1501,18 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     autocomplete="current-password",
                     key=_LOGIN_PWD_WIDGET_KEY,
                 )
+                save_col, forgot_col = st.columns([1.35, 1.05], vertical_alignment="bottom")
+                with save_col:
+                    st.checkbox(
+                        "Save Password",
+                        key=_LOGIN_SAVE_PW_KEY,
+                        help="Stores an encrypted login token in this browser only.",
+                    )
+                with forgot_col:
+                    forgot_clicked = st.form_submit_button(
+                        "Forgot Password",
+                        use_container_width=True,
+                    )
             else:
                 st.caption(
                     "**Local / legacy login** — not your Telegram username. "
@@ -1510,12 +1531,13 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     placeholder="Your name, e.g. ibeyx",
                     key=_LOGIN_OID_WIDGET_KEY,
                 )
-            st.checkbox(
-                "Save Password on This Device",
-                key=_LOGIN_SAVE_PW_KEY,
-                help="Stores an encrypted login token in this browser only.",
-            )
+                forgot_clicked = False
             submitted = st.form_submit_button("Sign In", use_container_width=True)
+
+    if per_user and forgot_clicked:
+        st.session_state[_LOGIN_VIEW_KEY] = "forgot_request"
+        st.rerun()
+        return
 
     if not submitted:
         return
@@ -1566,7 +1588,15 @@ def _render_login_forgot_request() -> None:
         st.caption("Enter your username. If the account exists, you will get a reset code.")
         with st.form("login_forgot_request_form", clear_on_submit=False):
             user = st.text_input("Username", placeholder="your login name")
+            nav_col, _ = st.columns([1, 2])
+            with nav_col:
+                back_clicked = st.form_submit_button("Back to sign in", use_container_width=True)
             submitted = st.form_submit_button("Get reset code", use_container_width=True)
+
+    if back_clicked:
+        st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
+        st.rerun()
+        return
 
     if not submitted:
         return
@@ -1608,7 +1638,17 @@ def _render_login_forgot_reset() -> None:
             code = st.text_input("Reset Code", placeholder="8-character code")
             new_pw = st.text_input("New Password", type="password")
             confirm_pw = st.text_input("Confirm New Password", type="password")
+            nav_col, _ = st.columns([1, 2])
+            with nav_col:
+                back_clicked = st.form_submit_button("Back to sign in", use_container_width=True)
             submitted = st.form_submit_button("Set new password", use_container_width=True)
+
+    if back_clicked:
+        st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
+        st.session_state.pop("_dash_reset_username", None)
+        st.session_state.pop("_dash_reset_code_display", None)
+        st.rerun()
+        return
 
     if not submitted:
         return
@@ -1720,8 +1760,7 @@ def _check_password() -> None:
             '<span class="bon-login-word-netops">NetOps</span></span>'
             '<span class="bon-login-line">'
             '<span class="bon-login-word-coverage">Coverage</span> '
-            '<span class="bon-login-word-eye">Eye</span></span></h2>'
-            '<p class="bon-login-sub">Sign in to continue.</p>',
+            '<span class="bon-login-word-eye">Eye</span></span></h2>',
             unsafe_allow_html=True,
         )
 
@@ -1732,25 +1771,6 @@ def _check_password() -> None:
             )
 
         _render_login_supabase_status()
-
-        if per_user:
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button(
-                    "Sign in",
-                    use_container_width=True,
-                    type="primary" if view == "sign_in" else "secondary",
-                ):
-                    st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
-                    st.rerun()
-            with c2:
-                if st.button(
-                    "Forgot Password",
-                    use_container_width=True,
-                    type="primary" if view != "sign_in" else "secondary",
-                ):
-                    st.session_state[_LOGIN_VIEW_KEY] = "forgot_request"
-                    st.rerun()
 
         if view == "sign_in":
             _render_login_sign_in(per_user=per_user, legacy_password=legacy_pw)
