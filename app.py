@@ -1408,14 +1408,18 @@ def _render_login_page_styles() -> None:
             background: linear-gradient(90deg, #F15A29, #F7931E) !important;
             border: 1px solid rgba(255,255,255,0.1) !important;
         }
-        /* Login row: Forgot Password beside Save Password (outside form) */
-        div.st-key-login_forgot_slot {
-            margin-top: -4.35rem;
-            margin-bottom: 0.9rem;
-            position: relative;
-            z-index: 2;
+        /* Login: hidden default submit (Enter) + Forgot beside Save Password */
+        div.st-key-login_enter_submit {
+            height: 0 !important;
+            max-height: 0 !important;
+            overflow: hidden !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            border: none !important;
         }
-        div.st-key-login_forgot_slot button {
+        div.st-key-login_shell [data-testid="stForm"] [data-testid="column"]:last-child button {
             font-size: 0.72rem !important;
             white-space: nowrap !important;
             padding: 0.28rem 0.45rem !important;
@@ -1491,6 +1495,7 @@ def _read_dashboard_password() -> str:
 def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
     _login_remember_bootstrap()
     forgot_clicked = False
+    submitted = False
 
     with st.container(border=True, key="login_shell"):
         with st.form("login_form", clear_on_submit=False):
@@ -1507,13 +1512,33 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     autocomplete="current-password",
                     key=_LOGIN_PWD_WIDGET_KEY,
                 )
-                save_col, _forgot_pad = st.columns([1.35, 1.05], vertical_alignment="bottom")
+                with st.container(key="login_enter_submit"):
+                    submitted_enter = st.form_submit_button(
+                        "Sign In",
+                        use_container_width=True,
+                        key="login_form_submit_enter",
+                    )
+                save_col, forgot_col = st.columns(
+                    [1.35, 1.05], vertical_alignment="center"
+                )
                 with save_col:
                     st.checkbox(
                         "Save Password",
                         key=_LOGIN_SAVE_PW_KEY,
                         help="Stores an encrypted login token in this browser only.",
                     )
+                with forgot_col:
+                    forgot_clicked = st.form_submit_button(
+                        "Forgot Password",
+                        use_container_width=True,
+                        key="login_form_submit_forgot",
+                    )
+                submitted_main = st.form_submit_button(
+                    "Sign In",
+                    use_container_width=True,
+                    key="login_form_submit_main",
+                )
+                submitted = submitted_enter or submitted_main
             else:
                 st.caption(
                     "**Local / legacy login** — not your Telegram username. "
@@ -1533,21 +1558,13 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
                     key=_LOGIN_OID_WIDGET_KEY,
                 )
                 forgot_clicked = False
-            submitted = st.form_submit_button("Sign In", use_container_width=True)
+                submitted = st.form_submit_button(
+                    "Sign In",
+                    use_container_width=True,
+                    key="login_form_submit_legacy",
+                )
 
-        if per_user:
-            _pad, forgot_wrap = st.columns([1.35, 1.05])
-            with forgot_wrap:
-                with st.container(key="login_forgot_slot"):
-                    if st.button(
-                        "Forgot Password",
-                        key="login_forgot_btn",
-                        use_container_width=True,
-                        type="secondary",
-                    ):
-                        forgot_clicked = True
-
-    if per_user and forgot_clicked:
+    if per_user and forgot_clicked and not submitted:
         st.session_state[_LOGIN_VIEW_KEY] = "forgot_request"
         st.rerun()
         return
