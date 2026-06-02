@@ -151,6 +151,7 @@ _FIELD_REPLY_STATUSES = frozenset({STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD})
 ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
+TICKET_VISITS_TABLE = (os.getenv("TICKET_VISITS_TABLE") or "ticket_visits").strip()
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
 TASK_CATEGORIES_TABLE = task_categories_table().strip()
 FIELD_RESPONSE_UNDO_MINUTES = max(
@@ -1437,6 +1438,28 @@ def _db_insert_attendance_log(
         )
 
 
+def _bot_visits_close_responded(
+    ticket_number: str,
+    *,
+    response_note: str | None,
+    photo_url: str | None,
+    visit_end: str,
+) -> None:
+    """Best-effort: close the open visit row as 'responded' from the bot."""
+    try:
+        supabase.table(TICKET_VISITS_TABLE).update(
+            {
+                "visit_end": visit_end,
+                "outcome": "responded",
+                "response_note": response_note,
+                "photo_url": photo_url,
+                "closed_by": "bot",
+            }
+        ).eq("ticket_number", str(ticket_number).strip()).is_("visit_end", "null").execute()
+    except Exception:
+        log.exception("visit close failed for ticket %s", ticket_number)
+
+
 def _db_complete_ticket_field_response(
     ticket_number: str,
     *,
@@ -1498,6 +1521,13 @@ def _db_complete_ticket_field_response(
             telegram_chat_id=telegram_chat_id,
             telegram_message_id=telegram_message_id,
         )
+    # Phase 2: close the open visit as 'responded'
+    _bot_visits_close_responded(
+        ticket_number,
+        response_note=field_response,
+        photo_url=photo_url if update_photo_url else None,
+        visit_end=responded_at,
+    )
 
 
 def _assignment_telegram_refs(update: Update) -> tuple[int | None, int | None]:

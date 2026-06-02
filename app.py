@@ -537,6 +537,10 @@ ATTENDANCE_LOGS_TABLE = (
     _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
     or "ticket_attendance_logs"
 )
+TICKET_VISITS_TABLE = (
+    _read_setting("TICKET_VISITS_TABLE", "ticket_visits")
+    or "ticket_visits"
+)
 FIELD_ENGINEERS_TABLE = (
     _read_setting("FIELD_ENGINEERS_TABLE", "dashboard_field_engineers")
     or "dashboard_field_engineers"
@@ -2061,6 +2065,15 @@ def _apply_manual_field_response(
         action_type="Response",
         note=log_note,
     )
+    # Phase 2: close the open visit as 'responded'
+    _visits_close_open(
+        client,
+        ticket_number,
+        outcome="responded",
+        response_note=text,
+        closed_by="dashboard",
+        visit_end=now_iso,
+    )
 
 
 def _parse_ts_value(value: object) -> datetime | None:
@@ -2155,6 +2168,14 @@ def _move_to_on_hold(ticket_number: str, *, operator_id: str) -> None:
         ).execute()
     except Exception:
         pass
+    # Phase 2: close visit for the current assignee with outcome 'on_hold'
+    _visits_close_open(
+        client,
+        ticket_number,
+        outcome="on_hold",
+        closed_by="dashboard",
+        visit_end=now_iso,
+    )
 
 
 def _navigate_to_on_hold_queue() -> None:
@@ -4111,6 +4132,232 @@ def _fetch_attendance(
     return pd.DataFrame(rows)
 
 
+def _visits_open_visit(client, ticket_number: str) -> dict | None:
+    """Return the single open (visit_end IS NULL) visit row for a ticket, or None."""
+    try:
+        res = (
+            client.table(TICKET_VISITS_TABLE)
+            .select("*")
+            .eq("ticket_number", str(ticket_number).strip())
+            .is_("visit_end", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _visits_open_new(
+    client,
+    ticket_number: str,
+    assignee: str,
+    *,
+    visit_start: str | None = None,
+) -> None:
+    """Insert a new open visit row (outcome = 'assigned')."""
+    try:
+        client.table(TICKET_VISITS_TABLE).insert(
+            {
+                "ticket_number": str(ticket_number).strip(),
+                "assignee": str(assignee).strip(),
+                "visit_start": visit_start or _cc_utc_now_iso(),
+                "visit_end": None,
+                "outcome": "assigned",
+                "closed_by": "dashboard",
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
+def _visits_close_open(
+    client,
+    ticket_number: str,
+    *,
+    outcome: str,
+    response_note: str | None = None,
+    photo_url: str | None = None,
+    closed_by: str = "dashboard",
+    visit_end: str | None = None,
+) -> None:
+    """Close the open visit for a ticket (set visit_end + outcome)."""
+    try:
+        client.table(TICKET_VISITS_TABLE).update(
+            {
+                "visit_end": visit_end or _cc_utc_now_iso(),
+                "outcome": outcome,
+                "response_note": response_note,
+                "photo_url": photo_url,
+                "closed_by": closed_by,
+            }
+        ).eq("ticket_number", str(ticket_number).strip()).is_("visit_end", "null").execute()
+    except Exception:
+        pass
+
+
+def _visits_reassign(
+    client,
+    ticket_number: str,
+    new_assignee: str,
+    *,
+    now_iso: str | None = None,
+) -> None:
+    """Close current open visit as 'reassigned', open new visit for new_assignee."""
+    ts = now_iso or _cc_utc_now_iso()
+    _visits_close_open(
+        client,
+        ticket_number,
+        outcome="reassigned",
+        closed_by="dashboard",
+        visit_end=ts,
+    )
+    _visits_open_new(client, ticket_number, new_assignee, visit_start=ts)
+
+
+def _fetch_visits_for_tickets(
+    ticket_numbers: list[str],
+    *,
+    since_utc: pd.Timestamp | None = None,
+    until_utc: pd.Timestamp | None = None,
+    limit: int = 8000,
+) -> pd.DataFrame:
+    if not ticket_numbers or not SUPABASE_URL or not SUPABASE_KEY:
+        return pd.DataFrame()
+    client = _get_supabase_client()
+    nums = sorted({str(t).strip() for t in ticket_numbers if str(t).strip()})
+    parts: list[pd.DataFrame] = []
+    for i in range(0, len(nums), 80):
+        chunk = nums[i : i + 80]
+        try:
+            q = (
+                client.table(TICKET_VISITS_TABLE)
+                .select("*")
+                .in_("ticket_number", chunk)
+            )
+            if since_utc is not None:
+                q = q.gte("visit_start", since_utc.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"))
+            if until_utc is not None:
+                q = q.lte("visit_start", until_utc.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"))
+            res = q.order("visit_start", desc=False).limit(limit).execute()
+        except Exception:
+            continue
+        if res.data:
+            parts.append(pd.DataFrame(res.data))
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def _fetch_visits_in_range(
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    *,
+    limit: int = 8000,
+) -> pd.DataFrame:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return pd.DataFrame()
+    client = _get_supabase_client()
+    try:
+        res = (
+            client.table(TICKET_VISITS_TABLE)
+            .select("*")
+            .gte("visit_start", range_start.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"))
+            .lte("visit_start", range_end.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"))
+            .order("visit_start", desc=False)
+            .limit(limit)
+            .execute()
+        )
+    except Exception:
+        return pd.DataFrame()
+    rows = res.data or []
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def _perf_build_visit_summary(visits: pd.DataFrame) -> pd.DataFrame:
+    """Per-person visit counts broken down by outcome."""
+    if visits.empty or "assignee" not in visits.columns:
+        return pd.DataFrame()
+    g = visits.groupby(["assignee", "outcome"], as_index=False).size().rename(columns={"size": "count"})
+    outcomes = ["assigned", "responded", "reassigned", "unattended", "on_hold"]
+    people = sorted(visits["assignee"].dropna().unique().tolist(), key=str.lower)
+    rows = []
+    for person in people:
+        pdata = g[g["assignee"] == person]
+        row: dict = {"Person": person}
+        for o in outcomes:
+            row[o.capitalize()] = int(pdata.loc[pdata["outcome"] == o, "count"].sum())
+        row["Total visits"] = int(pdata["count"].sum())
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    return df.sort_values(["Responded", "Total visits"], ascending=[False, False])
+
+
+def _perf_filter_visits_by_person(visits: pd.DataFrame, person: str) -> pd.DataFrame:
+    if visits.empty or person == "All":
+        return visits
+    return visits.loc[visits["assignee"] == person].copy()
+
+
+def _render_visit_summary_table(visits: pd.DataFrame) -> None:
+    summary = _perf_build_visit_summary(visits)
+    if summary.empty:
+        st.caption("No visit data for this filter.")
+        return
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+
+def _render_visit_detail_table(visits: pd.DataFrame) -> None:
+    if visits.empty:
+        st.caption("No visits to list.")
+        return
+    view = visits.copy()
+    for col in ("visit_start", "visit_end"):
+        if col in view.columns:
+            ts = _parse_ts(view[col])
+            view[col] = ts.dt.tz_convert(LOCAL_TZ).dt.strftime("%Y-%m-%d %H:%M")
+    cols = [c for c in (
+        "ticket_number", "assignee", "outcome", "visit_start", "visit_end",
+        "response_note", "photo_url", "closed_by",
+    ) if c in view.columns]
+    st.dataframe(view[cols].sort_values("visit_start", ascending=False).head(300),
+                 use_container_width=True, hide_index=True)
+
+
+def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> None:
+    if visits.empty:
+        return
+    if outcome:
+        data = visits[visits["outcome"] == outcome].copy()
+    else:
+        data = visits.copy()
+    if data.empty:
+        st.caption("No data.")
+        return
+    counts = data.groupby("assignee").size().rename("Count").reset_index()
+    height = min(420, max(140, 32 * len(counts)))
+    color = "#7eb8da" if outcome == "responded" else "#D7B491"
+    label = outcome.capitalize() if outcome else "Visits"
+    chart = (
+        alt.Chart(counts)
+        .mark_bar()
+        .encode(
+            x=alt.X("Count:Q", title=label),
+            y=alt.Y("assignee:N", sort="-x", title=""),
+            tooltip=[
+                alt.Tooltip("assignee:N", title="Engineer"),
+                alt.Tooltip("Count:Q", title=label),
+            ],
+            color=alt.value(color),
+        )
+        .properties(height=height)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def _perf_norm_member(raw: object) -> str:
     """Normalize ``assigned_to`` / log ``member_username`` for chart labels."""
 
@@ -4543,6 +4790,8 @@ def _perf_build_summary(
         ["Total", "Handled"],
         ascending=[False, False],
     )
+
+
 
 
 def _render_perf_individual_summary_table(summary: pd.DataFrame) -> None:
@@ -4987,6 +5236,8 @@ def _cc_insert_assignment(
         action_type="Assignment",
         note=_cc_assignment_log_note(additional_info, operator_id),
     )
+    # Phase 2: open a new visit cycle for this assignment
+    _visits_open_new(client, ticket_number, assigned_to, visit_start=now_iso)
 
 
 def _cc_insert_pending_unassigned(
@@ -5162,6 +5413,8 @@ def _cc_reassign_ticket(
         action_type="Assignment",
         note=_cc_assignment_log_note(additional_info, operator_id),
     )
+    # Phase 2: close previous visit as 'reassigned', open new visit for new assignee
+    _visits_reassign(client, ticket_number, assigned_to, now_iso=now_iso)
 
 
 def _cc_ensure_reassign_cleared_response_fields(
@@ -10706,8 +10959,8 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         m6.metric("Unattended", len(unattended_f))
         st.caption(
             "**In view** matches the **CSM Cases** tab (time range + active queues). "
-            "Queue counts above sum to **In view** when **All** assignees are selected. "
-            f"**Handled** ({STATUS_RESOLVED} + Investigation) is in the overview table — not the same as **In view**."
+            f"**Handled** ({STATUS_RESOLVED} + Investigation) is in the overview table. "
+            "**Visits** shows per-engineer visit cycles from the `ticket_visits` table."
         )
         if focus == "All" and n_tab_sum != n_in_view:
             st.warning(
@@ -10715,9 +10968,20 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 "some tickets have an unrecognized status."
             )
 
-        tab_overview, tab_work, tab_hold, tab_unatt = st.tabs(
+        # Load visits for the selected range
+        visits_all = pd.DataFrame()
+        try:
+            visits_all = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            pass
+        visits_f = _perf_filter_visits_by_person(visits_all, focus)
+        n_visits = len(visits_f)
+        n_responded = int((visits_f["outcome"] == "responded").sum()) if not visits_f.empty else 0
+
+        tab_overview, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
             [
                 "Overview",
+                f"Visits ({n_visits})",
                 f"Handled ({n_work})",
                 f"On Hold ({len(on_hold_f)})",
                 f"Unattended ({len(unattended_f)})",
@@ -10753,6 +11017,43 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                     _render_perf_person_bar(
                         unattended_f, title="", value_name="Unattended"
                     )
+
+        with tab_visits:
+            st.caption(
+                "One row per **assignment cycle** from `ticket_visits`. "
+                "**Responded** = field engineer completed the visit. "
+                "**Reassigned** = ticket given to someone else before response. "
+                "**On Hold** = admin paused the ticket. "
+                "**Assigned** = visit still open. "
+                "Each engineer gets their own row even if the same ticket was visited multiple times."
+            )
+            if visits_f.empty:
+                if visits_all.empty:
+                    st.info(
+                        "No visit data yet. Apply migration "
+                        "`20260702_ticket_visits.sql` in Supabase — new assigns will "
+                        "start generating visit rows automatically."
+                    )
+                else:
+                    st.info("No visits for this assignee filter in this time window.")
+            else:
+                vm0, vm1, vm2, vm3 = st.columns(4)
+                vm0.metric("Total visits", n_visits)
+                vm1.metric("Responded", n_responded,
+                           help="Visit closed with a field response.")
+                vm2.metric("Reassigned", int((visits_f["outcome"] == "reassigned").sum()))
+                vm3.metric("On Hold / Unattended",
+                           int(((visits_f["outcome"] == "on_hold") | (visits_f["outcome"] == "unattended")).sum()))
+                c_left, c_right = st.columns(2)
+                with c_left:
+                    st.markdown("**Responses per engineer (visits)**")
+                    _render_visit_bar(visits_f, outcome="responded")
+                with c_right:
+                    st.markdown("**All visits per engineer**")
+                    _render_visit_bar(visits_f)
+                _render_visit_summary_table(visits_f)
+                with st.expander("Visit detail list", expanded=False):
+                    _render_visit_detail_table(visits_f)
 
         with tab_work:
             st.caption(
