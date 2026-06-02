@@ -12,6 +12,25 @@
 - Use the repo venv: `/workspace/.venv/bin/python` (created on first setup).
 - If `python3 -m venv` fails with `ensurepip` missing, one-time: `sudo apt-get install -y python3.12-venv`.
 
+### Local Windows folder (canonical dev copy)
+
+Many operators keep the live project at:
+
+`C:\Users\ibrahim_ali\Desktop\CSM\TELEBOT`
+
+That folder should be the **same git repo** as `/workspace`. Sync **code** with `git pull` / `git push`. Sync **secrets and local-only files** separately (they are gitignored):
+
+| Local (TELEBOT) | Cloud (`/workspace`) |
+|-----------------|----------------------|
+| `.env` | `.env` (via Cursor Secrets + `scripts/write_dotenv_from_environment.sh`) |
+| `.streamlit/secrets.toml` | `.streamlit/secrets.toml` (optional upload) |
+| `venv\` | `.venv\` (recreated by VM update script) |
+| `telethon_*_session.session*` | optional; can regenerate |
+| `logs\` | not needed on cloud |
+
+On Windows, from the TELEBOT folder: `.\scripts\sync-local-telebot.ps1 -CheckOnly`  
+After adding Cursor Secrets on cloud: `bash scripts/write_dotenv_from_environment.sh`
+
 ### Configuration
 
 - Copy `.env.example` → `.env` and set at minimum: `SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_TOKEN`.
