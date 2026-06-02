@@ -2014,10 +2014,11 @@ def _apply_manual_field_response(
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket {ticket_number} not found.")
-    status = str(row.get("status") or "").strip()
+    raw_status = str(row.get("status") or "").strip()
+    status = _normalize_ticket_status_value(row.get("status"))
     if status not in (STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD):
         raise ValueError(
-            f"Ticket is {status}; manual response is only allowed while "
+            f"Ticket is {raw_status or status}; manual response is only allowed while "
             "Daily Task, On Hold, or Open."
         )
 
@@ -2890,10 +2891,11 @@ def _move_to_investigation(
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
-    status = str(row.get("status") or "").strip()
+    raw_status = str(row.get("status") or "").strip()
+    status = _normalize_ticket_status_value(row.get("status"))
     if status not in ("Open", STATUS_DAILY_TASK, STATUS_ON_HOLD):
         raise ValueError(
-            f"Ticket **{ticket_number}** is **{status}** — "
+            f"Ticket **{ticket_number}** is **{raw_status or status or '—'}** — "
             "move from **Needs Review**, **Daily Task**, or **On Hold** only."
         )
     if follow_up and status != "Open":
@@ -3369,7 +3371,7 @@ def _render_manual_field_response_editor(
     if not row:
         st.warning("Ticket not found.")
         return
-    status = str(row.get("status") or "").strip()
+    status = _normalize_ticket_status_value(row.get("status"))
     if status not in allowed_statuses:
         labels = " or **".join(allowed_statuses)
         st.info(f"Pick a **{labels}** ticket to record a field response.")
@@ -3831,6 +3833,10 @@ def _render_ticket_actions_popover_body(
     if not _is_dashboard_admin():
         status_actions = tuple(a for a in status_actions if a[2] != "OnHold")
     resolved_action, overflow_status = _split_ticket_status_actions(status_actions)
+    status_buttons: list[tuple[str, str, str]] = []
+    if resolved_action:
+        status_buttons.append(resolved_action)
+    status_buttons.extend(overflow_status)
     mfr_keys = _manual_field_response_session_keys(key_prefix)
     edit_keys = _assignment_edit_session_keys(key_prefix)
     reassign_keys = _reassign_session_keys(key_prefix)
@@ -3849,10 +3855,10 @@ def _render_ticket_actions_popover_body(
             else:
                 st.session_state[mfr_keys["show"]] = True
             st.rerun()
-    if resolved_action:
+    for label, _status, _log in status_buttons:
         if st.button(
-            resolved_action[0],
-            key=f"{key_prefix}_pop_resolved",
+            label,
+            key=f"{key_prefix}_pop_status_{label.replace(' ', '_')}",
             type="secondary",
             **btn_kw,
         ):
@@ -3860,33 +3866,14 @@ def _render_ticket_actions_popover_body(
                 key_prefix=key_prefix,
                 options=options,
                 status_actions=status_actions,
-                choice_label=resolved_action[0],
-            )
-    elif len(status_actions) == 1:
-        only = status_actions[0]
-        if st.button(
-            only[0],
-            key=f"{key_prefix}_pop_only_status",
-            type="secondary",
-            **btn_kw,
-        ):
-            _apply_ticket_status_batch(
-                key_prefix=key_prefix,
-                options=options,
-                status_actions=status_actions,
-                choice_label=only[0],
+                choice_label=label,
             )
 
-    has_primary = (
-        allow_manual_field_response
-        or bool(resolved_action)
-        or len(status_actions) == 1
-    )
+    has_primary = allow_manual_field_response or bool(status_buttons)
     has_below_primary = (
         has_workflow
         or allow_mark_follow_up
         or (allow_transfer_to_sales and _session_operator_id())
-        or bool(overflow_status)
         or allow_delete
     )
     if has_primary and has_below_primary:
@@ -3958,20 +3945,6 @@ def _render_ticket_actions_popover_body(
                         st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
                         _cc_set_flash(f"Moved **{ok}** ticket(s) to **Sales Cases**.")
                         st.rerun()
-
-    for label, _status, _log in overflow_status:
-            if st.button(
-                label,
-                key=f"{key_prefix}_pop_status_{label.replace(' ', '_')}",
-                type="secondary",
-                **btn_kw,
-            ):
-                _apply_ticket_status_batch(
-                    key_prefix=key_prefix,
-                    options=options,
-                    status_actions=status_actions,
-                    choice_label=label,
-                )
 
     if allow_delete:
         st.divider()
@@ -5290,7 +5263,7 @@ def _cc_patch_assignment_fields(
     row = _fetch_ticket_row(ticket_number)
     if not row:
         raise ValueError(f"Ticket **{ticket_number}** not found.")
-    status = str(row.get("status") or "").strip()
+    status = _normalize_ticket_status_value(row.get("status"))
     if status != required_status:
         raise ValueError(f"Only **{required_status}** tickets can be edited here.")
 
@@ -5485,7 +5458,7 @@ def _render_assignment_editor(
     if not row:
         st.warning("Ticket not found.")
         return
-    if str(row.get("status") or "").strip() != required_status:
+    if _normalize_ticket_status_value(row.get("status")) != required_status:
         st.info(f"Pick a **{required_status}** ticket to edit its assignment.")
         return
 
@@ -10337,6 +10310,7 @@ def _render_dashboard(
                     key_prefix="on_hold",
                     cols=na_show,
                     status_actions=(
+                        ("Send to Needs Review", "Open", "BackToOpenFromOnHold"),
                         (
                             "Under Investigation",
                             STATUS_UNDER_INVESTIGATION,
