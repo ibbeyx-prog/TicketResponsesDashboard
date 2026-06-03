@@ -4700,6 +4700,22 @@ def _render_perf_solo_shared_detail(
             st.dataframe(detail, use_container_width=True, hide_index=True)
 
 
+def _perf_apply_map_pick_from_query() -> None:
+    """Apply engineer pick from Visits map click (?perf_map_pick=)."""
+    if "perf_map_pick" not in st.query_params:
+        return
+    raw = str(st.query_params.get("perf_map_pick", "") or "").strip()
+    try:
+        del st.query_params["perf_map_pick"]
+    except Exception:
+        pass
+    if raw.lower() in ("", "all", "__all__"):
+        st.session_state["perf_focus_person"] = "All"
+    else:
+        st.session_state["perf_focus_person"] = _perf_norm_member(raw)
+    st.rerun()
+
+
 def _perf_column_y_positions(count: int, top: float, bottom: float) -> list[float]:
     if count <= 0:
         return []
@@ -4750,8 +4766,10 @@ def _perf_visit_bipartite_data(
 
     solo_n = sum(1 for tn in tickets if len(ticket_engineers.get(tn, set())) == 1)
     shared_n = len(tickets) - solo_n
+    all_engineers = sorted(pairs["assignee"].dropna().unique().tolist(), key=str.lower)
     return {
         "engineers": engineers,
+        "all_engineers": all_engineers,
         "tickets": tickets,
         "ticket_engineers": ticket_engineers,
         "focus_key": focus_key,
@@ -4770,46 +4788,24 @@ def _render_perf_visit_bipartite_graph(
     """Engineers (left) linked to tickets (right) — shared tickets use oak lines."""
     data = _perf_visit_bipartite_data(visits_all, focus=focus)
     if not data:
-        st.info(
-            "No visit links in this window. Assigns and reassigns create "
-            "`ticket_visits` rows that power this map."
+        components.html(
+            "<html><body style='margin:0;background:#141414;'></body></html>",
+            height=8,
         )
         return
 
-    engineers: list[str] = data["engineers"]  # type: ignore[assignment]
+    all_engineers: list[str] = data["all_engineers"]  # type: ignore[assignment]
     tickets: list[str] = data["tickets"]  # type: ignore[assignment]
     ticket_engineers: dict[str, set[str]] = data["ticket_engineers"]  # type: ignore[assignment]
     focus_key: str = data["focus_key"]  # type: ignore[assignment]
-    solo_n: int = data["solo_n"]  # type: ignore[assignment]
-    shared_n: int = data["shared_n"]  # type: ignore[assignment]
-    truncated: bool = data["truncated"]  # type: ignore[assignment]
-    total_tickets: int = data["total_tickets"]  # type: ignore[assignment]
-
-    eng_index = {eng: i for i, eng in enumerate(engineers)}
-    scope = html.escape(focus) if focus_key else "team"
-    st.markdown(
-        f'<div class="perf-bipartite-stats">'
-        f"<span>{scope}: <strong>{len(tickets)}</strong> tickets</span>"
-        f"<span>solo <strong>{solo_n}</strong></span>"
-        f"<span>shared <strong>{shared_n}</strong></span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="perf-bipartite-legend">'
-        '<span><i class="solo"></i> solo (one engineer)</span>'
-        '<span><i class="shared"></i> shared (handoff / reassign)</span>'
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
     svg_w = 720
     pad_top, pad_bottom = 28.0, 28.0
-    row_span = max(len(engineers), len(tickets), 1)
+    row_span = max(len(all_engineers), len(tickets), 1)
     svg_h = pad_top + pad_bottom + max(row_span - 1, 0) * 46 + 32
     y_top = pad_top + 16
     y_bottom = svg_h - pad_bottom - 16
-    eng_ys = _perf_column_y_positions(len(engineers), y_top, y_bottom)
+    eng_ys = _perf_column_y_positions(len(all_engineers), y_top, y_bottom)
     tick_ys = _perf_column_y_positions(len(tickets), y_top, y_bottom)
 
     eng_box_w, eng_box_h = 158.0, 30.0
@@ -4817,11 +4813,8 @@ def _render_perf_visit_bipartite_graph(
     eng_right = left_x + eng_box_w
     ticket_x = 548.0
 
-    parts: list[str] = [
-        f'<svg class="perf-bipartite-svg" viewBox="0 0 {svg_w} {svg_h}" '
-        f'xmlns="http://www.w3.org/2000/svg" role="img" '
-        f'aria-label="Engineer to ticket visit map">'
-    ]
+    eng_index = {eng: i for i, eng in enumerate(all_engineers)}
+    svg_parts: list[str] = []
 
     for ti, ticket in enumerate(tickets):
         engs = ticket_engineers.get(ticket, set())
@@ -4834,24 +4827,28 @@ def _render_perf_visit_bipartite_graph(
                 continue
             ey = eng_ys[ei]
             mid_x = (eng_right + ticket_x) / 2.0
-            parts.append(
+            svg_parts.append(
                 f'<path class="{link_cls}" d="M {eng_right:.1f} {ey:.1f} '
                 f"C {mid_x:.1f} {ey:.1f}, {mid_x:.1f} {ty:.1f}, {ticket_x:.1f} {ty:.1f}\"/>"
             )
 
-    for i, eng in enumerate(engineers):
+    for i, eng in enumerate(all_engineers):
         cy = eng_ys[i]
         is_focus = bool(focus_key and eng == focus_key)
         box_cls = "eng-box focus" if is_focus else "eng-box"
         label_cls = "eng-label focus" if is_focus else "eng-label"
         y0 = cy - eng_box_h / 2.0
-        parts.append(
+        eng_json = json.dumps(eng)
+        focus_flag = "true" if is_focus else "false"
+        svg_parts.append(
+            f'<g class="eng-pick" role="button" tabindex="0" '
+            f'onclick="pickEng({eng_json}, {focus_flag})" '
+            f'onkeydown="if(event.key===\'Enter\'||event.key===\' \')pickEng({eng_json}, {focus_flag})">'
             f'<rect class="{box_cls}" x="{left_x:.1f}" y="{y0:.1f}" '
             f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="8" ry="8"/>'
-        )
-        parts.append(
             f'<text class="{label_cls}" x="{left_x + eng_box_w / 2:.1f}" y="{cy + 4:.1f}" '
             f'text-anchor="middle">{html.escape(eng)}</text>'
+            f"</g>"
         )
 
     for ti, ticket in enumerate(tickets):
@@ -4860,21 +4857,43 @@ def _render_perf_visit_bipartite_graph(
         ty = tick_ys[ti]
         label_cls = "ticket-label shared" if is_shared else "ticket-label"
         short = ticket if len(ticket) <= 22 else ticket[:19] + "…"
-        parts.append(
+        svg_parts.append(
             f'<text class="{label_cls}" x="{ticket_x:.1f}" y="{ty + 4:.1f}" '
             f'text-anchor="start">{html.escape(short)}</text>'
         )
 
-    parts.append("</svg>")
-    st.markdown(
-        f'<div class="perf-bipartite-wrap">{"".join(parts)}</div>',
-        unsafe_allow_html=True,
-    )
-    if truncated:
-        st.caption(
-            f"Showing first **{len(tickets)}** of **{total_tickets}** tickets — "
-            "narrow **Focus Assignee** or shorten the sidebar range."
-        )
+    map_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<style>
+body {{ margin: 0; background: #141414; font-family: system-ui, sans-serif; }}
+.perf-bipartite-svg {{ display: block; width: 100%; min-width: 520px; }}
+.eng-box {{ fill: #141414; stroke: rgba(215, 180, 145, 0.35); stroke-width: 1.2; }}
+.eng-pick {{ cursor: pointer; }}
+.eng-pick:hover .eng-box {{ stroke: rgba(215, 180, 145, 0.75); }}
+.eng-box.focus {{ stroke: #D7B491; stroke-width: 1.8; }}
+.eng-label {{ fill: #e8e6e3; font-size: 11px; pointer-events: none; }}
+.eng-label.focus {{ fill: #D7B491; font-weight: 600; }}
+.ticket-label {{ fill: #a39e97; font-size: 11px; }}
+.ticket-label.shared {{ fill: #D7B491; font-weight: 600; }}
+.link-solo {{ fill: none; stroke: rgba(158, 197, 232, 0.45); stroke-width: 1.2; }}
+.link-shared {{ fill: none; stroke: rgba(215, 180, 145, 0.55); stroke-width: 1.4; }}
+</style>
+<script>
+function pickEng(eng, isFocused) {{
+  const url = new URL(window.parent.location.href);
+  url.searchParams.set("perf_map_pick", isFocused ? "All" : eng);
+  window.parent.location.href = url.toString();
+}}
+</script>
+</head><body>
+<div class="perf-bipartite-wrap">
+<svg class="perf-bipartite-svg" viewBox="0 0 {svg_w} {svg_h}" xmlns="http://www.w3.org/2000/svg"
+     aria-label="Engineer to ticket visit map">
+{"".join(svg_parts)}
+</svg>
+</div>
+</body></html>"""
+    components.html(map_html, height=int(svg_h) + 12, scrolling=False)
 
 
 def _render_visit_summary_table(visits: pd.DataFrame) -> None:
@@ -11717,7 +11736,7 @@ def _render_field_photos_section(done: pd.DataFrame) -> None:
 
 
 def _render_field_performance_tab(*, lookback_days: int) -> None:
-    """Field tickets + sales cases — outcomes per person in the sidebar window."""
+    """Field ticket outcomes per person in the sidebar window."""
     range_caption = _format_dash_range_caption() or "sidebar time range"
     st.caption(f"{range_caption} · {LOCAL_TZ_LABEL}")
 
@@ -11776,6 +11795,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         visit_summary = _perf_build_visit_summary(visits_all)
         overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
         people = _perf_focus_people(summary, visits_all)
+        _perf_apply_map_pick_from_query()
         focus = st.selectbox(
             "Focus Assignee (Field)",
             options=people,
@@ -11812,12 +11832,6 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         m6.metric("Unattended", len(unattended_f))
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
         n_visits = len(visits_f)
-        n_responded = int((visits_f["outcome"] == "responded").sum()) if not visits_f.empty else 0
-        n_active_visits = (
-            int(visits_f["is_active"].sum())
-            if not visits_f.empty and "is_active" in visits_f.columns
-            else 0
-        )
 
         st.caption(
             "**Ticket queues** = current snapshot (`tickets_active`). "
@@ -11851,39 +11865,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             _render_perf_solo_shared_detail(visits_all, focus=focus)
 
         with tab_visits:
-            st.caption(
-                "Per-assignment history in `ticket_visits`. "
-                "**Responded** = cycle completed · **Reassigned** = handoff before respond."
-            )
             _render_perf_visit_bipartite_graph(visits_all, focus=focus)
-            if visits_f.empty:
-                if visits_all.empty:
-                    st.info(
-                        "No visit data in this window. New assigns and reassigns "
-                        "create rows in `ticket_visits` automatically."
-                    )
-                else:
-                    st.info("No visits for this assignee filter in this time window.")
-            else:
-                vm0, vm1, vm2, vm3, vm4 = st.columns(5)
-                vm0.metric("Total visits", n_visits)
-                vm1.metric("Responded", n_responded,
-                           help="Visit cycles closed with a field response.")
-                vm2.metric("Reassigned", int((visits_f["outcome"] == "reassigned").sum()))
-                vm3.metric("On Hold / Unattended",
-                           int(((visits_f["outcome"] == "on_hold") | (visits_f["outcome"] == "unattended")).sum()))
-                vm4.metric("Active now", n_active_visits,
-                           help="Open assignment cycles (is_active = true).")
-                c_left, c_right = st.columns(2)
-                with c_left:
-                    st.markdown("**Responses per engineer (visits)**")
-                    _render_visit_bar(visits_f, outcome="responded")
-                with c_right:
-                    st.markdown("**All visits per engineer**")
-                    _render_visit_bar(visits_f)
-                _render_visit_summary_table(visits_f)
-                with st.expander("Visit detail list", expanded=False):
-                    _render_visit_detail_table(visits_f)
 
         with tab_work:
             st.caption(
@@ -11985,118 +11967,6 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                     )
                 with st.expander("Ticket list", expanded=len(unattended_f) <= 8):
                     _render_perf_ticket_table(unattended_f)
-
-    st.divider()
-    st.markdown("##### Sales Cases")
-    st.caption(
-        "Cases with activity in this window (by **updated_at**). "
-        "Grouped by **attended by**."
-    )
-    try:
-        sc_all = _fetch_sales_cases_df()
-    except Exception as exc:
-        st.error(f"Could not load sales cases: {exc}")
-        return
-
-    if sc_all is None:
-        st.warning(
-            f"The `{SALES_CASES_TABLE}` table is missing. Apply "
-            f"``supabase/migrations/20260620_dashboard_sales_cases.sql`` in Supabase."
-        )
-        return
-
-    sc_df = _perf_filter_sales_in_range(sc_all, range_start, range_end)
-    if sc_df.empty:
-        st.info(
-            "No Sales Cases updated in this time window. "
-            "Try **Last 30 days** or widen **Time range**."
-        )
-        return
-
-    sc_summary = _perf_build_sales_summary(sc_df)
-    sc_people = ["All"] + (
-        sc_summary["Person"].tolist() if not sc_summary.empty else []
-    )
-    sc_accounts = ["All"] + _perf_sales_account_names(sc_df)
-    f_owner, f_resort = st.columns(2)
-    with f_owner:
-        sc_focus = st.selectbox(
-            "Focus attended by",
-            options=sc_people,
-            key="perf_sc_focus_person",
-            help="Filter by **attended by** (dashboard operator), or **All**.",
-        )
-    with f_resort:
-        sc_account = st.selectbox(
-            "Focus Resort / Company",
-            options=sc_accounts,
-            key="perf_sc_focus_account",
-            help="Filter to one **Resort name / Company name** (`account_name`), or **All**.",
-        )
-    sc_f = _perf_filter_by_person(sc_df, sc_focus)
-    sc_f = _perf_filter_sales_by_account(sc_f, sc_account)
-    if sc_focus != "All" or sc_account != "All":
-        bits = []
-        if sc_focus != "All":
-            bits.append(f"attended by **{sc_focus}**")
-        if sc_account != "All":
-            bits.append(f"resort/company **{sc_account}**")
-        st.caption(f"Filtered by {' and '.join(bits)} · **{len(sc_f)}** case(s).")
-    sc_view = _perf_enrich_sales_cases(sc_f)
-
-    n_sales = len(_sc_filter_sales_df(sc_f, (SC_STATUS_SALES_TICKET,)))
-    n_sc_inv = len(_sc_filter_sales_df(sc_f, _SC_INVESTIGATION_QUEUE_STATUSES))
-    n_design = len(_sc_filter_sales_df(sc_f, (SC_STATUS_DESIGN,)))
-    n_resolved = len(_sc_filter_sales_df(sc_f, (SC_STATUS_RESOLVED,)))
-
-    s1, s2, s3, s4, s5 = st.columns(5)
-    s1.metric("In window", len(sc_f))
-    s2.metric("Sales Ticket", n_sales)
-    s3.metric("Investigation", n_sc_inv)
-    s4.metric("Design", n_design)
-    s5.metric("Resolved", n_resolved)
-
-    tab_sc_over, tab_sc_list = st.tabs(
-        ["Overview", f"Cases ({len(sc_f)})"],
-    )
-    with tab_sc_over:
-        summary_view = sc_summary
-        if sc_focus != "All" and not sc_summary.empty:
-            summary_view = sc_summary[sc_summary["Person"] == sc_focus]
-        if sc_account != "All" and not sc_f.empty:
-            summary_view = _perf_build_sales_summary(sc_f)
-        _render_perf_individual_summary_table(summary_view)
-        if not sc_view.empty:
-            by_status = (
-                sc_view.groupby("status_eff", as_index=False)
-                .size()
-                .rename(columns={"size": "Cases"})
-                .sort_values("Cases", ascending=False)
-            )
-            c_bar, c_pie = st.columns([2, 1])
-            with c_bar:
-                _render_perf_person_bar(
-                    sc_view,
-                    title="Cases by sales owner",
-                    value_name="Cases",
-                )
-            with c_pie:
-                st.markdown("**By status**")
-                st.dataframe(by_status, use_container_width=True, hide_index=True)
-
-    with tab_sc_list:
-        if sc_view.empty:
-            st.info("No Sales Cases for this filter.")
-        else:
-            with st.expander("Trend over time", expanded=False):
-                _render_perf_stacked_staff_chart(
-                    sc_view,
-                    y_title="Cases",
-                    bucket_fmt=bucket_fmt,
-                    x_title=x_title,
-                    axis_format=axis_format,
-                )
-            _render_perf_sales_case_table(sc_view)
 
 
 def _render_missing_table_help(table: str) -> None:
