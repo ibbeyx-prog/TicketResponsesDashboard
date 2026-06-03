@@ -2065,11 +2065,12 @@ def _apply_manual_field_response(
         action_type="Response",
         note=log_note,
     )
-    # Phase 2: close the open visit as 'responded'
-    _visits_close_open(
+    # Phase 2: close the open visit as 'responded' for this assignee.
+    visit_assignee = field_responded_by or assignee_raw or assignee
+    _visits_close_responded(
         client,
         ticket_number,
-        outcome="responded",
+        assignee=visit_assignee,
         response_note=text,
         closed_by="dashboard",
         visit_end=now_iso,
@@ -4150,13 +4151,54 @@ def _fetch_attendance(
     return pd.DataFrame(rows)
 
 
+def _visits_deactivate_ticket(client, ticket_number: str) -> None:
+    """Mark all active visits for a ticket inactive before opening a new cycle."""
+    try:
+        client.table(TICKET_VISITS_TABLE).update({"is_active": False}).eq(
+            "ticket_number", str(ticket_number).strip()
+        ).eq("is_active", True).execute()
+    except Exception:
+        pass
+
+
+def _normalize_visit_assignee(raw: object) -> str:
+    """Canonical @username for ticket_visits.assignee."""
+    s = str(raw or "").strip().lstrip("@")
+    return f"@{s.lower()}" if s else ""
+
+
+def _visits_current_assignee(client, ticket_number: str) -> str | None:
+    """Current field engineer from the active visit row (source of truth)."""
+    row = _visits_open_visit(client, ticket_number)
+    if not row:
+        return None
+    assignee = str(row.get("assignee") or "").strip()
+    return assignee or None
+
+
 def _visits_open_visit(client, ticket_number: str) -> dict | None:
-    """Return the single open (visit_end IS NULL) visit row for a ticket, or None."""
+    """Return the current active visit row for a ticket, or None."""
+    tn = str(ticket_number).strip()
     try:
         res = (
             client.table(TICKET_VISITS_TABLE)
             .select("*")
-            .eq("ticket_number", str(ticket_number).strip())
+            .eq("ticket_number", tn)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if rows:
+            return rows[0]
+    except Exception:
+        pass
+    # Legacy rows before is_active migration.
+    try:
+        res = (
+            client.table(TICKET_VISITS_TABLE)
+            .select("*")
+            .eq("ticket_number", tn)
             .is_("visit_end", "null")
             .limit(1)
             .execute()
@@ -4174,16 +4216,19 @@ def _visits_open_new(
     *,
     visit_start: str | None = None,
 ) -> None:
-    """Insert a new open visit row (outcome = 'assigned')."""
+    """Insert a new open visit row (outcome = 'assigned', is_active = true)."""
+    tn = str(ticket_number).strip()
     try:
+        _visits_deactivate_ticket(client, tn)
         client.table(TICKET_VISITS_TABLE).insert(
             {
-                "ticket_number": str(ticket_number).strip(),
-                "assignee": str(assignee).strip(),
+                "ticket_number": tn,
+                "assignee": _normalize_visit_assignee(assignee),
                 "visit_start": visit_start or _cc_utc_now_iso(),
                 "visit_end": None,
                 "outcome": "assigned",
                 "closed_by": "dashboard",
+                "is_active": True,
             }
         ).execute()
     except Exception:
@@ -4199,20 +4244,96 @@ def _visits_close_open(
     photo_url: str | None = None,
     closed_by: str = "dashboard",
     visit_end: str | None = None,
+    assignee: str | None = None,
 ) -> None:
-    """Close the open visit for a ticket (set visit_end + outcome)."""
+    """Close the active visit for a ticket (set visit_end + outcome)."""
+    tn = str(ticket_number).strip()
+    end_ts = visit_end or _cc_utc_now_iso()
+    payload = {
+        "visit_end": end_ts,
+        "outcome": outcome,
+        "response_note": response_note,
+        "photo_url": photo_url,
+        "closed_by": closed_by,
+        "is_active": False,
+    }
+
+    def _apply(update_q):
+        try:
+            update_q.execute()
+        except Exception:
+            pass
+
     try:
-        client.table(TICKET_VISITS_TABLE).update(
-            {
-                "visit_end": visit_end or _cc_utc_now_iso(),
-                "outcome": outcome,
-                "response_note": response_note,
-                "photo_url": photo_url,
-                "closed_by": closed_by,
-            }
-        ).eq("ticket_number", str(ticket_number).strip()).is_("visit_end", "null").execute()
+        q = (
+            client.table(TICKET_VISITS_TABLE)
+            .update(payload)
+            .eq("ticket_number", tn)
+            .eq("is_active", True)
+        )
+        if assignee:
+            q = q.eq("assignee", _normalize_visit_assignee(assignee))
+        _apply(q)
     except Exception:
         pass
+
+    if assignee:
+        # Fallback: close by ticket only if assignee filter matched nothing (legacy rows).
+        try:
+            active = (
+                client.table(TICKET_VISITS_TABLE)
+                .select("id")
+                .eq("ticket_number", tn)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if active.data:
+                _apply(
+                    client.table(TICKET_VISITS_TABLE)
+                    .update(payload)
+                    .eq("ticket_number", tn)
+                    .eq("is_active", True)
+                )
+        except Exception:
+            pass
+
+    # Legacy rows before is_active migration.
+    try:
+        q = (
+            client.table(TICKET_VISITS_TABLE)
+            .update(payload)
+            .eq("ticket_number", tn)
+            .is_("visit_end", "null")
+        )
+        if assignee:
+            q = q.eq("assignee", _normalize_visit_assignee(assignee))
+        _apply(q)
+    except Exception:
+        pass
+
+
+def _visits_close_responded(
+    client,
+    ticket_number: str,
+    *,
+    assignee: str,
+    response_note: str | None = None,
+    photo_url: str | None = None,
+    closed_by: str = "dashboard",
+    visit_end: str | None = None,
+) -> None:
+    """Close the active visit for this ticket + engineer as responded."""
+    _visits_close_open(
+        client,
+        ticket_number,
+        outcome="responded",
+        response_note=response_note,
+        photo_url=photo_url,
+        closed_by=closed_by,
+        visit_end=visit_end,
+        assignee=assignee,
+    )
 
 
 def _visits_reassign(
@@ -5188,14 +5309,39 @@ def _cc_insert_attendance_log(
 
 
 def _cc_execute_ticket_update(client, payload: dict, ticket_number: str) -> None:
+    if not _cc_execute_ticket_update_if(
+        client, payload, ticket_number, match=None, require_match=False
+    ):
+        raise RuntimeError(f"Update failed for ticket {ticket_number}")
+
+
+def _cc_execute_ticket_update_if(
+    client,
+    payload: dict,
+    ticket_number: str,
+    *,
+    match: dict[str, object] | None,
+    require_match: bool = True,
+) -> bool:
+    """Update ticket; optional optimistic match (e.g. last_assigned_at unchanged)."""
     attempt = _cc_strip_missing_ticket_columns(dict(payload))
     last_err: Exception | None = None
     for _ in range(4):
         try:
-            client.table(TICKETS_TABLE).update(attempt).eq(
+            q = client.table(TICKETS_TABLE).update(attempt).eq(
                 "ticket_number", ticket_number
-            ).execute()
-            return
+            )
+            if match:
+                for col, expected in match.items():
+                    if expected is None:
+                        q = q.is_(col, "null")
+                    else:
+                        q = q.eq(col, expected)
+            res = q.execute()
+            rows = res.data or []
+            if require_match and match and not rows:
+                return False
+            return True
         except Exception as exc:
             text = str(exc)
             col = _cc_parse_missing_column(text)
@@ -5207,6 +5353,7 @@ def _cc_execute_ticket_update(client, payload: dict, ticket_number: str) -> None
             last_err = exc
     if last_err is not None:
         raise last_err
+    return False
 
 
 def _cc_insert_assignment(
@@ -5405,6 +5552,7 @@ def _cc_reassign_ticket(
     *,
     additional_info: str | None = None,
     operator_id: str,
+    expected_last_assigned_at: object | None = None,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     updates = {
@@ -5421,7 +5569,17 @@ def _cc_reassign_ticket(
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
-    _cc_execute_ticket_update(client, updates, ticket_number)
+    if not _cc_execute_ticket_update_if(
+        client,
+        updates,
+        ticket_number,
+        match={"last_assigned_at": expected_last_assigned_at},
+        require_match=True,
+    ):
+        raise ValueError(
+            f"Ticket **{ticket_number}** was changed by someone else "
+            "(assignment timestamp mismatch). Refresh the queue and try again."
+        )
     _cc_ensure_reassign_cleared_response_fields(client, ticket_number)
 
     _cc_insert_attendance_log(
@@ -5490,6 +5648,7 @@ def _cc_upsert_assignment(
         task_category,
         additional_info=additional_info,
         operator_id=operator_id,
+        expected_last_assigned_at=existing.get("last_assigned_at"),
     )
     prev_assignee = existing.get("assigned_to") or "—"
     return (

@@ -1438,24 +1438,43 @@ def _db_insert_attendance_log(
         )
 
 
+def _normalize_visit_assignee(raw: object) -> str:
+    s = str(raw or "").strip().lstrip("@")
+    return f"@{s.lower()}" if s else ""
+
+
 def _bot_visits_close_responded(
     ticket_number: str,
     *,
+    assignee: str,
     response_note: str | None,
     photo_url: str | None,
     visit_end: str,
 ) -> None:
-    """Best-effort: close the open visit row as 'responded' from the bot."""
+    """Best-effort: close the active visit row as 'responded' for this engineer."""
     try:
-        supabase.table(TICKET_VISITS_TABLE).update(
-            {
-                "visit_end": visit_end,
-                "outcome": "responded",
-                "response_note": response_note,
-                "photo_url": photo_url,
-                "closed_by": "bot",
-            }
-        ).eq("ticket_number", str(ticket_number).strip()).is_("visit_end", "null").execute()
+        payload = {
+            "visit_end": visit_end,
+            "outcome": "responded",
+            "response_note": response_note,
+            "photo_url": photo_url,
+            "closed_by": "bot",
+            "is_active": False,
+        }
+        tn = str(ticket_number).strip()
+        engineer = _normalize_visit_assignee(assignee)
+        supabase.table(TICKET_VISITS_TABLE).update(payload).eq(
+            "ticket_number", tn
+        ).eq("assignee", engineer).eq("is_active", True).execute()
+        supabase.table(TICKET_VISITS_TABLE).update(payload).eq(
+            "ticket_number", tn
+        ).eq("is_active", True).execute()
+        supabase.table(TICKET_VISITS_TABLE).update(payload).eq(
+            "ticket_number", tn
+        ).eq("assignee", engineer).is_("visit_end", "null").execute()
+        supabase.table(TICKET_VISITS_TABLE).update(payload).eq(
+            "ticket_number", tn
+        ).is_("visit_end", "null").execute()
     except Exception:
         log.exception("visit close failed for ticket %s", ticket_number)
 
@@ -1478,6 +1497,16 @@ def _db_complete_ticket_field_response(
     decide whether to mark the ticket ``Resolved`` (or send it back to
     ``Open`` after re-review). The bot never sets ``Resolved`` itself.
     """
+    row = _db_get_ticket(ticket_number)
+    if row:
+        status = str(row.get("status") or "").strip()
+        if status == "Open" and str(row.get("field_response") or "").strip():
+            log.info(
+                "field reply ignored — ticket %s already in Needs Review",
+                ticket_number,
+            )
+            return
+
     responded_at = _utc_now_iso()
     updates: dict[str, Any] = {
         "status": "Open",
@@ -1496,6 +1525,7 @@ def _db_complete_ticket_field_response(
     else:
         updates["field_responded_by"] = None
     _execute_ticket_update(updates, ticket_number)
+    row: dict | None = None
     try:
         row = _db_get_ticket(ticket_number)
         if row and str(row.get("status") or "").strip() != "Open":
@@ -1521,13 +1551,20 @@ def _db_complete_ticket_field_response(
             telegram_chat_id=telegram_chat_id,
             telegram_message_id=telegram_message_id,
         )
-    # Phase 2: close the open visit as 'responded'
-    _bot_visits_close_responded(
-        ticket_number,
-        response_note=field_response,
-        photo_url=photo_url if update_photo_url else None,
-        visit_end=responded_at,
+    # Phase 2: close the active visit as 'responded' for this engineer.
+    visit_assignee = (
+        field_responded_by
+        or responder_username
+        or (str(row.get("assigned_to") or "") if row else "")
     )
+    if visit_assignee:
+        _bot_visits_close_responded(
+            ticket_number,
+            assignee=visit_assignee,
+            response_note=field_response,
+            photo_url=photo_url if update_photo_url else None,
+            visit_end=responded_at,
+        )
 
 
 def _assignment_telegram_refs(update: Update) -> tuple[int | None, int | None]:
