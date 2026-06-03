@@ -2065,11 +2065,12 @@ def _apply_manual_field_response(
         action_type="Response",
         note=log_note,
     )
-    # Phase 2: close the open visit as 'responded'
-    _visits_close_open(
+    # Phase 2: close the open visit as 'responded' for this assignee.
+    visit_assignee = field_responded_by or assignee_raw or assignee
+    _visits_close_responded(
         client,
         ticket_number,
-        outcome="responded",
+        assignee=visit_assignee,
         response_note=text,
         closed_by="dashboard",
         visit_end=now_iso,
@@ -2770,6 +2771,19 @@ def _follow_up_display_label(row: pd.Series) -> str:
     return f"● {when}" + (f" — {note}" if note else "")
 
 
+def _follow_up_labels_by_ticket(df: pd.DataFrame) -> dict[str, str]:
+    """Map ticket_number → follow-up display label (avoids row-order mismatches)."""
+    if df.empty or "ticket_number" not in df.columns:
+        return {}
+    labels: dict[str, str] = {}
+    for _, row in df.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if not tn:
+            continue
+        labels[tn] = _follow_up_display_label(row)
+    return labels
+
+
 def _render_selectable_ticket_table(
     df: pd.DataFrame,
     *,
@@ -2805,12 +2819,17 @@ def _render_selectable_ticket_table(
         return []
 
     options = _ticket_options_for_admin(filtered)
-    view = _ticket_queue_view(filtered, cols=cols)
+    # Keep follow-up pin order; do not re-sort newest-first on top of it.
+    view = _ticket_queue_view(filtered, cols=cols, preserve_order=highlight_follow_up)
     if highlight_follow_up and not view.empty and "follow_up_at" in filtered.columns:
+        fu_labels = _follow_up_labels_by_ticket(filtered)
         view.insert(
             0,
             "Follow-up",
-            filtered.apply(_follow_up_display_label, axis=1).tolist(),
+            view["ticket_number"]
+            .astype(str)
+            .map(lambda tn: fu_labels.get(str(tn).strip(), ""))
+            .tolist(),
         )
     sel_key = _ticket_selection_session_key(key_prefix)
     if sel_key not in st.session_state:
@@ -4132,13 +4151,54 @@ def _fetch_attendance(
     return pd.DataFrame(rows)
 
 
+def _visits_deactivate_ticket(client, ticket_number: str) -> None:
+    """Mark all active visits for a ticket inactive before opening a new cycle."""
+    try:
+        client.table(TICKET_VISITS_TABLE).update({"is_active": False}).eq(
+            "ticket_number", str(ticket_number).strip()
+        ).eq("is_active", True).execute()
+    except Exception:
+        pass
+
+
+def _normalize_visit_assignee(raw: object) -> str:
+    """Canonical @username for ticket_visits.assignee."""
+    s = str(raw or "").strip().lstrip("@")
+    return f"@{s.lower()}" if s else ""
+
+
+def _visits_current_assignee(client, ticket_number: str) -> str | None:
+    """Current field engineer from the active visit row (source of truth)."""
+    row = _visits_open_visit(client, ticket_number)
+    if not row:
+        return None
+    assignee = str(row.get("assignee") or "").strip()
+    return assignee or None
+
+
 def _visits_open_visit(client, ticket_number: str) -> dict | None:
-    """Return the single open (visit_end IS NULL) visit row for a ticket, or None."""
+    """Return the current active visit row for a ticket, or None."""
+    tn = str(ticket_number).strip()
     try:
         res = (
             client.table(TICKET_VISITS_TABLE)
             .select("*")
-            .eq("ticket_number", str(ticket_number).strip())
+            .eq("ticket_number", tn)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if rows:
+            return rows[0]
+    except Exception:
+        pass
+    # Legacy rows before is_active migration.
+    try:
+        res = (
+            client.table(TICKET_VISITS_TABLE)
+            .select("*")
+            .eq("ticket_number", tn)
             .is_("visit_end", "null")
             .limit(1)
             .execute()
@@ -4156,16 +4216,19 @@ def _visits_open_new(
     *,
     visit_start: str | None = None,
 ) -> None:
-    """Insert a new open visit row (outcome = 'assigned')."""
+    """Insert a new open visit row (outcome = 'assigned', is_active = true)."""
+    tn = str(ticket_number).strip()
     try:
+        _visits_deactivate_ticket(client, tn)
         client.table(TICKET_VISITS_TABLE).insert(
             {
-                "ticket_number": str(ticket_number).strip(),
-                "assignee": str(assignee).strip(),
+                "ticket_number": tn,
+                "assignee": _normalize_visit_assignee(assignee),
                 "visit_start": visit_start or _cc_utc_now_iso(),
                 "visit_end": None,
                 "outcome": "assigned",
                 "closed_by": "dashboard",
+                "is_active": True,
             }
         ).execute()
     except Exception:
@@ -4181,20 +4244,96 @@ def _visits_close_open(
     photo_url: str | None = None,
     closed_by: str = "dashboard",
     visit_end: str | None = None,
+    assignee: str | None = None,
 ) -> None:
-    """Close the open visit for a ticket (set visit_end + outcome)."""
+    """Close the active visit for a ticket (set visit_end + outcome)."""
+    tn = str(ticket_number).strip()
+    end_ts = visit_end or _cc_utc_now_iso()
+    payload = {
+        "visit_end": end_ts,
+        "outcome": outcome,
+        "response_note": response_note,
+        "photo_url": photo_url,
+        "closed_by": closed_by,
+        "is_active": False,
+    }
+
+    def _apply(update_q):
+        try:
+            update_q.execute()
+        except Exception:
+            pass
+
     try:
-        client.table(TICKET_VISITS_TABLE).update(
-            {
-                "visit_end": visit_end or _cc_utc_now_iso(),
-                "outcome": outcome,
-                "response_note": response_note,
-                "photo_url": photo_url,
-                "closed_by": closed_by,
-            }
-        ).eq("ticket_number", str(ticket_number).strip()).is_("visit_end", "null").execute()
+        q = (
+            client.table(TICKET_VISITS_TABLE)
+            .update(payload)
+            .eq("ticket_number", tn)
+            .eq("is_active", True)
+        )
+        if assignee:
+            q = q.eq("assignee", _normalize_visit_assignee(assignee))
+        _apply(q)
     except Exception:
         pass
+
+    if assignee:
+        # Fallback: close by ticket only if assignee filter matched nothing (legacy rows).
+        try:
+            active = (
+                client.table(TICKET_VISITS_TABLE)
+                .select("id")
+                .eq("ticket_number", tn)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if active.data:
+                _apply(
+                    client.table(TICKET_VISITS_TABLE)
+                    .update(payload)
+                    .eq("ticket_number", tn)
+                    .eq("is_active", True)
+                )
+        except Exception:
+            pass
+
+    # Legacy rows before is_active migration.
+    try:
+        q = (
+            client.table(TICKET_VISITS_TABLE)
+            .update(payload)
+            .eq("ticket_number", tn)
+            .is_("visit_end", "null")
+        )
+        if assignee:
+            q = q.eq("assignee", _normalize_visit_assignee(assignee))
+        _apply(q)
+    except Exception:
+        pass
+
+
+def _visits_close_responded(
+    client,
+    ticket_number: str,
+    *,
+    assignee: str,
+    response_note: str | None = None,
+    photo_url: str | None = None,
+    closed_by: str = "dashboard",
+    visit_end: str | None = None,
+) -> None:
+    """Close the active visit for this ticket + engineer as responded."""
+    _visits_close_open(
+        client,
+        ticket_number,
+        outcome="responded",
+        response_note=response_note,
+        photo_url=photo_url,
+        closed_by=closed_by,
+        visit_end=visit_end,
+        assignee=assignee,
+    )
 
 
 def _visits_reassign(
@@ -4274,32 +4413,468 @@ def _fetch_visits_in_range(
     rows = res.data or []
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows)
+    return _perf_prepare_visits_df(pd.DataFrame(rows))
+
+
+def _perf_prepare_visits_df(visits: pd.DataFrame) -> pd.DataFrame:
+    """Normalize assignee labels and boolean flags for Performance UI."""
+    if visits.empty:
+        return visits
+    out = visits.copy()
+    if "assignee" in out.columns:
+        out["assignee"] = out["assignee"].map(_perf_norm_member)
+    if "is_active" in out.columns:
+        out["is_active"] = out["is_active"].fillna(False).astype(bool)
+    return out
 
 
 def _perf_build_visit_summary(visits: pd.DataFrame) -> pd.DataFrame:
-    """Per-person visit counts broken down by outcome."""
+    """Per-person visit counts broken down by outcome (visit-cycle accountability)."""
     if visits.empty or "assignee" not in visits.columns:
         return pd.DataFrame()
+    visits = _perf_prepare_visits_df(visits)
     g = visits.groupby(["assignee", "outcome"], as_index=False).size().rename(columns={"size": "count"})
     outcomes = ["assigned", "responded", "reassigned", "unattended", "on_hold"]
     people = sorted(visits["assignee"].dropna().unique().tolist(), key=str.lower)
     rows = []
     for person in people:
         pdata = g[g["assignee"] == person]
+        person_visits = visits[visits["assignee"] == person]
         row: dict = {"Person": person}
         for o in outcomes:
             row[o.capitalize()] = int(pdata.loc[pdata["outcome"] == o, "count"].sum())
         row["Total visits"] = int(pdata["count"].sum())
+        if "ticket_number" in person_visits.columns:
+            row["Tickets touched"] = int(person_visits["ticket_number"].nunique())
+        if "is_active" in person_visits.columns:
+            row["Active now"] = int(person_visits["is_active"].sum())
         rows.append(row)
     df = pd.DataFrame(rows)
     return df.sort_values(["Responded", "Total visits"], ascending=[False, False])
 
 
+def _perf_merge_field_and_visit_summaries(
+    field_summary: pd.DataFrame,
+    visit_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    """One overview table: ticket-queue snapshot + visit-cycle responded counts."""
+    if field_summary.empty and visit_summary.empty:
+        return pd.DataFrame()
+    if field_summary.empty:
+        return visit_summary
+    if visit_summary.empty:
+        return field_summary
+    left = field_summary.copy()
+    right = visit_summary[["Person", "Responded", "Reassigned", "Tickets touched"]].rename(
+        columns={
+            "Responded": "Visit responded",
+            "Reassigned": "Visit reassigned",
+            "Tickets touched": "Visit tickets",
+        }
+    )
+    merged = left.merge(right, on="Person", how="outer")
+    for col in ("Total", "Handled", "Visit responded"):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(0).astype(int)
+    sort_cols = [c for c in ("Visit responded", "Handled", "Total") if c in merged.columns]
+    if sort_cols:
+        return merged.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+    return merged
+
+
+def _perf_focus_people(
+    field_summary: pd.DataFrame,
+    visits: pd.DataFrame,
+) -> list[str]:
+    names: set[str] = set()
+    if not field_summary.empty and "Person" in field_summary.columns:
+        names |= {str(p) for p in field_summary["Person"].tolist() if str(p).strip()}
+    if not visits.empty and "assignee" in visits.columns:
+        names |= {str(p) for p in visits["assignee"].dropna().unique().tolist() if str(p).strip()}
+    return ["All"] + sorted(names, key=str.lower)
+
+
 def _perf_filter_visits_by_person(visits: pd.DataFrame, person: str) -> pd.DataFrame:
-    if visits.empty or person == "All":
+    if visits.empty or person in ("", "All"):
         return visits
-    return visits.loc[visits["assignee"] == person].copy()
+    key = _perf_norm_member(person)
+    prepared = _perf_prepare_visits_df(visits)
+    return prepared.loc[prepared["assignee"] == key].copy()
+
+
+def _perf_solo_shared_ticket_rows(visits: pd.DataFrame, person: str) -> pd.DataFrame:
+    """Per ticket: solo vs shared for tickets this engineer touched in the window."""
+    if visits.empty or "ticket_number" not in visits.columns or person in ("", "All"):
+        return pd.DataFrame()
+    prepared = _perf_prepare_visits_df(visits)
+    key = _perf_norm_member(person)
+    touched = prepared.loc[prepared["assignee"] == key, "ticket_number"].astype(str).unique()
+    rows: list[dict[str, object]] = []
+    for tn in sorted({str(t).strip() for t in touched if str(t).strip()}):
+        tvisits = prepared[prepared["ticket_number"].astype(str) == tn]
+        engineers = sorted(tvisits["assignee"].dropna().unique().tolist(), key=str.lower)
+        solo = len(engineers) == 1
+        responded = False
+        if "outcome" in tvisits.columns:
+            responded = bool(
+                ((tvisits["assignee"] == key) & (tvisits["outcome"] == "responded")).any()
+            )
+        rows.append(
+            {
+                "Ticket": tn,
+                "Type": "Solo" if solo else "Shared",
+                "Engineers": len(engineers),
+                "Who was involved": ", ".join(engineers),
+                "Engineer responded": "Yes" if responded else "No",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _perf_solo_shared_summary_all(visits: pd.DataFrame) -> pd.DataFrame:
+    """Solo vs shared ticket counts for every engineer in the visit window."""
+    if visits.empty or "assignee" not in visits.columns:
+        return pd.DataFrame()
+    prepared = _perf_prepare_visits_df(visits)
+    people = sorted(prepared["assignee"].dropna().unique().tolist(), key=str.lower)
+    rows: list[dict[str, object]] = []
+    for person in people:
+        detail = _perf_solo_shared_ticket_rows(prepared, person)
+        if detail.empty:
+            continue
+        solo = int((detail["Type"] == "Solo").sum())
+        shared = int((detail["Type"] == "Shared").sum())
+        rows.append(
+            {
+                "Person": person,
+                "Solo tickets": solo,
+                "Shared tickets": shared,
+                "Tickets touched": solo + shared,
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        ["Tickets touched", "Solo tickets"],
+        ascending=[False, False],
+    )
+
+
+def _perf_grand_total_for_board(
+    overview_table: pd.DataFrame,
+    solo_shared_summary: pd.DataFrame,
+) -> int:
+    """Big ring number: snapshot queue total when available, else visit tickets touched."""
+    if not overview_table.empty and "Total" in overview_table.columns:
+        return int(overview_table["Total"].sum())
+    if not solo_shared_summary.empty and "Tickets touched" in solo_shared_summary.columns:
+        return int(solo_shared_summary["Tickets touched"].sum())
+    return 0
+
+
+def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
+    """Thin queue breakdown chips for one engineer or team totals."""
+    if summary.empty:
+        return
+    if focus != "All":
+        key = _perf_norm_member(focus)
+        row = summary.loc[summary["Person"] == key]
+        if row.empty:
+            return
+        r = row.iloc[0]
+    else:
+        r = summary.sum(numeric_only=True)
+    labels = (
+        ("Total", "Total"),
+        (STATUS_DAILY_TASK, STATUS_DAILY_TASK),
+        ("Needs Review", "Needs Review"),
+        ("Investigation", "Investigation"),
+        (STATUS_RESOLVED, STATUS_RESOLVED),
+        ("On Hold", "On Hold"),
+        ("Unattended", "Unattended"),
+        ("Handled", "Handled"),
+        ("Visit responded", "Visit responded"),
+    )
+    chips: list[str] = []
+    for col, label in labels:
+        if col not in summary.columns:
+            continue
+        val = int(r.get(col, 0))
+        if val == 0 and col not in ("Total", "Handled"):
+            continue
+        chips.append(
+            f'<span class="perf-queue-chip">{html.escape(label)}'
+            f"<strong>{val}</strong></span>"
+        )
+    if not chips:
+        return
+    st.markdown(
+        f'<div class="perf-queue-strip">{"".join(chips)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_solo_shared_board(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+    overview_table: pd.DataFrame | None = None,
+) -> None:
+    """Engineer rows (solo | shared pills) + total ring."""
+    overview_table = overview_table if overview_table is not None else pd.DataFrame()
+    if visits_all.empty:
+        st.markdown(
+            '<p class="perf-ss-hint">No visit data in this window — solo/shared breakdown '
+            "appears after assigns and reassigns create <code>ticket_visits</code> rows.</p>",
+            unsafe_allow_html=True,
+        )
+        if not overview_table.empty:
+            total = _perf_grand_total_for_board(overview_table, pd.DataFrame())
+            st.markdown(
+                f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
+                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total}</div>'
+                f'<div class="perf-ss-total-lbl">in queues</div></div></div>',
+                unsafe_allow_html=True,
+            )
+        return
+
+    summary = _perf_solo_shared_summary_all(visits_all)
+    if summary.empty:
+        st.caption("No engineers in visit data for this window.")
+        return
+
+    focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
+    total_n = _perf_grand_total_for_board(overview_table, summary)
+    rows_html: list[str] = []
+    for _, row in summary.iterrows():
+        person = str(row["Person"])
+        solo = int(row["Solo tickets"])
+        shared = int(row["Shared tickets"])
+        selected = focus_key and person == focus_key
+        row_cls = "perf-ss-row is-selected" if selected else "perf-ss-row"
+        rows_html.append(
+            f'<div class="{row_cls}">'
+            f'<span class="perf-ss-name">{html.escape(person)}</span>'
+            f'<div class="perf-ss-pill">'
+            f'<span class="perf-ss-seg solo">solo<span class="num">{solo}</span></span>'
+            f'<span class="perf-ss-seg shared">shared<span class="num">{shared}</span></span>'
+            f"</div>"
+            f"</div>"
+        )
+
+    st.markdown(
+        f'<div class="perf-ss-board">'
+        f'<div class="perf-ss-list">{"".join(rows_html)}</div>'
+        f'<div class="perf-ss-total">'
+        f'<div class="perf-ss-circle">{total_n}</div>'
+        f'<div class="perf-ss-total-lbl">in queues</div>'
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="perf-ss-hint">Solo = only that engineer on visit history · '
+        "Shared = handoff/reassign · Ring = sum of queue totals (sidebar range). "
+        "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_solo_shared_detail(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> None:
+    """Ticket list when one engineer is selected (shared drill-down)."""
+    if visits_all.empty or focus in ("", "All"):
+        return
+    detail = _perf_solo_shared_ticket_rows(visits_all, focus)
+    if detail.empty:
+        return
+    shared_only = detail[detail["Type"] == "Shared"]
+    with st.expander(f"Shared tickets — {focus}", expanded=not shared_only.empty):
+        if shared_only.empty:
+            st.caption("All tickets touched in this window are solo (no handoffs).")
+        else:
+            st.dataframe(shared_only, use_container_width=True, hide_index=True)
+        with st.expander("All tickets (solo + shared)", expanded=False):
+            st.dataframe(detail, use_container_width=True, hide_index=True)
+
+
+def _perf_column_y_positions(count: int, top: float, bottom: float) -> list[float]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return [(top + bottom) / 2.0]
+    step = (bottom - top) / float(count - 1)
+    return [top + i * step for i in range(count)]
+
+
+def _perf_visit_bipartite_data(
+    visits: pd.DataFrame,
+    *,
+    focus: str,
+    max_tickets: int = 48,
+) -> dict[str, object] | None:
+    """Engineers, tickets, and visit links for the Visits tab map."""
+    if visits.empty or "ticket_number" not in visits.columns or "assignee" not in visits.columns:
+        return None
+    prepared = _perf_prepare_visits_df(visits)
+    pairs = prepared[["assignee", "ticket_number"]].copy()
+    pairs["ticket_number"] = pairs["ticket_number"].astype(str).str.strip()
+    pairs = pairs.loc[pairs["ticket_number"].ne("")].drop_duplicates()
+    if pairs.empty:
+        return None
+
+    ticket_engineers: dict[str, set[str]] = {}
+    for tn, grp in pairs.groupby("ticket_number"):
+        ticket_engineers[str(tn)] = set(grp["assignee"].dropna().astype(str).tolist())
+
+    focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
+    if focus_key:
+        tickets = sorted(tn for tn, eng in ticket_engineers.items() if focus_key in eng)
+        engineers = sorted(
+            {focus_key} | {e for tn in tickets for e in ticket_engineers.get(tn, set())},
+            key=str.lower,
+        )
+    else:
+        engineers = sorted(pairs["assignee"].dropna().unique().tolist(), key=str.lower)
+        tickets = sorted(
+            ticket_engineers.keys(),
+            key=lambda t: (-len(ticket_engineers[t]), str(t).lower()),
+        )
+
+    total_tickets = len(tickets)
+    truncated = total_tickets > max_tickets
+    if truncated:
+        tickets = tickets[:max_tickets]
+
+    solo_n = sum(1 for tn in tickets if len(ticket_engineers.get(tn, set())) == 1)
+    shared_n = len(tickets) - solo_n
+    return {
+        "engineers": engineers,
+        "tickets": tickets,
+        "ticket_engineers": ticket_engineers,
+        "focus_key": focus_key,
+        "truncated": truncated,
+        "total_tickets": total_tickets,
+        "solo_n": solo_n,
+        "shared_n": shared_n,
+    }
+
+
+def _render_perf_visit_bipartite_graph(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> None:
+    """Engineers (left) linked to tickets (right) — shared tickets use oak lines."""
+    data = _perf_visit_bipartite_data(visits_all, focus=focus)
+    if not data:
+        st.info(
+            "No visit links in this window. Assigns and reassigns create "
+            "`ticket_visits` rows that power this map."
+        )
+        return
+
+    engineers: list[str] = data["engineers"]  # type: ignore[assignment]
+    tickets: list[str] = data["tickets"]  # type: ignore[assignment]
+    ticket_engineers: dict[str, set[str]] = data["ticket_engineers"]  # type: ignore[assignment]
+    focus_key: str = data["focus_key"]  # type: ignore[assignment]
+    solo_n: int = data["solo_n"]  # type: ignore[assignment]
+    shared_n: int = data["shared_n"]  # type: ignore[assignment]
+    truncated: bool = data["truncated"]  # type: ignore[assignment]
+    total_tickets: int = data["total_tickets"]  # type: ignore[assignment]
+
+    eng_index = {eng: i for i, eng in enumerate(engineers)}
+    scope = html.escape(focus) if focus_key else "team"
+    st.markdown(
+        f'<div class="perf-bipartite-stats">'
+        f"<span>{scope}: <strong>{len(tickets)}</strong> tickets</span>"
+        f"<span>solo <strong>{solo_n}</strong></span>"
+        f"<span>shared <strong>{shared_n}</strong></span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="perf-bipartite-legend">'
+        '<span><i class="solo"></i> solo (one engineer)</span>'
+        '<span><i class="shared"></i> shared (handoff / reassign)</span>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    svg_w = 720
+    pad_top, pad_bottom = 28.0, 28.0
+    row_span = max(len(engineers), len(tickets), 1)
+    svg_h = pad_top + pad_bottom + max(row_span - 1, 0) * 46 + 32
+    y_top = pad_top + 16
+    y_bottom = svg_h - pad_bottom - 16
+    eng_ys = _perf_column_y_positions(len(engineers), y_top, y_bottom)
+    tick_ys = _perf_column_y_positions(len(tickets), y_top, y_bottom)
+
+    eng_box_w, eng_box_h = 158.0, 30.0
+    left_x = 12.0
+    eng_right = left_x + eng_box_w
+    ticket_x = 548.0
+
+    parts: list[str] = [
+        f'<svg class="perf-bipartite-svg" viewBox="0 0 {svg_w} {svg_h}" '
+        f'xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'aria-label="Engineer to ticket visit map">'
+    ]
+
+    for ti, ticket in enumerate(tickets):
+        engs = ticket_engineers.get(ticket, set())
+        is_shared = len(engs) > 1
+        ty = tick_ys[ti]
+        link_cls = "link-shared" if is_shared else "link-solo"
+        for eng in engs:
+            ei = eng_index.get(eng)
+            if ei is None:
+                continue
+            ey = eng_ys[ei]
+            mid_x = (eng_right + ticket_x) / 2.0
+            parts.append(
+                f'<path class="{link_cls}" d="M {eng_right:.1f} {ey:.1f} '
+                f"C {mid_x:.1f} {ey:.1f}, {mid_x:.1f} {ty:.1f}, {ticket_x:.1f} {ty:.1f}\"/>"
+            )
+
+    for i, eng in enumerate(engineers):
+        cy = eng_ys[i]
+        is_focus = bool(focus_key and eng == focus_key)
+        box_cls = "eng-box focus" if is_focus else "eng-box"
+        label_cls = "eng-label focus" if is_focus else "eng-label"
+        y0 = cy - eng_box_h / 2.0
+        parts.append(
+            f'<rect class="{box_cls}" x="{left_x:.1f}" y="{y0:.1f}" '
+            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="8" ry="8"/>'
+        )
+        parts.append(
+            f'<text class="{label_cls}" x="{left_x + eng_box_w / 2:.1f}" y="{cy + 4:.1f}" '
+            f'text-anchor="middle">{html.escape(eng)}</text>'
+        )
+
+    for ti, ticket in enumerate(tickets):
+        engs = ticket_engineers.get(ticket, set())
+        is_shared = len(engs) > 1
+        ty = tick_ys[ti]
+        label_cls = "ticket-label shared" if is_shared else "ticket-label"
+        short = ticket if len(ticket) <= 22 else ticket[:19] + "…"
+        parts.append(
+            f'<text class="{label_cls}" x="{ticket_x:.1f}" y="{ty + 4:.1f}" '
+            f'text-anchor="start">{html.escape(short)}</text>'
+        )
+
+    parts.append("</svg>")
+    st.markdown(
+        f'<div class="perf-bipartite-wrap">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
+    if truncated:
+        st.caption(
+            f"Showing first **{len(tickets)}** of **{total_tickets}** tickets — "
+            "narrow **Focus Assignee** or shorten the sidebar range."
+        )
 
 
 def _render_visit_summary_table(visits: pd.DataFrame) -> None:
@@ -4320,7 +4895,7 @@ def _render_visit_detail_table(visits: pd.DataFrame) -> None:
             ts = _parse_ts(view[col])
             view[col] = ts.dt.tz_convert(LOCAL_TZ).dt.strftime("%Y-%m-%d %H:%M")
     cols = [c for c in (
-        "ticket_number", "assignee", "outcome", "visit_start", "visit_end",
+        "ticket_number", "assignee", "is_active", "outcome", "visit_start", "visit_end",
         "response_note", "photo_url", "closed_by",
     ) if c in view.columns]
     st.dataframe(view[cols].sort_values("visit_start", ascending=False).head(300),
@@ -4330,23 +4905,35 @@ def _render_visit_detail_table(visits: pd.DataFrame) -> None:
 def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> None:
     if visits.empty:
         return
+    data = _perf_prepare_visits_df(visits)
     if outcome:
-        data = visits[visits["outcome"] == outcome].copy()
-    else:
-        data = visits.copy()
+        data = data[data["outcome"] == outcome].copy()
     if data.empty:
         st.caption("No data.")
         return
     counts = data.groupby("assignee").size().rename("Count").reset_index()
-    height = min(420, max(140, 32 * len(counts)))
+    height = min(520, max(180, 42 * len(counts)))
     color = "#7eb8da" if outcome == "responded" else "#D7B491"
     label = outcome.capitalize() if outcome else "Visits"
     chart = (
         alt.Chart(counts)
         .mark_bar()
         .encode(
-            x=alt.X("Count:Q", title=label),
-            y=alt.Y("assignee:N", sort="-x", title=""),
+            x=alt.X(
+                "Count:Q",
+                title=label,
+                axis=alt.Axis(format=".0f", tickMinStep=1),
+            ),
+            y=alt.Y(
+                "assignee:N",
+                sort="-x",
+                title="",
+                axis=alt.Axis(
+                    labelOverlap=False,
+                    labelFontSize=13,
+                    labelPadding=8,
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("assignee:N", title="Engineer"),
                 alt.Tooltip("Count:Q", title=label),
@@ -4811,19 +5398,35 @@ def _render_perf_person_bar(
         return
     if "staff" not in view.columns:
         view = _perf_enrich_tickets(view)
+    else:
+        view = view.copy()
+        view["staff"] = view["staff"].map(_perf_norm_member)
     totals = (
         view.groupby("staff", as_index=False)
         .size()
         .rename(columns={"size": value_name})
         .sort_values(value_name, ascending=False)
     )
-    height = min(420, max(160, 32 * len(totals)))
+    height = min(520, max(200, 42 * len(totals)))
     chart = (
         alt.Chart(totals)
         .mark_bar()
         .encode(
-            x=alt.X(f"{value_name}:Q", title=value_name),
-            y=alt.Y("staff:N", sort="-x", title=""),
+            x=alt.X(
+                f"{value_name}:Q",
+                title=value_name,
+                axis=alt.Axis(format=".0f", tickMinStep=1),
+            ),
+            y=alt.Y(
+                "staff:N",
+                sort="-x",
+                title="",
+                axis=alt.Axis(
+                    labelOverlap=False,
+                    labelFontSize=13,
+                    labelPadding=8,
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("staff:N", title="assigned_to"),
                 alt.Tooltip(f"{value_name}:Q", title="Count"),
@@ -5170,14 +5773,39 @@ def _cc_insert_attendance_log(
 
 
 def _cc_execute_ticket_update(client, payload: dict, ticket_number: str) -> None:
+    if not _cc_execute_ticket_update_if(
+        client, payload, ticket_number, match=None, require_match=False
+    ):
+        raise RuntimeError(f"Update failed for ticket {ticket_number}")
+
+
+def _cc_execute_ticket_update_if(
+    client,
+    payload: dict,
+    ticket_number: str,
+    *,
+    match: dict[str, object] | None,
+    require_match: bool = True,
+) -> bool:
+    """Update ticket; optional optimistic match (e.g. last_assigned_at unchanged)."""
     attempt = _cc_strip_missing_ticket_columns(dict(payload))
     last_err: Exception | None = None
     for _ in range(4):
         try:
-            client.table(TICKETS_TABLE).update(attempt).eq(
+            q = client.table(TICKETS_TABLE).update(attempt).eq(
                 "ticket_number", ticket_number
-            ).execute()
-            return
+            )
+            if match:
+                for col, expected in match.items():
+                    if expected is None:
+                        q = q.is_(col, "null")
+                    else:
+                        q = q.eq(col, expected)
+            res = q.execute()
+            rows = res.data or []
+            if require_match and match and not rows:
+                return False
+            return True
         except Exception as exc:
             text = str(exc)
             col = _cc_parse_missing_column(text)
@@ -5189,6 +5817,7 @@ def _cc_execute_ticket_update(client, payload: dict, ticket_number: str) -> None
             last_err = exc
     if last_err is not None:
         raise last_err
+    return False
 
 
 def _cc_insert_assignment(
@@ -5387,6 +6016,7 @@ def _cc_reassign_ticket(
     *,
     additional_info: str | None = None,
     operator_id: str,
+    expected_last_assigned_at: object | None = None,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     updates = {
@@ -5403,7 +6033,17 @@ def _cc_reassign_ticket(
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
-    _cc_execute_ticket_update(client, updates, ticket_number)
+    if not _cc_execute_ticket_update_if(
+        client,
+        updates,
+        ticket_number,
+        match={"last_assigned_at": expected_last_assigned_at},
+        require_match=True,
+    ):
+        raise ValueError(
+            f"Ticket **{ticket_number}** was changed by someone else "
+            "(assignment timestamp mismatch). Refresh the queue and try again."
+        )
     _cc_ensure_reassign_cleared_response_fields(client, ticket_number)
 
     _cc_insert_attendance_log(
@@ -5472,6 +6112,7 @@ def _cc_upsert_assignment(
         task_category,
         additional_info=additional_info,
         operator_id=operator_id,
+        expected_last_assigned_at=existing.get("last_assigned_at"),
     )
     prev_assignee = existing.get("assigned_to") or "—"
     return (
@@ -8214,6 +8855,204 @@ _BON_THEME_CSS = """
             min-height: 280px;
         }
     }
+    /* Performance — solo vs shared board (engineer rows + total ring) */
+    .perf-ss-board {
+        display: flex;
+        align-items: center;
+        gap: 2rem;
+        margin: 0.35rem 0 0.75rem;
+        font-family: var(--bon-font);
+    }
+    .perf-ss-list {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 0.45rem;
+        min-width: 0;
+    }
+    .perf-ss-row {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+    }
+    .perf-ss-row.is-selected .perf-ss-name {
+        color: var(--bon-oak);
+    }
+    .perf-ss-name {
+        flex: 0 0 9.5rem;
+        font-size: 0.82rem;
+        color: var(--bon-text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .perf-ss-pill {
+        flex: 1 1 auto;
+        display: flex;
+        max-width: 14rem;
+        border: 1px solid rgba(215, 180, 145, 0.35);
+        border-radius: 999px;
+        overflow: hidden;
+        background: var(--bon-card);
+    }
+    .perf-ss-seg {
+        flex: 1 1 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        padding: 0.28rem 0.55rem;
+        font-size: 0.72rem;
+        line-height: 1.1;
+        text-transform: lowercase;
+        letter-spacing: 0.02em;
+    }
+    .perf-ss-seg.solo {
+        border-right: 1px solid rgba(215, 180, 145, 0.22);
+        color: #9ec5e8;
+    }
+    .perf-ss-seg.shared {
+        color: var(--bon-oak);
+    }
+    .perf-ss-seg .num {
+        font-size: 0.88rem;
+        font-weight: 600;
+        color: var(--bon-text);
+    }
+    .perf-ss-total {
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 0 0.25rem;
+    }
+    .perf-ss-circle {
+        width: 4.6rem;
+        height: 4.6rem;
+        border-radius: 50%;
+        border: 2px solid rgba(215, 180, 145, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.55rem;
+        font-weight: 600;
+        color: var(--bon-text);
+        background: radial-gradient(circle at 30% 30%, #1a1a1a, var(--bon-bg));
+    }
+    .perf-ss-total-lbl {
+        margin-top: 0.25rem;
+        font-size: 0.68rem;
+        color: var(--bon-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+    .perf-ss-hint {
+        font-size: 0.72rem;
+        color: var(--bon-muted);
+        margin: 0 0 0.5rem;
+    }
+    .perf-queue-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem 0.65rem;
+        margin: 0.25rem 0 0.65rem;
+        font-size: 0.78rem;
+    }
+    .perf-queue-chip {
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid rgba(215, 180, 145, 0.28);
+        color: var(--bon-muted);
+        background: var(--bon-card);
+    }
+    .perf-queue-chip strong {
+        color: var(--bon-text);
+        font-weight: 600;
+        margin-left: 0.2rem;
+    }
+    /* Performance Visits — engineer ↔ ticket map */
+    .perf-bipartite-wrap {
+        width: 100%;
+        overflow-x: auto;
+        margin: 0.25rem 0 0.75rem;
+        border: 1px solid rgba(215, 180, 145, 0.22);
+        border-radius: var(--bon-box-radius);
+        background: var(--bon-card);
+    }
+    .perf-bipartite-svg {
+        display: block;
+        width: 100%;
+        min-width: 520px;
+        font-family: var(--bon-font);
+    }
+    .perf-bipartite-svg .eng-box {
+        fill: #141414;
+        stroke: rgba(215, 180, 145, 0.35);
+        stroke-width: 1.2;
+    }
+    .perf-bipartite-svg .eng-box.focus {
+        stroke: var(--bon-oak);
+        stroke-width: 1.8;
+    }
+    .perf-bipartite-svg .eng-label {
+        fill: var(--bon-text);
+        font-size: 11px;
+    }
+    .perf-bipartite-svg .eng-label.focus {
+        fill: var(--bon-oak);
+        font-weight: 600;
+    }
+    .perf-bipartite-svg .ticket-label {
+        fill: var(--bon-muted);
+        font-size: 11px;
+    }
+    .perf-bipartite-svg .ticket-label.shared {
+        fill: var(--bon-oak);
+        font-weight: 600;
+    }
+    .perf-bipartite-svg .link-solo {
+        fill: none;
+        stroke: rgba(158, 197, 232, 0.45);
+        stroke-width: 1.2;
+    }
+    .perf-bipartite-svg .link-shared {
+        fill: none;
+        stroke: rgba(215, 180, 145, 0.55);
+        stroke-width: 1.4;
+    }
+    .perf-bipartite-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem 1.25rem;
+        font-size: 0.72rem;
+        color: var(--bon-muted);
+        margin: 0 0 0.5rem;
+    }
+    .perf-bipartite-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+    }
+    .perf-bipartite-legend i {
+        display: inline-block;
+        width: 1.4rem;
+        height: 2px;
+        border-radius: 1px;
+    }
+    .perf-bipartite-legend i.solo { background: rgba(158, 197, 232, 0.7); }
+    .perf-bipartite-legend i.shared { background: rgba(215, 180, 145, 0.85); }
+    .perf-bipartite-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem 1rem;
+        font-size: 0.78rem;
+        color: var(--bon-muted);
+        margin-bottom: 0.35rem;
+    }
+    .perf-bipartite-stats strong {
+        color: var(--bon-text);
+    }
 </style>
 """
 
@@ -8801,13 +9640,18 @@ def _sort_tickets_newest_first(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _ticket_queue_view(df: pd.DataFrame, cols: tuple[str, ...] = _TICKET_QUEUE_TABLE_COLS) -> pd.DataFrame:
+def _ticket_queue_view(
+    df: pd.DataFrame,
+    cols: tuple[str, ...] = _TICKET_QUEUE_TABLE_COLS,
+    *,
+    preserve_order: bool = False,
+) -> pd.DataFrame:
     """Subset and format ticket columns for queue tables."""
-    sorted_df = _sort_tickets_newest_first(df)
-    show = [c for c in cols if c in sorted_df.columns]
+    ordered = df if preserve_order else _sort_tickets_newest_first(df)
+    show = [c for c in cols if c in ordered.columns]
     if not show:
-        return _format_local(sorted_df)
-    return _format_local(sorted_df[show].copy())
+        return _format_local(ordered)
+    return _format_local(ordered[show].copy())
 
 
 def _sc_set_sales_flash(message: str, *, level: str = "success") -> None:
@@ -10920,17 +11764,26 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
 
     if field_has_data and n_in_view > 0:
+        visits_all = pd.DataFrame()
+        try:
+            visits_all = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            pass
+
         summary = _perf_build_summary(
             pending, open_df, completed, investigation, on_hold, unattended
         )
-        people = ["All"] + (
-            summary["Person"].tolist() if not summary.empty else []
-        )
+        visit_summary = _perf_build_visit_summary(visits_all)
+        overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
+        people = _perf_focus_people(summary, visits_all)
         focus = st.selectbox(
             "Focus Assignee (Field)",
             options=people,
             key="perf_focus_person",
-            help="Filter field ticket tabs to one engineer, or **All**.",
+            help=(
+                "Filter Performance tabs to one engineer, or **All**. "
+                "Includes engineers seen in ticket queues or visit cycles."
+            ),
         )
         pending_f = _perf_filter_by_person(pending, focus)
         open_f = _perf_filter_by_person(open_df, focus)
@@ -10957,26 +11810,25 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         m4.metric(STATUS_RESOLVED, len(completed_f))
         m5.metric("Investigation", len(investigation_f))
         m6.metric("Unattended", len(unattended_f))
+        visits_f = _perf_filter_visits_by_person(visits_all, focus)
+        n_visits = len(visits_f)
+        n_responded = int((visits_f["outcome"] == "responded").sum()) if not visits_f.empty else 0
+        n_active_visits = (
+            int(visits_f["is_active"].sum())
+            if not visits_f.empty and "is_active" in visits_f.columns
+            else 0
+        )
+
         st.caption(
-            "**In view** matches the **CSM Cases** tab (time range + active queues). "
-            f"**Handled** ({STATUS_RESOLVED} + Investigation) is in the overview table. "
-            "**Visits** shows per-engineer visit cycles from the `ticket_visits` table."
+            "**Ticket queues** = current snapshot (`tickets_active`). "
+            "**Visit cycles** = per-assignment history (`ticket_visits`, fair credit when A→B→C on one ticket). "
+            f"**Visit responded** counts closed cycles; **Handled** is {STATUS_RESOLVED} + Investigation in the window."
         )
         if focus == "All" and n_tab_sum != n_in_view:
             st.warning(
                 f"Queue sum (**{n_tab_sum}**) ≠ in view (**{n_in_view}**) — "
                 "some tickets have an unrecognized status."
             )
-
-        # Load visits for the selected range
-        visits_all = pd.DataFrame()
-        try:
-            visits_all = _fetch_visits_in_range(range_start, range_end)
-        except Exception:
-            pass
-        visits_f = _perf_filter_visits_by_person(visits_all, focus)
-        n_visits = len(visits_f)
-        n_responded = int((visits_f["outcome"] == "responded").sum()) if not visits_f.empty else 0
 
         tab_overview, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
             [
@@ -10989,61 +11841,39 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
 
         with tab_overview:
-            if focus != "All":
-                sub = (
-                    summary[summary["Person"] == focus]
-                    if not summary.empty
-                    else summary
-                )
-                _render_perf_individual_summary_table(sub)
-            else:
-                _render_perf_individual_summary_table(summary)
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if not work_f.empty:
-                    st.markdown("**Handled by assignee**")
-                    _render_perf_person_bar(
-                        work_f, title="", value_name="Handled"
-                    )
-            with c2:
-                if not on_hold_f.empty:
-                    st.markdown("**On Hold by assignee**")
-                    _render_perf_person_bar(
-                        on_hold_f, title="", value_name="On Hold"
-                    )
-            with c3:
-                if not unattended_f.empty:
-                    st.markdown("**Unattended by assignee**")
-                    _render_perf_person_bar(
-                        unattended_f, title="", value_name="Unattended"
-                    )
+            _render_perf_solo_shared_board(
+                visits_all,
+                focus=focus,
+                overview_table=overview_table,
+            )
+            if not overview_table.empty:
+                _render_perf_queue_strip(overview_table, focus=focus)
+            _render_perf_solo_shared_detail(visits_all, focus=focus)
 
         with tab_visits:
             st.caption(
-                "One row per **assignment cycle** from `ticket_visits`. "
-                "**Responded** = field engineer completed the visit. "
-                "**Reassigned** = ticket given to someone else before response. "
-                "**On Hold** = admin paused the ticket. "
-                "**Assigned** = visit still open. "
-                "Each engineer gets their own row even if the same ticket was visited multiple times."
+                "Per-assignment history in `ticket_visits`. "
+                "**Responded** = cycle completed · **Reassigned** = handoff before respond."
             )
+            _render_perf_visit_bipartite_graph(visits_all, focus=focus)
             if visits_f.empty:
                 if visits_all.empty:
                     st.info(
-                        "No visit data yet. Apply migration "
-                        "`20260702_ticket_visits.sql` in Supabase — new assigns will "
-                        "start generating visit rows automatically."
+                        "No visit data in this window. New assigns and reassigns "
+                        "create rows in `ticket_visits` automatically."
                     )
                 else:
                     st.info("No visits for this assignee filter in this time window.")
             else:
-                vm0, vm1, vm2, vm3 = st.columns(4)
+                vm0, vm1, vm2, vm3, vm4 = st.columns(5)
                 vm0.metric("Total visits", n_visits)
                 vm1.metric("Responded", n_responded,
-                           help="Visit closed with a field response.")
+                           help="Visit cycles closed with a field response.")
                 vm2.metric("Reassigned", int((visits_f["outcome"] == "reassigned").sum()))
                 vm3.metric("On Hold / Unattended",
                            int(((visits_f["outcome"] == "on_hold") | (visits_f["outcome"] == "unattended")).sum()))
+                vm4.metric("Active now", n_active_visits,
+                           help="Open assignment cycles (is_active = true).")
                 c_left, c_right = st.columns(2)
                 with c_left:
                     st.markdown("**Responses per engineer (visits)**")
@@ -11057,40 +11887,57 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_work:
             st.caption(
-                f"**Handled** = {STATUS_RESOLVED} + Under Investigation (subset of **In view**)."
+                f"**Visit responded** = fair per-engineer credit from `ticket_visits`. "
+                f"**Handled (tickets)** = {STATUS_RESOLVED} + Investigation on the ticket snapshot "
+                "(often credits the current assignee only)."
             )
-            if work_f.empty:
-                st.info("No resolved or investigation tickets for this filter.")
+            if work_f.empty and visits_f.empty:
+                st.info("No resolved/investigation tickets or visits for this filter.")
             else:
-                view = _perf_enrich_tickets(work_f)
+                view = _perf_enrich_tickets(work_f) if not work_f.empty else work_f
                 c_chart, c_table = st.columns([3, 2])
                 with c_chart:
-                    _render_perf_person_bar(
-                        view,
-                        title="Handled by assignee",
-                        value_name="Handled",
-                    )
-                with c_table:
-                    st.markdown("**Split**")
-                    split = (
-                        view.groupby(["_outcome", "category"], as_index=False)
-                        .size()
-                        .rename(columns={"size": "Tickets"})
-                        .sort_values(
-                            ["Tickets", "_outcome", "category"],
-                            ascending=[False, True, True],
+                    if not visits_f.empty:
+                        responded_visits = visits_f[visits_f["outcome"] == "responded"]
+                        if responded_visits.empty:
+                            st.caption("No responded visits in this time range.")
+                        else:
+                            st.markdown("**Handled by visit assignee (fair credit)**")
+                            _render_visit_bar(responded_visits, outcome=None)
+                    elif not view.empty:
+                        _render_perf_person_bar(
+                            view,
+                            title="Handled by assignee (ticket snapshot)",
+                            value_name="Handled",
                         )
-                        .rename(columns={"_outcome": "Outcome", "category": "Category"})
-                    )
-                    st.dataframe(split, use_container_width=True, hide_index=True)
-                with st.expander("Trend & ticket list", expanded=False):
-                    _render_perf_outcome_trend(
-                        view,
-                        bucket_fmt=bucket_fmt,
-                        x_title=x_title,
-                        axis_format=axis_format,
-                    )
-                    _render_perf_ticket_table(view)
+                with c_table:
+                    if work_f.empty:
+                        st.caption("No ticket snapshot rows for split table.")
+                    else:
+                        st.markdown("**Split (ticket snapshot)**")
+                        split = (
+                            view.groupby(["_outcome", "category"], as_index=False)
+                            .size()
+                            .rename(columns={"size": "Tickets"})
+                            .sort_values(
+                                ["Tickets", "_outcome", "category"],
+                                ascending=[False, True, True],
+                            )
+                            .rename(columns={"_outcome": "Outcome", "category": "Category"})
+                        )
+                        st.dataframe(split, use_container_width=True, hide_index=True)
+                if not view.empty:
+                    with st.expander("Trend & ticket list", expanded=False):
+                        _render_perf_outcome_trend(
+                            view,
+                            bucket_fmt=bucket_fmt,
+                            x_title=x_title,
+                            axis_format=axis_format,
+                        )
+                        _render_perf_ticket_table(view)
+                elif not visits_f.empty:
+                    with st.expander("Visit detail list", expanded=False):
+                        _render_visit_detail_table(visits_f)
 
         with tab_hold:
             st.caption(
