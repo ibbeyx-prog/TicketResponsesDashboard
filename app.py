@@ -2770,6 +2770,19 @@ def _follow_up_display_label(row: pd.Series) -> str:
     return f"● {when}" + (f" — {note}" if note else "")
 
 
+def _follow_up_labels_by_ticket(df: pd.DataFrame) -> dict[str, str]:
+    """Map ticket_number → follow-up display label (avoids row-order mismatches)."""
+    if df.empty or "ticket_number" not in df.columns:
+        return {}
+    labels: dict[str, str] = {}
+    for _, row in df.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if not tn:
+            continue
+        labels[tn] = _follow_up_display_label(row)
+    return labels
+
+
 def _render_selectable_ticket_table(
     df: pd.DataFrame,
     *,
@@ -2805,12 +2818,17 @@ def _render_selectable_ticket_table(
         return []
 
     options = _ticket_options_for_admin(filtered)
-    view = _ticket_queue_view(filtered, cols=cols)
+    # Keep follow-up pin order; do not re-sort newest-first on top of it.
+    view = _ticket_queue_view(filtered, cols=cols, preserve_order=highlight_follow_up)
     if highlight_follow_up and not view.empty and "follow_up_at" in filtered.columns:
+        fu_labels = _follow_up_labels_by_ticket(filtered)
         view.insert(
             0,
             "Follow-up",
-            filtered.apply(_follow_up_display_label, axis=1).tolist(),
+            view["ticket_number"]
+            .astype(str)
+            .map(lambda tn: fu_labels.get(str(tn).strip(), ""))
+            .tolist(),
         )
     sel_key = _ticket_selection_session_key(key_prefix)
     if sel_key not in st.session_state:
@@ -8801,13 +8819,18 @@ def _sort_tickets_newest_first(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _ticket_queue_view(df: pd.DataFrame, cols: tuple[str, ...] = _TICKET_QUEUE_TABLE_COLS) -> pd.DataFrame:
+def _ticket_queue_view(
+    df: pd.DataFrame,
+    cols: tuple[str, ...] = _TICKET_QUEUE_TABLE_COLS,
+    *,
+    preserve_order: bool = False,
+) -> pd.DataFrame:
     """Subset and format ticket columns for queue tables."""
-    sorted_df = _sort_tickets_newest_first(df)
-    show = [c for c in cols if c in sorted_df.columns]
+    ordered = df if preserve_order else _sort_tickets_newest_first(df)
+    show = [c for c in cols if c in ordered.columns]
     if not show:
-        return _format_local(sorted_df)
-    return _format_local(sorted_df[show].copy())
+        return _format_local(ordered)
+    return _format_local(ordered[show].copy())
 
 
 def _sc_set_sales_flash(message: str, *, level: str = "success") -> None:
