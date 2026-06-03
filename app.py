@@ -4413,32 +4413,199 @@ def _fetch_visits_in_range(
     rows = res.data or []
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows)
+    return _perf_prepare_visits_df(pd.DataFrame(rows))
+
+
+def _perf_prepare_visits_df(visits: pd.DataFrame) -> pd.DataFrame:
+    """Normalize assignee labels and boolean flags for Performance UI."""
+    if visits.empty:
+        return visits
+    out = visits.copy()
+    if "assignee" in out.columns:
+        out["assignee"] = out["assignee"].map(_perf_norm_member)
+    if "is_active" in out.columns:
+        out["is_active"] = out["is_active"].fillna(False).astype(bool)
+    return out
 
 
 def _perf_build_visit_summary(visits: pd.DataFrame) -> pd.DataFrame:
-    """Per-person visit counts broken down by outcome."""
+    """Per-person visit counts broken down by outcome (visit-cycle accountability)."""
     if visits.empty or "assignee" not in visits.columns:
         return pd.DataFrame()
+    visits = _perf_prepare_visits_df(visits)
     g = visits.groupby(["assignee", "outcome"], as_index=False).size().rename(columns={"size": "count"})
     outcomes = ["assigned", "responded", "reassigned", "unattended", "on_hold"]
     people = sorted(visits["assignee"].dropna().unique().tolist(), key=str.lower)
     rows = []
     for person in people:
         pdata = g[g["assignee"] == person]
+        person_visits = visits[visits["assignee"] == person]
         row: dict = {"Person": person}
         for o in outcomes:
             row[o.capitalize()] = int(pdata.loc[pdata["outcome"] == o, "count"].sum())
         row["Total visits"] = int(pdata["count"].sum())
+        if "ticket_number" in person_visits.columns:
+            row["Tickets touched"] = int(person_visits["ticket_number"].nunique())
+        if "is_active" in person_visits.columns:
+            row["Active now"] = int(person_visits["is_active"].sum())
         rows.append(row)
     df = pd.DataFrame(rows)
     return df.sort_values(["Responded", "Total visits"], ascending=[False, False])
 
 
+def _perf_merge_field_and_visit_summaries(
+    field_summary: pd.DataFrame,
+    visit_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    """One overview table: ticket-queue snapshot + visit-cycle responded counts."""
+    if field_summary.empty and visit_summary.empty:
+        return pd.DataFrame()
+    if field_summary.empty:
+        return visit_summary
+    if visit_summary.empty:
+        return field_summary
+    left = field_summary.copy()
+    right = visit_summary[["Person", "Responded", "Reassigned", "Tickets touched"]].rename(
+        columns={
+            "Responded": "Visit responded",
+            "Reassigned": "Visit reassigned",
+            "Tickets touched": "Visit tickets",
+        }
+    )
+    merged = left.merge(right, on="Person", how="outer")
+    for col in ("Total", "Handled", "Visit responded"):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(0).astype(int)
+    sort_cols = [c for c in ("Visit responded", "Handled", "Total") if c in merged.columns]
+    if sort_cols:
+        return merged.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+    return merged
+
+
+def _perf_focus_people(
+    field_summary: pd.DataFrame,
+    visits: pd.DataFrame,
+) -> list[str]:
+    names: set[str] = set()
+    if not field_summary.empty and "Person" in field_summary.columns:
+        names |= {str(p) for p in field_summary["Person"].tolist() if str(p).strip()}
+    if not visits.empty and "assignee" in visits.columns:
+        names |= {str(p) for p in visits["assignee"].dropna().unique().tolist() if str(p).strip()}
+    return ["All"] + sorted(names, key=str.lower)
+
+
 def _perf_filter_visits_by_person(visits: pd.DataFrame, person: str) -> pd.DataFrame:
-    if visits.empty or person == "All":
+    if visits.empty or person in ("", "All"):
         return visits
-    return visits.loc[visits["assignee"] == person].copy()
+    key = _perf_norm_member(person)
+    prepared = _perf_prepare_visits_df(visits)
+    return prepared.loc[prepared["assignee"] == key].copy()
+
+
+def _perf_solo_shared_ticket_rows(visits: pd.DataFrame, person: str) -> pd.DataFrame:
+    """Per ticket: solo vs shared for tickets this engineer touched in the window."""
+    if visits.empty or "ticket_number" not in visits.columns or person in ("", "All"):
+        return pd.DataFrame()
+    prepared = _perf_prepare_visits_df(visits)
+    key = _perf_norm_member(person)
+    touched = prepared.loc[prepared["assignee"] == key, "ticket_number"].astype(str).unique()
+    rows: list[dict[str, object]] = []
+    for tn in sorted({str(t).strip() for t in touched if str(t).strip()}):
+        tvisits = prepared[prepared["ticket_number"].astype(str) == tn]
+        engineers = sorted(tvisits["assignee"].dropna().unique().tolist(), key=str.lower)
+        solo = len(engineers) == 1
+        responded = False
+        if "outcome" in tvisits.columns:
+            responded = bool(
+                ((tvisits["assignee"] == key) & (tvisits["outcome"] == "responded")).any()
+            )
+        rows.append(
+            {
+                "Ticket": tn,
+                "Type": "Solo" if solo else "Shared",
+                "Engineers": len(engineers),
+                "Who was involved": ", ".join(engineers),
+                "Engineer responded": "Yes" if responded else "No",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _perf_solo_shared_summary_all(visits: pd.DataFrame) -> pd.DataFrame:
+    """Solo vs shared ticket counts for every engineer in the visit window."""
+    if visits.empty or "assignee" not in visits.columns:
+        return pd.DataFrame()
+    prepared = _perf_prepare_visits_df(visits)
+    people = sorted(prepared["assignee"].dropna().unique().tolist(), key=str.lower)
+    rows: list[dict[str, object]] = []
+    for person in people:
+        detail = _perf_solo_shared_ticket_rows(prepared, person)
+        if detail.empty:
+            continue
+        solo = int((detail["Type"] == "Solo").sum())
+        shared = int((detail["Type"] == "Shared").sum())
+        rows.append(
+            {
+                "Person": person,
+                "Solo tickets": solo,
+                "Shared tickets": shared,
+                "Tickets touched": solo + shared,
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        ["Tickets touched", "Solo tickets"],
+        ascending=[False, False],
+    )
+
+
+def _render_perf_solo_shared_breakdown(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> None:
+    """Solo vs shared tickets (visit history) for one engineer or all engineers."""
+    with st.expander("Solo vs shared tickets", expanded=True):
+        st.caption(
+            "**Solo** = only this engineer on that ticket in `ticket_visits` (sidebar time range). "
+            "**Shared** = another engineer also has visit rows (reassign/handoff; may be different days)."
+        )
+        if visits_all.empty:
+            st.caption("No visit data in this window.")
+            return
+        if focus == "All":
+            summary = _perf_solo_shared_summary_all(visits_all)
+            if summary.empty:
+                st.caption("No engineers in visit data.")
+            else:
+                st.dataframe(summary, use_container_width=True, hide_index=True)
+                st.caption(
+                    "Pick one engineer in **Focus Assignee** to see which ticket numbers were shared."
+                )
+            return
+
+        detail = _perf_solo_shared_ticket_rows(visits_all, focus)
+        if detail.empty:
+            st.caption(f"No tickets touched by **{focus}** in this window.")
+            return
+        solo_n = int((detail["Type"] == "Solo").sum())
+        shared_n = int((detail["Type"] == "Shared").sum())
+        s0, s1, s2 = st.columns(3)
+        s0.metric("Solo tickets", solo_n)
+        s1.metric("Shared tickets", shared_n)
+        s2.metric("Tickets touched", solo_n + shared_n)
+        shared_only = detail[detail["Type"] == "Shared"].copy()
+        if shared_only.empty:
+            st.success(
+                "Every ticket this engineer touched in the window is **solo** "
+                "(no other engineer on visit history)."
+            )
+        else:
+            st.markdown("**Shared tickets (other engineers involved)**")
+            st.dataframe(shared_only, use_container_width=True, hide_index=True)
+        with st.expander("All tickets for this engineer (solo + shared)", expanded=False):
+            st.dataframe(detail, use_container_width=True, hide_index=True)
 
 
 def _render_visit_summary_table(visits: pd.DataFrame) -> None:
@@ -4459,7 +4626,7 @@ def _render_visit_detail_table(visits: pd.DataFrame) -> None:
             ts = _parse_ts(view[col])
             view[col] = ts.dt.tz_convert(LOCAL_TZ).dt.strftime("%Y-%m-%d %H:%M")
     cols = [c for c in (
-        "ticket_number", "assignee", "outcome", "visit_start", "visit_end",
+        "ticket_number", "assignee", "is_active", "outcome", "visit_start", "visit_end",
         "response_note", "photo_url", "closed_by",
     ) if c in view.columns]
     st.dataframe(view[cols].sort_values("visit_start", ascending=False).head(300),
@@ -4469,23 +4636,35 @@ def _render_visit_detail_table(visits: pd.DataFrame) -> None:
 def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> None:
     if visits.empty:
         return
+    data = _perf_prepare_visits_df(visits)
     if outcome:
-        data = visits[visits["outcome"] == outcome].copy()
-    else:
-        data = visits.copy()
+        data = data[data["outcome"] == outcome].copy()
     if data.empty:
         st.caption("No data.")
         return
     counts = data.groupby("assignee").size().rename("Count").reset_index()
-    height = min(420, max(140, 32 * len(counts)))
+    height = min(520, max(180, 42 * len(counts)))
     color = "#7eb8da" if outcome == "responded" else "#D7B491"
     label = outcome.capitalize() if outcome else "Visits"
     chart = (
         alt.Chart(counts)
         .mark_bar()
         .encode(
-            x=alt.X("Count:Q", title=label),
-            y=alt.Y("assignee:N", sort="-x", title=""),
+            x=alt.X(
+                "Count:Q",
+                title=label,
+                axis=alt.Axis(format=".0f", tickMinStep=1),
+            ),
+            y=alt.Y(
+                "assignee:N",
+                sort="-x",
+                title="",
+                axis=alt.Axis(
+                    labelOverlap=False,
+                    labelFontSize=13,
+                    labelPadding=8,
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("assignee:N", title="Engineer"),
                 alt.Tooltip("Count:Q", title=label),
@@ -4950,19 +5129,35 @@ def _render_perf_person_bar(
         return
     if "staff" not in view.columns:
         view = _perf_enrich_tickets(view)
+    else:
+        view = view.copy()
+        view["staff"] = view["staff"].map(_perf_norm_member)
     totals = (
         view.groupby("staff", as_index=False)
         .size()
         .rename(columns={"size": value_name})
         .sort_values(value_name, ascending=False)
     )
-    height = min(420, max(160, 32 * len(totals)))
+    height = min(520, max(200, 42 * len(totals)))
     chart = (
         alt.Chart(totals)
         .mark_bar()
         .encode(
-            x=alt.X(f"{value_name}:Q", title=value_name),
-            y=alt.Y("staff:N", sort="-x", title=""),
+            x=alt.X(
+                f"{value_name}:Q",
+                title=value_name,
+                axis=alt.Axis(format=".0f", tickMinStep=1),
+            ),
+            y=alt.Y(
+                "staff:N",
+                sort="-x",
+                title="",
+                axis=alt.Axis(
+                    labelOverlap=False,
+                    labelFontSize=13,
+                    labelPadding=8,
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("staff:N", title="assigned_to"),
                 alt.Tooltip(f"{value_name}:Q", title="Count"),
@@ -11102,17 +11297,26 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
 
     if field_has_data and n_in_view > 0:
+        visits_all = pd.DataFrame()
+        try:
+            visits_all = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            pass
+
         summary = _perf_build_summary(
             pending, open_df, completed, investigation, on_hold, unattended
         )
-        people = ["All"] + (
-            summary["Person"].tolist() if not summary.empty else []
-        )
+        visit_summary = _perf_build_visit_summary(visits_all)
+        overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
+        people = _perf_focus_people(summary, visits_all)
         focus = st.selectbox(
             "Focus Assignee (Field)",
             options=people,
             key="perf_focus_person",
-            help="Filter field ticket tabs to one engineer, or **All**.",
+            help=(
+                "Filter Performance tabs to one engineer, or **All**. "
+                "Includes engineers seen in ticket queues or visit cycles."
+            ),
         )
         pending_f = _perf_filter_by_person(pending, focus)
         open_f = _perf_filter_by_person(open_df, focus)
@@ -11139,26 +11343,25 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         m4.metric(STATUS_RESOLVED, len(completed_f))
         m5.metric("Investigation", len(investigation_f))
         m6.metric("Unattended", len(unattended_f))
+        visits_f = _perf_filter_visits_by_person(visits_all, focus)
+        n_visits = len(visits_f)
+        n_responded = int((visits_f["outcome"] == "responded").sum()) if not visits_f.empty else 0
+        n_active_visits = (
+            int(visits_f["is_active"].sum())
+            if not visits_f.empty and "is_active" in visits_f.columns
+            else 0
+        )
+
         st.caption(
-            "**In view** matches the **CSM Cases** tab (time range + active queues). "
-            f"**Handled** ({STATUS_RESOLVED} + Investigation) is in the overview table. "
-            "**Visits** shows per-engineer visit cycles from the `ticket_visits` table."
+            "**Ticket queues** = current snapshot (`tickets_active`). "
+            "**Visit cycles** = per-assignment history (`ticket_visits`, fair credit when A→B→C on one ticket). "
+            f"**Visit responded** counts closed cycles; **Handled** is {STATUS_RESOLVED} + Investigation in the window."
         )
         if focus == "All" and n_tab_sum != n_in_view:
             st.warning(
                 f"Queue sum (**{n_tab_sum}**) ≠ in view (**{n_in_view}**) — "
                 "some tickets have an unrecognized status."
             )
-
-        # Load visits for the selected range
-        visits_all = pd.DataFrame()
-        try:
-            visits_all = _fetch_visits_in_range(range_start, range_end)
-        except Exception:
-            pass
-        visits_f = _perf_filter_visits_by_person(visits_all, focus)
-        n_visits = len(visits_f)
-        n_responded = int((visits_f["outcome"] == "responded").sum()) if not visits_f.empty else 0
 
         tab_overview, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
             [
@@ -11171,19 +11374,20 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
 
         with tab_overview:
-            if focus != "All":
-                sub = (
-                    summary[summary["Person"] == focus]
-                    if not summary.empty
-                    else summary
-                )
-                _render_perf_individual_summary_table(sub)
-            else:
-                _render_perf_individual_summary_table(summary)
+            if not overview_table.empty:
+                if focus != "All":
+                    key = _perf_norm_member(focus)
+                    sub = overview_table[overview_table["Person"] == key]
+                    _render_perf_individual_summary_table(sub)
+                else:
+                    _render_perf_individual_summary_table(overview_table)
             c1, c2, c3 = st.columns(3)
             with c1:
-                if not work_f.empty:
-                    st.markdown("**Handled by assignee**")
+                if not visits_f.empty:
+                    st.markdown("**Visit responded (fair credit)**")
+                    _render_visit_bar(visits_f, outcome="responded")
+                elif not work_f.empty:
+                    st.markdown("**Handled (ticket snapshot)**")
                     _render_perf_person_bar(
                         work_f, title="", value_name="Handled"
                     )
@@ -11202,30 +11406,31 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_visits:
             st.caption(
-                "One row per **assignment cycle** from `ticket_visits`. "
-                "**Responded** = field engineer completed the visit. "
-                "**Reassigned** = ticket given to someone else before response. "
-                "**On Hold** = admin paused the ticket. "
-                "**Assigned** = visit still open. "
-                "Each engineer gets their own row even if the same ticket was visited multiple times."
+                "Source of truth for **individual accountability** when multiple engineers touch the same ticket. "
+                "**Responded** = that assignee completed their cycle. "
+                "**Reassigned** = ticket moved on before they responded. "
+                "**Active now** (`is_active`) = current assignment cycle still open."
             )
+            if not visits_all.empty:
+                _render_perf_solo_shared_breakdown(visits_all, focus=focus)
             if visits_f.empty:
                 if visits_all.empty:
                     st.info(
-                        "No visit data yet. Apply migration "
-                        "`20260702_ticket_visits.sql` in Supabase — new assigns will "
-                        "start generating visit rows automatically."
+                        "No visit data in this window. New assigns and reassigns "
+                        "create rows in `ticket_visits` automatically."
                     )
                 else:
                     st.info("No visits for this assignee filter in this time window.")
             else:
-                vm0, vm1, vm2, vm3 = st.columns(4)
+                vm0, vm1, vm2, vm3, vm4 = st.columns(5)
                 vm0.metric("Total visits", n_visits)
                 vm1.metric("Responded", n_responded,
-                           help="Visit closed with a field response.")
+                           help="Visit cycles closed with a field response.")
                 vm2.metric("Reassigned", int((visits_f["outcome"] == "reassigned").sum()))
                 vm3.metric("On Hold / Unattended",
                            int(((visits_f["outcome"] == "on_hold") | (visits_f["outcome"] == "unattended")).sum()))
+                vm4.metric("Active now", n_active_visits,
+                           help="Open assignment cycles (is_active = true).")
                 c_left, c_right = st.columns(2)
                 with c_left:
                     st.markdown("**Responses per engineer (visits)**")
@@ -11239,40 +11444,57 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_work:
             st.caption(
-                f"**Handled** = {STATUS_RESOLVED} + Under Investigation (subset of **In view**)."
+                f"**Visit responded** = fair per-engineer credit from `ticket_visits`. "
+                f"**Handled (tickets)** = {STATUS_RESOLVED} + Investigation on the ticket snapshot "
+                "(often credits the current assignee only)."
             )
-            if work_f.empty:
-                st.info("No resolved or investigation tickets for this filter.")
+            if work_f.empty and visits_f.empty:
+                st.info("No resolved/investigation tickets or visits for this filter.")
             else:
-                view = _perf_enrich_tickets(work_f)
+                view = _perf_enrich_tickets(work_f) if not work_f.empty else work_f
                 c_chart, c_table = st.columns([3, 2])
                 with c_chart:
-                    _render_perf_person_bar(
-                        view,
-                        title="Handled by assignee",
-                        value_name="Handled",
-                    )
-                with c_table:
-                    st.markdown("**Split**")
-                    split = (
-                        view.groupby(["_outcome", "category"], as_index=False)
-                        .size()
-                        .rename(columns={"size": "Tickets"})
-                        .sort_values(
-                            ["Tickets", "_outcome", "category"],
-                            ascending=[False, True, True],
+                    if not visits_f.empty:
+                        responded_visits = visits_f[visits_f["outcome"] == "responded"]
+                        if responded_visits.empty:
+                            st.caption("No responded visits in this time range.")
+                        else:
+                            st.markdown("**Handled by visit assignee (fair credit)**")
+                            _render_visit_bar(responded_visits, outcome=None)
+                    elif not view.empty:
+                        _render_perf_person_bar(
+                            view,
+                            title="Handled by assignee (ticket snapshot)",
+                            value_name="Handled",
                         )
-                        .rename(columns={"_outcome": "Outcome", "category": "Category"})
-                    )
-                    st.dataframe(split, use_container_width=True, hide_index=True)
-                with st.expander("Trend & ticket list", expanded=False):
-                    _render_perf_outcome_trend(
-                        view,
-                        bucket_fmt=bucket_fmt,
-                        x_title=x_title,
-                        axis_format=axis_format,
-                    )
-                    _render_perf_ticket_table(view)
+                with c_table:
+                    if work_f.empty:
+                        st.caption("No ticket snapshot rows for split table.")
+                    else:
+                        st.markdown("**Split (ticket snapshot)**")
+                        split = (
+                            view.groupby(["_outcome", "category"], as_index=False)
+                            .size()
+                            .rename(columns={"size": "Tickets"})
+                            .sort_values(
+                                ["Tickets", "_outcome", "category"],
+                                ascending=[False, True, True],
+                            )
+                            .rename(columns={"_outcome": "Outcome", "category": "Category"})
+                        )
+                        st.dataframe(split, use_container_width=True, hide_index=True)
+                if not view.empty:
+                    with st.expander("Trend & ticket list", expanded=False):
+                        _render_perf_outcome_trend(
+                            view,
+                            bucket_fmt=bucket_fmt,
+                            x_title=x_title,
+                            axis_format=axis_format,
+                        )
+                        _render_perf_ticket_table(view)
+                elif not visits_f.empty:
+                    with st.expander("Visit detail list", expanded=False):
+                        _render_visit_detail_table(visits_f)
 
         with tab_hold:
             st.caption(
