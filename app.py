@@ -4700,6 +4700,25 @@ def _render_perf_solo_shared_detail(
             st.dataframe(detail, use_container_width=True, hide_index=True)
 
 
+_PERF_ENG_LINE_COLORS: tuple[str, ...] = (
+    "#7eb8da",
+    "#D7B491",
+    "#8fd99a",
+    "#c9a0dc",
+    "#f0a080",
+    "#e8d06a",
+    "#6ecfcf",
+    "#f08098",
+)
+
+
+def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
+    return {
+        eng: _PERF_ENG_LINE_COLORS[i % len(_PERF_ENG_LINE_COLORS)]
+        for i, eng in enumerate(engineers)
+    }
+
+
 def _perf_apply_map_pick_from_query() -> None:
     """Apply engineer pick from Visits map click (?perf_map_pick=)."""
     if "perf_map_pick" not in st.query_params:
@@ -4716,20 +4735,77 @@ def _perf_apply_map_pick_from_query() -> None:
     st.rerun()
 
 
-def _perf_column_y_positions(count: int, top: float, bottom: float) -> list[float]:
+_PERF_MAP_SEARCH_KEY = "perf_map_ticket_search"
+_PERF_MAP_ENG_ROW_H = 30.0
+_PERF_MAP_PAD_V = 10.0
+_PERF_MAP_VIEWPORT_PX = 760
+_PERF_MAP_IFRAME_MAX = 2400
+
+
+def _perf_map_ticket_layout(n: int) -> tuple[float, float, float, int]:
+    """Row height, label font (px), highlight font (px), max chars — scale down as count grows."""
+    if n <= 6:
+        return (15.0, 7.0, 7.5, 20)
+    if n <= 12:
+        return (12.0, 6.5, 7.0, 18)
+    if n <= 20:
+        return (10.0, 6.0, 6.5, 16)
+    if n <= 35:
+        return (8.0, 5.5, 6.0, 14)
+    if n <= 55:
+        return (6.5, 5.0, 5.5, 12)
+    return (5.5, 4.5, 5.0, 11)
+
+
+def _perf_map_expand_layout(
+    *,
+    n_eng: int,
+    n_tick: int,
+    ticket_row_h: float,
+    ticket_font: float,
+    ticket_font_hl: float,
+    viewport_px: int,
+) -> tuple[float, float, float, float]:
+    """Grow row spacing and fonts to fill the visible iframe when content is short."""
+    band_top = _PERF_MAP_PAD_V + 6.0
+    legend_h = 48
+    usable_inner = float(viewport_px) - legend_h - band_top * 2 - 22.0
+    eng_band = max(0, n_eng - 1) * _PERF_MAP_ENG_ROW_H
+    tick_band = max(0, n_tick - 1) * ticket_row_h
+    inner_h = max(eng_band, tick_band, 1.0)
+    if n_tick > 1 and tick_band < usable_inner:
+        grown_row = min(22.0, usable_inner / float(n_tick - 1))
+        if grown_row > ticket_row_h:
+            ticket_row_h = grown_row
+            boost = min(1.5, (grown_row - 8.0) * 0.12)
+            ticket_font = min(8.0, ticket_font + boost)
+            ticket_font_hl = min(8.5, ticket_font_hl + boost)
+            tick_band = (n_tick - 1) * ticket_row_h
+            inner_h = max(eng_band, tick_band, 1.0)
+    return ticket_row_h, ticket_font, ticket_font_hl, inner_h
+
+
+def _perf_map_band_y_positions(
+    count: int,
+    row_h: float,
+    *,
+    inner_h: float,
+    band_top: float,
+) -> list[float]:
+    """Evenly spaced rows inside a band — compact tickets, readable engineers."""
     if count <= 0:
         return []
     if count == 1:
-        return [(top + bottom) / 2.0]
-    step = (bottom - top) / float(count - 1)
-    return [top + i * step for i in range(count)]
+        return [band_top + inner_h / 2.0]
+    band_h = (count - 1) * row_h
+    offset = band_top + max(0.0, (inner_h - band_h) / 2.0)
+    return [offset + i * row_h for i in range(count)]
 
 
 def _perf_visit_bipartite_data(
     visits: pd.DataFrame,
     *,
     focus: str,
-    max_tickets: int = 48,
 ) -> dict[str, object] | None:
     """Engineers, tickets, and visit links for the Visits tab map."""
     if visits.empty or "ticket_number" not in visits.columns or "assignee" not in visits.columns:
@@ -4746,38 +4822,53 @@ def _perf_visit_bipartite_data(
         ticket_engineers[str(tn)] = set(grp["assignee"].dropna().astype(str).tolist())
 
     focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
-    if focus_key:
-        tickets = sorted(tn for tn, eng in ticket_engineers.items() if focus_key in eng)
-        engineers = sorted(
-            {focus_key} | {e for tn in tickets for e in ticket_engineers.get(tn, set())},
-            key=str.lower,
-        )
-    else:
-        engineers = sorted(pairs["assignee"].dropna().unique().tolist(), key=str.lower)
-        tickets = sorted(
-            ticket_engineers.keys(),
-            key=lambda t: (-len(ticket_engineers[t]), str(t).lower()),
-        )
-
-    total_tickets = len(tickets)
-    truncated = total_tickets > max_tickets
-    if truncated:
-        tickets = tickets[:max_tickets]
-
-    solo_n = sum(1 for tn in tickets if len(ticket_engineers.get(tn, set())) == 1)
-    shared_n = len(tickets) - solo_n
     all_engineers = sorted(pairs["assignee"].dropna().unique().tolist(), key=str.lower)
+    all_tickets = sorted(
+        ticket_engineers.keys(),
+        key=lambda t: (-len(ticket_engineers[t]), str(t).lower()),
+    )
     return {
-        "engineers": engineers,
         "all_engineers": all_engineers,
-        "tickets": tickets,
+        "all_tickets": all_tickets,
         "ticket_engineers": ticket_engineers,
         "focus_key": focus_key,
-        "truncated": truncated,
-        "total_tickets": total_tickets,
-        "solo_n": solo_n,
-        "shared_n": shared_n,
+        "total_tickets": len(all_tickets),
     }
+
+
+def _perf_visit_map_ticket_pool(
+    all_tickets: list[str],
+    ticket_engineers: dict[str, set[str]],
+    eng_index: dict[str, int],
+    *,
+    focus_key: str,
+    search: str,
+) -> list[str]:
+    """Filter + sort tickets for the map (engineer focus, search, barycenter order)."""
+    pool = list(all_tickets)
+    if focus_key:
+        pool = [t for t in pool if focus_key in ticket_engineers.get(t, set())]
+    q = str(search or "").strip().lower()
+    if q:
+        pool = [t for t in pool if q in str(t).lower()]
+    return _perf_bipartite_ticket_order(pool, ticket_engineers, eng_index)
+
+
+def _perf_bipartite_ticket_order(
+    tickets: list[str],
+    ticket_engineers: dict[str, set[str]],
+    eng_index: dict[str, int],
+) -> list[str]:
+    """Order tickets near their engineers' rows — fewer crossing lines."""
+
+    def _key(tn: str) -> tuple[float, str]:
+        engs = ticket_engineers.get(tn, set())
+        if not engs:
+            return (0.0, tn.lower())
+        avg = sum(eng_index.get(e, 0) for e in engs) / len(engs)
+        return (avg, tn.lower())
+
+    return sorted(tickets, key=_key)
 
 
 def _render_perf_visit_bipartite_graph(
@@ -4785,7 +4876,7 @@ def _render_perf_visit_bipartite_graph(
     *,
     focus: str,
 ) -> None:
-    """Engineers (left) linked to tickets (right) — shared tickets use oak lines."""
+    """Engineers (left) linked to tickets (right) — all filtered tickets on one view."""
     data = _perf_visit_bipartite_data(visits_all, focus=focus)
     if not data:
         components.html(
@@ -4795,59 +4886,137 @@ def _render_perf_visit_bipartite_graph(
         return
 
     all_engineers: list[str] = data["all_engineers"]  # type: ignore[assignment]
-    tickets: list[str] = data["tickets"]  # type: ignore[assignment]
+    all_tickets: list[str] = data["all_tickets"]  # type: ignore[assignment]
     ticket_engineers: dict[str, set[str]] = data["ticket_engineers"]  # type: ignore[assignment]
     focus_key: str = data["focus_key"]  # type: ignore[assignment]
+    total_all: int = data["total_tickets"]  # type: ignore[assignment]
 
-    svg_w = 720
-    pad_top, pad_bottom = 28.0, 28.0
-    row_span = max(len(all_engineers), len(tickets), 1)
-    svg_h = pad_top + pad_bottom + max(row_span - 1, 0) * 46 + 32
-    y_top = pad_top + 16
-    y_bottom = svg_h - pad_bottom - 16
-    eng_ys = _perf_column_y_positions(len(all_engineers), y_top, y_bottom)
-    tick_ys = _perf_column_y_positions(len(tickets), y_top, y_bottom)
-
-    eng_box_w, eng_box_h = 158.0, 30.0
-    left_x = 12.0
-    eng_right = left_x + eng_box_w
-    ticket_x = 548.0
+    search = st.text_input(
+        "Find ticket",
+        key=_PERF_MAP_SEARCH_KEY,
+        placeholder="Filter by ticket number…",
+    )
 
     eng_index = {eng: i for i, eng in enumerate(all_engineers)}
+    pool = _perf_visit_map_ticket_pool(
+        all_tickets,
+        ticket_engineers,
+        eng_index,
+        focus_key=focus_key,
+        search=search,
+    )
+    pool_total = len(pool)
+    tickets = pool
+
+    if pool_total == 0:
+        st.caption("No tickets match — try another search or pick **All** in Focus Assignee.")
+    elif focus_key:
+        st.caption(
+            f"**{pool_total}** ticket(s) for **{focus_key}** · "
+            f"click engineer again to show all **{total_all}**"
+        )
+    else:
+        st.caption(
+            f"**{pool_total}** ticket(s) · click an engineer to filter · "
+            f"use search to narrow"
+        )
+
+    if not tickets:
+        return
+
+    eng_colors = _perf_engineer_color_map(all_engineers)
+    eng_slug = {eng: f"e{i}" for i, eng in enumerate(all_engineers)}
+    focus_slug = eng_slug.get(focus_key, "") if focus_key else ""
+    tickets_for_focus = {
+        tn for tn, engs in ticket_engineers.items() if focus_key and focus_key in engs
+    }
+
+    n_eng = len(all_engineers)
+    n_tick = len(tickets)
+    ticket_row_h, ticket_font, ticket_font_hl, ticket_max_len = _perf_map_ticket_layout(
+        n_tick,
+    )
+    ticket_row_h, ticket_font, ticket_font_hl, inner_h = _perf_map_expand_layout(
+        n_eng=n_eng,
+        n_tick=n_tick,
+        ticket_row_h=ticket_row_h,
+        ticket_font=ticket_font,
+        ticket_font_hl=ticket_font_hl,
+        viewport_px=_PERF_MAP_VIEWPORT_PX,
+    )
+    band_top = _PERF_MAP_PAD_V + 6.0
+    svg_w = 640
+    svg_h = band_top * 2 + inner_h + 10.0
+    svg_h_px = int(svg_h)
+    eng_ys = _perf_map_band_y_positions(
+        n_eng, _PERF_MAP_ENG_ROW_H, inner_h=inner_h, band_top=band_top,
+    )
+    tick_ys = _perf_map_band_y_positions(
+        n_tick, ticket_row_h, inner_h=inner_h, band_top=band_top,
+    )
+
+    eng_box_w, eng_box_h = 132.0, 22.0
+    left_x = 8.0
+    eng_right = left_x + eng_box_w
+    ticket_x = 468.0
+
     svg_parts: list[str] = []
+    focus_mode_cls = " focus-mode" if focus_slug else ""
+
+    legend_bits: list[str] = []
+    for eng in all_engineers:
+        col = eng_colors[eng]
+        slug = eng_slug[eng]
+        active = slug == focus_slug
+        short_eng = eng if len(eng) <= 14 else eng[:12] + "…"
+        legend_bits.append(
+            f'<button type="button" class="legend-chip{" active" if active else ""}" '
+            f'onclick="pickEng({json.dumps(eng)}, {"true" if active else "false"})">'
+            f'<i style="background:{col}"></i>{html.escape(short_eng)}</button>'
+        )
+    legend_html = "".join(legend_bits)
 
     for ti, ticket in enumerate(tickets):
         engs = ticket_engineers.get(ticket, set())
-        is_shared = len(engs) > 1
         ty = tick_ys[ti]
-        link_cls = "link-shared" if is_shared else "link-solo"
-        for eng in engs:
+        for eng in sorted(engs, key=str.lower):
             ei = eng_index.get(eng)
             if ei is None:
                 continue
             ey = eng_ys[ei]
+            col = eng_colors[eng]
+            slug = eng_slug[eng]
+            is_hl_link = bool(focus_key and eng == focus_key)
             mid_x = (eng_right + ticket_x) / 2.0
+            sw = 2.0 if is_hl_link else 1.1
             svg_parts.append(
-                f'<path class="{link_cls}" d="M {eng_right:.1f} {ey:.1f} '
+                f'<path class="link-path {slug}{" hl" if is_hl_link else ""}" '
+                f'stroke="{col}" stroke-width="{sw}" fill="none" '
+                f'd="M {eng_right:.1f} {ey:.1f} '
                 f"C {mid_x:.1f} {ey:.1f}, {mid_x:.1f} {ty:.1f}, {ticket_x:.1f} {ty:.1f}\"/>"
             )
 
     for i, eng in enumerate(all_engineers):
         cy = eng_ys[i]
-        is_focus = bool(focus_key and eng == focus_key)
-        box_cls = "eng-box focus" if is_focus else "eng-box"
-        label_cls = "eng-label focus" if is_focus else "eng-label"
+        col = eng_colors[eng]
+        slug = eng_slug[eng]
+        is_focus = slug == focus_slug
         y0 = cy - eng_box_h / 2.0
         eng_json = json.dumps(eng)
         focus_flag = "true" if is_focus else "false"
+        short_eng = eng if len(eng) <= 15 else eng[:13] + "…"
         svg_parts.append(
-            f'<g class="eng-pick" role="button" tabindex="0" '
+            f'<g class="eng-pick {slug}{" focused" if is_focus else ""}" role="button" tabindex="0" '
             f'onclick="pickEng({eng_json}, {focus_flag})" '
             f'onkeydown="if(event.key===\'Enter\'||event.key===\' \')pickEng({eng_json}, {focus_flag})">'
-            f'<rect class="{box_cls}" x="{left_x:.1f}" y="{y0:.1f}" '
-            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="8" ry="8"/>'
-            f'<text class="{label_cls}" x="{left_x + eng_box_w / 2:.1f}" y="{cy + 4:.1f}" '
-            f'text-anchor="middle">{html.escape(eng)}</text>'
+            f'<rect class="eng-box" x="{left_x:.1f}" y="{y0:.1f}" '
+            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="6" ry="6" '
+            f'stroke="{col}" stroke-width="{2.2 if is_focus else 1.2}"/>'
+            f'<rect class="eng-accent" x="{left_x:.1f}" y="{y0:.1f}" width="3" height="{eng_box_h:.1f}" '
+            f'rx="1" fill="{col}"/>'
+            f'<text class="eng-label" x="{left_x + eng_box_w / 2:.1f}" y="{cy + 3.5:.1f}" '
+            f'text-anchor="middle" fill="{col if is_focus else "#e8e6e3"}">'
+            f"{html.escape(short_eng)}</text>"
             f"</g>"
         )
 
@@ -4855,28 +5024,66 @@ def _render_perf_visit_bipartite_graph(
         engs = ticket_engineers.get(ticket, set())
         is_shared = len(engs) > 1
         ty = tick_ys[ti]
-        label_cls = "ticket-label shared" if is_shared else "ticket-label"
-        short = ticket if len(ticket) <= 22 else ticket[:19] + "…"
+        is_hl = bool(focus_key and ticket in tickets_for_focus)
+        if is_hl and focus_key:
+            ticket_col = eng_colors.get(focus_key, "#e8e6e3")
+        elif is_shared:
+            ticket_col = "#D7B491"
+        else:
+            solo_eng = next(iter(engs), "")
+            ticket_col = eng_colors.get(solo_eng, "#a39e97")
+        short = ticket if len(ticket) <= ticket_max_len else ticket[: ticket_max_len - 1] + "…"
+        hl_cls = " hl" if is_hl else ""
+        ty_off = max(1.5, ticket_font * 0.35)
         svg_parts.append(
-            f'<text class="{label_cls}" x="{ticket_x:.1f}" y="{ty + 4:.1f}" '
-            f'text-anchor="start">{html.escape(short)}</text>'
+            f'<text class="ticket-label{hl_cls}" x="{ticket_x:.1f}" y="{ty + ty_off:.1f}" '
+            f'text-anchor="start" fill="{ticket_col}">{html.escape(short)}</text>'
         )
+
+    legend_h = 48
+    content_h = svg_h_px + legend_h + 12
+    frame_h = min(max(content_h, _PERF_MAP_VIEWPORT_PX), _PERF_MAP_IFRAME_MAX)
 
     map_html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
 <style>
-body {{ margin: 0; background: #141414; font-family: system-ui, sans-serif; }}
-.perf-bipartite-svg {{ display: block; width: 100%; min-width: 520px; }}
-.eng-box {{ fill: #141414; stroke: rgba(215, 180, 145, 0.35); stroke-width: 1.2; }}
+html, body {{
+  margin: 0; padding: 0; background: #141414;
+  font-family: system-ui, sans-serif; color: #a39e97;
+  min-height: {frame_h}px; height: {frame_h}px;
+  overflow: auto; -webkit-overflow-scrolling: touch;
+  box-sizing: border-box;
+}}
+.perf-map-shell {{
+  padding: 4px 6px 6px; min-width: 320px;
+  min-height: {frame_h}px; box-sizing: border-box;
+}}
+.eng-legend {{ display: flex; flex-wrap: wrap; gap: 0.25rem 0.4rem; margin-bottom: 4px; }}
+.legend-chip {{
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  border: 1px solid rgba(215,180,145,0.2); border-radius: 999px;
+  background: #141414; color: #e8e6e3; font-size: 9px; padding: 0.12rem 0.4rem;
+  cursor: pointer; line-height: 1.2;
+}}
+.legend-chip.active {{ border-color: #D7B491; }}
+.legend-chip i {{ width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }}
+.svg-wrap {{ width: 100%; overflow: visible; }}
+.perf-bipartite-svg {{
+  display: block; width: 100%; height: {svg_h_px}px; max-height: none;
+}}
 .eng-pick {{ cursor: pointer; }}
-.eng-pick:hover .eng-box {{ stroke: rgba(215, 180, 145, 0.75); }}
-.eng-box.focus {{ stroke: #D7B491; stroke-width: 1.8; }}
-.eng-label {{ fill: #e8e6e3; font-size: 11px; pointer-events: none; }}
-.eng-label.focus {{ fill: #D7B491; font-weight: 600; }}
-.ticket-label {{ fill: #a39e97; font-size: 11px; }}
-.ticket-label.shared {{ fill: #D7B491; font-weight: 600; }}
-.link-solo {{ fill: none; stroke: rgba(158, 197, 232, 0.45); stroke-width: 1.2; }}
-.link-shared {{ fill: none; stroke: rgba(215, 180, 145, 0.55); stroke-width: 1.4; }}
+.eng-label {{ font-size: 9px; pointer-events: none; font-weight: 500; }}
+.eng-box {{ fill: #141414; }}
+.ticket-label {{ font-size: {ticket_font}px; fill: #a39e97; }}
+.link-path {{ opacity: 0.78; }}
+.perf-bipartite-svg.focus-mode .link-path {{ opacity: 0.08; }}
+.perf-bipartite-svg.focus-mode .link-path.hl {{ opacity: 1; stroke-width: 2.2 !important; }}
+.perf-bipartite-svg.focus-mode .eng-pick {{ opacity: 0.3; }}
+.perf-bipartite-svg.focus-mode .eng-pick.focused {{ opacity: 1; }}
+.perf-bipartite-svg.focus-mode .ticket-label {{ opacity: 0.18; }}
+.perf-bipartite-svg.focus-mode .ticket-label.hl {{
+  opacity: 1; font-size: {ticket_font_hl}px; font-weight: 600;
+}}
 </style>
 <script>
 function pickEng(eng, isFocused) {{
@@ -4886,14 +5093,17 @@ function pickEng(eng, isFocused) {{
 }}
 </script>
 </head><body>
-<div class="perf-bipartite-wrap">
-<svg class="perf-bipartite-svg" viewBox="0 0 {svg_w} {svg_h}" xmlns="http://www.w3.org/2000/svg"
-     aria-label="Engineer to ticket visit map">
+<div class="perf-map-shell">
+<div class="eng-legend">{legend_html}</div>
+<div class="svg-wrap">
+<svg class="perf-bipartite-svg{focus_mode_cls}" viewBox="0 0 {svg_w} {svg_h}" preserveAspectRatio="xMidYMin meet"
+     xmlns="http://www.w3.org/2000/svg" aria-label="Engineer to ticket visit map">
 {"".join(svg_parts)}
 </svg>
 </div>
+</div>
 </body></html>"""
-    components.html(map_html, height=int(svg_h) + 12, scrolling=False)
+    components.html(map_html, height=frame_h, scrolling=True)
 
 
 def _render_visit_summary_table(visits: pd.DataFrame) -> None:
