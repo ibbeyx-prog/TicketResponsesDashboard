@@ -4560,52 +4560,321 @@ def _perf_solo_shared_summary_all(visits: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _render_perf_solo_shared_breakdown(
+def _perf_grand_total_for_board(
+    overview_table: pd.DataFrame,
+    solo_shared_summary: pd.DataFrame,
+) -> int:
+    """Big ring number: snapshot queue total when available, else visit tickets touched."""
+    if not overview_table.empty and "Total" in overview_table.columns:
+        return int(overview_table["Total"].sum())
+    if not solo_shared_summary.empty and "Tickets touched" in solo_shared_summary.columns:
+        return int(solo_shared_summary["Tickets touched"].sum())
+    return 0
+
+
+def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
+    """Thin queue breakdown chips for one engineer or team totals."""
+    if summary.empty:
+        return
+    if focus != "All":
+        key = _perf_norm_member(focus)
+        row = summary.loc[summary["Person"] == key]
+        if row.empty:
+            return
+        r = row.iloc[0]
+    else:
+        r = summary.sum(numeric_only=True)
+    labels = (
+        ("Total", "Total"),
+        (STATUS_DAILY_TASK, STATUS_DAILY_TASK),
+        ("Needs Review", "Needs Review"),
+        ("Investigation", "Investigation"),
+        (STATUS_RESOLVED, STATUS_RESOLVED),
+        ("On Hold", "On Hold"),
+        ("Unattended", "Unattended"),
+        ("Handled", "Handled"),
+        ("Visit responded", "Visit responded"),
+    )
+    chips: list[str] = []
+    for col, label in labels:
+        if col not in summary.columns:
+            continue
+        val = int(r.get(col, 0))
+        if val == 0 and col not in ("Total", "Handled"):
+            continue
+        chips.append(
+            f'<span class="perf-queue-chip">{html.escape(label)}'
+            f"<strong>{val}</strong></span>"
+        )
+    if not chips:
+        return
+    st.markdown(
+        f'<div class="perf-queue-strip">{"".join(chips)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_solo_shared_board(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+    overview_table: pd.DataFrame | None = None,
+) -> None:
+    """Engineer rows (solo | shared pills) + total ring."""
+    overview_table = overview_table if overview_table is not None else pd.DataFrame()
+    if visits_all.empty:
+        st.markdown(
+            '<p class="perf-ss-hint">No visit data in this window — solo/shared breakdown '
+            "appears after assigns and reassigns create <code>ticket_visits</code> rows.</p>",
+            unsafe_allow_html=True,
+        )
+        if not overview_table.empty:
+            total = _perf_grand_total_for_board(overview_table, pd.DataFrame())
+            st.markdown(
+                f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
+                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total}</div>'
+                f'<div class="perf-ss-total-lbl">in queues</div></div></div>',
+                unsafe_allow_html=True,
+            )
+        return
+
+    summary = _perf_solo_shared_summary_all(visits_all)
+    if summary.empty:
+        st.caption("No engineers in visit data for this window.")
+        return
+
+    focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
+    total_n = _perf_grand_total_for_board(overview_table, summary)
+    rows_html: list[str] = []
+    for _, row in summary.iterrows():
+        person = str(row["Person"])
+        solo = int(row["Solo tickets"])
+        shared = int(row["Shared tickets"])
+        selected = focus_key and person == focus_key
+        row_cls = "perf-ss-row is-selected" if selected else "perf-ss-row"
+        rows_html.append(
+            f'<div class="{row_cls}">'
+            f'<span class="perf-ss-name">{html.escape(person)}</span>'
+            f'<div class="perf-ss-pill">'
+            f'<span class="perf-ss-seg solo">solo<span class="num">{solo}</span></span>'
+            f'<span class="perf-ss-seg shared">shared<span class="num">{shared}</span></span>'
+            f"</div>"
+            f"</div>"
+        )
+
+    st.markdown(
+        f'<div class="perf-ss-board">'
+        f'<div class="perf-ss-list">{"".join(rows_html)}</div>'
+        f'<div class="perf-ss-total">'
+        f'<div class="perf-ss-circle">{total_n}</div>'
+        f'<div class="perf-ss-total-lbl">in queues</div>'
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="perf-ss-hint">Solo = only that engineer on visit history · '
+        "Shared = handoff/reassign · Ring = sum of queue totals (sidebar range). "
+        "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_solo_shared_detail(
     visits_all: pd.DataFrame,
     *,
     focus: str,
 ) -> None:
-    """Solo vs shared tickets (visit history) for one engineer or all engineers."""
-    with st.expander("Solo vs shared tickets", expanded=True):
-        st.caption(
-            "**Solo** = only this engineer on that ticket in `ticket_visits` (sidebar time range). "
-            "**Shared** = another engineer also has visit rows (reassign/handoff; may be different days)."
-        )
-        if visits_all.empty:
-            st.caption("No visit data in this window.")
-            return
-        if focus == "All":
-            summary = _perf_solo_shared_summary_all(visits_all)
-            if summary.empty:
-                st.caption("No engineers in visit data.")
-            else:
-                st.dataframe(summary, use_container_width=True, hide_index=True)
-                st.caption(
-                    "Pick one engineer in **Focus Assignee** to see which ticket numbers were shared."
-                )
-            return
-
-        detail = _perf_solo_shared_ticket_rows(visits_all, focus)
-        if detail.empty:
-            st.caption(f"No tickets touched by **{focus}** in this window.")
-            return
-        solo_n = int((detail["Type"] == "Solo").sum())
-        shared_n = int((detail["Type"] == "Shared").sum())
-        s0, s1, s2 = st.columns(3)
-        s0.metric("Solo tickets", solo_n)
-        s1.metric("Shared tickets", shared_n)
-        s2.metric("Tickets touched", solo_n + shared_n)
-        shared_only = detail[detail["Type"] == "Shared"].copy()
+    """Ticket list when one engineer is selected (shared drill-down)."""
+    if visits_all.empty or focus in ("", "All"):
+        return
+    detail = _perf_solo_shared_ticket_rows(visits_all, focus)
+    if detail.empty:
+        return
+    shared_only = detail[detail["Type"] == "Shared"]
+    with st.expander(f"Shared tickets — {focus}", expanded=not shared_only.empty):
         if shared_only.empty:
-            st.success(
-                "Every ticket this engineer touched in the window is **solo** "
-                "(no other engineer on visit history)."
-            )
+            st.caption("All tickets touched in this window are solo (no handoffs).")
         else:
-            st.markdown("**Shared tickets (other engineers involved)**")
             st.dataframe(shared_only, use_container_width=True, hide_index=True)
-        with st.expander("All tickets for this engineer (solo + shared)", expanded=False):
+        with st.expander("All tickets (solo + shared)", expanded=False):
             st.dataframe(detail, use_container_width=True, hide_index=True)
+
+
+def _perf_column_y_positions(count: int, top: float, bottom: float) -> list[float]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return [(top + bottom) / 2.0]
+    step = (bottom - top) / float(count - 1)
+    return [top + i * step for i in range(count)]
+
+
+def _perf_visit_bipartite_data(
+    visits: pd.DataFrame,
+    *,
+    focus: str,
+    max_tickets: int = 48,
+) -> dict[str, object] | None:
+    """Engineers, tickets, and visit links for the Visits tab map."""
+    if visits.empty or "ticket_number" not in visits.columns or "assignee" not in visits.columns:
+        return None
+    prepared = _perf_prepare_visits_df(visits)
+    pairs = prepared[["assignee", "ticket_number"]].copy()
+    pairs["ticket_number"] = pairs["ticket_number"].astype(str).str.strip()
+    pairs = pairs.loc[pairs["ticket_number"].ne("")].drop_duplicates()
+    if pairs.empty:
+        return None
+
+    ticket_engineers: dict[str, set[str]] = {}
+    for tn, grp in pairs.groupby("ticket_number"):
+        ticket_engineers[str(tn)] = set(grp["assignee"].dropna().astype(str).tolist())
+
+    focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
+    if focus_key:
+        tickets = sorted(tn for tn, eng in ticket_engineers.items() if focus_key in eng)
+        engineers = sorted(
+            {focus_key} | {e for tn in tickets for e in ticket_engineers.get(tn, set())},
+            key=str.lower,
+        )
+    else:
+        engineers = sorted(pairs["assignee"].dropna().unique().tolist(), key=str.lower)
+        tickets = sorted(
+            ticket_engineers.keys(),
+            key=lambda t: (-len(ticket_engineers[t]), str(t).lower()),
+        )
+
+    total_tickets = len(tickets)
+    truncated = total_tickets > max_tickets
+    if truncated:
+        tickets = tickets[:max_tickets]
+
+    solo_n = sum(1 for tn in tickets if len(ticket_engineers.get(tn, set())) == 1)
+    shared_n = len(tickets) - solo_n
+    return {
+        "engineers": engineers,
+        "tickets": tickets,
+        "ticket_engineers": ticket_engineers,
+        "focus_key": focus_key,
+        "truncated": truncated,
+        "total_tickets": total_tickets,
+        "solo_n": solo_n,
+        "shared_n": shared_n,
+    }
+
+
+def _render_perf_visit_bipartite_graph(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> None:
+    """Engineers (left) linked to tickets (right) — shared tickets use oak lines."""
+    data = _perf_visit_bipartite_data(visits_all, focus=focus)
+    if not data:
+        st.info(
+            "No visit links in this window. Assigns and reassigns create "
+            "`ticket_visits` rows that power this map."
+        )
+        return
+
+    engineers: list[str] = data["engineers"]  # type: ignore[assignment]
+    tickets: list[str] = data["tickets"]  # type: ignore[assignment]
+    ticket_engineers: dict[str, set[str]] = data["ticket_engineers"]  # type: ignore[assignment]
+    focus_key: str = data["focus_key"]  # type: ignore[assignment]
+    solo_n: int = data["solo_n"]  # type: ignore[assignment]
+    shared_n: int = data["shared_n"]  # type: ignore[assignment]
+    truncated: bool = data["truncated"]  # type: ignore[assignment]
+    total_tickets: int = data["total_tickets"]  # type: ignore[assignment]
+
+    eng_index = {eng: i for i, eng in enumerate(engineers)}
+    scope = html.escape(focus) if focus_key else "team"
+    st.markdown(
+        f'<div class="perf-bipartite-stats">'
+        f"<span>{scope}: <strong>{len(tickets)}</strong> tickets</span>"
+        f"<span>solo <strong>{solo_n}</strong></span>"
+        f"<span>shared <strong>{shared_n}</strong></span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="perf-bipartite-legend">'
+        '<span><i class="solo"></i> solo (one engineer)</span>'
+        '<span><i class="shared"></i> shared (handoff / reassign)</span>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    svg_w = 720
+    pad_top, pad_bottom = 28.0, 28.0
+    row_span = max(len(engineers), len(tickets), 1)
+    svg_h = pad_top + pad_bottom + max(row_span - 1, 0) * 46 + 32
+    y_top = pad_top + 16
+    y_bottom = svg_h - pad_bottom - 16
+    eng_ys = _perf_column_y_positions(len(engineers), y_top, y_bottom)
+    tick_ys = _perf_column_y_positions(len(tickets), y_top, y_bottom)
+
+    eng_box_w, eng_box_h = 158.0, 30.0
+    left_x = 12.0
+    eng_right = left_x + eng_box_w
+    ticket_x = 548.0
+
+    parts: list[str] = [
+        f'<svg class="perf-bipartite-svg" viewBox="0 0 {svg_w} {svg_h}" '
+        f'xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'aria-label="Engineer to ticket visit map">'
+    ]
+
+    for ti, ticket in enumerate(tickets):
+        engs = ticket_engineers.get(ticket, set())
+        is_shared = len(engs) > 1
+        ty = tick_ys[ti]
+        link_cls = "link-shared" if is_shared else "link-solo"
+        for eng in engs:
+            ei = eng_index.get(eng)
+            if ei is None:
+                continue
+            ey = eng_ys[ei]
+            mid_x = (eng_right + ticket_x) / 2.0
+            parts.append(
+                f'<path class="{link_cls}" d="M {eng_right:.1f} {ey:.1f} '
+                f"C {mid_x:.1f} {ey:.1f}, {mid_x:.1f} {ty:.1f}, {ticket_x:.1f} {ty:.1f}\"/>"
+            )
+
+    for i, eng in enumerate(engineers):
+        cy = eng_ys[i]
+        is_focus = bool(focus_key and eng == focus_key)
+        box_cls = "eng-box focus" if is_focus else "eng-box"
+        label_cls = "eng-label focus" if is_focus else "eng-label"
+        y0 = cy - eng_box_h / 2.0
+        parts.append(
+            f'<rect class="{box_cls}" x="{left_x:.1f}" y="{y0:.1f}" '
+            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="8" ry="8"/>'
+        )
+        parts.append(
+            f'<text class="{label_cls}" x="{left_x + eng_box_w / 2:.1f}" y="{cy + 4:.1f}" '
+            f'text-anchor="middle">{html.escape(eng)}</text>'
+        )
+
+    for ti, ticket in enumerate(tickets):
+        engs = ticket_engineers.get(ticket, set())
+        is_shared = len(engs) > 1
+        ty = tick_ys[ti]
+        label_cls = "ticket-label shared" if is_shared else "ticket-label"
+        short = ticket if len(ticket) <= 22 else ticket[:19] + "…"
+        parts.append(
+            f'<text class="{label_cls}" x="{ticket_x:.1f}" y="{ty + 4:.1f}" '
+            f'text-anchor="start">{html.escape(short)}</text>'
+        )
+
+    parts.append("</svg>")
+    st.markdown(
+        f'<div class="perf-bipartite-wrap">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
+    if truncated:
+        st.caption(
+            f"Showing first **{len(tickets)}** of **{total_tickets}** tickets — "
+            "narrow **Focus Assignee** or shorten the sidebar range."
+        )
 
 
 def _render_visit_summary_table(visits: pd.DataFrame) -> None:
@@ -8586,6 +8855,204 @@ _BON_THEME_CSS = """
             min-height: 280px;
         }
     }
+    /* Performance — solo vs shared board (engineer rows + total ring) */
+    .perf-ss-board {
+        display: flex;
+        align-items: center;
+        gap: 2rem;
+        margin: 0.35rem 0 0.75rem;
+        font-family: var(--bon-font);
+    }
+    .perf-ss-list {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 0.45rem;
+        min-width: 0;
+    }
+    .perf-ss-row {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+    }
+    .perf-ss-row.is-selected .perf-ss-name {
+        color: var(--bon-oak);
+    }
+    .perf-ss-name {
+        flex: 0 0 9.5rem;
+        font-size: 0.82rem;
+        color: var(--bon-text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .perf-ss-pill {
+        flex: 1 1 auto;
+        display: flex;
+        max-width: 14rem;
+        border: 1px solid rgba(215, 180, 145, 0.35);
+        border-radius: 999px;
+        overflow: hidden;
+        background: var(--bon-card);
+    }
+    .perf-ss-seg {
+        flex: 1 1 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        padding: 0.28rem 0.55rem;
+        font-size: 0.72rem;
+        line-height: 1.1;
+        text-transform: lowercase;
+        letter-spacing: 0.02em;
+    }
+    .perf-ss-seg.solo {
+        border-right: 1px solid rgba(215, 180, 145, 0.22);
+        color: #9ec5e8;
+    }
+    .perf-ss-seg.shared {
+        color: var(--bon-oak);
+    }
+    .perf-ss-seg .num {
+        font-size: 0.88rem;
+        font-weight: 600;
+        color: var(--bon-text);
+    }
+    .perf-ss-total {
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 0 0.25rem;
+    }
+    .perf-ss-circle {
+        width: 4.6rem;
+        height: 4.6rem;
+        border-radius: 50%;
+        border: 2px solid rgba(215, 180, 145, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.55rem;
+        font-weight: 600;
+        color: var(--bon-text);
+        background: radial-gradient(circle at 30% 30%, #1a1a1a, var(--bon-bg));
+    }
+    .perf-ss-total-lbl {
+        margin-top: 0.25rem;
+        font-size: 0.68rem;
+        color: var(--bon-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+    .perf-ss-hint {
+        font-size: 0.72rem;
+        color: var(--bon-muted);
+        margin: 0 0 0.5rem;
+    }
+    .perf-queue-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem 0.65rem;
+        margin: 0.25rem 0 0.65rem;
+        font-size: 0.78rem;
+    }
+    .perf-queue-chip {
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid rgba(215, 180, 145, 0.28);
+        color: var(--bon-muted);
+        background: var(--bon-card);
+    }
+    .perf-queue-chip strong {
+        color: var(--bon-text);
+        font-weight: 600;
+        margin-left: 0.2rem;
+    }
+    /* Performance Visits — engineer ↔ ticket map */
+    .perf-bipartite-wrap {
+        width: 100%;
+        overflow-x: auto;
+        margin: 0.25rem 0 0.75rem;
+        border: 1px solid rgba(215, 180, 145, 0.22);
+        border-radius: var(--bon-box-radius);
+        background: var(--bon-card);
+    }
+    .perf-bipartite-svg {
+        display: block;
+        width: 100%;
+        min-width: 520px;
+        font-family: var(--bon-font);
+    }
+    .perf-bipartite-svg .eng-box {
+        fill: #141414;
+        stroke: rgba(215, 180, 145, 0.35);
+        stroke-width: 1.2;
+    }
+    .perf-bipartite-svg .eng-box.focus {
+        stroke: var(--bon-oak);
+        stroke-width: 1.8;
+    }
+    .perf-bipartite-svg .eng-label {
+        fill: var(--bon-text);
+        font-size: 11px;
+    }
+    .perf-bipartite-svg .eng-label.focus {
+        fill: var(--bon-oak);
+        font-weight: 600;
+    }
+    .perf-bipartite-svg .ticket-label {
+        fill: var(--bon-muted);
+        font-size: 11px;
+    }
+    .perf-bipartite-svg .ticket-label.shared {
+        fill: var(--bon-oak);
+        font-weight: 600;
+    }
+    .perf-bipartite-svg .link-solo {
+        fill: none;
+        stroke: rgba(158, 197, 232, 0.45);
+        stroke-width: 1.2;
+    }
+    .perf-bipartite-svg .link-shared {
+        fill: none;
+        stroke: rgba(215, 180, 145, 0.55);
+        stroke-width: 1.4;
+    }
+    .perf-bipartite-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem 1.25rem;
+        font-size: 0.72rem;
+        color: var(--bon-muted);
+        margin: 0 0 0.5rem;
+    }
+    .perf-bipartite-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+    }
+    .perf-bipartite-legend i {
+        display: inline-block;
+        width: 1.4rem;
+        height: 2px;
+        border-radius: 1px;
+    }
+    .perf-bipartite-legend i.solo { background: rgba(158, 197, 232, 0.7); }
+    .perf-bipartite-legend i.shared { background: rgba(215, 180, 145, 0.85); }
+    .perf-bipartite-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem 1rem;
+        font-size: 0.78rem;
+        color: var(--bon-muted);
+        margin-bottom: 0.35rem;
+    }
+    .perf-bipartite-stats strong {
+        color: var(--bon-text);
+    }
 </style>
 """
 
@@ -11374,45 +11841,21 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
 
         with tab_overview:
+            _render_perf_solo_shared_board(
+                visits_all,
+                focus=focus,
+                overview_table=overview_table,
+            )
             if not overview_table.empty:
-                if focus != "All":
-                    key = _perf_norm_member(focus)
-                    sub = overview_table[overview_table["Person"] == key]
-                    _render_perf_individual_summary_table(sub)
-                else:
-                    _render_perf_individual_summary_table(overview_table)
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if not visits_f.empty:
-                    st.markdown("**Visit responded (fair credit)**")
-                    _render_visit_bar(visits_f, outcome="responded")
-                elif not work_f.empty:
-                    st.markdown("**Handled (ticket snapshot)**")
-                    _render_perf_person_bar(
-                        work_f, title="", value_name="Handled"
-                    )
-            with c2:
-                if not on_hold_f.empty:
-                    st.markdown("**On Hold by assignee**")
-                    _render_perf_person_bar(
-                        on_hold_f, title="", value_name="On Hold"
-                    )
-            with c3:
-                if not unattended_f.empty:
-                    st.markdown("**Unattended by assignee**")
-                    _render_perf_person_bar(
-                        unattended_f, title="", value_name="Unattended"
-                    )
+                _render_perf_queue_strip(overview_table, focus=focus)
+            _render_perf_solo_shared_detail(visits_all, focus=focus)
 
         with tab_visits:
             st.caption(
-                "Source of truth for **individual accountability** when multiple engineers touch the same ticket. "
-                "**Responded** = that assignee completed their cycle. "
-                "**Reassigned** = ticket moved on before they responded. "
-                "**Active now** (`is_active`) = current assignment cycle still open."
+                "Per-assignment history in `ticket_visits`. "
+                "**Responded** = cycle completed · **Reassigned** = handoff before respond."
             )
-            if not visits_all.empty:
-                _render_perf_solo_shared_breakdown(visits_all, focus=focus)
+            _render_perf_visit_bipartite_graph(visits_all, focus=focus)
             if visits_f.empty:
                 if visits_all.empty:
                     st.info(
