@@ -1,11 +1,11 @@
--- Replace sales_owner with attended_by (Mular_s | Ibbe).
+-- Replace sales_owner with attended_by (Mular_s | ibeyx).
 
 alter table if exists public.dashboard_sales_cases
   add column if not exists attended_by text;
 
 update public.dashboard_sales_cases
 set attended_by = case
-  when trim(coalesce(sales_owner, '')) ilike 'ibbe%' then 'Ibbe'
+  when trim(coalesce(sales_owner, '')) ilike 'ibbe%' then 'ibeyx'
   when trim(coalesce(sales_owner, '')) ilike 'mular%' then 'Mular_s'
   else 'Mular_s'
 end
