@@ -5976,11 +5976,18 @@ def _perf_sales_case_list_view(df: pd.DataFrame) -> pd.DataFrame:
         else pd.Series("", index=view.index)
     )
 
+    status = (
+        view["status_eff"].fillna("").astype(str).str.strip()
+        if "status_eff" in view.columns
+        else pd.Series("", index=view.index)
+    )
+
     return pd.DataFrame(
         {
             "Ticket Number": view["case_ref"].astype(str)
             if "case_ref" in view.columns
             else "",
+            "Status": status,
             "Resort Name / Company Name": view["account_name"].astype(str)
             if "account_name" in view.columns
             else "",
@@ -6006,6 +6013,7 @@ def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
         return
     col_cfg = {
         "Ticket Number": st.column_config.TextColumn("Ticket Number", width="small"),
+        "Status": st.column_config.TextColumn("Status", width="small"),
         "Resort Name / Company Name": st.column_config.TextColumn(
             "Resort Name / Company Name",
             width="medium",
