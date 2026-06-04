@@ -65,6 +65,7 @@ import hashlib
 import html
 import hmac
 import json
+import math
 import os
 import re
 from datetime import date, datetime, time, timedelta, timezone
@@ -75,6 +76,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 from cryptography.fernet import Fernet
 import altair as alt
+
+_STAFF_MATRIX_BUILD = Path(__file__).resolve().parent / "components" / "staff_matrix" / "build"
+_HAS_STAFF_MATRIX = (_STAFF_MATRIX_BUILD / "index.html").is_file()
+try:
+    from components.staff_matrix import staff_matrix as _staff_matrix_component
+except ImportError:
+    _staff_matrix_component = None
+    _HAS_STAFF_MATRIX = False
+
 from bot_utils import (
     NOTIFY_BUILD_ID,
     AssignmentTelegramRef,
@@ -4853,10 +4863,11 @@ def _perf_apply_map_pick_from_query() -> None:
     st.rerun()
 
 
-_PERF_MAP_SEARCH_KEY = "perf_map_ticket_search"
 _PERF_MAP_ENG_ROW_H = 30.0
 _PERF_MAP_PAD_V = 10.0
 _PERF_MAP_VIEWPORT_PX = 760
+_PERF_MAP_TICKET_NODE_R = 2.5
+_PERF_MAP_RING_EXTRA = 100.0
 _PERF_MAP_IFRAME_MAX = 2400
 _PERF_MATRIX_MAX_TICKETS = 40
 _PERF_MATRIX_OUTCOME_STYLE: dict[str, tuple[str, str]] = {
@@ -4866,6 +4877,22 @@ _PERF_MATRIX_OUTCOME_STYLE: dict[str, tuple[str, str]] = {
     "unattended": ("U", "#c97a7a"),
     "on_hold": ("H", "#a39e97"),
 }
+_PERF_MATRIX_OUTCOME_LABELS: dict[str, str] = {
+    "active": "Active assignment",
+    "assigned": "Assigned",
+    "responded": "Responded",
+    "reassigned": "Reassigned",
+    "unattended": "Unattended",
+    "on_hold": "On hold",
+}
+_PERF_MATRIX_STATUS_RANK: tuple[str, ...] = (
+    "active",
+    "responded",
+    "reassigned",
+    "assigned",
+    "on_hold",
+    "unattended",
+)
 
 
 def _perf_map_ticket_layout(n: int) -> tuple[float, float, float, int]:
@@ -4926,6 +4953,283 @@ def _perf_map_band_y_positions(
     band_h = (count - 1) * row_h
     offset = band_top + max(0.0, (inner_h - band_h) / 2.0)
     return [offset + i * row_h for i in range(count)]
+
+
+def _perf_radial_ticket_font(n: int) -> tuple[float, float, int]:
+    """Label font (px), highlight font (px), max chars — scale down as ticket count grows."""
+    if n <= 12:
+        return (8.0, 9.0, 18)
+    if n <= 24:
+        return (7.0, 8.0, 14)
+    if n <= 48:
+        return (6.0, 7.0, 12)
+    if n <= 80:
+        return (5.5, 6.5, 11)
+    if n <= 120:
+        return (5.0, 6.0, 10)
+    return (4.5, 5.5, 9)
+
+
+def _perf_radial_map_geometry(
+    *,
+    n_tick: int,
+    hub_row_w: float,
+    hub_box_h: float,
+    ticket_font: float,
+) -> tuple[float, float, float, float]:
+    """Return cx, cy, ticket ring radius, and square svg size."""
+    hub_span = max(hub_row_w / 2.0 + 24.0, hub_box_h / 2.0 + 28.0)
+    min_radius = hub_span + 92.0
+    arc_per = max(12.0, ticket_font * 7.0)
+    ring_radius = (n_tick * arc_per) / (2.0 * math.pi) if n_tick else min_radius
+    radius = max(min_radius, ring_radius, 120.0) + _PERF_MAP_RING_EXTRA
+    label_outset = 16.0 + ticket_font * 2.2
+    margin = hub_span + 40.0
+    svg_size = 2.0 * (radius + label_outset + margin)
+    svg_size = max(float(_PERF_MAP_VIEWPORT_PX), min(svg_size, float(_PERF_MAP_IFRAME_MAX)))
+    cx = cy = svg_size / 2.0
+    return cx, cy, radius, svg_size
+
+
+def _perf_engineer_portrait_label(eng: str) -> str:
+    short = eng if len(eng) <= 11 else eng[:10] + "…"
+    return short
+
+
+def _perf_engineer_portrait_dims(n_eng: int) -> tuple[float, float, float]:
+    """Narrow vertical engineer card: width, height, gap."""
+    box_w = 38.0
+    box_h = 58.0 if n_eng <= 4 else 52.0 if n_eng <= 6 else 46.0
+    gap = 10.0 if n_eng <= 5 else 7.0
+    return box_w, box_h, gap
+
+
+def _perf_hub_engineer_layout_row(
+    *,
+    cx: float,
+    cy: float,
+    engineers: list[str],
+    eng_box_w: float,
+    eng_box_h: float,
+    eng_gap: float,
+) -> tuple[dict[str, tuple[float, float]], dict[str, int], float, float, float]:
+    """Portrait cards in a horizontal row; return positions, indices, row width, left/right x."""
+    n = len(engineers)
+    if n == 0:
+        return {}, {}, 0.0, cx, cx
+    row_w = n * eng_box_w + max(0, n - 1) * eng_gap
+    start_x = cx - row_w / 2.0 + eng_box_w / 2.0
+    positions: dict[str, tuple[float, float]] = {}
+    indices: dict[str, int] = {}
+    for i, eng in enumerate(engineers):
+        indices[eng] = i
+        positions[eng] = (start_x + i * (eng_box_w + eng_gap), cy)
+    hub_left_x = start_x - eng_box_w / 2.0
+    hub_right_x = start_x + (n - 1) * (eng_box_w + eng_gap) + eng_box_w / 2.0
+    return positions, indices, row_w, hub_left_x, hub_right_x
+
+
+def _perf_hub_engineer_sector_angle(eng_index: int, n_eng: int) -> float:
+    """Map hub column to ticket-ring sector (left engineer → left arc, right → right)."""
+    if n_eng <= 1:
+        return 0.0
+    return math.pi - (math.pi * eng_index / (n_eng - 1))
+
+
+def _perf_engineer_touch_anchors(
+    ex: float,
+    ey: float,
+    box_w: float,
+    box_h: float,
+    *,
+    eng_index: int,
+    n_eng: int,
+) -> dict[str, tuple[float, float]]:
+    """Fixed touch points: left/right box → top, bottom, side; middle → top, bottom only."""
+    hw, hh = box_w / 2.0, box_h / 2.0
+    x0, y0 = ex - hw, ey - hh
+    x1, y1 = ex + hw, ey + hh
+    anchors: dict[str, tuple[float, float]] = {
+        "top": (ex, y0),
+        "bottom": (ex, y1),
+    }
+    if n_eng <= 1:
+        anchors["left"] = (x0, ey)
+        anchors["right"] = (x1, ey)
+    elif eng_index == 0:
+        anchors["left"] = (x0, ey)
+    elif eng_index == n_eng - 1:
+        anchors["right"] = (x1, ey)
+    return anchors
+
+
+def _perf_pick_touch_side(
+    anchors: dict[str, tuple[float, float]],
+    *,
+    tx: float,
+    ty: float,
+    ex: float,
+    ey: float,
+    eng_index: int,
+    n_eng: int,
+) -> str:
+    """Choose touch point closest to ticket; left/right only when ticket is on that side."""
+    best_side = "top"
+    best_dist = float("inf")
+    for side, (ax, ay) in anchors.items():
+        dist = math.hypot(tx - ax, ty - ay)
+        if side == "left" and tx > ex + 4.0:
+            dist += 800.0
+        elif side == "right" and tx < ex - 4.0:
+            dist += 800.0
+        elif side == "left" and eng_index == 0 and tx < ex:
+            dist *= 0.72
+        elif side == "right" and eng_index == n_eng - 1 and tx > ex:
+            dist *= 0.72
+        if dist < best_dist:
+            best_dist = dist
+            best_side = side
+    if best_side in anchors:
+        return best_side
+    return "top" if ty < ey else "bottom"
+
+
+def _perf_curved_link_path(
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
+    *,
+    side: str,
+    bow: float = 32.0,
+) -> str:
+    """Quadratic curve from box touch point to ticket."""
+    if side == "left":
+        cpx, cpy = sx - bow, (sy + ty) / 2.0
+    elif side == "right":
+        cpx, cpy = sx + bow, (sy + ty) / 2.0
+    elif side == "top":
+        cpx, cpy = (sx + tx) / 2.0, sy - bow
+    else:
+        cpx, cpy = (sx + tx) / 2.0, sy + bow
+    return f"M {sx:.1f} {sy:.1f} Q {cpx:.1f} {cpy:.1f} {tx:.1f} {ty:.1f}"
+
+
+def _perf_box_edge_on_side(
+    ex: float,
+    ey: float,
+    box_w: float,
+    box_h: float,
+    tx: float,
+    ty: float,
+    *,
+    side: str,
+) -> tuple[float, float]:
+    """Fixed center touch point on the chosen face (matches hub mockup)."""
+    del tx, ty
+    anchors = _perf_engineer_touch_anchors(
+        ex, ey, box_w, box_h, eng_index=0, n_eng=1,
+    )
+    if side not in anchors:
+        hw, hh = box_w / 2.0, box_h / 2.0
+        if side == "left":
+            return ex - hw, ey
+        if side == "right":
+            return ex + hw, ey
+        if side == "top":
+            return ex, ey - hh
+        return ex, ey + hh
+    return anchors[side]
+
+
+def _perf_link_endpoint_at_ticket(
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
+    *,
+    node_r: float = _PERF_MAP_TICKET_NODE_R,
+) -> tuple[float, float]:
+    """Stop the wire at the ticket dot, not past it."""
+    dx, dy = tx - sx, ty - sy
+    dist = math.hypot(dx, dy)
+    if dist < node_r + 0.5:
+        return tx, ty
+    scale = (dist - node_r) / dist
+    return sx + dx * scale, sy + dy * scale
+
+
+def _perf_straight_link_path(sx: float, sy: float, tx: float, ty: float) -> str:
+    return f"M {sx:.1f} {sy:.1f} L {tx:.1f} {ty:.1f}"
+
+
+def _perf_radial_ticket_order(
+    tickets: list[str],
+    ticket_engineers: dict[str, set[str]],
+    eng_angles: dict[str, float],
+) -> list[str]:
+    """Order tickets around the ring near their engineers' sectors — fewer crossings."""
+
+    def _key(tn: str) -> tuple[float, str]:
+        engs = ticket_engineers.get(tn, set())
+        if not engs:
+            return (0.0, tn.lower())
+        avg = sum(eng_angles.get(e, 0.0) for e in engs) / len(engs)
+        return (avg, tn.lower())
+
+    return sorted(tickets, key=_key)
+
+
+def _perf_box_edge_toward(
+    cx: float,
+    cy: float,
+    box_w: float,
+    box_h: float,
+    tx: float,
+    ty: float,
+) -> tuple[float, float]:
+    """Point on rectangle edge toward target (tx, ty)."""
+    dx, dy = tx - cx, ty - cy
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return cx, cy
+    hw, hh = box_w / 2.0, box_h / 2.0
+    scale_x = hw / abs(dx) if abs(dx) > 1e-9 else float("inf")
+    scale_y = hh / abs(dy) if abs(dy) > 1e-9 else float("inf")
+    scale = min(scale_x, scale_y)
+    return cx + dx * scale, cy + dy * scale
+
+
+def _perf_radial_text_anchor(angle: float) -> str:
+    cos_a = math.cos(angle)
+    if cos_a > 0.3:
+        return "start"
+    if cos_a < -0.3:
+        return "end"
+    return "middle"
+
+
+def _perf_radial_link_path(
+    sx: float,
+    sy: float,
+    tx: float,
+    ty: float,
+    *,
+    hub_x: float,
+    hub_y: float,
+    corridor_r: float,
+) -> str:
+    """Cubic curve via a corridor point on the ticket's radial — avoids hub clutter."""
+    tick_angle = math.atan2(ty - hub_y, tx - hub_x)
+    mx = hub_x + corridor_r * math.cos(tick_angle)
+    my = hub_y + corridor_r * math.sin(tick_angle)
+    c1x = sx + (mx - sx) * 0.62
+    c1y = sy + (my - sy) * 0.62
+    c2x = tx + (mx - tx) * 0.62
+    c2y = ty + (my - ty) * 0.62
+    return (
+        f"M {sx:.1f} {sy:.1f} C {c1x:.1f} {c1y:.1f}, {c2x:.1f} {c2y:.1f}, "
+        f"{tx:.1f} {ty:.1f}"
+    )
 
 
 def _perf_visit_bipartite_data(
@@ -5004,7 +5308,7 @@ def _perf_visit_map_caption(
     focus_key: str,
 ) -> None:
     if pool_total == 0:
-        st.caption("No tickets match — try another search or pick **All** in Focus Assignee.")
+        st.caption("No tickets in this view — pick **All** in Focus Assignee or widen the time range.")
     elif focus_key:
         st.caption(
             f"**{pool_total}** ticket(s) for **{focus_key}** · "
@@ -5012,8 +5316,7 @@ def _perf_visit_map_caption(
         )
     else:
         st.caption(
-            f"**{pool_total}** ticket(s) · click an engineer to filter · "
-            f"use search to narrow"
+            f"**{pool_total}** ticket(s) · click an engineer in the diagram to filter"
         )
 
 
@@ -5038,6 +5341,443 @@ def _perf_visit_ticket_pool(
     return all_engineers, pool, ticket_engineers, focus_key, total_all
 
 
+def _perf_visit_staff_outcome(
+    visits: pd.DataFrame,
+    *,
+    assignee: str,
+    ticket: str,
+) -> tuple[str, str]:
+    """Return (outcome_code, label) for one engineer×ticket cell."""
+    if visits.empty:
+        return "", ""
+    mask = (
+        visits["assignee"].astype(str) == assignee
+    ) & (visits["ticket_number"].astype(str) == ticket)
+    sub = visits.loc[mask]
+    if sub.empty:
+        return "", ""
+    if "is_active" in sub.columns and sub["is_active"].any():
+        return "active", _PERF_MATRIX_OUTCOME_LABELS["active"]
+    outcome = "assigned"
+    if "outcome" in sub.columns:
+        ordered = sub.copy()
+        if "visit_start" in ordered.columns:
+            ordered = ordered.sort_values("visit_start")
+        outcome = str(ordered["outcome"].iloc[-1] or "assigned")
+    label = _PERF_MATRIX_OUTCOME_LABELS.get(outcome, outcome.replace("_", " ").title())
+    return outcome, label
+
+
+def _perf_ticket_matrix_status(staff_assignments: dict[str, dict[str, str]], assigned: list[str]) -> str:
+    if any(staff_assignments.get(s, {}).get("outcome") == "active" for s in assigned):
+        return "Active"
+    best: str | None = None
+    best_rank = len(_PERF_MATRIX_STATUS_RANK)
+    for staff in assigned:
+        outcome = staff_assignments.get(staff, {}).get("outcome", "")
+        if not outcome:
+            continue
+        try:
+            rank = _PERF_MATRIX_STATUS_RANK.index(outcome)
+        except ValueError:
+            rank = len(_PERF_MATRIX_STATUS_RANK)
+        if rank < best_rank:
+            best_rank = rank
+            best = outcome
+    if not best:
+        return "Unknown"
+    if best == "on_hold":
+        return "On Hold"
+    return best.replace("_", " ").title()
+
+
+def _perf_ticket_matrix_priority(*, assigned_count: int) -> str:
+    if assigned_count >= 4:
+        return "Critical"
+    if assigned_count >= 3:
+        return "High"
+    if assigned_count >= 2:
+        return "Normal"
+    return "Low"
+
+
+def _perf_matrix_display_status(status: str) -> str:
+    """Workflow labels for the matrix Status column."""
+    return {
+        "Active": "In Progress",
+        "Responded": "Resolved",
+        "Assigned": "Open",
+        "Reassigned": "In Progress",
+        "On Hold": "On Hold",
+        "Unattended": "Open",
+        "Unknown": "Open",
+    }.get(status, status)
+
+
+def _perf_matrix_staff_role(outcome: str) -> str:
+    return {
+        "active": "Active Dev",
+        "responded": "Peer Reviewer",
+        "reassigned": "Handoff",
+        "unattended": "Observer",
+        "on_hold": "On Hold",
+        "assigned": "Contributor",
+    }.get(outcome, "Contributor")
+
+
+def _perf_matrix_case_label(ticket_id: str, priority: str, *, seq: int) -> str:
+    code = {"Critical": "C", "High": "H", "Normal": "N", "Low": "L"}.get(priority, "N")
+    return f"Case #{ticket_id} ({code}-{seq:02d})"
+
+
+_PERF_MATRIX_COMMENTS_MAX = 40
+_PERF_MATRIX_PHOTOS_MAX = 20
+
+
+def _perf_matrix_case_info_ts(raw: object) -> tuple[str, float]:
+    """Local display time + unix sort key for matrix Case Info."""
+    dt = _parse_ts_value(raw)
+    if not dt:
+        return "", 0.0
+    try:
+        ts = pd.Timestamp(dt)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        local = ts.tz_convert(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+        return local, float(ts.timestamp())
+    except Exception:
+        return str(raw), 0.0
+
+
+_PERF_MATRIX_COMMENT_PREFIX_RE = re.compile(
+    r"^(?:responded by\s+@\S+:\s*|manual dashboard\s+.+?\s+by\s+@\S+:\s*)",
+    re.IGNORECASE,
+)
+
+
+def _perf_matrix_comment_key(author: str, text: str) -> tuple[str, str]:
+    a = str(author or "").strip().lower().lstrip("@")
+    t = " ".join(str(text or "").strip().split())
+    t = _PERF_MATRIX_COMMENT_PREFIX_RE.sub("", t).strip().lower()
+    return (a, t[:220])
+
+
+class _PerfMatrixCaseInfoBucket:
+    """Per-ticket comments (text) and photos (URLs), deduped across sources."""
+
+    def __init__(self) -> None:
+        self.comments: dict[str, list[dict[str, str]]] = {}
+        self.photos: dict[str, list[dict[str, str]]] = {}
+        self._comment_seen: dict[str, set[tuple[str, str]]] = {}
+        self._photo_seen: dict[str, set[str]] = {}
+
+    def add(
+        self,
+        ticket_number: str,
+        *,
+        at_raw: object,
+        author: str,
+        text: str | None,
+        photo_url: str | None,
+        kind: str,
+    ) -> None:
+        tn = str(ticket_number or "").strip()
+        if not tn:
+            return
+        text_s = str(text or "").strip()
+        photo_s = str(photo_url or "").strip()
+        at_label, sort_key = _perf_matrix_case_info_ts(at_raw)
+        author_s = str(author or "—").strip() or "—"
+        sort_s = str(sort_key)
+        if text_s:
+            ckey = _perf_matrix_comment_key(author_s, text_s)
+            cseen = self._comment_seen.setdefault(tn, set())
+            if ckey not in cseen:
+                cseen.add(ckey)
+                self.comments.setdefault(tn, []).append(
+                    {
+                        "at": at_label,
+                        "author": author_s,
+                        "text": text_s,
+                        "kind": kind,
+                        "_sort": sort_s,
+                    }
+                )
+        if photo_s.startswith("http"):
+            pseen = self._photo_seen.setdefault(tn, set())
+            if photo_s not in pseen:
+                pseen.add(photo_s)
+                self.photos.setdefault(tn, []).append(
+                    {
+                        "at": at_label,
+                        "author": author_s,
+                        "url": photo_s,
+                        "_sort": sort_s,
+                    }
+                )
+
+
+def _perf_matrix_case_info_from_visits(
+    visits: pd.DataFrame,
+    ticket_numbers: set[str],
+    bucket: _PerfMatrixCaseInfoBucket,
+) -> None:
+    if visits.empty or "ticket_number" not in visits.columns:
+        return
+    prepared = _perf_prepare_visits_df(visits)
+    for _, row in prepared.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if tn not in ticket_numbers:
+            continue
+        note = str(row.get("response_note") or "").strip()
+        photo = str(row.get("photo_url") or "").strip()
+        if not note and not photo.startswith("http"):
+            continue
+        bucket.add(
+            tn,
+            at_raw=row.get("visit_end") or row.get("visit_start"),
+            author=str(row.get("assignee") or "—"),
+            text=note or None,
+            photo_url=photo or None,
+            kind="visit",
+        )
+
+
+def _fetch_attendance_for_matrix_tickets(
+    ticket_numbers: list[str],
+    *,
+    limit: int = 4000,
+) -> pd.DataFrame:
+    """Attendance log rows for matrix Case Info (responses + noted assignments)."""
+    if not ticket_numbers or not SUPABASE_URL or not SUPABASE_KEY:
+        return pd.DataFrame()
+    client = _get_supabase_client()
+    ids = [str(t).strip() for t in dict.fromkeys(ticket_numbers) if str(t).strip()]
+    parts: list[pd.DataFrame] = []
+    per_chunk = 80
+    for i in range(0, len(ids), per_chunk):
+        chunk = ids[i : i + per_chunk]
+        try:
+            res = (
+                client.table(ATTENDANCE_LOGS_TABLE)
+                .select(
+                    "ticket_number, member_username, action_type, note, photo_url, timestamp"
+                )
+                .in_("ticket_number", chunk)
+                .order("timestamp", desc=True)
+                .limit(limit)
+                .execute()
+            )
+        except Exception:
+            continue
+        if res.data:
+            parts.append(pd.DataFrame(res.data))
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def _perf_matrix_case_info_from_attendance(
+    logs: pd.DataFrame,
+    ticket_numbers: set[str],
+    bucket: _PerfMatrixCaseInfoBucket,
+) -> None:
+    if logs.empty:
+        return
+    for _, row in logs.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if tn not in ticket_numbers:
+            continue
+        action = str(row.get("action_type") or "").strip()
+        note = str(row.get("note") or "").strip()
+        photo = str(row.get("photo_url") or "").strip()
+        if action == "Assignment" and not note:
+            continue
+        if action == "Response" and not note and not photo.startswith("http"):
+            continue
+        if action not in ("Response", "Assignment"):
+            continue
+        kind = "response" if action == "Response" else "assignment"
+        bucket.add(
+            tn,
+            at_raw=row.get("timestamp"),
+            author=str(row.get("member_username") or "—"),
+            text=note or None,
+            photo_url=photo or None,
+            kind=kind,
+        )
+
+
+def _perf_matrix_case_info_from_tickets_snapshot(
+    tickets_df: pd.DataFrame,
+    ticket_numbers: set[str],
+    bucket: _PerfMatrixCaseInfoBucket,
+) -> None:
+    if tickets_df.empty or "ticket_number" not in tickets_df.columns:
+        return
+    for _, row in tickets_df.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if tn not in ticket_numbers:
+            continue
+        text = str(row.get("field_response") or "").strip()
+        photo = str(row.get("photo_url") or "").strip()
+        if not text and not photo.startswith("http"):
+            continue
+        author = str(
+            row.get("field_responded_by") or row.get("assigned_to") or "—"
+        )
+        bucket.add(
+            tn,
+            at_raw=row.get("responded_at") or row.get("updated_at"),
+            author=author,
+            text=text or None,
+            photo_url=photo or None,
+            kind="field",
+        )
+
+
+def _perf_matrix_case_info_finalize(
+    bucket: _PerfMatrixCaseInfoBucket,
+    ticket_numbers: set[str],
+) -> dict[str, dict[str, list[dict[str, object]]]]:
+    out: dict[str, dict[str, list[dict[str, object]]]] = {}
+    for tn in ticket_numbers:
+        comments = bucket.comments.get(tn, [])
+        photos = bucket.photos.get(tn, [])
+        comments_sorted = sorted(
+            comments,
+            key=lambda e: float(e.pop("_sort", 0) or 0),
+            reverse=True,
+        )[:_PERF_MATRIX_COMMENTS_MAX]
+        photos_sorted = sorted(
+            photos,
+            key=lambda e: float(e.pop("_sort", 0) or 0),
+            reverse=True,
+        )[:_PERF_MATRIX_PHOTOS_MAX]
+        out[tn] = {
+            "comments": [
+                {
+                    "at": e["at"],
+                    "author": e["author"],
+                    "text": e["text"],
+                    "kind": e["kind"],
+                }
+                for e in comments_sorted
+            ],
+            "photos": [
+                {"at": e["at"], "author": e["author"], "url": e["url"]}
+                for e in photos_sorted
+            ],
+        }
+    return out
+
+
+def _perf_matrix_case_info_by_ticket(
+    visits_all: pd.DataFrame,
+    ticket_numbers: list[str],
+) -> dict[str, dict[str, list[dict[str, object]]]]:
+    """Comments and photos for Case Info — text and images kept separate, deduped."""
+    ids = {str(t).strip() for t in ticket_numbers if str(t).strip()}
+    if not ids:
+        return {}
+    bucket = _PerfMatrixCaseInfoBucket()
+    _perf_matrix_case_info_from_visits(visits_all, ids, bucket)
+    try:
+        logs = _fetch_attendance_for_matrix_tickets(sorted(ids))
+    except Exception:
+        logs = pd.DataFrame()
+    _perf_matrix_case_info_from_attendance(logs, ids, bucket)
+    try:
+        tickets_df = _fetch_tickets_cached()
+    except Exception:
+        tickets_df = pd.DataFrame()
+    if not tickets_df.empty:
+        subset = tickets_df[
+            tickets_df["ticket_number"].astype(str).str.strip().isin(ids)
+        ]
+        _perf_matrix_case_info_from_tickets_snapshot(subset, ids, bucket)
+    # Only add gallery URLs not already captured (older pinned photos).
+    photo_hist = _fetch_ticket_photos(sorted(ids), limit_per_ticket=15)
+    for tn, items in photo_hist.items():
+        if tn not in ids:
+            continue
+        for p in items:
+            bucket.add(
+                tn,
+                at_raw=p.get("when"),
+                author=str(p.get("member") or "—"),
+                text=None,
+                photo_url=str(p.get("url") or ""),
+                kind="response",
+            )
+    return _perf_matrix_case_info_finalize(bucket, ids)
+
+
+def _perf_build_staff_matrix_payload(
+    visits_all: pd.DataFrame,
+    *,
+    data: dict[str, object],
+    search: str,
+) -> dict[str, object]:
+    """JSON payload for the React Multi-Staff Case Management Matrix."""
+    all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
+        data,
+        search=search,
+    )
+    prepared = _perf_prepare_visits_df(visits_all)
+    eng_colors = _perf_engineer_color_map(all_engineers)
+    case_info_by_ticket = _perf_matrix_case_info_by_ticket(visits_all, pool)
+    tickets: list[dict[str, object]] = []
+    for seq, tn in enumerate(pool, start=1):
+        assigned = sorted(ticket_engineers.get(tn, set()), key=str.lower)
+        staff_assignments: dict[str, dict[str, str]] = {}
+        for eng in assigned:
+            outcome, label = _perf_visit_staff_outcome(
+                prepared,
+                assignee=eng,
+                ticket=tn,
+            )
+            if outcome:
+                staff_assignments[eng] = {
+                    "outcome": outcome,
+                    "label": label,
+                    "role": _perf_matrix_staff_role(outcome),
+                }
+        is_shared = len(assigned) > 1
+        status = _perf_ticket_matrix_status(staff_assignments, assigned)
+        priority = _perf_ticket_matrix_priority(assigned_count=len(assigned))
+        tickets.append(
+            {
+                "id": tn,
+                "caseLabel": _perf_matrix_case_label(tn, priority, seq=seq),
+                "status": status,
+                "displayStatus": _perf_matrix_display_status(status),
+                "priority": priority,
+                "assignedStaff": assigned,
+                "staffAssignments": staff_assignments,
+                "isShared": is_shared,
+                "comments": case_info_by_ticket.get(tn, {}).get("comments", []),
+                "photos": case_info_by_ticket.get(tn, {}).get("photos", []),
+            }
+        )
+    staff_counts = [len(t.get("assignedStaff") or []) for t in tickets]
+    total = len(tickets)
+    avg_staff = (sum(staff_counts) / total) if total else 0.0
+    top_idx = max(range(total), key=lambda i: staff_counts[i]) if total else 0
+    top_ticket = tickets[top_idx] if total else {}
+    return {
+        "tickets": tickets,
+        "staffMembers": all_engineers,
+        "staffColors": eng_colors,
+        "summary": {
+            "totalCases": total,
+            "avgStaffPerCase": round(avg_staff, 1),
+            "topCollaborativeCaseId": str(top_ticket.get("id") or ""),
+            "topCollaborativeStaffCount": int(staff_counts[top_idx]) if total else 0,
+        },
+    }
+
+
 def _perf_visit_matrix_cell(
     visits: pd.DataFrame,
     *,
@@ -5046,24 +5786,13 @@ def _perf_visit_matrix_cell(
     eng_colors: dict[str, str],
 ) -> tuple[str, str, str]:
     """Return (symbol, color, title) for one engineer×ticket cell."""
-    if visits.empty:
+    outcome, label = _perf_visit_staff_outcome(visits, assignee=assignee, ticket=ticket)
+    if not outcome:
         return "", "", ""
-    mask = (
-        visits["assignee"].astype(str) == assignee
-    ) & (visits["ticket_number"].astype(str) == ticket)
-    sub = visits.loc[mask]
-    if sub.empty:
-        return "", "", ""
-    if "is_active" in sub.columns and sub["is_active"].any():
-        return "●", eng_colors.get(assignee, "#9ec5e8"), "Active assignment"
-    outcome = "assigned"
-    if "outcome" in sub.columns:
-        ordered = sub.copy()
-        if "visit_start" in ordered.columns:
-            ordered = ordered.sort_values("visit_start")
-        outcome = str(ordered["outcome"].iloc[-1] or "assigned")
+    if outcome == "active":
+        return "●", eng_colors.get(assignee, "#9ec5e8"), label
     sym, col = _PERF_MATRIX_OUTCOME_STYLE.get(outcome, ("·", "#a39e97"))
-    return sym, col, outcome.replace("_", " ").title()
+    return sym, col, label
 
 
 def _render_perf_visit_staff_matrix(
@@ -5072,46 +5801,54 @@ def _render_perf_visit_staff_matrix(
     data: dict[str, object],
     search: str,
 ) -> None:
-    """Engineers × tickets grid — who touched each case and latest visit outcome."""
-    all_engineers, pool, ticket_engineers, focus_key, _total_all = _perf_visit_ticket_pool(
-        data,
-        search=search,
-    )
-    tickets = pool[:_PERF_MATRIX_MAX_TICKETS]
+    """Tickets × staff grid — virtualized React matrix when build is present."""
+    payload = _perf_build_staff_matrix_payload(visits_all, data=data, search=search)
+    tickets = payload.get("tickets") or []
     if not tickets:
         st.caption("No tickets to show in the matrix.")
         return
+
+    if _staff_matrix_component is not None and _HAS_STAFF_MATRIX:
+        _staff_matrix_component(payload, height=720, key="perf_staff_matrix")
+        return
+
+    all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
+        data,
+        search=search,
+    )
+    tickets_pool = pool[:_PERF_MATRIX_MAX_TICKETS]
     if len(pool) > _PERF_MATRIX_MAX_TICKETS:
         st.caption(
             f"Showing first **{_PERF_MATRIX_MAX_TICKETS}** of **{len(pool)}** tickets — "
-            "narrow with **Find ticket** or **Focus Assignee**."
+            "build the React component for full virtualization (`npm run build` in "
+            "`components/staff_matrix/frontend`)."
         )
 
     prepared = _perf_prepare_visits_df(visits_all)
     eng_colors = _perf_engineer_color_map(all_engineers)
 
     header_cells = [
-        '<th class="perf-matrix-sticky-col">Engineer</th>',
+        '<th class="perf-matrix-sticky-col">Ticket</th>',
     ]
-    for tn in tickets:
-        engs = ticket_engineers.get(tn, set())
-        shared_cls = " shared-col" if len(engs) > 1 else ""
-        short = tn if len(tn) <= 14 else tn[:11] + "…"
+    for eng in all_engineers:
+        eng_short = eng if len(eng) <= 14 else eng[:11] + "…"
+        col = eng_colors.get(eng, "#9ec5e8")
         header_cells.append(
-            f'<th class="perf-matrix-ticket{shared_cls}" title="{html.escape(tn)}">'
-            f"{html.escape(short)}</th>"
+            f'<th class="perf-matrix-ticket" title="{html.escape(eng)}" '
+            f'style="color:{col}">{html.escape(eng_short)}</th>'
         )
 
     body_rows: list[str] = []
-    for eng in all_engineers:
-        eng_short = eng if len(eng) <= 16 else eng[:14] + "…"
-        col = eng_colors.get(eng, "#9ec5e8")
+    for tn in tickets_pool:
+        engs = ticket_engineers.get(tn, set())
+        shared_cls = " shared-col" if len(engs) > 1 else ""
+        short = tn if len(tn) <= 14 else tn[:11] + "…"
         cells = [
-            f'<td class="perf-matrix-sticky-col" style="color:{col}">'
-            f"{html.escape(eng_short)}</td>"
+            f'<td class="perf-matrix-sticky-col{shared_cls}" title="{html.escape(tn)}">'
+            f"{html.escape(short)}</td>"
         ]
-        for tn in tickets:
-            if eng not in ticket_engineers.get(tn, set()):
+        for eng in all_engineers:
+            if eng not in engs:
                 cells.append('<td class="perf-matrix-empty">·</td>')
                 continue
             sym, sym_col, title = _perf_visit_matrix_cell(
@@ -5186,7 +5923,7 @@ th.perf-matrix-ticket.shared-col {{ color: #e8c9a0; }}
 </div>
 </div>
 </body></html>"""
-    components.html(matrix_html, height=min(560, 80 + 28 * len(all_engineers)), scrolling=True)
+    components.html(matrix_html, height=min(560, 80 + 28 * max(len(tickets_pool), 1)), scrolling=True)
 
 
 def _render_perf_visit_bipartite_graph(
@@ -5196,7 +5933,7 @@ def _render_perf_visit_bipartite_graph(
     data: dict[str, object] | None = None,
     search: str | None = None,
 ) -> None:
-    """Engineers (left) linked to tickets (right) — node-link diagram."""
+    """Engineers in a horizontal row of portrait cards; tickets on outer ring."""
     if data is None:
         data = _perf_visit_bipartite_data(visits_all, focus=focus)
     if not data:
@@ -5206,11 +5943,10 @@ def _render_perf_visit_bipartite_graph(
         )
         return
 
-    all_engineers, pool, ticket_engineers, focus_key, total_all = _perf_visit_ticket_pool(
+    all_engineers, pool, ticket_engineers, focus_key, _total_all = _perf_visit_ticket_pool(
         data,
         search=search or "",
     )
-    pool_total = len(pool)
     tickets = pool
 
     if not tickets:
@@ -5225,32 +5961,50 @@ def _render_perf_visit_bipartite_graph(
 
     n_eng = len(all_engineers)
     n_tick = len(tickets)
-    ticket_row_h, ticket_font, ticket_font_hl, ticket_max_len = _perf_map_ticket_layout(
-        n_tick,
-    )
-    ticket_row_h, ticket_font, ticket_font_hl, inner_h = _perf_map_expand_layout(
-        n_eng=n_eng,
-        n_tick=n_tick,
-        ticket_row_h=ticket_row_h,
-        ticket_font=ticket_font,
-        ticket_font_hl=ticket_font_hl,
-        viewport_px=_PERF_MAP_VIEWPORT_PX,
-    )
-    band_top = _PERF_MAP_PAD_V + 6.0
-    svg_w = 640
-    svg_h = band_top * 2 + inner_h + 10.0
-    svg_h_px = int(svg_h)
-    eng_ys = _perf_map_band_y_positions(
-        n_eng, _PERF_MAP_ENG_ROW_H, inner_h=inner_h, band_top=band_top,
-    )
-    tick_ys = _perf_map_band_y_positions(
-        n_tick, ticket_row_h, inner_h=inner_h, band_top=band_top,
-    )
+    ticket_font, ticket_font_hl, ticket_max_len = _perf_radial_ticket_font(n_tick)
 
-    eng_box_w, eng_box_h = 132.0, 22.0
-    left_x = 8.0
-    eng_right = left_x + eng_box_w
-    ticket_x = 468.0
+    eng_box_w, eng_box_h, eng_gap = _perf_engineer_portrait_dims(n_eng)
+
+    eng_angle_seed = {
+        eng: _perf_hub_engineer_sector_angle(i, n_eng)
+        for i, eng in enumerate(all_engineers)
+    }
+    tickets = _perf_radial_ticket_order(tickets, ticket_engineers, eng_angle_seed)
+    n_tick = len(tickets)
+
+    row_w = n_eng * eng_box_w + max(0, n_eng - 1) * eng_gap
+    cx, cy, ring_r, svg_size = _perf_radial_map_geometry(
+        n_tick=n_tick,
+        hub_row_w=row_w,
+        hub_box_h=eng_box_h,
+        ticket_font=ticket_font,
+    )
+    eng_positions, eng_indices, _row_w, hub_left_x, hub_right_x = _perf_hub_engineer_layout_row(
+        cx=cx,
+        cy=cy,
+        engineers=all_engineers,
+        eng_box_w=eng_box_w,
+        eng_box_h=eng_box_h,
+        eng_gap=eng_gap,
+    )
+    svg_w = svg_h = svg_size
+    svg_h_px = int(svg_h)
+    label_outset = 16.0 + ticket_font * 2.2
+    hub_pad = 12.0
+    hub_mask_x = hub_left_x - hub_pad
+    hub_mask_y = cy - eng_box_h / 2.0 - hub_pad
+    hub_mask_w = (hub_right_x - hub_left_x) + hub_pad * 2.0
+    hub_mask_h = eng_box_h + hub_pad * 2.0
+
+    tick_angles: dict[str, float] = {}
+    tick_xy: dict[str, tuple[float, float]] = {}
+    for ti, ticket in enumerate(tickets):
+        angle = (2.0 * math.pi * ti / n_tick) - math.pi / 2.0
+        tick_angles[ticket] = angle
+        tick_xy[ticket] = (
+            cx + ring_r * math.cos(angle),
+            cy + ring_r * math.sin(angle),
+        )
 
     svg_parts: list[str] = []
     focus_mode_cls = " focus-mode" if focus_slug else ""
@@ -5268,54 +6022,86 @@ def _render_perf_visit_bipartite_graph(
         )
     legend_html = "".join(legend_bits)
 
-    for ti, ticket in enumerate(tickets):
-        engs = ticket_engineers.get(ticket, set())
-        ty = tick_ys[ti]
-        for eng in sorted(engs, key=str.lower):
-            ei = eng_index.get(eng)
-            if ei is None:
-                continue
-            ey = eng_ys[ei]
-            col = eng_colors[eng]
-            slug = eng_slug[eng]
-            is_hl_link = bool(focus_key and eng == focus_key)
-            mid_x = (eng_right + ticket_x) / 2.0
-            sw = 2.0 if is_hl_link else 1.1
-            svg_parts.append(
-                f'<path class="link-path {slug}{" hl" if is_hl_link else ""}" '
-                f'stroke="{col}" stroke-width="{sw}" fill="none" '
-                f'd="M {eng_right:.1f} {ey:.1f} '
-                f"C {mid_x:.1f} {ey:.1f}, {mid_x:.1f} {ty:.1f}, {ticket_x:.1f} {ty:.1f}\"/>"
-            )
+    svg_parts.append(
+        f'<circle class="ring-guide" cx="{cx:.1f}" cy="{cy:.1f}" r="{ring_r:.1f}" '
+        f'fill="none" stroke="rgba(215,180,145,0.28)" stroke-width="2" '
+        f'stroke-dasharray="6 6"/>'
+    )
 
-    for i, eng in enumerate(all_engineers):
-        cy = eng_ys[i]
+    svg_parts.append(
+        f'<rect class="hub-mask" x="{hub_mask_x:.1f}" y="{hub_mask_y:.1f}" '
+        f'width="{hub_mask_w:.1f}" height="{hub_mask_h:.1f}" rx="10" ry="10" '
+        f'fill="#141414" stroke="rgba(215,180,145,0.08)" stroke-width="1"/>'
+    )
+
+    for eng in all_engineers:
+        ex, ey = eng_positions[eng]
         col = eng_colors[eng]
         slug = eng_slug[eng]
         is_focus = slug == focus_slug
-        y0 = cy - eng_box_h / 2.0
+        x0 = ex - eng_box_w / 2.0
+        y0 = ey - eng_box_h / 2.0
         eng_json = json.dumps(eng)
         focus_flag = "true" if is_focus else "false"
-        short_eng = eng if len(eng) <= 15 else eng[:13] + "…"
+        label = _perf_engineer_portrait_label(eng)
         svg_parts.append(
-            f'<g class="eng-pick {slug}{" focused" if is_focus else ""}" role="button" tabindex="0" '
+            f'<g class="eng-pick eng-portrait {slug}{" focused" if is_focus else ""}" '
+            f'role="button" tabindex="0" '
             f'onclick="pickEng({eng_json}, {focus_flag})" '
             f'onkeydown="if(event.key===\'Enter\'||event.key===\' \')pickEng({eng_json}, {focus_flag})">'
-            f'<rect class="eng-box" x="{left_x:.1f}" y="{y0:.1f}" '
-            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="6" ry="6" '
+            f'<rect class="eng-box" x="{x0:.1f}" y="{y0:.1f}" '
+            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="5" ry="5" '
             f'stroke="{col}" stroke-width="{2.2 if is_focus else 1.2}"/>'
-            f'<rect class="eng-accent" x="{left_x:.1f}" y="{y0:.1f}" width="3" height="{eng_box_h:.1f}" '
-            f'rx="1" fill="{col}"/>'
-            f'<text class="eng-label" x="{left_x + eng_box_w / 2:.1f}" y="{cy + 3.5:.1f}" '
-            f'text-anchor="middle" fill="{col if is_focus else "#e8e6e3"}">'
-            f"{html.escape(short_eng)}</text>"
+            f'<rect class="eng-accent" x="{x0:.1f}" y="{y0:.1f}" '
+            f'width="{eng_box_w:.1f}" height="3" rx="1" fill="{col}"/>'
+            f'<text class="eng-label" x="{ex:.1f}" y="{ey:.1f}" '
+            f'text-anchor="middle" dominant-baseline="middle" '
+            f'transform="rotate(-90 {ex:.1f} {ey:.1f})" '
+            f'fill="{col if is_focus else "#e8e6e3"}">'
+            f"{html.escape(label)}</text>"
             f"</g>"
         )
 
-    for ti, ticket in enumerate(tickets):
+    for ticket in tickets:
+        tx, ty = tick_xy[ticket]
+        engs = ticket_engineers.get(ticket, set())
+        for eng in sorted(engs, key=str.lower):
+            if eng not in eng_positions:
+                continue
+            ex, ey = eng_positions[eng]
+            ei = eng_indices[eng]
+            touch_anchors = _perf_engineer_touch_anchors(
+                ex, ey, eng_box_w, eng_box_h, eng_index=ei, n_eng=n_eng,
+            )
+            side = _perf_pick_touch_side(
+                touch_anchors,
+                tx=tx,
+                ty=ty,
+                ex=ex,
+                ey=ey,
+                eng_index=ei,
+                n_eng=n_eng,
+            )
+            sx, sy = touch_anchors[side]
+            lx_end, ly_end = _perf_link_endpoint_at_ticket(sx, sy, tx, ty)
+            col = eng_colors[eng]
+            slug = eng_slug[eng]
+            is_hl_link = bool(focus_key and eng == focus_key)
+            sw = 2.0 if is_hl_link else 0.85
+            svg_parts.append(
+                f'<path class="link-path {slug}{" hl" if is_hl_link else ""} link-{side}" '
+                f'stroke="{col}" stroke-width="{sw}" fill="none" '
+                f'stroke-linecap="round" '
+                f'd="{_perf_curved_link_path(sx, sy, lx_end, ly_end, side=side)}"/>'
+            )
+
+    for ticket in tickets:
         engs = ticket_engineers.get(ticket, set())
         is_shared = len(engs) > 1
-        ty = tick_ys[ti]
+        angle = tick_angles[ticket]
+        tx, ty = tick_xy[ticket]
+        lx = cx + (ring_r + label_outset) * math.cos(angle)
+        ly = cy + (ring_r + label_outset) * math.sin(angle)
         is_hl = bool(focus_key and ticket in tickets_for_focus)
         if is_hl and focus_key:
             ticket_col = eng_colors.get(focus_key, "#e8e6e3")
@@ -5326,10 +6112,22 @@ def _render_perf_visit_bipartite_graph(
             ticket_col = eng_colors.get(solo_eng, "#a39e97")
         short = ticket if len(ticket) <= ticket_max_len else ticket[: ticket_max_len - 1] + "…"
         hl_cls = " hl" if is_hl else ""
-        ty_off = max(1.5, ticket_font * 0.35)
+        shared_cls = " shared" if is_shared else ""
+        anchor = _perf_radial_text_anchor(angle)
+        rot_deg = math.degrees(angle)
+        if anchor == "end":
+            rot_deg += 180.0
+        use_rotate = abs(math.cos(angle)) < 0.85
+        transform = f' transform="rotate({rot_deg:.1f} {lx:.1f} {ly:.1f})"' if use_rotate else ""
         svg_parts.append(
-            f'<text class="ticket-label{hl_cls}" x="{ticket_x:.1f}" y="{ty + ty_off:.1f}" '
-            f'text-anchor="start" fill="{ticket_col}">{html.escape(short)}</text>'
+            f'<circle class="ticket-node{hl_cls}" cx="{tx:.1f}" cy="{ty:.1f}" '
+            f'r="{_PERF_MAP_TICKET_NODE_R:.1f}" '
+            f'fill="{ticket_col}" opacity="0.85"/>'
+        )
+        svg_parts.append(
+            f'<text class="ticket-label{hl_cls}{shared_cls}" x="{lx:.1f}" y="{ly + 3.0:.1f}" '
+            f'text-anchor="{anchor}" fill="{ticket_col}"{transform}>'
+            f"{html.escape(short)}</text>"
         )
 
     legend_h = 48
@@ -5359,21 +6157,26 @@ html, body {{
 }}
 .legend-chip.active {{ border-color: #D7B491; }}
 .legend-chip i {{ width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }}
-.svg-wrap {{ width: 100%; overflow: visible; }}
-.perf-bipartite-svg {{
-  display: block; width: 100%; height: {svg_h_px}px; max-height: none;
+.svg-wrap {{ width: 100%; overflow: visible; display: flex; justify-content: center; }}
+.perf-radial-svg {{
+  display: block; width: 100%; max-width: {svg_w:.0f}px; height: auto;
+  aspect-ratio: 1 / 1;
 }}
 .eng-pick {{ cursor: pointer; }}
-.eng-label {{ font-size: 9px; pointer-events: none; font-weight: 500; }}
-.eng-box {{ fill: #141414; }}
+.eng-label {{ font-size: 8px; pointer-events: none; font-weight: 500; letter-spacing: 0.02em; }}
+.eng-portrait .eng-box {{ fill: #141414; }}
 .ticket-label {{ font-size: {ticket_font}px; fill: #a39e97; }}
-.link-path {{ opacity: 0.78; }}
-.perf-bipartite-svg.focus-mode .link-path {{ opacity: 0.08; }}
-.perf-bipartite-svg.focus-mode .link-path.hl {{ opacity: 1; stroke-width: 2.2 !important; }}
-.perf-bipartite-svg.focus-mode .eng-pick {{ opacity: 0.3; }}
-.perf-bipartite-svg.focus-mode .eng-pick.focused {{ opacity: 1; }}
-.perf-bipartite-svg.focus-mode .ticket-label {{ opacity: 0.18; }}
-.perf-bipartite-svg.focus-mode .ticket-label.hl {{
+.ticket-label.shared {{ fill: #D7B491; }}
+.link-path {{ opacity: 0.5; stroke-linecap: round; }}
+.hub-mask {{ pointer-events: none; }}
+.perf-radial-svg.focus-mode .link-path {{ opacity: 0.07; }}
+.perf-radial-svg.focus-mode .link-path.hl {{ opacity: 1; stroke-width: 2.2 !important; }}
+.perf-radial-svg.focus-mode .eng-pick {{ opacity: 0.35; }}
+.perf-radial-svg.focus-mode .eng-pick.focused {{ opacity: 1; }}
+.perf-radial-svg.focus-mode .ticket-label {{ opacity: 0.16; }}
+.perf-radial-svg.focus-mode .ticket-node {{ opacity: 0.16; }}
+.perf-radial-svg.focus-mode .ticket-label.hl,
+.perf-radial-svg.focus-mode .ticket-node.hl {{
   opacity: 1; font-size: {ticket_font_hl}px; font-weight: 600;
 }}
 </style>
@@ -5388,8 +6191,8 @@ function pickEng(eng, isFocused) {{
 <div class="perf-map-shell">
 <div class="eng-legend">{legend_html}</div>
 <div class="svg-wrap">
-<svg class="perf-bipartite-svg{focus_mode_cls}" viewBox="0 0 {svg_w} {svg_h}" preserveAspectRatio="xMidYMin meet"
-     xmlns="http://www.w3.org/2000/svg" aria-label="Engineer to ticket visit map">
+<svg class="perf-radial-svg{focus_mode_cls}" viewBox="0 0 {svg_w:.0f} {svg_h:.0f}" preserveAspectRatio="xMidYMid meet"
+     xmlns="http://www.w3.org/2000/svg" aria-label="Radial engineer to ticket visit map">
 {"".join(svg_parts)}
 </svg>
 </div>
@@ -5412,12 +6215,7 @@ def _render_perf_visits_tab(
         )
         return
 
-    search = st.text_input(
-        "Find ticket",
-        key=_PERF_MAP_SEARCH_KEY,
-        placeholder="Filter by ticket number…",
-    )
-    _, pool, _, focus_key, total_all = _perf_visit_ticket_pool(data, search=search)
+    _, pool, _, focus_key, total_all = _perf_visit_ticket_pool(data, search="")
     _perf_visit_map_caption(len(pool), total_all, focus_key=focus_key)
 
     tab_node, tab_matrix = st.tabs(
@@ -5427,25 +6225,21 @@ def _render_perf_visits_tab(
         ]
     )
     with tab_node:
-        st.caption(
-            "Engineers on the left, tickets on the right — lines show who touched each case. "
-            "Click an engineer to filter."
-        )
         _render_perf_visit_bipartite_graph(
             visits_all,
             focus=focus,
             data=data,
-            search=search,
+            search="",
         )
     with tab_matrix:
         st.caption(
-            "Rows = engineers · columns = tickets · cell = latest visit outcome "
-            "(● active). Gold headers = shared tickets."
+            "Rows = tickets · columns = staff · colored dots show involvement. "
+            "Use **Ticket ID** in the matrix filter bar to search. Case Info on the right."
         )
         _render_perf_visit_staff_matrix(
             visits_all,
             data=data,
-            search=search,
+            search="",
         )
 
 
