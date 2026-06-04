@@ -691,8 +691,16 @@ def _manual_field_response_session_keys(prefix: str) -> dict[str, str]:
     }
 
 
+def _canonical_username_stem(stem: str) -> str:
+    """Map retired handles (e.g. ibbe → ibeyx)."""
+    s = stem.strip().lstrip("@").lower()
+    if s.startswith("ibbe"):
+        return "ibeyx" + s[4:]
+    return s
+
+
 def _dash_normalize_handle(handle: str) -> str:
-    return handle.strip().lstrip("@").lower()
+    return _canonical_username_stem(handle)
 
 
 def _resolve_field_responded_by(assigned_to: object, replier_label: str) -> str | None:
@@ -4485,12 +4493,15 @@ def _perf_merge_field_and_visit_summaries(
 def _perf_focus_people(
     field_summary: pd.DataFrame,
     visits: pd.DataFrame,
+    sales_summary: pd.DataFrame | None = None,
 ) -> list[str]:
     names: set[str] = set()
     if not field_summary.empty and "Person" in field_summary.columns:
         names |= {str(p) for p in field_summary["Person"].tolist() if str(p).strip()}
     if not visits.empty and "assignee" in visits.columns:
         names |= {str(p) for p in visits["assignee"].dropna().unique().tolist() if str(p).strip()}
+    if sales_summary is not None and not sales_summary.empty and "Person" in sales_summary.columns:
+        names |= {str(p) for p in sales_summary["Person"].tolist() if str(p).strip()}
     return ["All"] + sorted(names, key=str.lower)
 
 
@@ -4560,16 +4571,93 @@ def _perf_solo_shared_summary_all(visits: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _perf_count_column_total(
+    table: pd.DataFrame,
+    column: str,
+    *,
+    focus: str,
+) -> int:
+    if table.empty or column not in table.columns:
+        return 0
+    if focus not in ("", "All"):
+        key = _perf_norm_member(focus)
+        row = table.loc[table["Person"] == key]
+        return int(row[column].sum()) if not row.empty else 0
+    return int(table[column].sum())
+
+
+def _perf_attach_sales_to_overview(
+    overview_table: pd.DataFrame,
+    sales_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add per-person Sales Cases counts (field ``Total`` stays field-only)."""
+    if sales_summary.empty or "Total" not in sales_summary.columns:
+        if overview_table.empty:
+            return overview_table
+        out = overview_table.copy()
+        out["Sales Cases"] = 0
+        return out
+    sales_col = sales_summary[["Person", "Total"]].rename(
+        columns={"Total": "Sales Cases"},
+    )
+    if overview_table.empty:
+        out = sales_col.copy()
+        out["Total"] = 0
+        out["Handled"] = 0
+        return out
+    merged = overview_table.merge(sales_col, on="Person", how="outer")
+    for col in ("Total", "Sales Cases", "Handled"):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(0).astype(int)
+    return merged
+
+
 def _perf_grand_total_for_board(
     overview_table: pd.DataFrame,
     solo_shared_summary: pd.DataFrame,
+    *,
+    sales_summary: pd.DataFrame | None = None,
+    focus: str = "All",
 ) -> int:
-    """Big ring number: snapshot queue total when available, else visit tickets touched."""
-    if not overview_table.empty and "Total" in overview_table.columns:
-        return int(overview_table["Total"].sum())
+    """Ring total: field queue snapshot + Sales Cases in the sidebar window."""
+    field_n = _perf_count_column_total(overview_table, "Total", focus=focus)
+    sales_n = _perf_count_column_total(
+        sales_summary if sales_summary is not None else pd.DataFrame(),
+        "Total",
+        focus=focus,
+    )
+    if field_n or sales_n:
+        return field_n + sales_n
     if not solo_shared_summary.empty and "Tickets touched" in solo_shared_summary.columns:
-        return int(solo_shared_summary["Tickets touched"].sum())
+        return _perf_count_column_total(solo_shared_summary, "Tickets touched", focus=focus)
     return 0
+
+
+def _perf_overview_total_breakdown(
+    overview_table: pd.DataFrame,
+    *,
+    sales_summary: pd.DataFrame | None = None,
+    focus: str = "All",
+) -> tuple[int, int, int]:
+    field_n = _perf_count_column_total(overview_table, "Total", focus=focus)
+    sales_n = _perf_count_column_total(
+        sales_summary if sales_summary is not None else pd.DataFrame(),
+        "Total",
+        focus=focus,
+    )
+    return field_n + sales_n, field_n, sales_n
+
+
+def _perf_overview_ring_subhtml(field_n: int, sales_n: int) -> str:
+    if field_n and sales_n:
+        return (
+            f'<div class="perf-ss-total-sub">Field {field_n} · Sales {sales_n}</div>'
+        )
+    if sales_n:
+        return f'<div class="perf-ss-total-sub">Sales {sales_n}</div>'
+    if field_n:
+        return f'<div class="perf-ss-total-sub">Field {field_n}</div>'
+    return ""
 
 
 def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
@@ -4585,7 +4673,8 @@ def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
     else:
         r = summary.sum(numeric_only=True)
     labels = (
-        ("Total", "Total"),
+        ("Total", "Field queues"),
+        ("Sales Cases", "Sales Cases"),
         (STATUS_DAILY_TASK, STATUS_DAILY_TASK),
         ("Needs Review", "Needs Review"),
         ("Investigation", "Investigation"),
@@ -4600,7 +4689,7 @@ def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
         if col not in summary.columns:
             continue
         val = int(r.get(col, 0))
-        if val == 0 and col not in ("Total", "Handled"):
+        if val == 0 and col not in ("Total", "Sales Cases", "Handled"):
             continue
         chips.append(
             f'<span class="perf-queue-chip">{html.escape(label)}'
@@ -4619,32 +4708,60 @@ def _render_perf_solo_shared_board(
     *,
     focus: str,
     overview_table: pd.DataFrame | None = None,
+    sales_summary: pd.DataFrame | None = None,
 ) -> None:
     """Engineer rows (solo | shared pills) + total ring."""
     overview_table = overview_table if overview_table is not None else pd.DataFrame()
+    sales_summary = sales_summary if sales_summary is not None else pd.DataFrame()
+    total_n, field_n, sales_n = _perf_overview_total_breakdown(
+        overview_table,
+        sales_summary=sales_summary,
+        focus=focus,
+    )
+    sub_html = _perf_overview_ring_subhtml(field_n, sales_n)
+
     if visits_all.empty:
         st.markdown(
             '<p class="perf-ss-hint">No visit data in this window — solo/shared breakdown '
             "appears after assigns and reassigns create <code>ticket_visits</code> rows.</p>",
             unsafe_allow_html=True,
         )
-        if not overview_table.empty:
-            total = _perf_grand_total_for_board(overview_table, pd.DataFrame())
+        if total_n > 0:
             st.markdown(
                 f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
-                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total}</div>'
-                f'<div class="perf-ss-total-lbl">in queues</div></div></div>',
+                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total_n}</div>'
+                f'<div class="perf-ss-total-lbl">in queues</div>{sub_html}</div></div>',
                 unsafe_allow_html=True,
             )
         return
 
     summary = _perf_solo_shared_summary_all(visits_all)
     if summary.empty:
-        st.caption("No engineers in visit data for this window.")
+        if total_n > 0:
+            st.markdown(
+                f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
+                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total_n}</div>'
+                f'<div class="perf-ss-total-lbl">in queues</div>{sub_html}</div></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("No engineers in visit data for this window.")
         return
 
     focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
-    total_n = _perf_grand_total_for_board(overview_table, summary)
+    if total_n == 0:
+        total_n = _perf_grand_total_for_board(
+            overview_table,
+            summary,
+            sales_summary=sales_summary,
+            focus=focus,
+        )
+        _, field_n, sales_n = _perf_overview_total_breakdown(
+            overview_table,
+            sales_summary=sales_summary,
+            focus=focus,
+        )
+        sub_html = _perf_overview_ring_subhtml(field_n, sales_n)
     rows_html: list[str] = []
     for _, row in summary.iterrows():
         person = str(row["Person"])
@@ -4668,13 +4785,14 @@ def _render_perf_solo_shared_board(
         f'<div class="perf-ss-total">'
         f'<div class="perf-ss-circle">{total_n}</div>'
         f'<div class="perf-ss-total-lbl">in queues</div>'
+        f"{sub_html}"
         f"</div></div>",
         unsafe_allow_html=True,
     )
     st.markdown(
         '<p class="perf-ss-hint">Solo = only that engineer on visit history · '
-        "Shared = handoff/reassign · Ring = sum of queue totals (sidebar range). "
-        "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
+        "Shared = handoff/reassign · Ring = <strong>field queues + Sales Cases</strong> "
+        "(sidebar range). Use <strong>Focus Assignee</strong> to highlight a row.</p>",
         unsafe_allow_html=True,
     )
 
@@ -5180,7 +5298,7 @@ def _perf_norm_member(raw: object) -> str:
     s = str(raw or "").strip()
     if not s or s.lower() in ("unknown", "none", "null"):
         return "(unknown)"
-    low = s.lstrip("@").lower()
+    low = _canonical_username_stem(s)
     return f"@{low}" if low else "(unknown)"
 
 
@@ -5447,7 +5565,7 @@ def _perf_enrich_sales_cases(df: pd.DataFrame) -> pd.DataFrame:
     view["_local"] = view["_ts"].dt.tz_convert(LOCAL_TZ)
     if "attended_by" in view.columns:
         ab = view["attended_by"].fillna("").astype(str).str.strip()
-        view["staff"] = ab.mask(ab.eq(""), "(unknown)")
+        view["staff"] = ab.map(lambda s: _perf_norm_member(s) if s else "(unknown)")
     elif "admin_owner" in view.columns:
         view["staff"] = view["admin_owner"].map(_perf_norm_member)
     else:
@@ -5463,9 +5581,11 @@ def _perf_enrich_sales_cases(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _perf_build_sales_summary(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "status_eff" not in df.columns:
+    if df.empty:
         return pd.DataFrame()
     view = _perf_enrich_sales_cases(df)
+    if view.empty or "status_eff" not in view.columns:
+        return pd.DataFrame()
     rows: list[dict[str, object]] = []
     for person, grp in view.groupby("staff"):
         st = grp["status_eff"]
@@ -5788,35 +5908,283 @@ def _render_perf_ticket_table(df: pd.DataFrame) -> None:
     )
 
 
+def _perf_attach_field_responses_to_sales(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``field_response`` from linked CSM tickets when missing on the sales row."""
+    if df.empty:
+        return df
+    out = df.copy()
+    if "field_response" not in out.columns:
+        out["field_response"] = ""
+    if "case_ref" not in out.columns:
+        return out
+    missing = out["field_response"].fillna("").astype(str).str.strip().eq("")
+    if not missing.any():
+        return out
+    try:
+        tickets = _fetch_tickets()
+    except Exception:
+        return out
+    if tickets.empty or "ticket_number" not in tickets.columns or "field_response" not in tickets.columns:
+        return out
+    lookup = (
+        tickets[["ticket_number", "field_response"]]
+        .dropna(subset=["ticket_number"])
+        .drop_duplicates(subset=["ticket_number"], keep="last")
+    )
+    lookup = lookup.set_index("ticket_number")["field_response"]
+    refs = out.loc[missing, "case_ref"].astype(str).str.strip()
+    out.loc[missing, "field_response"] = refs.map(
+        lambda r: str(lookup.get(r, "") or "").strip()
+    )
+    return out
+
+
+def _perf_sales_case_list_view(df: pd.DataFrame) -> pd.DataFrame:
+    """Compact case list columns for Performance → Sales Cases."""
+    if df.empty:
+        return pd.DataFrame()
+    view = _perf_enrich_sales_cases(df)
+    view = _perf_attach_field_responses_to_sales(view)
+    view = view.sort_values("_ts", ascending=False).head(200).copy()
+
+    region = (
+        view["account_region"].fillna("").astype(str).str.strip()
+        if "account_region" in view.columns
+        else pd.Series("", index=view.index)
+    )
+    if "dispatch_region" in view.columns:
+        dispatch = view["dispatch_region"].fillna("").astype(str).str.strip()
+        region = region.mask(region.eq(""), dispatch)
+
+    case_note = (
+        view["description"].fillna("").astype(str).str.strip()
+        if "description" in view.columns
+        else pd.Series("", index=view.index)
+    )
+    if "additional_info" in view.columns:
+        extra = view["additional_info"].fillna("").astype(str).str.strip()
+        case_note = case_note.mask(case_note.eq(""), extra)
+
+    comment = (
+        view["close_note"].fillna("").astype(str).str.strip()
+        if "close_note" in view.columns
+        else pd.Series("", index=view.index)
+    )
+    field_resp = (
+        view["field_response"].fillna("").astype(str).str.strip()
+        if "field_response" in view.columns
+        else pd.Series("", index=view.index)
+    )
+
+    return pd.DataFrame(
+        {
+            "Ticket Number": view["case_ref"].astype(str)
+            if "case_ref" in view.columns
+            else "",
+            "Resort Name / Company Name": view["account_name"].astype(str)
+            if "account_name" in view.columns
+            else "",
+            "Region": region,
+            "Field category": view["field_task_category"].fillna("").astype(str)
+            if "field_task_category" in view.columns
+            else "",
+            "Case note": case_note,
+            "Comment (Optional)": comment,
+            "Field response": field_resp,
+        },
+        index=view.index,
+    )
+
+
 def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
     if df.empty:
         st.caption("No Sales Cases to list.")
         return
-    view = _perf_enrich_sales_cases(df)
-    detail = view.sort_values("_ts", ascending=False).head(200)
-    cols = [
-        c
-        for c in (
-            "status_eff",
-            "case_ref",
-            "account_name",
-            "attended_by",
-            "sales_category",
-            "account_region",
-            "admin_owner",
-            "assigned_to",
-            "updated_at",
-        )
-        if c in detail.columns
-    ]
-    show = detail[cols].rename(
-        columns={"status_eff": "Status", "attended_by": "Attended by"}
-    )
+    show = _perf_sales_case_list_view(df)
+    if show.empty:
+        st.caption("No Sales Cases to list.")
+        return
+    col_cfg = {
+        "Ticket Number": st.column_config.TextColumn("Ticket Number", width="small"),
+        "Resort Name / Company Name": st.column_config.TextColumn(
+            "Resort Name / Company Name",
+            width="medium",
+        ),
+        "Region": st.column_config.TextColumn("Region", width="small"),
+        "Field category": st.column_config.TextColumn("Field category", width="medium"),
+        "Case note": st.column_config.TextColumn("Case note", width="large"),
+        "Comment (Optional)": st.column_config.TextColumn(
+            "Comment (Optional)",
+            width="medium",
+        ),
+        "Field response": st.column_config.TextColumn("Field response", width="large"),
+    }
     st.dataframe(
-        _format_local(show),
+        show,
         use_container_width=True,
         hide_index=True,
+        column_config=col_cfg,
     )
+
+
+def _perf_sales_status_counts(view: pd.DataFrame) -> dict[str, int]:
+    if view.empty or "status_eff" not in view.columns:
+        return {
+            "Sales Ticket": 0,
+            "Investigation": 0,
+            "Design": 0,
+            "Resolved": 0,
+        }
+    st = view["status_eff"]
+    return {
+        "Sales Ticket": int(st.eq(SC_STATUS_SALES_TICKET).sum()),
+        "Investigation": int(st.isin(_SC_INVESTIGATION_QUEUE_STATUSES).sum()),
+        "Design": int(st.eq(SC_STATUS_DESIGN).sum()),
+        "Resolved": int(st.eq(SC_STATUS_RESOLVED).sum()),
+    }
+
+
+def _render_perf_sales_status_strip(view: pd.DataFrame) -> None:
+    counts = _perf_sales_status_counts(view)
+    chips: list[str] = []
+    for label, val in counts.items():
+        if val == 0 and label != "Sales Ticket":
+            continue
+        chips.append(
+            f'<span class="perf-queue-chip">{html.escape(label)}'
+            f"<strong>{val}</strong></span>"
+        )
+    if not chips:
+        return
+    st.markdown(
+        f'<div class="perf-queue-strip">{"".join(chips)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_sales_staff_bar(view: pd.DataFrame, *, title: str) -> None:
+    if view.empty:
+        st.caption("No data for this filter.")
+        return
+    if "staff" not in view.columns:
+        view = _perf_enrich_sales_cases(view)
+    totals = (
+        view.groupby("staff", as_index=False)
+        .size()
+        .rename(columns={"size": "Cases"})
+        .sort_values("Cases", ascending=False)
+    )
+    height = min(420, max(180, 38 * len(totals)))
+    chart = (
+        alt.Chart(totals)
+        .mark_bar(color="#D7B491")
+        .encode(
+            x=alt.X("Cases:Q", title="Cases"),
+            y=alt.Y("staff:N", sort="-x", title="Attended by"),
+            tooltip=[
+                alt.Tooltip("staff:N", title="Attended by"),
+                alt.Tooltip("Cases:Q", title="Cases"),
+            ],
+        )
+        .properties(height=height, title=title)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _render_perf_sales_status_bar(view: pd.DataFrame, *, title: str) -> None:
+    counts = _perf_sales_status_counts(view)
+    rows = [{"Status": k, "Cases": v} for k, v in counts.items() if v > 0]
+    if not rows:
+        st.caption("No cases by status.")
+        return
+    data = pd.DataFrame(rows)
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x=alt.X("Cases:Q", title="Cases"),
+            y=alt.Y("Status:N", sort="-x", title=""),
+            color=alt.Color(
+                "Status:N",
+                legend=None,
+                scale=alt.Scale(
+                    domain=list(counts.keys()),
+                    range=["#9ec5e8", "#c4a882", "#D7B491", "#8fa89e"],
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("Status:N", title="Queue"),
+                alt.Tooltip("Cases:Q", title="Cases"),
+            ],
+        )
+        .properties(height=220, title=title)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _render_perf_sales_cases_tab(
+    sales_df: pd.DataFrame,
+    *,
+    focus: str,
+    bucket_fmt: str,
+    x_title: str,
+    axis_format: str,
+) -> None:
+    """Sales Cases in the Performance window — queues, staff, and case list."""
+    st.caption(
+        "Cases in the sidebar **Time range**, plus any still in an active sales queue. "
+        "**Attended by** = sales owner · **Field engineer** = assignment when dispatched."
+    )
+    if sales_df.empty:
+        st.info("No Sales Cases for this filter — try **All** in Focus Assignee or widen the time range.")
+        return
+
+    view = _perf_enrich_sales_cases(sales_df)
+    counts = _perf_sales_status_counts(view)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total", len(view))
+    c2.metric("Sales Ticket", counts["Sales Ticket"])
+    c3.metric("Investigation", counts["Investigation"])
+    c4.metric("Design", counts["Design"])
+    c5.metric("Resolved", counts["Resolved"])
+
+    _render_perf_sales_status_strip(view)
+
+    chart_l, chart_r = st.columns(2)
+    with chart_l:
+        _render_perf_sales_status_bar(view, title="By queue")
+    with chart_r:
+        staff_title = (
+            f"By attended by ({focus})"
+            if focus not in ("", "All")
+            else "By attended by"
+        )
+        _render_perf_sales_staff_bar(view, title=staff_title)
+
+    split = (
+        view.groupby(["status_eff", "category"], as_index=False)
+        .size()
+        .rename(columns={"size": "Cases", "status_eff": "Status", "category": "Category"})
+        .sort_values(["Cases", "Status", "Category"], ascending=[False, True, True])
+    )
+    if not split.empty:
+        st.markdown("**Split (status × category)**")
+        st.dataframe(split, use_container_width=True, hide_index=True)
+
+    with st.expander("Trend over time", expanded=len(view) <= 12):
+        if "staff" in view.columns and "_local" in view.columns:
+            _render_perf_stacked_staff_chart(
+                view,
+                y_title="Sales Cases",
+                bucket_fmt=bucket_fmt,
+                x_title=x_title,
+                axis_format=axis_format,
+            )
+        else:
+            st.caption("No timeline data for this range.")
+
+    st.markdown("**Case list**")
+    _render_perf_sales_case_table(sales_df)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -5945,7 +6313,7 @@ def _cc_strip_missing_ticket_columns(payload: dict) -> dict:
 
 def _cc_normalize_handle(raw: str) -> str:
     """Return ``@username`` for Supabase / Telegram."""
-    cleaned = raw.strip().lstrip("@")
+    cleaned = _canonical_username_stem(raw)
     if not cleaned:
         raise ValueError("Username is empty.")
     if len(cleaned) > 32:
@@ -6440,6 +6808,7 @@ def _cc_dashboard_reassign_ticket(
         task_category,
         additional_info=additional_info,
         operator_id=operator_id,
+        expected_last_assigned_at=row.get("last_assigned_at"),
     )
     if from_status in ("Open", STATUS_DAILY_TASK, STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION):
         if from_status == "Open":
@@ -6887,6 +7256,7 @@ def _sc_patch_assignment_fields(
     additional_info: str | None,
     operator_id: str,
     account_region: str | None = None,
+    account_name: str | None = None,
 ) -> dict:
     """Update sales case field assignment (same fields as CSM edit assignment)."""
     row = _fetch_sales_case_row_by_id(row_id)
@@ -6902,6 +7272,9 @@ def _sc_patch_assignment_fields(
         "additional_info": additional_info,
         "admin_owner": operator_id,
     }
+    an = (account_name or "").strip()
+    if an:
+        patch["account_name"] = an
     region = (account_region or "").strip()
     if region:
         if region not in SALES_REGION_CODES:
@@ -7030,6 +7403,7 @@ def _render_sales_assignment_editor(
         fe_missing=fe_missing,
     )
     region_key = f"{edit_key_prefix}_sc_edit_assign_region"
+    account_key = f"{edit_key_prefix}_sc_edit_assign_account"
     synced_key = f"{edit_key_prefix}_sc_edit_assign_synced"
     if st.session_state.get(synced_key) != cref:
         st.session_state[synced_key] = cref
@@ -7037,8 +7411,14 @@ def _render_sales_assignment_editor(
         st.session_state[region_key] = (
             cur_region if cur_region in SALES_REGION_CODES else SALES_REGION_CODES[0]
         )
+        st.session_state[account_key] = _sc_row_text(r0.get("account_name"))
 
     with st.form(f"{edit_key_prefix}_sc_assignment_edit_form", clear_on_submit=False):
+        st.text_input(
+            "Resort Name / Company Name",
+            key=account_key,
+            placeholder="Resort or company name",
+        )
         st.selectbox(
             "Region Team",
             options=list(SALES_REGION_CODES),
@@ -7094,6 +7474,9 @@ def _render_sales_assignment_editor(
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
         region = str(st.session_state.get(region_key, "")).strip()
+        account_name = str(st.session_state.get(account_key, "")).strip()
+        if not account_name:
+            raise ValueError("Fill **Resort Name / Company Name**.")
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -7111,6 +7494,7 @@ def _render_sales_assignment_editor(
             additional_info=notes,
             operator_id=op,
             account_region=region,
+            account_name=account_name,
         )
     except Exception as exc:
         st.error(f"Could not save: {exc}")
@@ -9176,6 +9560,14 @@ _BON_THEME_CSS = """
         text-transform: uppercase;
         letter-spacing: 0.06em;
     }
+    .perf-ss-total-sub {
+        margin-top: 0.15rem;
+        font-size: 0.62rem;
+        color: var(--bon-oak);
+        letter-spacing: 0.02em;
+        text-align: center;
+        line-height: 1.25;
+    }
     .perf-ss-hint {
         font-size: 0.72rem;
         color: var(--bon-muted);
@@ -9978,7 +10370,6 @@ def _sc_sales_case_display_cols() -> tuple[str, ...]:
     return (
         "case_ref",
         "account_name",
-        "attended_by",
         "sales_priority",
         "account_region",
         "sales_category",
@@ -9999,7 +10390,6 @@ def _sc_rename_sales_case_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
     mapping = {
         "case_ref": "Ticket Number",
         "account_name": "Resort Name / Company Name",
-        "attended_by": "Attended by",
         "additional_info": "Case note",
         "close_note": "Closing note",
     }
@@ -10009,7 +10399,6 @@ def _sc_rename_sales_case_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
 _SC_QUEUE_TABLE_COLS: tuple[str, ...] = (
     "case_ref",
     "account_name",
-    "attended_by",
     "sales_priority",
     "account_region",
     "sales_category",
@@ -11992,7 +12381,21 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             "No field tickets in this time window. Try **Last 30 days** in the sidebar."
         )
 
-    if field_has_data and n_in_view > 0:
+    sales_all = pd.DataFrame()
+    try:
+        raw_sales = _fetch_sales_cases_cached()
+        sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
+    except Exception as exc:
+        st.warning(f"Could not load Sales Cases for Performance: {exc}")
+    sales_in_view, _n_sales_range = _dashboard_sales_cases_in_view(
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    sales_summary = _perf_build_sales_summary(sales_in_view)
+    n_sales = len(sales_in_view)
+
+    if (field_has_data and n_in_view > 0) or n_sales > 0:
         visits_all = pd.DataFrame()
         try:
             visits_all = _fetch_visits_in_range(range_start, range_end)
@@ -12004,7 +12407,8 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
         visit_summary = _perf_build_visit_summary(visits_all)
         overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
-        people = _perf_focus_people(summary, visits_all)
+        overview_table = _perf_attach_sales_to_overview(overview_table, sales_summary)
+        people = _perf_focus_people(summary, visits_all, sales_summary)
         _perf_apply_map_pick_from_query()
         focus = st.selectbox(
             "Focus Assignee (Field)",
@@ -12012,7 +12416,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             key="perf_focus_person",
             help=(
                 "Filter Performance tabs to one engineer, or **All**. "
-                "Includes engineers seen in ticket queues or visit cycles."
+                "Includes field queues, visit cycles, and Sales Cases staff."
             ),
         )
         pending_f = _perf_filter_by_person(pending, focus)
@@ -12021,6 +12425,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         investigation_f = _perf_filter_by_person(investigation, focus)
         on_hold_f = _perf_filter_by_person(on_hold, focus)
         unattended_f = _perf_filter_by_person(unattended, focus)
+        sales_f = _perf_filter_by_person(
+            _perf_enrich_sales_cases(sales_in_view), focus,
+        )
         work_f = _perf_combine_work(completed_f, investigation_f)
         n_work = len(work_f)
         n_filtered = (
@@ -12032,14 +12439,28 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             + len(unattended_f)
         )
 
-        m0, m1, m2, m3, m4, m5, m6 = st.columns(7)
-        m0.metric("In view", n_in_view if focus == "All" else n_filtered)
+        if n_sales > 0:
+            m0, m1, m2, m3, m4, m5, m6, m7 = st.columns(8)
+        else:
+            m0, m1, m2, m3, m4, m5, m6 = st.columns(7)
+            m7 = None
+        m0.metric(
+            "In view",
+            n_in_view if focus == "All" else n_filtered,
+            help="Field tickets in the sidebar window (snapshot queues).",
+        )
         m1.metric(STATUS_DAILY_TASK, len(pending_f))
         m2.metric("Needs Review", len(open_f))
         m3.metric("On Hold", len(on_hold_f))
         m4.metric(STATUS_RESOLVED, len(completed_f))
         m5.metric("Investigation", len(investigation_f))
         m6.metric("Unattended", len(unattended_f))
+        if m7 is not None:
+            m7.metric(
+                "Sales Cases",
+                n_sales if focus == "All" else len(sales_f),
+                help="In sidebar range plus any still in an active sales queue.",
+            )
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
         n_visits = len(visits_f)
 
@@ -12054,9 +12475,12 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 "some tickets have an unrecognized status."
             )
 
-        tab_overview, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
+        n_sales_tab = len(sales_f) if focus not in ("", "All") else n_sales
+
+        tab_overview, tab_sales, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
             [
                 "Overview",
+                f"Sales Cases ({n_sales_tab})",
                 f"Visits ({n_visits})",
                 f"Handled ({n_work})",
                 f"On Hold ({len(on_hold_f)})",
@@ -12069,10 +12493,20 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 visits_all,
                 focus=focus,
                 overview_table=overview_table,
+                sales_summary=sales_summary,
             )
             if not overview_table.empty:
                 _render_perf_queue_strip(overview_table, focus=focus)
             _render_perf_solo_shared_detail(visits_all, focus=focus)
+
+        with tab_sales:
+            _render_perf_sales_cases_tab(
+                sales_f,
+                focus=focus,
+                bucket_fmt=bucket_fmt,
+                x_title=x_title,
+                axis_format=axis_format,
+            )
 
         with tab_visits:
             _render_perf_visit_bipartite_graph(visits_all, focus=focus)
