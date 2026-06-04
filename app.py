@@ -4858,6 +4858,14 @@ _PERF_MAP_ENG_ROW_H = 30.0
 _PERF_MAP_PAD_V = 10.0
 _PERF_MAP_VIEWPORT_PX = 760
 _PERF_MAP_IFRAME_MAX = 2400
+_PERF_MATRIX_MAX_TICKETS = 40
+_PERF_MATRIX_OUTCOME_STYLE: dict[str, tuple[str, str]] = {
+    "assigned": ("A", "#9ec5e8"),
+    "responded": ("✓", "#b8d4a8"),
+    "reassigned": ("↪", "#D7B491"),
+    "unattended": ("U", "#c97a7a"),
+    "on_hold": ("H", "#a39e97"),
+}
 
 
 def _perf_map_ticket_layout(n: int) -> tuple[float, float, float, int]:
@@ -4989,43 +4997,12 @@ def _perf_bipartite_ticket_order(
     return sorted(tickets, key=_key)
 
 
-def _render_perf_visit_bipartite_graph(
-    visits_all: pd.DataFrame,
+def _perf_visit_map_caption(
+    pool_total: int,
+    total_all: int,
     *,
-    focus: str,
+    focus_key: str,
 ) -> None:
-    """Engineers (left) linked to tickets (right) — all filtered tickets on one view."""
-    data = _perf_visit_bipartite_data(visits_all, focus=focus)
-    if not data:
-        components.html(
-            "<html><body style='margin:0;background:#141414;'></body></html>",
-            height=8,
-        )
-        return
-
-    all_engineers: list[str] = data["all_engineers"]  # type: ignore[assignment]
-    all_tickets: list[str] = data["all_tickets"]  # type: ignore[assignment]
-    ticket_engineers: dict[str, set[str]] = data["ticket_engineers"]  # type: ignore[assignment]
-    focus_key: str = data["focus_key"]  # type: ignore[assignment]
-    total_all: int = data["total_tickets"]  # type: ignore[assignment]
-
-    search = st.text_input(
-        "Find ticket",
-        key=_PERF_MAP_SEARCH_KEY,
-        placeholder="Filter by ticket number…",
-    )
-
-    eng_index = {eng: i for i, eng in enumerate(all_engineers)}
-    pool = _perf_visit_map_ticket_pool(
-        all_tickets,
-        ticket_engineers,
-        eng_index,
-        focus_key=focus_key,
-        search=search,
-    )
-    pool_total = len(pool)
-    tickets = pool
-
     if pool_total == 0:
         st.caption("No tickets match — try another search or pick **All** in Focus Assignee.")
     elif focus_key:
@@ -5038,6 +5015,203 @@ def _render_perf_visit_bipartite_graph(
             f"**{pool_total}** ticket(s) · click an engineer to filter · "
             f"use search to narrow"
         )
+
+
+def _perf_visit_ticket_pool(
+    data: dict[str, object],
+    *,
+    search: str,
+) -> tuple[list[str], list[str], dict[str, set[str]], str, int]:
+    all_engineers: list[str] = data["all_engineers"]  # type: ignore[assignment]
+    all_tickets: list[str] = data["all_tickets"]  # type: ignore[assignment]
+    ticket_engineers: dict[str, set[str]] = data["ticket_engineers"]  # type: ignore[assignment]
+    focus_key: str = data["focus_key"]  # type: ignore[assignment]
+    total_all: int = data["total_tickets"]  # type: ignore[assignment]
+    eng_index = {eng: i for i, eng in enumerate(all_engineers)}
+    pool = _perf_visit_map_ticket_pool(
+        all_tickets,
+        ticket_engineers,
+        eng_index,
+        focus_key=focus_key,
+        search=search,
+    )
+    return all_engineers, pool, ticket_engineers, focus_key, total_all
+
+
+def _perf_visit_matrix_cell(
+    visits: pd.DataFrame,
+    *,
+    assignee: str,
+    ticket: str,
+    eng_colors: dict[str, str],
+) -> tuple[str, str, str]:
+    """Return (symbol, color, title) for one engineer×ticket cell."""
+    if visits.empty:
+        return "", "", ""
+    mask = (
+        visits["assignee"].astype(str) == assignee
+    ) & (visits["ticket_number"].astype(str) == ticket)
+    sub = visits.loc[mask]
+    if sub.empty:
+        return "", "", ""
+    if "is_active" in sub.columns and sub["is_active"].any():
+        return "●", eng_colors.get(assignee, "#9ec5e8"), "Active assignment"
+    outcome = "assigned"
+    if "outcome" in sub.columns:
+        ordered = sub.copy()
+        if "visit_start" in ordered.columns:
+            ordered = ordered.sort_values("visit_start")
+        outcome = str(ordered["outcome"].iloc[-1] or "assigned")
+    sym, col = _PERF_MATRIX_OUTCOME_STYLE.get(outcome, ("·", "#a39e97"))
+    return sym, col, outcome.replace("_", " ").title()
+
+
+def _render_perf_visit_staff_matrix(
+    visits_all: pd.DataFrame,
+    *,
+    data: dict[str, object],
+    search: str,
+) -> None:
+    """Engineers × tickets grid — who touched each case and latest visit outcome."""
+    all_engineers, pool, ticket_engineers, focus_key, _total_all = _perf_visit_ticket_pool(
+        data,
+        search=search,
+    )
+    tickets = pool[:_PERF_MATRIX_MAX_TICKETS]
+    if not tickets:
+        st.caption("No tickets to show in the matrix.")
+        return
+    if len(pool) > _PERF_MATRIX_MAX_TICKETS:
+        st.caption(
+            f"Showing first **{_PERF_MATRIX_MAX_TICKETS}** of **{len(pool)}** tickets — "
+            "narrow with **Find ticket** or **Focus Assignee**."
+        )
+
+    prepared = _perf_prepare_visits_df(visits_all)
+    eng_colors = _perf_engineer_color_map(all_engineers)
+
+    header_cells = [
+        '<th class="perf-matrix-sticky-col">Engineer</th>',
+    ]
+    for tn in tickets:
+        engs = ticket_engineers.get(tn, set())
+        shared_cls = " shared-col" if len(engs) > 1 else ""
+        short = tn if len(tn) <= 14 else tn[:11] + "…"
+        header_cells.append(
+            f'<th class="perf-matrix-ticket{shared_cls}" title="{html.escape(tn)}">'
+            f"{html.escape(short)}</th>"
+        )
+
+    body_rows: list[str] = []
+    for eng in all_engineers:
+        eng_short = eng if len(eng) <= 16 else eng[:14] + "…"
+        col = eng_colors.get(eng, "#9ec5e8")
+        cells = [
+            f'<td class="perf-matrix-sticky-col" style="color:{col}">'
+            f"{html.escape(eng_short)}</td>"
+        ]
+        for tn in tickets:
+            if eng not in ticket_engineers.get(tn, set()):
+                cells.append('<td class="perf-matrix-empty">·</td>')
+                continue
+            sym, sym_col, title = _perf_visit_matrix_cell(
+                prepared,
+                assignee=eng,
+                ticket=tn,
+                eng_colors=eng_colors,
+            )
+            cells.append(
+                f'<td class="perf-matrix-cell" style="color:{sym_col}" '
+                f'title="{html.escape(title)}">{html.escape(sym)}</td>'
+            )
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    legend_bits = [
+        '<span class="perf-matrix-legend-item"><i style="color:#9ec5e8">●</i> Active</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#b8d4a8">✓</i> Responded</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#D7B491">↪</i> Reassigned</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#9ec5e8">A</i> Assigned</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#c97a7a">U</i> Unattended</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#D7B491">■</i> Shared ticket</span>',
+    ]
+
+    matrix_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<style>
+html, body {{
+  margin: 0; padding: 0; background: #141414; color: #e8e6e3;
+  font-family: system-ui, sans-serif; font-size: 11px;
+}}
+.perf-matrix-shell {{ padding: 6px 8px 10px; }}
+.perf-matrix-legend {{
+  display: flex; flex-wrap: wrap; gap: 0.5rem 1rem;
+  margin-bottom: 8px; color: #a39e97; font-size: 10px;
+}}
+.perf-matrix-legend-item {{ display: inline-flex; align-items: center; gap: 0.25rem; }}
+.perf-matrix-wrap {{
+  overflow: auto; max-height: 520px;
+  border: 1px solid rgba(215,180,145,0.22); border-radius: 6px;
+}}
+table.perf-matrix {{
+  border-collapse: collapse; min-width: 100%;
+}}
+.perf-matrix th, .perf-matrix td {{
+  border: 1px solid rgba(215,180,145,0.12);
+  padding: 4px 6px; text-align: center; white-space: nowrap;
+}}
+.perf-matrix th {{
+  background: #1a1a1a; color: #D7B491; font-weight: 600;
+  position: sticky; top: 0; z-index: 2;
+}}
+.perf-matrix-sticky-col {{
+  position: sticky; left: 0; z-index: 3;
+  background: #141414; text-align: left !important;
+  font-weight: 500; min-width: 108px;
+  box-shadow: 2px 0 4px rgba(0,0,0,0.35);
+}}
+th.perf-matrix-sticky-col {{ z-index: 4; background: #1a1a1a; }}
+.perf-matrix-ticket {{ min-width: 52px; font-size: 9px; }}
+th.perf-matrix-ticket.shared-col {{ color: #e8c9a0; }}
+.perf-matrix-cell {{ font-weight: 700; font-size: 12px; }}
+.perf-matrix-empty {{ color: #3a3a3a; }}
+</style>
+</head><body>
+<div class="perf-matrix-shell">
+<div class="perf-matrix-legend">{"".join(legend_bits)}</div>
+<div class="perf-matrix-wrap">
+<table class="perf-matrix">
+<thead><tr>{"".join(header_cells)}</tr></thead>
+<tbody>{"".join(body_rows)}</tbody>
+</table>
+</div>
+</div>
+</body></html>"""
+    components.html(matrix_html, height=min(560, 80 + 28 * len(all_engineers)), scrolling=True)
+
+
+def _render_perf_visit_bipartite_graph(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+    data: dict[str, object] | None = None,
+    search: str | None = None,
+) -> None:
+    """Engineers (left) linked to tickets (right) — node-link diagram."""
+    if data is None:
+        data = _perf_visit_bipartite_data(visits_all, focus=focus)
+    if not data:
+        components.html(
+            "<html><body style='margin:0;background:#141414;'></body></html>",
+            height=8,
+        )
+        return
+
+    all_engineers, pool, ticket_engineers, focus_key, total_all = _perf_visit_ticket_pool(
+        data,
+        search=search or "",
+    )
+    pool_total = len(pool)
+    tickets = pool
 
     if not tickets:
         return
@@ -5222,6 +5396,57 @@ function pickEng(eng, isFocused) {{
 </div>
 </body></html>"""
     components.html(map_html, height=frame_h, scrolling=True)
+
+
+def _render_perf_visits_tab(
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> None:
+    """Visits: node-link diagram and multi-staff case matrix."""
+    data = _perf_visit_bipartite_data(visits_all, focus=focus)
+    if not data:
+        st.info(
+            "No visit data in this window — visit cycles appear after assigns and "
+            "reassigns create `ticket_visits` rows."
+        )
+        return
+
+    search = st.text_input(
+        "Find ticket",
+        key=_PERF_MAP_SEARCH_KEY,
+        placeholder="Filter by ticket number…",
+    )
+    _, pool, _, focus_key, total_all = _perf_visit_ticket_pool(data, search=search)
+    _perf_visit_map_caption(len(pool), total_all, focus_key=focus_key)
+
+    tab_node, tab_matrix = st.tabs(
+        [
+            "Node-Link Diagram",
+            "Multi-Staff Case Management Matrix",
+        ]
+    )
+    with tab_node:
+        st.caption(
+            "Engineers on the left, tickets on the right — lines show who touched each case. "
+            "Click an engineer to filter."
+        )
+        _render_perf_visit_bipartite_graph(
+            visits_all,
+            focus=focus,
+            data=data,
+            search=search,
+        )
+    with tab_matrix:
+        st.caption(
+            "Rows = engineers · columns = tickets · cell = latest visit outcome "
+            "(● active). Gold headers = shared tickets."
+        )
+        _render_perf_visit_staff_matrix(
+            visits_all,
+            data=data,
+            search=search,
+        )
 
 
 def _render_visit_summary_table(visits: pd.DataFrame) -> None:
@@ -5976,11 +6201,18 @@ def _perf_sales_case_list_view(df: pd.DataFrame) -> pd.DataFrame:
         else pd.Series("", index=view.index)
     )
 
+    status = (
+        view["status_eff"].fillna("").astype(str).str.strip()
+        if "status_eff" in view.columns
+        else pd.Series("", index=view.index)
+    )
+
     return pd.DataFrame(
         {
             "Ticket Number": view["case_ref"].astype(str)
             if "case_ref" in view.columns
             else "",
+            "Status": status,
             "Resort Name / Company Name": view["account_name"].astype(str)
             if "account_name" in view.columns
             else "",
@@ -6006,6 +6238,7 @@ def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
         return
     col_cfg = {
         "Ticket Number": st.column_config.TextColumn("Ticket Number", width="small"),
+        "Status": st.column_config.TextColumn("Status", width="small"),
         "Resort Name / Company Name": st.column_config.TextColumn(
             "Resort Name / Company Name",
             width="medium",
@@ -12509,7 +12742,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             )
 
         with tab_visits:
-            _render_perf_visit_bipartite_graph(visits_all, focus=focus)
+            _render_perf_visits_tab(visits_all, focus=focus)
 
         with tab_work:
             st.caption(
