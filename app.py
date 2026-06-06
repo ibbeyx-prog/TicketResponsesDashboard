@@ -2202,6 +2202,63 @@ def _navigate_to_on_hold_queue() -> None:
     st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_ON_HOLD
 
 
+def _navigate_to_resolved_queue() -> None:
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+    st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_RESOLVED
+
+
+def _apply_admin_close_ticket(
+    ticket_number: str,
+    *,
+    comment: str,
+    operator_id: str,
+) -> None:
+    """Admin-only: close without field completion → **Resolved** with required note."""
+    text = (comment or "").strip()
+    if not text:
+        raise ValueError("A comment is required to close this ticket.")
+
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    status = _normalize_ticket_status_value(row.get("status"))
+    allowed = (STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION)
+    if status not in allowed:
+        raw = str(row.get("status") or "").strip()
+        raise ValueError(
+            f"Ticket **{ticket_number}** is **{raw or '—'}** — **Closed** is only allowed from "
+            "**Daily Task**, **Needs Review**, **On Hold**, or **Under Investigation**."
+        )
+
+    client = _get_supabase_client()
+    now_iso = _cc_utc_now_iso()
+    op_at = f"@{operator_id.lstrip('@')}"
+    from_label = {
+        STATUS_DAILY_TASK: STATUS_DAILY_TASK,
+        "Open": "Needs Review",
+        STATUS_ON_HOLD: STATUS_ON_HOLD,
+        STATUS_UNDER_INVESTIGATION: STATUS_UNDER_INVESTIGATION,
+    }.get(status, status)
+    log_note = f"Admin closed from {from_label}: {text}"
+
+    _set_ticket_status(
+        ticket_number,
+        new_status=STATUS_RESOLVED,
+        log_action="AdminClosed",
+        actor=op_at,
+        note=log_note,
+    )
+    _visits_close_open(
+        client,
+        ticket_number,
+        outcome="unattended",
+        response_note=log_note,
+        closed_by="dashboard",
+        visit_end=now_iso,
+    )
+    _invalidate_dashboard_data_cache()
+
+
 def _fetch_pending_with_response_mismatch_uncached() -> list[str]:
     """Daily Task tickets that look stuck after a field reply (bot UPDATE likely failed).
 
@@ -3646,6 +3703,54 @@ def _apply_ticket_status_batch(
         st.rerun()
 
 
+def _render_admin_close_form_inline(*, key_prefix: str, options: list[str]) -> None:
+    """Admin close — required comment, moves ticket(s) to **Resolved**."""
+    picked_list = _get_selected_queue_tickets(key_prefix, options)
+    if not picked_list:
+        st.caption("Select ticket(s) in the table first.")
+        return
+    shown = ", ".join(picked_list[:4])
+    extra = f" (+{len(picked_list) - 4} more)" if len(picked_list) > 4 else ""
+    st.caption(
+        f"**{len(picked_list)}** selected · {shown}{extra} · "
+        "for customer unavailable / no field visit — moves to **Resolved**."
+    )
+    comment = st.text_area(
+        "Close comment",
+        placeholder="e.g. Customer unavailable — admin closed without field visit",
+        key=f"{key_prefix}_admin_close_comment",
+        height=72,
+        label_visibility="collapsed",
+    )
+    if st.button(
+        "Confirm close",
+        key=f"{key_prefix}_admin_close_confirm",
+        type="primary",
+        use_container_width=True,
+    ):
+        op = _session_operator_id()
+        if not op:
+            st.error("Sign in again — operator session is missing.")
+            return
+        ok = 0
+        for ticket in picked_list:
+            try:
+                _apply_admin_close_ticket(ticket, comment=comment, operator_id=op)
+                ok += 1
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"**{ticket}**: {exc}")
+        if ok:
+            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            _navigate_to_resolved_queue()
+            st.session_state[_CC_FLASH_KEY] = (
+                f"Closed **{ok}** ticket(s) → **Resolved**."
+            )
+            st.session_state[_CC_FLASH_LEVEL_KEY] = "success"
+            st.rerun()
+
+
 def _render_follow_up_form_inline(*, key_prefix: str, options: list[str]) -> None:
     """Follow-up form (used inside overflow menu)."""
     picked = _get_selected_queue_tickets(key_prefix, options)
@@ -3845,6 +3950,7 @@ def _render_ticket_actions_popover(
     allow_manual_field_response: bool = False,
     allow_reassign: bool = False,
     allow_mark_follow_up: bool = False,
+    allow_admin_close: bool = False,
 ) -> None:
     """Actions menu — only enabled when at least one ticket is selected."""
     picked = _get_selected_queue_tickets(key_prefix, options)
@@ -3871,6 +3977,7 @@ def _render_ticket_actions_popover(
                 allow_manual_field_response=allow_manual_field_response,
                 allow_reassign=allow_reassign,
                 allow_mark_follow_up=allow_mark_follow_up,
+                allow_admin_close=allow_admin_close,
             )
 
 
@@ -3886,6 +3993,7 @@ def _render_ticket_actions_popover_body(
     allow_manual_field_response: bool,
     allow_reassign: bool,
     allow_mark_follow_up: bool,
+    allow_admin_close: bool,
 ) -> None:
     """Action buttons inside the Actions popover (selection already verified)."""
     if not _is_dashboard_admin():
@@ -3931,6 +4039,7 @@ def _render_ticket_actions_popover_body(
     has_below_primary = (
         has_workflow
         or allow_mark_follow_up
+        or (allow_admin_close and _is_dashboard_admin())
         or (allow_transfer_to_sales and _session_operator_id())
         or allow_delete
     )
@@ -3967,6 +4076,9 @@ def _render_ticket_actions_popover_body(
     if allow_mark_follow_up:
         with st.expander("Follow-up", expanded=False):
             _render_follow_up_form_inline(key_prefix=key_prefix, options=options)
+    if allow_admin_close and _is_dashboard_admin():
+        with st.expander("Closed", expanded=False):
+            _render_admin_close_form_inline(key_prefix=key_prefix, options=options)
     if allow_transfer_to_sales and _session_operator_id():
         with st.expander("Move to Sales", expanded=False):
             picked_list = _get_selected_queue_tickets(key_prefix, options)
@@ -4082,6 +4194,7 @@ def _render_admin_ticket_toolbar(
     allow_manual_field_response: bool = False,
     allow_reassign: bool = False,
     allow_mark_follow_up: bool = False,
+    allow_admin_close: bool = False,
     selected: list[str] | None = None,
 ) -> None:
     """Legacy entry point — delegates to the queue actions row + Actions popover."""
@@ -4097,6 +4210,7 @@ def _render_admin_ticket_toolbar(
         allow_manual_field_response=allow_manual_field_response,
         allow_reassign=allow_reassign,
         allow_mark_follow_up=allow_mark_follow_up,
+        allow_admin_close=allow_admin_close,
     )
 
 
@@ -12949,6 +13063,7 @@ def _render_dashboard(
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=_is_dashboard_admin(),
+                    allow_admin_close=_is_dashboard_admin(),
                 )
 
                 if _is_dashboard_admin():
@@ -13065,6 +13180,7 @@ def _render_dashboard(
                     allow_edit_assignment=True,
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=_is_dashboard_admin(),
+                    allow_admin_close=_is_dashboard_admin(),
                 )
                 if _is_dashboard_admin() and st.session_state.get(
                     _reassign_session_keys("on_hold")["show"]
@@ -13157,6 +13273,7 @@ def _render_dashboard(
                     allow_manual_field_response=_is_dashboard_admin(),
                     allow_reassign=True,
                     allow_mark_follow_up=True,
+                    allow_admin_close=_is_dashboard_admin(),
                 )
 
                 if _is_dashboard_admin() and st.session_state.get(
@@ -13236,6 +13353,7 @@ def _render_dashboard(
                     allow_delete=True,
                     allow_edit_assignment=True,
                     allow_reassign=True,
+                    allow_admin_close=_is_dashboard_admin(),
                 )
 
                 if st.session_state.get(
