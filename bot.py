@@ -257,6 +257,9 @@ def _validate_ticket_id(raw: str) -> str | None:
 # Extra spellings accepted in Telegram text; normalized to a canonical DB value.
 _ASSIGNMENT_CATEGORY_SYNONYMS: dict[str, str] = {
     "Femto Recovery": "Femto Recover",
+    "Coverage issue": "Coverage Check",
+    "Coverage Issue": "Coverage Check",
+    "Coverage Issues": "Coverage Check",
 }
 
 # Pattern: "@user <Category> <ticket_number>" — rebuilt when categories change in Supabase.
@@ -1184,6 +1187,8 @@ def _canonical_task_category(raw: str) -> str | None:
         "repeater-installation": "Repeater Installation",
         "coverage": "Coverage Check",
         "coverage check": "Coverage Check",
+        "coverage issue": "Coverage Check",
+        "coverage issues": "Coverage Check",
     }
     return aliases.get(s.lower())
 

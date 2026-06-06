@@ -29,6 +29,37 @@ DEFAULT_ASSIGNMENT_TASK_CATEGORIES: tuple[str, ...] = (
     "Follow-Up Installation",
 )
 
+# Retired labels → canonical name (case-insensitive lookup via ``canonical_task_category``).
+TASK_CATEGORY_LEGACY_ALIASES: dict[str, str] = {
+    "coverage issue": "Coverage Check",
+    "coverage issues": "Coverage Check",
+}
+
+
+def canonical_task_category(raw: str) -> str:
+    """Normalize spacing and map retired labels (e.g. Coverage issue → Coverage Check)."""
+    s = " ".join(str(raw or "").strip().split())
+    if not s:
+        return ""
+    mapped = TASK_CATEGORY_LEGACY_ALIASES.get(s.lower())
+    return mapped if mapped else s
+
+
+def dedupe_canonical_categories(names: list[str] | tuple[str, ...]) -> list[str]:
+    """Picker list: canonical labels only, stable order, no duplicate Coverage rows."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        canon = canonical_task_category(str(raw))
+        if not canon:
+            continue
+        key = canon.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(canon)
+    return out
+
 
 def task_categories_table() -> str:
     return (os.getenv("TASK_CATEGORIES_TABLE") or "dashboard_task_categories").strip()
@@ -69,6 +100,7 @@ def fetch_task_category_names(
             return [], True
         raise
     names = [str(r["name"]).strip() for r in (res.data or []) if r.get("name")]
+    names = dedupe_canonical_categories(names)
     if not names and include_defaults_if_empty:
         return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), False
     return names, False
@@ -115,6 +147,7 @@ def sync_ticket_categories_into_table(
         raw = str(row.get("task_category") or "").strip()
         if not raw:
             continue
+        raw = canonical_task_category(raw)
         try:
             norm = normalize_task_category_name(raw)
         except ValueError:
@@ -136,9 +169,12 @@ def resolve_task_category(raw: str, known: tuple[str, ...] | list[str]) -> str |
     s = re.sub(r"\s+", " ", (raw or "").strip())
     if not s:
         return None
+    canon = canonical_task_category(s)
+    if canon in known:
+        return canon
     if s in known:
         return s
-    key_lower = s.lower()
+    key_lower = canon.lower()
     for cat in known:
         if cat.lower() == key_lower:
             return cat
