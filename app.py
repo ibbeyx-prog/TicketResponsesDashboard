@@ -5952,6 +5952,8 @@ def _render_perf_visit_bipartite_graph(
     if not tickets:
         return
 
+    eng_index = {eng: i for i, eng in enumerate(all_engineers)}
+
     eng_colors = _perf_engineer_color_map(all_engineers)
     eng_slug = {eng: f"e{i}" for i, eng in enumerate(all_engineers)}
     focus_slug = eng_slug.get(focus_key, "") if focus_key else ""
@@ -5979,7 +5981,7 @@ def _render_perf_visit_bipartite_graph(
         hub_box_h=eng_box_h,
         ticket_font=ticket_font,
     )
-    eng_positions, eng_indices, _row_w, hub_left_x, hub_right_x = _perf_hub_engineer_layout_row(
+    eng_positions, _eng_indices, _row_w, hub_left_x, hub_right_x = _perf_hub_engineer_layout_row(
         cx=cx,
         cy=cy,
         engineers=all_engineers,
@@ -6069,7 +6071,7 @@ def _render_perf_visit_bipartite_graph(
             if eng not in eng_positions:
                 continue
             ex, ey = eng_positions[eng]
-            ei = eng_indices[eng]
+            ei = eng_index.get(eng, 0)
             touch_anchors = _perf_engineer_touch_anchors(
                 ex, ey, eng_box_w, eng_box_h, eng_index=ei, n_eng=n_eng,
             )
