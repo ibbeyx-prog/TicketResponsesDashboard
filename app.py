@@ -141,6 +141,98 @@ SALES_REGION_CODES: tuple[str, ...] = (
     "GOC",
     "CENTRAL",
 )
+SALES_REGION_CENTRAL = "CENTRAL"
+
+
+def _sc_region_is_central(region: object) -> bool:
+    return str(region or "").strip().upper() == SALES_REGION_CENTRAL
+
+
+def _sc_sync_region_engineer_widgets(
+    *,
+    region_key: str,
+    region_watch_key: str,
+    engineer_select_key: str,
+    engineer_manual_key: str,
+    fe_names: list[str],
+    fe_missing: bool,
+    restore_handle: str = "",
+) -> bool:
+    """When Region Team is not CENTRAL, clear engineer; restore when switching back."""
+    region = str(st.session_state.get(region_key, "")).strip()
+    central = _sc_region_is_central(region)
+    prev = st.session_state.get(region_watch_key)
+    if prev != region:
+        st.session_state[region_watch_key] = region
+        if not central:
+            st.session_state.pop(engineer_select_key, None)
+            st.session_state.pop(engineer_manual_key, None)
+        elif restore_handle:
+            handle = restore_handle.lstrip("@").lower()
+            if fe_names and not fe_missing:
+                fe_opts = [f"@{n}" for n in fe_names]
+                match = next(
+                    (o for o in fe_opts if o.lstrip("@").lower() == handle),
+                    fe_opts[0] if fe_opts else "",
+                )
+                st.session_state[engineer_select_key] = match
+            else:
+                st.session_state[engineer_manual_key] = restore_handle.lstrip("@")
+    return central
+
+
+def _render_sc_engineer_field(
+    *,
+    central: bool,
+    fe_names: list[str],
+    fe_missing: bool,
+    select_key: str,
+    manual_key: str,
+    blank_key: str,
+) -> None:
+    """Engineer picker for CENTRAL; blank disabled field for regional teams."""
+    if central:
+        if fe_names and not fe_missing:
+            st.selectbox(
+                "Engineer",
+                options=[f"@{n}" for n in fe_names],
+                key=select_key,
+            )
+        else:
+            st.text_input(
+                "Engineer",
+                placeholder="username",
+                key=manual_key,
+            )
+    else:
+        st.caption(
+            "Regional team — leave engineer blank; assign from **Site Visit** "
+            "when the case is **Regional for site visit**."
+        )
+        st.text_input("Engineer", value="", disabled=True, key=blank_key)
+
+
+def _sc_resolve_sales_engineer_handle(
+    *,
+    central: bool,
+    fe_names: list[str],
+    fe_missing: bool,
+    select_key: str,
+    manual_key: str,
+) -> str | None:
+    if not central:
+        return None
+    if fe_names and not fe_missing:
+        pick = str(st.session_state.get(select_key, "")).strip()
+        if not pick:
+            raise ValueError("Pick an engineer from the list.")
+        return _cc_normalize_handle(pick)
+    raw = str(st.session_state.get(manual_key, "")).strip()
+    if not raw:
+        raise ValueError("Enter an engineer username.")
+    return _cc_normalize_handle(raw)
+
+
 SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Standard")
 DEFAULT_SALES_CASE_CATEGORIES: tuple[str, ...] = (
     "QOS Issue",
@@ -750,12 +842,15 @@ def _sync_assignment_edit_widgets(
     cats: list[str],
     fe_names: list[str],
     fe_missing: bool,
+    skip_engineer: bool = False,
 ) -> None:
     """Push the selected ticket's values into edit widgets (Streamlit keeps stale keys)."""
     if st.session_state.get(keys["synced_ticket"]) == picked:
         return
     st.session_state[keys["synced_ticket"]] = picked
-    if fe_names and not fe_missing:
+    if skip_engineer:
+        st.session_state.pop(keys["engineer"], None)
+    elif fe_names and not fe_missing:
         fe_opts = [f"@{n}" for n in fe_names]
         default_fe = (
             f"@{current_handle}"
@@ -1513,6 +1608,40 @@ def _sc_attended_by_for_session() -> str:
     if user:
         return user
     return "unknown"
+
+
+_SC_SALES_OVERVIEW_ADMIN_LABEL = "Admin"
+
+
+def _sc_unassigned_sales_attended_by() -> str:
+    """Stored ``attended_by`` when no field engineer — Overview shows **Admin**."""
+    return _SC_SALES_OVERVIEW_ADMIN_LABEL
+
+
+def _sc_sales_attended_by_for_case(*, assigned_to: str | None = None) -> str:
+    """``attended_by`` for sales rows — **Admin** when no field engineer assigned."""
+    if str(assigned_to or "").strip():
+        return _sc_attended_by_for_session()
+    return _sc_unassigned_sales_attended_by()
+
+
+def _sc_perf_sales_credit_staff(row: object) -> str:
+    """Performance / Overview person label for a sales case row."""
+    if isinstance(row, pd.Series):
+        assigned = str(row.get("assigned_to") or "").strip()
+        attended = str(row.get("attended_by") or "").strip()
+    else:
+        d = row if isinstance(row, dict) else {}
+        assigned = str(d.get("assigned_to") or "").strip()
+        attended = str(d.get("attended_by") or "").strip()
+    if not assigned:
+        return _SC_SALES_OVERVIEW_ADMIN_LABEL
+    if attended:
+        stem = attended.lstrip("@").lower()
+        if stem in ("admin", "dashboard-admin", "unknown"):
+            return _SC_SALES_OVERVIEW_ADMIN_LABEL
+        return _perf_norm_member(attended)
+    return _SC_SALES_OVERVIEW_ADMIN_LABEL
 
 
 def _cc_assignment_log_note(additional_info: str | None, operator_id: str) -> str | None:
@@ -4940,6 +5069,41 @@ def _perf_solo_shared_summary_all(visits: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _perf_solo_shared_board_summary(
+    visits: pd.DataFrame,
+    sales_summary: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Visit solo/shared counts plus Sales Cases staff (e.g. sales-only in window)."""
+    visit_summary = (
+        _perf_solo_shared_summary_all(visits)
+        if not visits.empty
+        else pd.DataFrame()
+    )
+    sales = sales_summary if sales_summary is not None else pd.DataFrame()
+    if visit_summary.empty and (sales.empty or "Person" not in sales.columns):
+        return pd.DataFrame()
+    if sales.empty or "Person" not in sales.columns or "Total" not in sales.columns:
+        out = visit_summary.copy()
+        if not out.empty:
+            out["Sales Cases"] = 0
+        return out
+    sales_cols = sales[["Person", "Total"]].rename(columns={"Total": "Sales Cases"})
+    if visit_summary.empty:
+        out = sales_cols.copy()
+        out["Solo tickets"] = 0
+        out["Shared tickets"] = 0
+        out["Tickets touched"] = 0
+        return out.sort_values(["Sales Cases", "Person"], ascending=[False, True])
+    merged = visit_summary.merge(sales_cols, on="Person", how="outer")
+    for col in ("Solo tickets", "Shared tickets", "Tickets touched", "Sales Cases"):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(0).astype(int)
+    return merged.sort_values(
+        ["Tickets touched", "Sales Cases", "Solo tickets"],
+        ascending=[False, False, False],
+    )
+
+
 def _perf_count_column_total(
     table: pd.DataFrame,
     column: str,
@@ -5089,23 +5253,19 @@ def _render_perf_solo_shared_board(
     )
     sub_html = _perf_overview_ring_subhtml(field_n, sales_n)
 
-    if visits_all.empty:
-        st.markdown(
-            '<p class="perf-ss-hint">No visit data in this window — solo/shared breakdown '
-            "appears after assigns and reassigns create <code>ticket_visits</code> rows.</p>",
-            unsafe_allow_html=True,
-        )
-        if total_n > 0:
-            st.markdown(
-                f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
-                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total_n}</div>'
-                f'<div class="perf-ss-total-lbl">in queues</div>{sub_html}</div></div>',
-                unsafe_allow_html=True,
-            )
-        return
-
-    summary = _perf_solo_shared_summary_all(visits_all)
+    summary = _perf_solo_shared_board_summary(visits_all, sales_summary)
     if summary.empty:
+        if visits_all.empty and total_n == 0:
+            st.markdown(
+                '<p class="perf-ss-hint">No field visits or Sales Cases in this window.</p>',
+                unsafe_allow_html=True,
+            )
+        elif visits_all.empty and total_n > 0:
+            st.markdown(
+                '<p class="perf-ss-hint">No visit data — field counts come from queue snapshot; '
+                "Sales Cases use <code>attended_by</code>.</p>",
+                unsafe_allow_html=True,
+            )
         if total_n > 0:
             st.markdown(
                 f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
@@ -5113,8 +5273,8 @@ def _render_perf_solo_shared_board(
                 f'<div class="perf-ss-total-lbl">in queues</div>{sub_html}</div></div>',
                 unsafe_allow_html=True,
             )
-        else:
-            st.caption("No engineers in visit data for this window.")
+        elif summary.empty:
+            st.caption("No engineers in visit or Sales Cases data for this window.")
         return
 
     focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
@@ -5134,16 +5294,24 @@ def _render_perf_solo_shared_board(
     rows_html: list[str] = []
     for _, row in summary.iterrows():
         person = str(row["Person"])
-        solo = int(row["Solo tickets"])
-        shared = int(row["Shared tickets"])
+        solo = int(row.get("Solo tickets", 0))
+        shared = int(row.get("Shared tickets", 0))
+        sales_n_person = int(row.get("Sales Cases", 0))
         selected = focus_key and person == focus_key
         row_cls = "perf-ss-row is-selected" if selected else "perf-ss-row"
+        sales_seg = ""
+        if sales_n_person > 0:
+            sales_seg = (
+                f'<span class="perf-ss-seg sales">sales'
+                f'<span class="num">{sales_n_person}</span></span>'
+            )
         rows_html.append(
             f'<div class="{row_cls}">'
             f'<span class="perf-ss-name">{html.escape(person)}</span>'
-            f'<div class="perf-ss-pill">'
+            f'<div class="perf-ss-pill{" has-sales" if sales_n_person else ""}">'
             f'<span class="perf-ss-seg solo">solo<span class="num">{solo}</span></span>'
             f'<span class="perf-ss-seg shared">shared<span class="num">{shared}</span></span>'
+            f"{sales_seg}"
             f"</div>"
             f"</div>"
         )
@@ -5159,9 +5327,9 @@ def _render_perf_solo_shared_board(
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<p class="perf-ss-hint">Solo = only that engineer on visit history · '
-        "Shared = handoff/reassign · Ring = **field queues + Sales Cases** "
-        "(excludes **Unattended** from credit total). "
+        '<p class="perf-ss-hint">Solo / shared = field visit history · '
+        "<strong>Sales</strong> = Sales Cases in window (<code>attended_by</code>) · "
+        "Ring = field queues + Sales Cases (excludes **Unattended** from credit). "
         "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
         unsafe_allow_html=True,
     )
@@ -5171,21 +5339,60 @@ def _render_perf_solo_shared_detail(
     visits_all: pd.DataFrame,
     *,
     focus: str,
+    sales_cases: pd.DataFrame | None = None,
 ) -> None:
-    """Ticket list when one engineer is selected (shared drill-down)."""
-    if visits_all.empty or focus in ("", "All"):
+    """Ticket list when one engineer is selected (field visits + Sales Cases)."""
+    if focus in ("", "All"):
         return
-    detail = _perf_solo_shared_ticket_rows(visits_all, focus)
-    if detail.empty:
+    detail = (
+        _perf_solo_shared_ticket_rows(visits_all, focus)
+        if not visits_all.empty
+        else pd.DataFrame()
+    )
+    sales_view = pd.DataFrame()
+    if sales_cases is not None and not sales_cases.empty:
+        sales_view = _perf_filter_by_person(
+            _perf_enrich_sales_cases(sales_cases), focus,
+        )
+    if detail.empty and sales_view.empty:
         return
-    shared_only = detail[detail["Type"] == "Shared"]
-    with st.expander(f"Shared tickets — {focus}", expanded=not shared_only.empty):
-        if shared_only.empty:
-            st.caption("All tickets touched in this window are solo (no handoffs).")
-        else:
-            st.dataframe(shared_only, use_container_width=True, hide_index=True)
-        with st.expander("All tickets (solo + shared)", expanded=False):
-            st.dataframe(detail, use_container_width=True, hide_index=True)
+    if not detail.empty:
+        shared_only = detail[detail["Type"] == "Shared"]
+        with st.expander(f"Shared tickets — {focus}", expanded=not shared_only.empty):
+            if shared_only.empty:
+                st.caption("All tickets touched in this window are solo (no handoffs).")
+            else:
+                st.dataframe(shared_only, use_container_width=True, hide_index=True)
+            with st.expander("All field tickets (solo + shared)", expanded=False):
+                st.dataframe(detail, use_container_width=True, hide_index=True)
+    if not sales_view.empty:
+        cols = [
+            c
+            for c in (
+                "ticket_number",
+                "account_name",
+                "sales_category",
+                "status_eff",
+                "_local",
+            )
+            if c in sales_view.columns
+        ]
+        show = sales_view[cols].copy() if cols else sales_view.copy()
+        rename = {
+            "ticket_number": "Ticket",
+            "account_name": "Account",
+            "sales_category": "Category",
+            "status_eff": "Status",
+            "_local": "Updated",
+        }
+        show = show.rename(columns={k: v for k, v in rename.items() if k in show.columns})
+        if "Updated" in show.columns:
+            show["Updated"] = show["Updated"].dt.strftime("%Y-%m-%d %H:%M")
+        with st.expander(
+            f"Sales Cases — {focus} ({len(show)})",
+            expanded=detail.empty,
+        ):
+            st.dataframe(show, use_container_width=True, hide_index=True)
 
 
 _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
@@ -5814,6 +6021,18 @@ _PERF_MATRIX_COMMENT_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Attendance ``action_type`` → Case Info comment ``kind`` (admin resolve/close notes included).
+_PERF_MATRIX_LOG_ACTION_KIND: dict[str, str] = {
+    "Response": "response",
+    "Assignment": "assignment",
+    "Resolved": "admin",
+    "AdminClosed": "admin",
+    "OnHold": "admin",
+    "MovedToInvestigation": "admin",
+    "Reopened": "admin",
+    "ReopenedFromUnattended": "admin",
+}
+
 
 def _perf_matrix_comment_key(author: str, text: str) -> tuple[str, str]:
     a = str(author or "").strip().lower().lstrip("@")
@@ -5951,13 +6170,15 @@ def _perf_matrix_case_info_from_attendance(
         action = str(row.get("action_type") or "").strip()
         note = str(row.get("note") or "").strip()
         photo = str(row.get("photo_url") or "").strip()
+        kind = _PERF_MATRIX_LOG_ACTION_KIND.get(action)
+        if not kind:
+            continue
         if action == "Assignment" and not note:
             continue
         if action == "Response" and not note and not photo.startswith("http"):
             continue
-        if action not in ("Response", "Assignment"):
+        if kind == "admin" and not note:
             continue
-        kind = "response" if action == "Response" else "assignment"
         bucket.add(
             tn,
             at_raw=row.get("timestamp"),
@@ -6944,13 +7165,7 @@ def _perf_enrich_sales_cases(df: pd.DataFrame) -> pd.DataFrame:
     if "_ts" not in view.columns and "updated_at" in view.columns:
         view["_ts"] = _parse_ts(view["updated_at"])
     view["_local"] = view["_ts"].dt.tz_convert(LOCAL_TZ)
-    if "attended_by" in view.columns:
-        ab = view["attended_by"].fillna("").astype(str).str.strip()
-        view["staff"] = ab.map(lambda s: _perf_norm_member(s) if s else "(unknown)")
-    elif "admin_owner" in view.columns:
-        view["staff"] = view["admin_owner"].map(_perf_norm_member)
-    else:
-        view["staff"] = "(unknown)"
+    view["staff"] = view.apply(_sc_perf_sales_credit_staff, axis=1)
     if "sales_category" in view.columns:
         cat = view["sales_category"].fillna("").astype(str).str.strip()
         view["category"] = cat.mask(cat.eq(""), "(uncategorized)")
@@ -8506,7 +8721,8 @@ def _cc_patch_assignment_fields(
         "dashboard_assigned_by": operator_id,
         "updated_at": now_iso,
     }
-    if assigned_to and not prev_handle:
+    first_assignee = bool(assigned_to and not prev_handle)
+    if first_assignee:
         updates["last_assigned_at"] = now_iso
     _cc_execute_ticket_update(client, updates, ticket_number)
     _cc_insert_attendance_log(
@@ -8516,6 +8732,8 @@ def _cc_patch_assignment_fields(
         action_type="AssignmentUpdated",
         note=_cc_assignment_log_note(additional_info, operator_id),
     )
+    if first_assignee:
+        _visits_open_new(client, ticket_number, assigned_to, visit_start=now_iso)
     updated = _fetch_ticket_row(ticket_number)
     return updated or row
 
@@ -8990,7 +9208,7 @@ def _render_reassign_editor(
 def _sc_patch_assignment_fields(
     row_id: str,
     *,
-    assigned_to: str,
+    assigned_to: str | None,
     field_task_category: str,
     additional_info: str | None,
     operator_id: str,
@@ -9127,10 +9345,25 @@ def _render_sales_assignment_editor(
         r0.get("description")
     )
 
-    cats = field_cats if field_cats else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    if current_cat and current_cat not in cats:
-        cats = [current_cat, *cats]
+    cats = _sales_category_options(field_cats)
+    if current_cat:
+        canon = canonical_task_category(current_cat) or current_cat
+        if canon not in cats:
+            cats = [canon, *cats]
+    account_key = f"{edit_key_prefix}_sc_edit_assign_account"
+    synced_key = f"{edit_key_prefix}_sc_edit_assign_synced"
+    region_watch_key = f"{edit_key_prefix}_sc_edit_assign_region_watch"
+    engineer_blank_key = f"{edit_key_prefix}_sc_edit_assign_engineer_blank"
+    if st.session_state.get(synced_key) != cref:
+        st.session_state[synced_key] = cref
+        cur_region = _sc_row_text(r0.get("account_region"))
+        st.session_state[region_key] = (
+            cur_region if cur_region in SALES_REGION_CODES else SALES_REGION_CODES[0]
+        )
+        st.session_state[account_key] = _sc_row_text(r0.get("account_name"))
+        st.session_state.pop(region_watch_key, None)
 
+    central_on_load = _sc_region_is_central(st.session_state.get(region_key))
     _sync_assignment_edit_widgets(
         keys=keys,
         picked=cref,
@@ -9140,17 +9373,8 @@ def _render_sales_assignment_editor(
         cats=cats,
         fe_names=fe_names,
         fe_missing=fe_missing,
+        skip_engineer=not central_on_load,
     )
-    region_key = f"{edit_key_prefix}_sc_edit_assign_region"
-    account_key = f"{edit_key_prefix}_sc_edit_assign_account"
-    synced_key = f"{edit_key_prefix}_sc_edit_assign_synced"
-    if st.session_state.get(synced_key) != cref:
-        st.session_state[synced_key] = cref
-        cur_region = _sc_row_text(r0.get("account_region"))
-        st.session_state[region_key] = (
-            cur_region if cur_region in SALES_REGION_CODES else SALES_REGION_CODES[0]
-        )
-        st.session_state[account_key] = _sc_row_text(r0.get("account_name"))
 
     with st.form(f"{edit_key_prefix}_sc_assignment_edit_form", clear_on_submit=False):
         st.text_input(
@@ -9163,18 +9387,23 @@ def _render_sales_assignment_editor(
             options=list(SALES_REGION_CODES),
             key=region_key,
         )
-        if fe_names and not fe_missing:
-            st.selectbox(
-                "Engineer",
-                options=[f"@{n}" for n in fe_names],
-                key=keys["engineer"],
-            )
-        else:
-            st.text_input(
-                "Engineer",
-                placeholder="username",
-                key=keys["engineer"],
-            )
+        central = _sc_sync_region_engineer_widgets(
+            region_key=region_key,
+            region_watch_key=region_watch_key,
+            engineer_select_key=keys["engineer"],
+            engineer_manual_key=keys["engineer"],
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            restore_handle=current_handle,
+        )
+        _render_sc_engineer_field(
+            central=central,
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            select_key=keys["engineer"],
+            manual_key=keys["engineer"],
+            blank_key=engineer_blank_key,
+        )
         st.selectbox(
             "Category",
             options=cats,
@@ -9199,20 +9428,19 @@ def _render_sales_assignment_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(
-                str(st.session_state.get(keys["engineer"], ""))
-            )
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        region = str(st.session_state.get(region_key, "")).strip()
+        central = _sc_region_is_central(region)
+        handle = _sc_resolve_sales_engineer_handle(
+            central=central,
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            select_key=keys["engineer"],
+            manual_key=keys["engineer"],
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
-        region = str(st.session_state.get(region_key, "")).strip()
         account_name = str(st.session_state.get(account_key, "")).strip()
         if not account_name:
             raise ValueError("Fill **Resort Name / Company Name**.")
@@ -9240,7 +9468,7 @@ def _render_sales_assignment_editor(
         return
 
     tg_note = ""
-    if st.session_state.get(keys["sync_tg"]):
+    if handle and st.session_state.get(keys["sync_tg"]):
         token, chat_id = _cc_resolve_telegram_credentials()
         if not token or chat_id is None:
             st.warning(
@@ -9345,9 +9573,11 @@ def _render_sales_reassign_editor(
         r0.get("description")
     )
 
-    cats = field_cats if field_cats else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    if current_cat and current_cat not in cats:
-        cats = [current_cat, *cats]
+    cats = _sales_category_options(field_cats)
+    if current_cat:
+        canon = canonical_task_category(current_cat) or current_cat
+        if canon not in cats:
+            cats = [canon, *cats]
 
     _sync_assignment_edit_widgets(
         keys=keys,
@@ -9565,7 +9795,9 @@ def _cached_task_categories() -> tuple[tuple[str, ...], bool]:
 
 def _try_fetch_task_categories() -> tuple[list[str], bool]:
     names, missing = _cached_task_categories()
-    return list(names), missing
+    if missing:
+        return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), True
+    return _merge_category_option_lists(DEFAULT_ASSIGNMENT_TASK_CATEGORIES, names), False
 
 
 def _try_fetch_task_categories_db_only() -> tuple[list[str], bool]:
@@ -10029,7 +10261,6 @@ def _sidebar_sales_intake() -> None:
         st.caption("Sign in with an **Operator ID** to create sales cases.")
         return
 
-    attended_by = _sc_attended_by_for_session()
     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
     cat_names, cat_missing = _try_fetch_task_categories()
     token_env = (
@@ -10064,18 +10295,6 @@ def _sidebar_sales_intake() -> None:
                 "Assign an engineer later from the sales work panel."
             ),
         )
-        if not skip_assign:
-            _render_cc_engineer_row(
-                fe_names,
-                missing=fe_missing,
-                select_key=_SC_CC_FE_SELECT_KEY,
-                manual_key=_SC_CC_FE_MANUAL_KEY,
-                team_popover_key="sc_cc_team_popover",
-            )
-        else:
-            st.caption(
-                "No engineer yet — assign from the sales case work panel later."
-            )
         st.text_input(
             "Ticket Number",
             key=_SC_CC_ST_REF_KEY,
@@ -10099,6 +10318,30 @@ def _sidebar_sales_intake() -> None:
                 options=list(SALES_REGION_CODES),
                 key=_SC_CC_ST_REGION_KEY,
             )
+        intake_central = True
+        if not skip_assign:
+            intake_central = _sc_sync_region_engineer_widgets(
+                region_key=_SC_CC_ST_REGION_KEY,
+                region_watch_key="_sc_cc_intake_region_watch",
+                engineer_select_key=_SC_CC_FE_SELECT_KEY,
+                engineer_manual_key=_SC_CC_FE_MANUAL_KEY,
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+            )
+            _render_sc_engineer_field(
+                central=intake_central,
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+                select_key=_SC_CC_FE_SELECT_KEY,
+                manual_key=_SC_CC_FE_MANUAL_KEY,
+                blank_key="sc_cc_intake_engineer_blank",
+            )
+            with st.popover("Edit team", key="sc_cc_team_popover"):
+                _field_team_manage_popover(fe_names, missing=fe_missing)
+        else:
+            st.caption(
+                "No engineer yet — assign from the sales case work panel later."
+            )
         _render_sales_category_row(cat_names, missing=cat_missing)
         st.text_area(
             "Notes (Optional)",
@@ -10106,7 +10349,7 @@ def _sidebar_sales_intake() -> None:
             height=64,
             placeholder="Context for the field team",
         )
-        if not skip_assign:
+        if not skip_assign and intake_central:
             if not token_env:
                 st.text_input(
                     "Bot Token (Session Only)",
@@ -10146,15 +10389,18 @@ def _sidebar_sales_intake() -> None:
             return
 
         skip_assign = bool(st.session_state.get(_SC_CC_SKIP_ASSIGN_KEY))
+        region = str(st.session_state.get(_SC_CC_ST_REGION_KEY, "")).strip()
+        central = _sc_region_is_central(region)
         assigned_to: str | None = None
         field_cat: str | None = None
-        post_telegram = not skip_assign
+        post_telegram = not skip_assign and central
 
-        if post_telegram:
+        if not skip_assign and central:
             field_cat = sales_cat
             try:
-                assigned_to = _cc_resolve_intake_engineer_handle(
-                    fe_names,
+                assigned_to = _sc_resolve_sales_engineer_handle(
+                    central=True,
+                    fe_names=fe_names,
                     fe_missing=fe_missing,
                     select_key=_SC_CC_FE_SELECT_KEY,
                     manual_key=_SC_CC_FE_MANUAL_KEY,
@@ -10163,6 +10409,7 @@ def _sidebar_sales_intake() -> None:
                 _sc_set_sales_flash(str(exc), level="error")
                 st.rerun()
                 return
+        if post_telegram:
             token = token_env or str(
                 st.session_state.get(_CC_SESSION_TOKEN_KEY, "")
             ).strip()
@@ -10208,7 +10455,7 @@ def _sidebar_sales_intake() -> None:
         _sc_insert_intake_case(
             case_ref=cr,
             account_name=an,
-            attended_by=attended_by,
+            attended_by=_sc_sales_attended_by_for_case(assigned_to=assigned_to),
             sales_priority=str(
                 st.session_state.get(_SC_CC_ST_PRIORITY_KEY, "Standard")
             ).strip(),
@@ -11247,6 +11494,9 @@ _BON_THEME_CSS = """
         overflow: hidden;
         background: var(--bon-card);
     }
+    .perf-ss-pill.has-sales {
+        max-width: 20rem;
+    }
     .perf-ss-seg {
         flex: 1 1 50%;
         display: flex;
@@ -11265,6 +11515,12 @@ _BON_THEME_CSS = """
     }
     .perf-ss-seg.shared {
         color: var(--bon-oak);
+    }
+    .perf-ss-pill.has-sales .perf-ss-seg.shared {
+        border-right: 1px solid rgba(215, 180, 145, 0.22);
+    }
+    .perf-ss-seg.sales {
+        color: #b8d4a8;
     }
     .perf-ss-seg .num {
         font-size: 0.88rem;
@@ -12521,7 +12777,7 @@ def _cc_transfer_ticket_to_sales_case(
     task_cat = str(row.get("task_category") or "").strip() or "Coverage Check"
     notes = str(row.get("additional_info") or "").strip() or None
     assigned = str(row.get("assigned_to") or "").strip() or None
-    attended = str(row.get("dashboard_assigned_by") or "").strip() or operator_id
+    attended = _sc_sales_attended_by_for_case(assigned_to=assigned)
     region = (
         account_region
         if account_region in SALES_REGION_CODES
@@ -14277,7 +14533,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             )
             if not overview_table.empty:
                 _render_perf_queue_strip(overview_table, focus=focus)
-            _render_perf_solo_shared_detail(visits_all, focus=focus)
+            _render_perf_solo_shared_detail(
+                visits_all, focus=focus, sales_cases=sales_in_view,
+            )
 
         with tab_sales:
             _render_perf_sales_cases_tab(

@@ -19,7 +19,7 @@ export interface TicketComment {
   at: string;
   author: string;
   text: string;
-  kind: "response" | "visit" | "assignment" | "field";
+  kind: "response" | "visit" | "assignment" | "field" | "admin";
 }
 
 /** Photo link in Case Info (deduped by URL). */
