@@ -86,6 +86,14 @@ except ImportError:
     _staff_matrix_component = None
     _HAS_STAFF_MATRIX = False
 
+_PERF_WEEKLY_BUILD = Path(__file__).resolve().parent / "components" / "perf_weekly" / "build"
+_HAS_PERF_WEEKLY = (_PERF_WEEKLY_BUILD / "index.html").is_file()
+try:
+    from components.perf_weekly import perf_weekly as _perf_weekly_component
+except ImportError:
+    _perf_weekly_component = None
+    _HAS_PERF_WEEKLY = False
+
 from bot_utils import (
     NOTIFY_BUILD_ID,
     AssignmentTelegramRef,
@@ -268,6 +276,17 @@ _SC_ATTENDED_STATUSES: frozenset[str] = frozenset(
     }
 )
 _PERF_WEEKLY_WEEK_KEY = "perf_weekly_week_offset"
+# CSM rows counted in Weekly attended (excludes Daily Task / Open / Unattended).
+_CSM_WEEKLY_ATTENDED_KEYS: tuple[str, ...] = (
+    "on_hold",
+    "completed",
+    "investigation",
+)
+_CSM_WEEKLY_ATTENDED_LABELS: dict[str, str] = {
+    "on_hold": STATUS_ON_HOLD,
+    "completed": STATUS_RESOLVED,
+    "investigation": STATUS_UNDER_INVESTIGATION,
+}
 
 # Older rows / labels (mapped in UI until backfill migration runs).
 _SC_LEGACY_STATUS_MAP: dict[str, str] = {
@@ -4917,10 +4936,38 @@ def _perf_prepare_visits_df(visits: pd.DataFrame) -> pd.DataFrame:
         return visits
     out = visits.copy()
     if "assignee" in out.columns:
-        out["assignee"] = out["assignee"].map(_perf_norm_member)
+        out["assignee"] = out["assignee"].map(_normalize_visit_assignee)
+        out.loc[out["assignee"].eq(""), "assignee"] = "(unknown)"
     if "is_active" in out.columns:
         out["is_active"] = out["is_active"].fillna(False).astype(bool)
     return out
+
+
+def _perf_handled_visit_credit_counts(visits: pd.DataFrame) -> pd.DataFrame:
+    """Fair credit for Handled: distinct tickets per assignee (+ visit-cycle total)."""
+    if visits.empty or "assignee" not in visits.columns:
+        return pd.DataFrame(columns=["assignee", "Tickets", "Visit cycles"])
+    data = _perf_prepare_visits_df(visits)
+    if "ticket_number" not in data.columns:
+        grouped = (
+            data.groupby("assignee", as_index=False)
+            .size()
+            .rename(columns={"size": "Tickets"})
+        )
+        grouped["Visit cycles"] = grouped["Tickets"]
+        return grouped.sort_values("Tickets", ascending=False)
+    rows: list[dict[str, object]] = []
+    for assignee, grp in data.groupby("assignee", sort=False):
+        rows.append(
+            {
+                "assignee": assignee,
+                "Tickets": int(grp["ticket_number"].astype(str).nunique()),
+                "Visit cycles": int(len(grp)),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["assignee", "Tickets", "Visit cycles"])
+    return pd.DataFrame(rows).sort_values(["Tickets", "Visit cycles"], ascending=False)
 
 
 def _perf_build_visit_summary(visits: pd.DataFrame) -> pd.DataFrame:
@@ -4937,7 +4984,11 @@ def _perf_build_visit_summary(visits: pd.DataFrame) -> pd.DataFrame:
         person_visits = visits[visits["assignee"] == person]
         row: dict = {"Person": person}
         for o in outcomes:
-            row[o.capitalize()] = int(pdata.loc[pdata["outcome"] == o, "count"].sum())
+            o_rows = person_visits[person_visits["outcome"] == o] if "outcome" in person_visits.columns else person_visits.iloc[0:0]
+            if o == "responded" and "ticket_number" in o_rows.columns and not o_rows.empty:
+                row[o.capitalize()] = int(o_rows["ticket_number"].astype(str).nunique())
+            else:
+                row[o.capitalize()] = int(pdata.loc[pdata["outcome"] == o, "count"].sum())
         row["Total visits"] = int(pdata["count"].sum())
         if "ticket_number" in person_visits.columns:
             row["Tickets touched"] = int(person_visits["ticket_number"].nunique())
@@ -6841,6 +6892,56 @@ def _render_visit_detail_table(visits: pd.DataFrame) -> None:
                  use_container_width=True, hide_index=True)
 
 
+def _render_handled_visit_credit_bar(visits: pd.DataFrame) -> None:
+    """Distinct tickets handled per engineer (fair credit); tooltip shows visit cycles."""
+    prepared = _perf_prepare_visits_df(visits)
+    counts = _perf_handled_visit_credit_counts(prepared)
+    if counts.empty:
+        st.caption("No responded visits in this time range.")
+        return
+    n_tickets = (
+        int(prepared["ticket_number"].astype(str).nunique())
+        if "ticket_number" in prepared.columns
+        else int(len(prepared))
+    )
+    n_cycles = int(len(prepared))
+    st.caption(
+        f"**{n_tickets}** unique tickets with a responded visit · "
+        f"**{n_cycles}** visit cycles in range "
+        "(multiple cycles on one ticket count once per engineer)."
+    )
+    height = min(520, max(180, 42 * len(counts)))
+    chart = (
+        alt.Chart(counts)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "Tickets:Q",
+                title="Tickets handled",
+                axis=alt.Axis(format=".0f", tickMinStep=1),
+            ),
+            y=alt.Y(
+                "assignee:N",
+                sort="-x",
+                title="",
+                axis=alt.Axis(
+                    labelOverlap=False,
+                    labelFontSize=13,
+                    labelPadding=8,
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("assignee:N", title="Engineer"),
+                alt.Tooltip("Tickets:Q", title="Unique tickets"),
+                alt.Tooltip("Visit cycles:Q", title="Visit cycles"),
+            ],
+            color=alt.value("#7eb8da"),
+        )
+        .properties(height=height)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> None:
     if visits.empty:
         return
@@ -7277,19 +7378,49 @@ def _apply_weekly_time_range(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Weekly attended window — ``updated_at`` only (last status/queue touch).
-
-    Unlike the dashboard range helper, this does not take the max of
-    ``last_assigned_at`` / ``responded_at`` / ``created_at``, and rows with
-    no parseable ``updated_at`` are excluded.
-    """
+    """Weekly window — latest activity timestamp (same basis as Overview in-view)."""
     if df.empty:
         return df
-    if "updated_at" not in df.columns:
-        return pd.DataFrame(columns=df.columns)
-    ref = _parse_ts(df["updated_at"])
+    ref = _perf_reference_ts(df)
     mask = ref.notna() & (ref >= range_start) & (ref <= range_end)
     return df.loc[mask].copy()
+
+
+def _perf_csm_attended_in_week(
+    df_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """CSM tickets in On Hold / Resolved / Investigation with activity in the week."""
+    if df_all.empty or "status" not in df_all.columns:
+        return pd.DataFrame()
+    blocked = _perf_unattended_ticket_numbers(df_all)
+    in_range = _apply_weekly_time_range(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if in_range.empty:
+        return pd.DataFrame()
+    in_range = _perf_drop_unattended_tickets(in_range, blocked)
+    if in_range.empty:
+        return pd.DataFrame()
+    masks = _ticket_queue_count_masks(in_range)
+    attended_mask = pd.Series(False, index=in_range.index)
+    for key in _CSM_WEEKLY_ATTENDED_KEYS:
+        attended_mask |= masks[key]
+    part = in_range.loc[attended_mask].copy()
+    if part.empty:
+        return part
+    norm = _normalized_status_series(part)
+    label_map = {
+        STATUS_ON_HOLD.casefold(): STATUS_ON_HOLD,
+        STATUS_RESOLVED.casefold(): STATUS_RESOLVED,
+        STATUS_UNDER_INVESTIGATION.casefold(): STATUS_UNDER_INVESTIGATION,
+    }
+    part["_attended_status"] = norm.str.casefold().map(label_map).fillna(norm)
+    part["track"] = "CSM"
+    part["_ts"] = _perf_reference_ts(part)
+    return part
 
 
 def _perf_unattended_ticket_numbers(df_all: pd.DataFrame) -> frozenset[str]:
@@ -7313,43 +7444,6 @@ def _perf_drop_unattended_tickets(
     return df.loc[keep].copy()
 
 
-def _perf_csm_attended_in_week(
-    df_all: pd.DataFrame,
-    *,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> pd.DataFrame:
-    """CSM tickets in On Hold / Resolved / Investigation with activity in the week."""
-    if df_all.empty or "status" not in df_all.columns:
-        return pd.DataFrame()
-    blocked = _perf_unattended_ticket_numbers(df_all)
-    in_range = _apply_weekly_time_range(
-        df_all, range_start=range_start, range_end=range_end
-    )
-    in_range = _perf_drop_unattended_tickets(in_range, blocked)
-    if in_range.empty:
-        return pd.DataFrame()
-    masks = _ticket_queue_count_masks(in_range)
-    ref_ts = _parse_ts(in_range["updated_at"])
-    parts: list[pd.DataFrame] = []
-    for key, label in (
-        ("on_hold", STATUS_ON_HOLD),
-        ("completed", STATUS_RESOLVED),
-        ("investigation", STATUS_UNDER_INVESTIGATION),
-    ):
-        part = in_range.loc[masks[key]].copy()
-        if part.empty:
-            continue
-        part["_ts"] = ref_ts.loc[part.index]
-        part["_attended_status"] = label
-        part["track"] = "CSM"
-        parts.append(part)
-    if not parts:
-        return pd.DataFrame()
-    out = pd.concat(parts, ignore_index=True)
-    return _perf_drop_unattended_tickets(out, blocked)
-
-
 def _perf_sales_attended_in_week(
     df_all: pd.DataFrame,
     *,
@@ -7371,8 +7465,36 @@ def _perf_sales_attended_in_week(
         return part
     part["_attended_status"] = effective.loc[mask].values
     part["track"] = "Sales"
-    part["_ts"] = _parse_ts(part["updated_at"])
+    part["_ts"] = _perf_reference_ts(part)
     return part
+
+
+def _perf_weekly_attended_bundle(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, object]:
+    """Compute weekly CSM + Sales attended once (summary, detail, counts)."""
+    csm_attended = _perf_csm_attended_in_week(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    sales_attended = _perf_sales_attended_in_week(
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+    )
+    summary, detail = _perf_build_weekly_attended_tables(csm_attended, sales_attended)
+    return {
+        "csm": csm_attended,
+        "sales": sales_attended,
+        "summary": summary,
+        "detail": detail,
+        "n_csm": len(csm_attended),
+        "n_sales": len(sales_attended),
+        "total": len(csm_attended) + len(sales_attended),
+    }
 
 
 def _perf_resolve_display_category(row: pd.Series, *, track: str) -> str:
@@ -7405,11 +7527,6 @@ def _perf_build_weekly_attended_tables(
 
     if not csm_raw.empty:
         csm = _perf_enrich_tickets(csm_raw)
-        activity = (
-            csm["_local"].dt.strftime("%Y-%m-%d %H:%M")
-            if "_local" in csm.columns
-            else pd.Series("", index=csm.index)
-        )
         detail_parts.append(
             pd.DataFrame(
                 {
@@ -7417,22 +7534,21 @@ def _perf_build_weekly_attended_tables(
                     "ID": csm.get("ticket_number", pd.Series("", index=csm.index)),
                     "Status": csm.get("_attended_status", pd.Series("", index=csm.index)),
                     "Attended by": csm.get("staff", pd.Series("(unknown)", index=csm.index)),
-                    "Category": csm.apply(
-                        lambda r: _perf_resolve_display_category(r, track="CSM"),
-                        axis=1,
-                    ),
-                    "Activity (local)": activity,
+                    "Category": csm.get("category", pd.Series("(uncategorized)", index=csm.index)),
+                    "Activity (local)": csm["_local"].dt.strftime("%Y-%m-%d %H:%M"),
                 }
             )
         )
 
     if not sales_raw.empty:
         sales = _perf_enrich_sales_cases(sales_raw)
-        activity = (
-            sales["_local"].dt.strftime("%Y-%m-%d %H:%M")
-            if "_local" in sales.columns
-            else pd.Series("", index=sales.index)
+        sales_cat = sales.get("sales_category", pd.Series("", index=sales.index)).map(
+            canonical_task_category
         )
+        field_cat = sales.get(
+            "field_task_category", pd.Series("", index=sales.index)
+        ).map(canonical_task_category)
+        category = sales_cat.where(sales_cat.notna(), field_cat).fillna("(uncategorized)")
         detail_parts.append(
             pd.DataFrame(
                 {
@@ -7444,11 +7560,8 @@ def _perf_build_weekly_attended_tables(
                     "Attended by": sales.get(
                         "staff", pd.Series("(unknown)", index=sales.index)
                     ),
-                    "Category": sales.apply(
-                        lambda r: _perf_resolve_display_category(r, track="Sales"),
-                        axis=1,
-                    ),
-                    "Activity (local)": activity,
+                    "Category": category,
+                    "Activity (local)": sales["_local"].dt.strftime("%Y-%m-%d %H:%M"),
                 }
             )
         )
@@ -7458,60 +7571,64 @@ def _perf_build_weekly_attended_tables(
     else:
         detail = pd.DataFrame(columns=detail_cols)
 
+    empty_summary = pd.DataFrame(
+        columns=[
+            "Attended by",
+            "CSM total",
+            f"CSM {STATUS_ON_HOLD}",
+            f"CSM {STATUS_RESOLVED}",
+            "CSM Investigation",
+            "Sales total",
+            "Sales Investigation",
+            "Sales Regional",
+            f"Sales {STATUS_RESOLVED}",
+            "Grand total",
+        ]
+    )
     if detail.empty:
-        empty_summary = pd.DataFrame(
-            columns=[
-                "Attended by",
-                "CSM total",
-                f"CSM {STATUS_ON_HOLD}",
-                f"CSM {STATUS_RESOLVED}",
-                "CSM Investigation",
-                "Sales total",
-                "Sales Investigation",
-                "Sales Regional",
-                f"Sales {STATUS_RESOLVED}",
-                "Grand total",
-            ]
-        )
         return empty_summary, detail
 
-    rows: list[dict[str, object]] = []
+    attended = detail["Attended by"].astype(str).str.strip()
+    detail = detail.loc[attended.ne("")].copy()
+    if detail.empty:
+        return empty_summary, detail
+
+    csm = detail[detail["Track"] == "CSM"]
+    sales = detail[detail["Track"] == "Sales"]
     people = sorted(
-        {str(p).strip() for p in detail["Attended by"].tolist() if str(p).strip()},
-        key=str.lower,
+        detail["Attended by"].astype(str).str.strip().unique(), key=str.lower
     )
+    idx = pd.Index(people, name="Attended by")
 
-    def _status_count(sub: pd.DataFrame, status: str) -> int:
+    def _count(sub: pd.DataFrame, status: str) -> pd.Series:
         if sub.empty:
-            return 0
-        return int(sub["Status"].astype(str).eq(status).sum())
-
-    for person in people:
-        subset = detail[detail["Attended by"].astype(str) == person]
-        csm_sub = subset[subset["Track"] == "CSM"]
-        sales_sub = subset[subset["Track"] == "Sales"]
-        rows.append(
-            {
-                "Attended by": person,
-                "CSM total": len(csm_sub),
-                f"CSM {STATUS_ON_HOLD}": _status_count(csm_sub, STATUS_ON_HOLD),
-                f"CSM {STATUS_RESOLVED}": _status_count(csm_sub, STATUS_RESOLVED),
-                "CSM Investigation": _status_count(
-                    csm_sub, STATUS_UNDER_INVESTIGATION
-                ),
-                "Sales total": len(sales_sub),
-                "Sales Investigation": _status_count(
-                    sales_sub, SC_STATUS_INVESTIGATION
-                ),
-                "Sales Regional": _status_count(sales_sub, SC_STATUS_REGIONAL),
-                f"Sales {STATUS_RESOLVED}": _status_count(
-                    sales_sub, SC_STATUS_RESOLVED
-                ),
-                "Grand total": len(subset),
-            }
+            return pd.Series(0, index=idx, dtype=int)
+        mask = sub["Status"].astype(str).eq(status)
+        return (
+            sub.loc[mask]
+            .groupby("Attended by")
+            .size()
+            .reindex(idx, fill_value=0)
+            .astype(int)
         )
 
-    summary = pd.DataFrame(rows).sort_values(
+    summary = pd.DataFrame({"Attended by": people})
+    summary["CSM total"] = (
+        csm.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
+    )
+    summary[f"CSM {STATUS_ON_HOLD}"] = _count(csm, STATUS_ON_HOLD).values
+    summary[f"CSM {STATUS_RESOLVED}"] = _count(csm, STATUS_RESOLVED).values
+    summary["CSM Investigation"] = _count(csm, STATUS_UNDER_INVESTIGATION).values
+    summary["Sales total"] = (
+        sales.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
+    )
+    summary["Sales Investigation"] = _count(sales, SC_STATUS_INVESTIGATION).values
+    summary["Sales Regional"] = _count(sales, SC_STATUS_REGIONAL).values
+    summary[f"Sales {STATUS_RESOLVED}"] = _count(sales, SC_STATUS_RESOLVED).values
+    summary["Grand total"] = (
+        detail.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
+    )
+    summary = summary.sort_values(
         ["Grand total", "Attended by"], ascending=[False, True]
     )
     totals = summary.drop(columns=["Attended by"]).sum(numeric_only=True)
@@ -7520,9 +7637,92 @@ def _perf_build_weekly_attended_tables(
     return summary, detail
 
 
+def _perf_build_weekly_dashboard_payload(
+    bundle: dict[str, object],
+    *,
+    week_start: date,
+    week_end: date,
+) -> dict[str, object]:
+    """JSON payload for the React weekly operational dashboard."""
+    detail = bundle.get("detail")
+    detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+    n_csm = int(bundle.get("n_csm") or 0)
+    n_sales = int(bundle.get("n_sales") or 0)
+    total = int(bundle.get("total") or 0)
+
+    inv_count = 0
+    category_outcome: list[dict[str, object]] = []
+    priority_cases: list[dict[str, object]] = []
+
+    if not detail_df.empty:
+        status = detail_df["Status"].astype(str).str.strip()
+        inv_mask = status.str.contains("Investigation", case=False, na=False)
+        inv_count = int(inv_mask.sum())
+
+        grouped = (
+            detail_df.groupby(
+                [
+                    detail_df["Category"].astype(str).str.strip().replace("", "(uncategorized)"),
+                    status,
+                ],
+                dropna=False,
+            )
+            .size()
+            .reset_index(name="count")
+        )
+        for row in grouped.itertuples(index=False):
+            category_outcome.append(
+                {
+                    "category": str(row[0]),
+                    "outcome": str(row[1]),
+                    "count": int(row[2]),
+                }
+            )
+
+        if inv_mask.any():
+            inv_df = detail_df.loc[inv_mask].copy()
+            inv_df["_cat"] = (
+                inv_df["Category"].astype(str).str.strip().replace("", "(uncategorized)")
+            )
+            inv_df["_outcome"] = inv_df["Status"].astype(str).str.strip()
+            pri = (
+                inv_df.groupby(["_outcome", "_cat"], dropna=False)
+                .size()
+                .reset_index(name="tickets")
+                .sort_values(["tickets", "_cat"], ascending=[False, True])
+            )
+            for row in pri.itertuples(index=False):
+                priority_cases.append(
+                    {
+                        "outcome": str(row[0]),
+                        "category": str(row[1]),
+                        "tickets": int(row[2]),
+                    }
+                )
+
+    week_label = (
+        f"{week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
+    )
+    return {
+        "title": "NetOps | Coverage Eye",
+        "weekLabel": week_label,
+        "timezone": LOCAL_TZ_LABEL,
+        "kpis": [
+            {"label": "Total Tickets", "value": total},
+            {"label": "CSM Tickets", "value": n_csm},
+            {"label": "Sales Cases", "value": n_sales},
+            {"label": "Investigation", "value": inv_count},
+        ],
+        "categoryOutcome": category_outcome,
+        "priorityCases": priority_cases,
+    }
+
+
 def _render_perf_weekly_attended_report(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
+    *,
+    this_week_bundle: dict[str, object] | None = None,
 ) -> None:
     """Sun–Sat weekly attended counts — CSM (assignee) + Sales (attended_by)."""
     week_labels = ("This week (Sun–Sat)", "Last week", "2 weeks ago")
@@ -7539,34 +7739,49 @@ def _render_perf_weekly_attended_report(
     )
     st.caption(
         f"**{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}** · {LOCAL_TZ_LABEL} · "
-        f"In-week filter: **updated_at** only · "
+        f"In-week filter: latest activity (`last_assigned_at` / `responded_at` / "
+        f"`updated_at` / `created_at`) · "
         f"**Unattended** tickets excluded from credit · "
         f"CSM credit: **assigned_to** · Sales credit: field engineer or **Admin** · "
         f"Statuses: CSM On Hold / Resolved / Investigation; "
         f"Sales Investigation / Regional / Resolved."
     )
 
-    csm_attended = _perf_csm_attended_in_week(
-        df_all, range_start=range_start, range_end=range_end
-    )
-    sales_attended = _perf_sales_attended_in_week(
-        sales_all if sales_all is not None else pd.DataFrame(),
-        range_start=range_start,
-        range_end=range_end,
-    )
-    summary, detail = _perf_build_weekly_attended_tables(csm_attended, sales_attended)
+    if week_offset == 0 and this_week_bundle is not None:
+        bundle = this_week_bundle
+    else:
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    summary = bundle["summary"]
+    detail = bundle["detail"]
+    n_csm = int(bundle["n_csm"])
+    n_sales = int(bundle["n_sales"])
 
-    n_csm = len(csm_attended)
-    n_sales = len(sales_attended)
-    m0, m1, m2 = st.columns(3)
-    m0.metric("Total attended", n_csm + n_sales)
-    m1.metric("CSM tickets", n_csm)
-    m2.metric("Sales cases", n_sales)
+    dashboard_payload = _perf_build_weekly_dashboard_payload(
+        bundle, week_start=d0, week_end=d1
+    )
+    if _perf_weekly_component is not None and _HAS_PERF_WEEKLY:
+        _perf_weekly_component(dashboard_payload, height=680, key=f"perf_weekly_dash_{week_offset}")
+    else:
+        m0, m1, m2 = st.columns(3)
+        m0.metric("Total attended", n_csm + n_sales)
+        m1.metric("CSM tickets", n_csm)
+        m2.metric("Sales cases", n_sales)
+        if not _HAS_PERF_WEEKLY:
+            st.caption(
+                "Build the weekly dashboard component: "
+                "`cd components/perf_weekly/frontend && npm install && npm run build`"
+            )
 
     if summary.empty:
         st.info("No attended CSM tickets or Sales cases in this week.")
         return
 
+    st.subheader("Staff breakdown")
     st.dataframe(summary, use_container_width=True, hide_index=True)
 
     file_stamp = f"{d0.isoformat()}_{d1.isoformat()}"
@@ -14456,6 +14671,16 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
         work_f = _perf_combine_work(completed_f, investigation_f)
         n_work = len(work_f)
+        responded_in_view = pd.DataFrame()
+        if not visits_all.empty and "outcome" in visits_all.columns:
+            responded_in_view = visits_all[
+                visits_all["outcome"].astype(str).eq("responded")
+            ].copy()
+        n_handled_visit_tickets = (
+            int(responded_in_view["ticket_number"].astype(str).nunique())
+            if not responded_in_view.empty and "ticket_number" in responded_in_view.columns
+            else 0
+        )
         n_filtered = (
             len(pending_f)
             + len(open_f)
@@ -14504,15 +14729,13 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         n_sales_tab = len(sales_f) if focus not in ("", "All") else n_sales
 
         _wk_start, _wk_end, _, _ = _perf_calendar_week_range_utc(week_offset=0)
-        n_weekly = len(
-            _perf_csm_attended_in_week(
-                df_all, range_start=_wk_start, range_end=_wk_end
-            )
-        ) + len(
-            _perf_sales_attended_in_week(
-                sales_all, range_start=_wk_start, range_end=_wk_end
-            )
+        weekly_this_week = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all,
+            range_start=_wk_start,
+            range_end=_wk_end,
         )
+        n_weekly = int(weekly_this_week["total"])
 
         tab_overview, tab_weekly, tab_sales, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
             [
@@ -14527,7 +14750,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
 
         with tab_weekly:
-            _render_perf_weekly_attended_report(df_all, sales_all)
+            _render_perf_weekly_attended_report(
+                df_all, sales_all, this_week_bundle=weekly_this_week
+            )
 
         with tab_overview:
             _render_perf_solo_shared_board(
@@ -14556,9 +14781,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_work:
             st.caption(
-                f"**Visit responded** = fair per-engineer credit from `ticket_visits`. "
-                f"**Handled (tickets)** = {STATUS_RESOLVED} + Investigation on the ticket snapshot "
-                "(often credits the current assignee only)."
+                f"**Handled tab ({n_work})** = {STATUS_RESOLVED} + Investigation ticket snapshot. "
+                f"**Visit fair credit** = distinct tickets per engineer from responded visits "
+                f"({n_handled_visit_tickets} unique tickets in range)."
             )
             if work_f.empty and visits_f.empty:
                 st.info("No resolved/investigation tickets or visits for this filter.")
@@ -14567,12 +14792,14 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 c_chart, c_table = st.columns([3, 2])
                 with c_chart:
                     if not visits_f.empty:
-                        responded_visits = visits_f[visits_f["outcome"] == "responded"]
+                        responded_visits = visits_f[
+                            visits_f["outcome"].astype(str).eq("responded")
+                        ]
                         if responded_visits.empty:
                             st.caption("No responded visits in this time range.")
                         else:
                             st.markdown("**Handled by visit assignee (fair credit)**")
-                            _render_visit_bar(responded_visits, outcome=None)
+                            _render_handled_visit_credit_bar(responded_visits)
                     elif not view.empty:
                         _render_perf_person_bar(
                             view,

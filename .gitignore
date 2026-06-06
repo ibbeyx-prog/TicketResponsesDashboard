@@ -30,3 +30,4 @@ telethon_sidecar_session.session*
 Thumbs.db
 node_modules/
 components/staff_matrix/frontend/node_modules/
+components/perf_weekly/frontend/node_modules/
