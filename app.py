@@ -1599,48 +1599,37 @@ def _session_operator_id() -> str | None:
     return s or None
 
 
-def _sc_attended_by_for_session() -> str:
-    """Sales case ``attended_by`` — the signed-in dashboard operator."""
-    op = _session_operator_id()
-    if op:
-        return op
-    user = _session_dashboard_username()
-    if user:
-        return user
-    return "unknown"
-
-
 _SC_SALES_OVERVIEW_ADMIN_LABEL = "Admin"
+_EMPTY_ASSIGNEE_TOKENS = frozenset({"", "nan", "none", "null", "nat"})
 
 
-def _sc_unassigned_sales_attended_by() -> str:
-    """Stored ``attended_by`` when no field engineer — Overview shows **Admin**."""
-    return _SC_SALES_OVERVIEW_ADMIN_LABEL
+def _sc_sales_has_field_assignee(raw: object) -> bool:
+    """True when ``assigned_to`` is a real field engineer (not null/NaN/empty)."""
+    if raw is None:
+        return False
+    try:
+        if pd.isna(raw):
+            return False
+    except (TypeError, ValueError):
+        pass
+    s = str(raw).strip()
+    return bool(s) and s.lower() not in _EMPTY_ASSIGNEE_TOKENS
 
 
 def _sc_sales_attended_by_for_case(*, assigned_to: str | None = None) -> str:
-    """``attended_by`` for sales rows — **Admin** when no field engineer assigned."""
-    if str(assigned_to or "").strip():
-        return _sc_attended_by_for_session()
-    return _sc_unassigned_sales_attended_by()
+    """Stored ``attended_by`` on the sales row (admin queue)."""
+    return _SC_SALES_OVERVIEW_ADMIN_LABEL
 
 
 def _sc_perf_sales_credit_staff(row: object) -> str:
-    """Performance / Overview person label for a sales case row."""
+    """Performance credit: field engineer when dispatched, otherwise **Admin**."""
     if isinstance(row, pd.Series):
-        assigned = str(row.get("assigned_to") or "").strip()
-        attended = str(row.get("attended_by") or "").strip()
+        assigned = row.get("assigned_to")
     else:
         d = row if isinstance(row, dict) else {}
-        assigned = str(d.get("assigned_to") or "").strip()
-        attended = str(d.get("attended_by") or "").strip()
-    if not assigned:
-        return _SC_SALES_OVERVIEW_ADMIN_LABEL
-    if attended:
-        stem = attended.lstrip("@").lower()
-        if stem in ("admin", "dashboard-admin", "unknown"):
-            return _SC_SALES_OVERVIEW_ADMIN_LABEL
-        return _perf_norm_member(attended)
+        assigned = d.get("assigned_to")
+    if _sc_sales_has_field_assignee(assigned):
+        return _perf_norm_member(assigned)
     return _SC_SALES_OVERVIEW_ADMIN_LABEL
 
 
@@ -5263,7 +5252,7 @@ def _render_perf_solo_shared_board(
         elif visits_all.empty and total_n > 0:
             st.markdown(
                 '<p class="perf-ss-hint">No visit data — field counts come from queue snapshot; '
-                "Sales Cases use <code>attended_by</code>.</p>",
+                "Sales Cases: **Admin** if unassigned, else field engineer.</p>",
                 unsafe_allow_html=True,
             )
         if total_n > 0:
@@ -5328,7 +5317,8 @@ def _render_perf_solo_shared_board(
     )
     st.markdown(
         '<p class="perf-ss-hint">Solo / shared = field visit history · '
-        "<strong>Sales</strong> = Sales Cases in window (<code>attended_by</code>) · "
+        "<strong>Sales</strong> = Sales Cases in window · "
+        "<strong>Admin</strong> if no field engineer · else <code>assigned_to</code> · "
         "Ring = field queues + Sales Cases (excludes **Unattended** from credit). "
         "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
         unsafe_allow_html=True,
@@ -6898,8 +6888,10 @@ def _perf_norm_member(raw: object) -> str:
     """Normalize ``assigned_to`` / log ``member_username`` for chart labels."""
 
     s = str(raw or "").strip()
-    if not s or s.lower() in ("unknown", "none", "null"):
+    if not s or s.lower() in ("unknown", "none", "null", "nan", "nat"):
         return "(unknown)"
+    if s.lower().lstrip("@") == "admin":
+        return _SC_SALES_OVERVIEW_ADMIN_LABEL
     low = _canonical_username_stem(s)
     return f"@{low}" if low else "(unknown)"
 
@@ -7160,7 +7152,7 @@ def _perf_filter_sales_in_range(
 
 
 def _perf_enrich_sales_cases(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``staff`` (attended_by), ``category``, and local time from ``_ts``."""
+    """Add ``staff`` (Performance credit), ``category``, and local time from ``_ts``."""
     view = df.copy()
     if "_ts" not in view.columns and "updated_at" in view.columns:
         view["_ts"] = _parse_ts(view["updated_at"])
@@ -7549,7 +7541,7 @@ def _render_perf_weekly_attended_report(
         f"**{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}** · {LOCAL_TZ_LABEL} · "
         f"In-week filter: **updated_at** only · "
         f"**Unattended** tickets excluded from credit · "
-        f"CSM credit: **assigned_to** · Sales credit: **attended_by** · "
+        f"CSM credit: **assigned_to** · Sales credit: field engineer or **Admin** · "
         f"Statuses: CSM On Hold / Resolved / Investigation; "
         f"Sales Investigation / Regional / Resolved."
     )
@@ -8032,9 +8024,9 @@ def _render_perf_sales_staff_bar(view: pd.DataFrame, *, title: str) -> None:
         .mark_bar(color="#D7B491")
         .encode(
             x=alt.X("Cases:Q", title="Cases"),
-            y=alt.Y("staff:N", sort="-x", title="Attended by"),
+            y=alt.Y("staff:N", sort="-x", title="Sales credit"),
             tooltip=[
-                alt.Tooltip("staff:N", title="Attended by"),
+                alt.Tooltip("staff:N", title="Sales credit"),
                 alt.Tooltip("Cases:Q", title="Cases"),
             ],
         )
@@ -8085,7 +8077,7 @@ def _render_perf_sales_cases_tab(
     """Sales Cases in the Performance window — queues, staff, and case list."""
     st.caption(
         "Cases in the sidebar **Time range**, plus any still in an active sales queue. "
-        "**Attended by** = sales owner · **Field engineer** = assignment when dispatched."
+        "**Performance credit** = field engineer when `assigned_to` is set, otherwise **Admin**."
     )
     if sales_df.empty:
         st.info("No Sales Cases for this filter — try **All** in Focus Assignee or widen the time range.")
@@ -8107,9 +8099,9 @@ def _render_perf_sales_cases_tab(
         _render_perf_sales_status_bar(view, title="By queue")
     with chart_r:
         staff_title = (
-            f"By attended by ({focus})"
+            f"By sales credit ({focus})"
             if focus not in ("", "All")
-            else "By attended by"
+            else "By sales credit (field or Admin)"
         )
         _render_perf_sales_staff_bar(view, title=staff_title)
 
