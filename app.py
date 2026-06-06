@@ -96,7 +96,9 @@ from bot_utils import (
 )
 from task_categories import (
     DEFAULT_ASSIGNMENT_TASK_CATEGORIES,
+    canonical_task_category,
     delete_task_category,
+    dedupe_canonical_categories,
     fetch_task_category_names,
     normalize_task_category_name,
     sync_ticket_categories_into_table,
@@ -126,6 +128,7 @@ _LEGACY_STATUS_ALIASES: dict[str, str] = {
     "no answer": STATUS_ON_HOLD,
     "unavailable": STATUS_ON_HOLD,
 }
+_OUTCOME_SAME_LABEL = "Same as assigned"
 
 # --- Sales Cases (separate track from field tickets; admin-first) ---
 SALES_REGION_CODES: tuple[str, ...] = (
@@ -141,7 +144,7 @@ SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Stand
 DEFAULT_SALES_CASE_CATEGORIES: tuple[str, ...] = (
     "QOS Issue",
     "Call Drop Issues",
-    "Coverage Issues",
+    "Coverage Check",
     "Mobile Data Issues",
     "Voice Call Issues",
 )
@@ -2207,11 +2210,141 @@ def _navigate_to_resolved_queue() -> None:
     st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_RESOLVED
 
 
+def _outcome_category_options() -> list[str]:
+    cats, _missing = _try_fetch_task_categories()
+    if cats:
+        return dedupe_canonical_categories(cats)
+    return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+
+
+def _assigned_categories_for_tickets(
+    df: pd.DataFrame,
+    ticket_ids: list[str],
+) -> list[str]:
+    if df.empty or "ticket_number" not in df.columns or "task_category" not in df.columns:
+        return []
+    ids = {str(t).strip() for t in ticket_ids if str(t).strip()}
+    if not ids:
+        return []
+    sub = df[df["ticket_number"].astype(str).isin(ids)]
+    return sorted(
+        {
+            str(c).strip()
+            for c in sub["task_category"].dropna().tolist()
+            if str(c).strip()
+        },
+        key=str.lower,
+    )
+
+
+def _resolve_outcome_category(*, assigned: str, chosen: str) -> str:
+    picked = canonical_task_category((chosen or "").strip())
+    assign = canonical_task_category((assigned or "").strip())
+    if not picked or picked == _OUTCOME_SAME_LABEL:
+        if not assign:
+            raise ValueError(
+                "Pick an **outcome category** — this ticket has no assigned category."
+            )
+        return assign
+    return picked
+
+
+def _build_outcome_log_note(
+    *,
+    assigned: str,
+    outcome: str,
+    comment: str | None = None,
+    prefix: str | None = None,
+) -> str:
+    parts: list[str] = []
+    if prefix:
+        parts.append(prefix.strip())
+    assign = (assigned or "").strip()
+    out = (outcome or "").strip()
+    if assign and out and assign != out:
+        parts.append(f"Assigned: {assign} → Outcome: {out}")
+    elif out:
+        parts.append(f"Outcome: {out}")
+    note = (comment or "").strip()
+    if note:
+        parts.append(note)
+    return " — ".join(parts)
+
+
+def _persist_ticket_resolved_with_outcome(
+    ticket_number: str,
+    *,
+    outcome_category_input: str,
+    operator_id: str,
+    comment: str | None = None,
+    log_action: str = "Resolved",
+    log_prefix: str | None = None,
+) -> str:
+    """Set **Resolved** + ``outcome_category``; keep ``task_category`` unchanged."""
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    assigned = str(row.get("task_category") or "").strip()
+    outcome = _resolve_outcome_category(assigned=assigned, chosen=outcome_category_input)
+    op_at = f"@{operator_id.lstrip('@')}"
+    note = _build_outcome_log_note(
+        assigned=assigned,
+        outcome=outcome,
+        comment=comment,
+        prefix=log_prefix,
+    )
+    client = _get_supabase_client()
+    now_iso = _cc_utc_now_iso()
+    payload: dict[str, object] = {
+        "status": STATUS_RESOLVED,
+        "outcome_category": outcome,
+        "updated_at": now_iso,
+        "follow_up_at": None,
+        "follow_up_note": None,
+    }
+    _cc_execute_ticket_update(client, payload, ticket_number)
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=ticket_number,
+        member_username=op_at,
+        action_type=log_action,
+        note=note or None,
+    )
+    _invalidate_dashboard_data_cache()
+    return outcome
+
+
+def _render_outcome_category_picker(
+    *,
+    key: str,
+    cat_options: list[str],
+    assigned_categories: list[str],
+) -> str:
+    opts = [_OUTCOME_SAME_LABEL, *cat_options]
+    for ac in assigned_categories:
+        if ac and ac not in opts:
+            opts.insert(1, ac)
+    if len(assigned_categories) == 1:
+        st.caption(f"Assigned category: **{assigned_categories[0]}**")
+    elif len(assigned_categories) > 1:
+        st.caption(
+            "Multiple assigned categories — **Same as assigned** uses each ticket's own "
+            "category."
+        )
+    return st.selectbox(
+        "Outcome category",
+        options=opts,
+        key=key,
+        help="What was actually done. Performance reports use outcome, not assignment category.",
+    )
+
+
 def _apply_admin_close_ticket(
     ticket_number: str,
     *,
     comment: str,
     operator_id: str,
+    outcome_category_input: str,
 ) -> None:
     """Admin-only: close without field completion → **Resolved** with required note."""
     text = (comment or "").strip()
@@ -2232,21 +2365,30 @@ def _apply_admin_close_ticket(
 
     client = _get_supabase_client()
     now_iso = _cc_utc_now_iso()
-    op_at = f"@{operator_id.lstrip('@')}"
     from_label = {
         STATUS_DAILY_TASK: STATUS_DAILY_TASK,
         "Open": "Needs Review",
         STATUS_ON_HOLD: STATUS_ON_HOLD,
         STATUS_UNDER_INVESTIGATION: STATUS_UNDER_INVESTIGATION,
     }.get(status, status)
-    log_note = f"Admin closed from {from_label}: {text}"
-
-    _set_ticket_status(
+    assigned = str(row.get("task_category") or "").strip()
+    outcome = _resolve_outcome_category(
+        assigned=assigned,
+        chosen=outcome_category_input,
+    )
+    log_note = _build_outcome_log_note(
+        assigned=assigned,
+        outcome=outcome,
+        comment=text,
+        prefix=f"Admin closed from {from_label}",
+    )
+    _persist_ticket_resolved_with_outcome(
         ticket_number,
-        new_status=STATUS_RESOLVED,
+        outcome_category_input=outcome_category_input,
+        operator_id=operator_id,
+        comment=text,
         log_action="AdminClosed",
-        actor=op_at,
-        note=log_note,
+        log_prefix=f"Admin closed from {from_label}",
     )
     _visits_close_open(
         client,
@@ -2256,7 +2398,6 @@ def _apply_admin_close_ticket(
         closed_by="dashboard",
         visit_end=now_iso,
     )
-    _invalidate_dashboard_data_cache()
 
 
 def _fetch_pending_with_response_mismatch_uncached() -> list[str]:
@@ -3703,8 +3844,13 @@ def _apply_ticket_status_batch(
         st.rerun()
 
 
-def _render_admin_close_form_inline(*, key_prefix: str, options: list[str]) -> None:
-    """Admin close — required comment, moves ticket(s) to **Resolved**."""
+def _render_admin_close_form_inline(
+    *,
+    key_prefix: str,
+    options: list[str],
+    df: pd.DataFrame,
+) -> None:
+    """Admin close — required comment + outcome category → **Resolved**."""
     picked_list = _get_selected_queue_tickets(key_prefix, options)
     if not picked_list:
         st.caption("Select ticket(s) in the table first.")
@@ -3714,6 +3860,12 @@ def _render_admin_close_form_inline(*, key_prefix: str, options: list[str]) -> N
     st.caption(
         f"**{len(picked_list)}** selected · {shown}{extra} · "
         "for customer unavailable / no field visit — moves to **Resolved**."
+    )
+    assigned_cats = _assigned_categories_for_tickets(df, picked_list)
+    outcome_pick = _render_outcome_category_picker(
+        key=f"{key_prefix}_admin_close_outcome",
+        cat_options=_outcome_category_options(),
+        assigned_categories=assigned_cats,
     )
     comment = st.text_area(
         "Close comment",
@@ -3735,7 +3887,12 @@ def _render_admin_close_form_inline(*, key_prefix: str, options: list[str]) -> N
         ok = 0
         for ticket in picked_list:
             try:
-                _apply_admin_close_ticket(ticket, comment=comment, operator_id=op)
+                _apply_admin_close_ticket(
+                    ticket,
+                    comment=comment,
+                    operator_id=op,
+                    outcome_category_input=outcome_pick,
+                )
                 ok += 1
             except ValueError as exc:
                 st.error(str(exc))
@@ -3746,6 +3903,69 @@ def _render_admin_close_form_inline(*, key_prefix: str, options: list[str]) -> N
             _navigate_to_resolved_queue()
             st.session_state[_CC_FLASH_KEY] = (
                 f"Closed **{ok}** ticket(s) → **Resolved**."
+            )
+            st.session_state[_CC_FLASH_LEVEL_KEY] = "success"
+            st.rerun()
+
+
+def _render_mark_resolved_form_inline(
+    *,
+    key_prefix: str,
+    options: list[str],
+    df: pd.DataFrame,
+    log_action: str = "Resolved",
+) -> None:
+    """Mark selected ticket(s) **Resolved** with an outcome category."""
+    picked_list = _get_selected_queue_tickets(key_prefix, options)
+    if not picked_list:
+        st.caption("Select ticket(s) in the table first.")
+        return
+    shown = ", ".join(picked_list[:4])
+    extra = f" (+{len(picked_list) - 4} more)" if len(picked_list) > 4 else ""
+    st.caption(f"**{len(picked_list)}** selected · {shown}{extra}")
+    assigned_cats = _assigned_categories_for_tickets(df, picked_list)
+    outcome_pick = _render_outcome_category_picker(
+        key=f"{key_prefix}_mark_resolved_outcome",
+        cat_options=_outcome_category_options(),
+        assigned_categories=assigned_cats,
+    )
+    comment = st.text_area(
+        "Note (optional)",
+        placeholder="e.g. Coverage OK on site — no installation required",
+        key=f"{key_prefix}_mark_resolved_note",
+        height=60,
+        label_visibility="collapsed",
+    )
+    if st.button(
+        "Confirm resolved",
+        key=f"{key_prefix}_mark_resolved_confirm",
+        type="primary",
+        use_container_width=True,
+    ):
+        op = _session_operator_id()
+        if not op:
+            st.error("Sign in again — operator session is missing.")
+            return
+        ok = 0
+        for ticket in picked_list:
+            try:
+                _persist_ticket_resolved_with_outcome(
+                    ticket,
+                    outcome_category_input=outcome_pick,
+                    operator_id=op,
+                    comment=comment or None,
+                    log_action=log_action,
+                )
+                ok += 1
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"**{ticket}**: {exc}")
+        if ok:
+            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            _navigate_to_resolved_queue()
+            st.session_state[_CC_FLASH_KEY] = (
+                f"Marked **{ok}** ticket(s) → **Resolved**."
             )
             st.session_state[_CC_FLASH_LEVEL_KEY] = "success"
             st.rerun()
@@ -3999,10 +4219,7 @@ def _render_ticket_actions_popover_body(
     if not _is_dashboard_admin():
         status_actions = tuple(a for a in status_actions if a[2] != "OnHold")
     resolved_action, overflow_status = _split_ticket_status_actions(status_actions)
-    status_buttons: list[tuple[str, str, str]] = []
-    if resolved_action:
-        status_buttons.append(resolved_action)
-    status_buttons.extend(overflow_status)
+    status_buttons: list[tuple[str, str, str]] = list(overflow_status)
     mfr_keys = _manual_field_response_session_keys(key_prefix)
     edit_keys = _assignment_edit_session_keys(key_prefix)
     reassign_keys = _reassign_session_keys(key_prefix)
@@ -4021,6 +4238,14 @@ def _render_ticket_actions_popover_body(
             else:
                 st.session_state[mfr_keys["show"]] = True
             st.rerun()
+    if resolved_action:
+        with st.expander(resolved_action[0], expanded=False):
+            _render_mark_resolved_form_inline(
+                key_prefix=key_prefix,
+                options=options,
+                df=df,
+                log_action=resolved_action[2],
+            )
     for label, _status, _log in status_buttons:
         if st.button(
             label,
@@ -4035,7 +4260,11 @@ def _render_ticket_actions_popover_body(
                 choice_label=label,
             )
 
-    has_primary = allow_manual_field_response or bool(status_buttons)
+    has_primary = (
+        allow_manual_field_response
+        or bool(status_buttons)
+        or bool(resolved_action)
+    )
     has_below_primary = (
         has_workflow
         or allow_mark_follow_up
@@ -4078,7 +4307,11 @@ def _render_ticket_actions_popover_body(
             _render_follow_up_form_inline(key_prefix=key_prefix, options=options)
     if allow_admin_close and _is_dashboard_admin():
         with st.expander("Closed", expanded=False):
-            _render_admin_close_form_inline(key_prefix=key_prefix, options=options)
+            _render_admin_close_form_inline(
+                key_prefix=key_prefix,
+                options=options,
+                df=df,
+            )
     if allow_transfer_to_sales and _session_operator_id():
         with st.expander("Move to Sales", expanded=False):
             picked_list = _get_selected_queue_tickets(key_prefix, options)
@@ -6777,10 +7010,19 @@ def _perf_enrich_tickets(df: pd.DataFrame) -> pd.DataFrame:
     else:
         view["staff"] = "(unknown)"
     if "task_category" in view.columns:
-        cat_series = view["task_category"].fillna("").astype(str).str.strip()
-        view["category"] = cat_series.mask(cat_series.eq(""), "(uncategorized)")
+        assigned = view["task_category"].map(canonical_task_category)
+        assigned = assigned.fillna("").astype(str).str.strip()
+        view["assigned_category"] = assigned.mask(assigned.eq(""), "(uncategorized)")
     else:
-        view["category"] = "(uncategorized)"
+        view["assigned_category"] = "(uncategorized)"
+    if "outcome_category" in view.columns:
+        outcome = view["outcome_category"].map(canonical_task_category)
+        outcome = outcome.fillna("").astype(str).str.strip()
+    else:
+        outcome = pd.Series("", index=view.index, dtype=str)
+    view["outcome_category"] = outcome
+    view["category"] = outcome.where(outcome.ne(""), view["assigned_category"])
+    view["category"] = view["category"].mask(view["category"].eq(""), "(uncategorized)")
     return view
 
 
@@ -7027,6 +7269,7 @@ def _render_perf_ticket_table(df: pd.DataFrame) -> None:
             "ticket_number",
             "assigned_to",
             "task_category",
+            "outcome_category",
             "last_assigned_at",
             "updated_at",
             "responded_at",
@@ -10897,6 +11140,16 @@ def _dataframe_column_config(df: pd.DataFrame) -> dict:
                 "Responded by",
                 help="Telegram account that **sent** the reply (test phone), when different from assignee. Not ``@`` names inside the note.",
             )
+        if "task_category" in df.columns:
+            cfg["task_category"] = st.column_config.TextColumn(
+                "Assigned category",
+                help="Dispatch intent when the ticket was assigned.",
+            )
+        if "outcome_category" in df.columns:
+            cfg["outcome_category"] = st.column_config.TextColumn(
+                "Outcome category",
+                help="Actual work performed when resolved (used in Performance reports).",
+            )
     except Exception:
         return {}
     return cfg
@@ -11415,7 +11668,11 @@ def _ticket_queue_view(
     show = [c for c in cols if c in ordered.columns]
     if not show:
         return _format_local(ordered)
-    return _format_local(ordered[show].copy())
+    view = ordered[show].copy()
+    for col in ("task_category", "outcome_category"):
+        if col in view.columns:
+            view[col] = view[col].map(canonical_task_category)
+    return _format_local(view)
 
 
 def _sc_set_sales_flash(message: str, *, level: str = "success") -> None:
@@ -13258,7 +13515,8 @@ def _render_dashboard(
                 _render_ticket_toolbar_then_table(
                     open_df,
                     key_prefix="open",
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
+                    cols=_TICKET_QUEUE_TABLE_COLS
+                    + ("outcome_category", "additional_info", "created_at"),
                     status_actions=(
                         ("Mark Resolved", STATUS_RESOLVED, "Resolved"),
                         (
@@ -13399,7 +13657,8 @@ def _render_dashboard(
                 _render_ticket_toolbar_then_table(
                     done,
                     key_prefix="completed",
-                    cols=_TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at"),
+                    cols=_TICKET_QUEUE_TABLE_COLS
+                    + ("outcome_category", "additional_info", "created_at"),
                     caption="Send back to **Open** for more field work.",
                     status_actions=(
                         ("Send back to Open", "Open", "Reopened"),
@@ -13696,9 +13955,31 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                                 ["Tickets", "_outcome", "category"],
                                 ascending=[False, True, True],
                             )
-                            .rename(columns={"_outcome": "Outcome", "category": "Category"})
+                            .rename(columns={"_outcome": "Outcome", "category": "Outcome category"})
                         )
                         st.dataframe(split, use_container_width=True, hide_index=True)
+                        if "assigned_category" in view.columns:
+                            assign_split = (
+                                view.groupby(["_outcome", "assigned_category"], as_index=False)
+                                .size()
+                                .rename(
+                                    columns={
+                                        "size": "Tickets",
+                                        "_outcome": "Outcome",
+                                        "assigned_category": "Assigned category",
+                                    }
+                                )
+                                .sort_values(
+                                    ["Tickets", "Outcome", "Assigned category"],
+                                    ascending=[False, True, True],
+                                )
+                            )
+                            st.markdown("**Assigned vs outcome (mismatch check)**")
+                            st.dataframe(
+                                assign_split,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
                 if not view.empty:
                     with st.expander("Trend & ticket list", expanded=False):
                         _render_perf_outcome_trend(
