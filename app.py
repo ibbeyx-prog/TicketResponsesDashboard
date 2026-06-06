@@ -8485,6 +8485,7 @@ def _cc_insert_transferred_ticket(
     assigned_to: str | None,
     additional_info: str | None,
     operator_id: str,
+    last_assigned_at: object | None = None,
 ) -> None:
     """Insert a CSM ticket row when moving from Sales Cases."""
     now_iso = _cc_utc_now_iso()
@@ -8504,7 +8505,8 @@ def _cc_insert_transferred_ticket(
         "unattended_nudge_sent_at": None,
     }
     if handle:
-        row["last_assigned_at"] = now_iso
+        la = last_assigned_at if last_assigned_at else None
+        row["last_assigned_at"] = la if la else now_iso
     for _ in range(4):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
@@ -12027,7 +12029,17 @@ def _render_assign_day_metrics(
     if sc_all is not None and not sc_all.empty:
         if "last_assigned_at" in sc_all.columns:
             sc_la = _parse_ts(sc_all["last_assigned_at"])
-            assigned_today += int(((sc_la >= start) & (sc_la <= end)).sum())
+            sc_mask = (sc_la >= start) & (sc_la <= end)
+            if "assigned_to" in sc_all.columns:
+                sc_mask &= (
+                    sc_all["assigned_to"].fillna("").astype(str).str.strip().ne("")
+                )
+            if "status" in sc_all.columns:
+                effective = sc_all["status"].astype(str).str.strip().map(
+                    _sc_effective_status
+                )
+                sc_mask &= effective.ne(SC_STATUS_RESOLVED)
+            assigned_today += int(sc_mask.sum())
         if "created_at" in sc_all.columns:
             created = _parse_ts(sc_all["created_at"])
             attended_today = (created >= start) & (created <= end)
@@ -12868,6 +12880,7 @@ def _cc_transfer_sales_case_to_ticket(
         assigned_to=assigned,
         additional_info=notes,
         operator_id=operator_id,
+        last_assigned_at=sales_row.get("last_assigned_at"),
     )
     _sales_cases_delete_row(row_id)
     return tid
