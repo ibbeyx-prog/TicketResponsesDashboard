@@ -14,6 +14,11 @@ STATUS_DAILY_TASK = "Daily Task"
 # Legacy rows may still say Pending before migration 20260626.
 DAILY_TASK_STATUSES: tuple[str, ...] = (STATUS_DAILY_TASK, "Pending")
 
+
+def is_daily_task_status(status: object) -> bool:
+    return str(status or "").strip() in DAILY_TASK_STATUSES
+
+
 UNATTENDED_NUDGE_HOURS = float(os.getenv("UNATTENDED_NUDGE_HOURS", "6"))
 UNATTENDED_POLL_MINUTES = float(os.getenv("UNATTENDED_POLL_MINUTES", "15"))
 ASSIGN_DAY_CUTOFF_HOUR = int(os.getenv("ASSIGN_DAY_CUTOFF_HOUR", "23"))

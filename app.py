@@ -65,6 +65,7 @@ import hashlib
 import html
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -430,6 +431,8 @@ from supabase_client import (
     resolve_supabase_config,
     test_supabase_connection,
 )
+
+log = logging.getLogger(__name__)
 
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
@@ -1891,7 +1894,7 @@ def _maybe_run_unattended_close() -> None:
                 "(no field reply before assign-day cutoff)."
             )
     except Exception:
-        pass
+        log.exception("dashboard unattended auto-close failed")
 
 
 def _render_login_supabase_status() -> None:
@@ -5157,8 +5160,9 @@ def _render_perf_solo_shared_board(
     )
     st.markdown(
         '<p class="perf-ss-hint">Solo = only that engineer on visit history · '
-        "Shared = handoff/reassign · Ring = <strong>field queues + Sales Cases</strong> "
-        "(sidebar range). Use <strong>Focus Assignee</strong> to highlight a row.</p>",
+        "Shared = handoff/reassign · Ring = **field queues + Sales Cases** "
+        "(excludes **Unattended** from credit total). "
+        "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
         unsafe_allow_html=True,
     )
 
@@ -7060,6 +7064,48 @@ def _perf_calendar_week_range_utc(
     )
 
 
+def _apply_weekly_time_range(
+    df: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Weekly attended window — ``updated_at`` only (last status/queue touch).
+
+    Unlike the dashboard range helper, this does not take the max of
+    ``last_assigned_at`` / ``responded_at`` / ``created_at``, and rows with
+    no parseable ``updated_at`` are excluded.
+    """
+    if df.empty:
+        return df
+    if "updated_at" not in df.columns:
+        return pd.DataFrame(columns=df.columns)
+    ref = _parse_ts(df["updated_at"])
+    mask = ref.notna() & (ref >= range_start) & (ref <= range_end)
+    return df.loc[mask].copy()
+
+
+def _perf_unattended_ticket_numbers(df_all: pd.DataFrame) -> frozenset[str]:
+    """Ticket IDs in **Unattended** — excluded from attended / credit totals."""
+    if df_all.empty or "ticket_number" not in df_all.columns:
+        return frozenset()
+    if "status" not in df_all.columns:
+        return frozenset()
+    norm = _normalized_status_series(df_all)
+    ids = df_all.loc[norm.eq(STATUS_UNATTENDED), "ticket_number"].astype(str).str.strip()
+    return frozenset(t for t in ids.tolist() if t)
+
+
+def _perf_drop_unattended_tickets(
+    df: pd.DataFrame,
+    blocked: frozenset[str],
+) -> pd.DataFrame:
+    if df.empty or not blocked or "ticket_number" not in df.columns:
+        return df
+    keep = ~df["ticket_number"].astype(str).str.strip().isin(blocked)
+    return df.loc[keep].copy()
+
+
 def _perf_csm_attended_in_week(
     df_all: pd.DataFrame,
     *,
@@ -7069,13 +7115,15 @@ def _perf_csm_attended_in_week(
     """CSM tickets in On Hold / Resolved / Investigation with activity in the week."""
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
-    in_range = _apply_dash_time_range(
+    blocked = _perf_unattended_ticket_numbers(df_all)
+    in_range = _apply_weekly_time_range(
         df_all, range_start=range_start, range_end=range_end
     )
+    in_range = _perf_drop_unattended_tickets(in_range, blocked)
     if in_range.empty:
         return pd.DataFrame()
     masks = _ticket_queue_count_masks(in_range)
-    ref_ts = _perf_reference_ts(in_range)
+    ref_ts = _parse_ts(in_range["updated_at"])
     parts: list[pd.DataFrame] = []
     for key, label in (
         ("on_hold", STATUS_ON_HOLD),
@@ -7091,7 +7139,8 @@ def _perf_csm_attended_in_week(
         parts.append(part)
     if not parts:
         return pd.DataFrame()
-    return pd.concat(parts, ignore_index=True)
+    out = pd.concat(parts, ignore_index=True)
+    return _perf_drop_unattended_tickets(out, blocked)
 
 
 def _perf_sales_attended_in_week(
@@ -7103,7 +7152,7 @@ def _perf_sales_attended_in_week(
     """Sales cases in Investigation / Regional / Resolved with activity in the week."""
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
-    in_range = _apply_dash_time_range(
+    in_range = _apply_weekly_time_range(
         df_all, range_start=range_start, range_end=range_end
     )
     if in_range.empty:
@@ -7115,7 +7164,7 @@ def _perf_sales_attended_in_week(
         return part
     part["_attended_status"] = effective.loc[mask].values
     part["track"] = "Sales"
-    part["_ts"] = _perf_reference_ts(part)
+    part["_ts"] = _parse_ts(part["updated_at"])
     return part
 
 
@@ -7283,6 +7332,8 @@ def _render_perf_weekly_attended_report(
     )
     st.caption(
         f"**{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}** · {LOCAL_TZ_LABEL} · "
+        f"In-week filter: **updated_at** only · "
+        f"**Unattended** tickets excluded from credit · "
         f"CSM credit: **assigned_to** · Sales credit: **attended_by** · "
         f"Statuses: CSM On Hold / Resolved / Investigation; "
         f"Sales Investigation / Regional / Resolved."
@@ -7381,13 +7432,13 @@ def _perf_build_summary(
     rows = [
         {
             "Person": p,
+            # Credit total — Unattended is shown separately and does not count.
             "Total": (
                 int(p_counts.get(p, 0))
                 + int(o_counts.get(p, 0))
                 + int(c_counts.get(p, 0))
                 + int(i_counts.get(p, 0))
                 + int(h_counts.get(p, 0))
-                + int(u_counts.get(p, 0))
             ),
             STATUS_DAILY_TASK: int(p_counts.get(p, 0)),
             "Needs Review": int(o_counts.get(p, 0)),
@@ -7955,6 +8006,8 @@ def _to_local(series: pd.Series) -> pd.Series:
 
 def _format_local(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    if out.columns.duplicated().any():
+        out = out.loc[:, ~out.columns.duplicated()]
     for col in _TS_COLS:
         if col in out.columns:
             out[col] = _to_local(out[col]).dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -11965,7 +12018,12 @@ def _ticket_queue_view(
 ) -> pd.DataFrame:
     """Subset and format ticket columns for queue tables."""
     ordered = df if preserve_order else _sort_tickets_newest_first(df)
-    show = [c for c in cols if c in ordered.columns]
+    show: list[str] = []
+    seen: set[str] = set()
+    for c in cols:
+        if c in ordered.columns and c not in seen:
+            seen.add(c)
+            show.append(c)
     if not show:
         return _format_local(ordered)
     view = ordered[show].copy()
@@ -13795,7 +13853,7 @@ def _render_dashboard(
                     unat,
                     key_prefix="unattended",
                     cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
+                    + ("additional_info", "unattended_nudge_sent_at"),
                     caption="Reopen to **Daily Task** to reassign or chase again.",
                     status_actions=(
                         ("Reopen to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
@@ -14335,7 +14393,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_unatt:
             st.caption(
-                "No same-day field response before assign-day cutoff — per assignee."
+                "No same-day field response before assign-day cutoff — listed for "
+                "accountability only; **does not count** toward Overview credit, "
+                "Handled, or Weekly attended."
             )
             if unattended_f.empty:
                 st.info("No unattended tickets for this filter.")
