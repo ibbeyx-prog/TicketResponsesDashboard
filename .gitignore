@@ -28,3 +28,5 @@ telethon_delete_listener_session.session*
 telethon_sidecar_session.session*
 .DS_Store
 Thumbs.db
+node_modules/
+components/staff_matrix/frontend/node_modules/
