@@ -86,14 +86,6 @@ except ImportError:
     _staff_matrix_component = None
     _HAS_STAFF_MATRIX = False
 
-_PERF_WEEKLY_BUILD = Path(__file__).resolve().parent / "components" / "perf_weekly" / "build"
-_HAS_PERF_WEEKLY = (_PERF_WEEKLY_BUILD / "index.html").is_file()
-try:
-    from components.perf_weekly import perf_weekly as _perf_weekly_component
-except ImportError:
-    _perf_weekly_component = None
-    _HAS_PERF_WEEKLY = False
-
 from bot_utils import (
     NOTIFY_BUILD_ID,
     AssignmentTelegramRef,
@@ -7637,85 +7629,343 @@ def _perf_build_weekly_attended_tables(
     return summary, detail
 
 
-def _perf_build_weekly_dashboard_payload(
+_WEEKLY_INV_COLOR = "#E8A838"
+_WEEKLY_RESOLVED_COLOR = "#9A6B2F"
+_WEEKLY_CHART_THEME = {
+    "background": "transparent",
+}
+
+
+def _weekly_altair_theme(chart: alt.Chart) -> alt.Chart:
+    return (
+        chart.configure(**_WEEKLY_CHART_THEME)
+        .configure_view(strokeWidth=0, stroke="transparent")
+        .configure_axis(labelColor="#a39e97", titleColor="#e8e6e3", gridColor="#333333")
+        .configure_legend(labelColor="#e8e6e3", titleColor="#e8e6e3")
+    )
+
+
+def _perf_weekly_outcome_group(status: str) -> str:
+    """Roll weekly statuses into Investigation vs Resolved for executive charts."""
+    s = str(status or "").strip()
+    if s in (STATUS_RESOLVED, SC_STATUS_RESOLVED):
+        return "Resolved"
+    return "Investigation"
+
+
+def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]:
+    """KPI + chart/table frames for the weekly executive summary."""
+    empty_cat = pd.DataFrame(columns=["category", "outcome", "count"])
+    empty_trend = pd.DataFrame(columns=["week", "rate", "total"])
+    base: dict[str, object] = {
+        "total": 0,
+        "resolved": 0,
+        "investigation": 0,
+        "resolution_rate": 0,
+        "top_inv_category": "—",
+        "top_resolved_category": "—",
+        "outcome_df": pd.DataFrame(columns=["outcome", "count"]),
+        "category_df": empty_cat,
+        "priority_df": pd.DataFrame(
+            columns=["Outcome", "Assigned category", "Tickets", "Action Required"]
+        ),
+        "trend_df": empty_trend,
+    }
+    if detail_df.empty:
+        return base
+
+    view = detail_df.copy()
+    view["Category"] = (
+        view["Category"].astype(str).str.strip().replace("", "(uncategorized)")
+    )
+    view["Outcome"] = view["Status"].astype(str).str.strip().map(_perf_weekly_outcome_group)
+
+    total = len(view)
+    resolved = int(view["Outcome"].eq("Resolved").sum())
+    investigation = total - resolved
+    rate = int(round(100 * resolved / total)) if total else 0
+
+    inv_by_cat = (
+        view.loc[view["Outcome"].eq("Investigation")]
+        .groupby("Category")
+        .size()
+        .sort_values(ascending=False)
+    )
+    res_by_cat = (
+        view.loc[view["Outcome"].eq("Resolved")]
+        .groupby("Category")
+        .size()
+        .sort_values(ascending=False)
+    )
+
+    category_df = (
+        view.groupby(["Category", "Outcome"], as_index=False)
+        .size()
+        .rename(columns={"size": "count", "Category": "category", "Outcome": "outcome"})
+        .sort_values(["count", "category"], ascending=[False, True])
+    )
+
+    priority = (
+        view.groupby(["Outcome", "Category"], as_index=False)
+        .size()
+        .rename(
+            columns={
+                "size": "Tickets",
+                "Outcome": "Outcome",
+                "Category": "Assigned category",
+            }
+        )
+        .sort_values(["Tickets", "Assigned category"], ascending=[False, True])
+    )
+    priority["Action Required"] = priority["Outcome"].map(
+        lambda o: "High" if o == "Investigation" else "Review"
+    )
+
+    return {
+        "total": total,
+        "resolved": resolved,
+        "investigation": investigation,
+        "resolution_rate": rate,
+        "top_inv_category": str(inv_by_cat.index[0]) if len(inv_by_cat) else "—",
+        "top_resolved_category": str(res_by_cat.index[0]) if len(res_by_cat) else "—",
+        "outcome_df": pd.DataFrame(
+            {"outcome": ["Investigation", "Resolved"], "count": [investigation, resolved]}
+        ),
+        "category_df": category_df,
+        "priority_df": priority,
+        "trend_df": empty_trend,
+    }
+
+
+def _perf_weekly_resolution_trend(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    end_week_offset: int = 0,
+    weeks: int = 4,
+) -> pd.DataFrame:
+    """Resolution rate for the last ``weeks`` Sun–Sat windows ending at ``end_week_offset``."""
+    rows: list[dict[str, object]] = []
+    for offset in range(end_week_offset - weeks + 1, end_week_offset + 1):
+        rs, re, d0, _d1 = _perf_calendar_week_range_utc(week_offset=offset)
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all if sales_all is not None else pd.DataFrame(),
+            range_start=rs,
+            range_end=re,
+        )
+        detail = bundle.get("detail")
+        detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+        total = int(bundle.get("total") or 0)
+        if total == 0 or detail_df.empty:
+            rate = 0
+        else:
+            resolved = int(
+                detail_df["Status"]
+                .astype(str)
+                .str.strip()
+                .isin([STATUS_RESOLVED, SC_STATUS_RESOLVED])
+                .sum()
+            )
+            rate = int(round(100 * resolved / total))
+        rows.append(
+            {
+                "week": d0.strftime("%d %b"),
+                "rate": rate,
+                "total": total,
+                "sort": offset,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("sort")
+
+
+def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
+    st.markdown(
+        """
+<style>
+.weekly-exec-header {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+  gap: 12px; margin-bottom: 1rem; padding-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(215, 180, 145, 0.35);
+}
+.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e8e6e3; margin: 0; }
+.weekly-exec-sub { font-size: 0.85rem; color: #a39e97; margin: 0.15rem 0 0; }
+.weekly-exec-badge {
+  font-size: 0.85rem; color: #a39e97; padding: 0.45rem 0.85rem;
+  border: 1px solid #374151; border-radius: 8px; background: #141414;
+}
+.weekly-kpi-card {
+  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
+  border-radius: 10px; padding: 1rem 1.1rem; min-height: 88px;
+}
+.weekly-kpi-label { font-size: 0.78rem; color: #a39e97; margin: 0 0 0.35rem; }
+.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e8e6e3; margin: 0; line-height: 1.2; }
+.weekly-kpi-sub { font-size: 0.75rem; color: #D7B491; margin: 0.35rem 0 0; }
+.weekly-panel {
+  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
+  border-radius: 10px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
+}
+.weekly-panel h4 {
+  font-size: 0.95rem; font-weight: 600; color: #e8e6e3; margin: 0 0 0.65rem;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+    k1, k2, k3, k4 = st.columns(4)
+    cards = [
+        (k1, "Total Tickets", str(metrics["total"]), ""),
+        (k2, "Resolution Rate", f"{metrics['resolution_rate']}%", ""),
+        (k3, "Top 'Investigation' Category", str(metrics["top_inv_category"]), ""),
+        (k4, "Top 'Resolved' Category", str(metrics["top_resolved_category"]), ""),
+    ]
+    for col, label, value, sub in cards:
+        with col:
+            sub_html = f'<p class="weekly-kpi-sub">{sub}</p>' if sub else ""
+            st.markdown(
+                f'<div class="weekly-kpi-card">'
+                f'<p class="weekly-kpi-label">{label}</p>'
+                f'<p class="weekly-kpi-value">{value}</p>{sub_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+
+def _render_perf_weekly_executive_dashboard(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
     bundle: dict[str, object],
     *,
     week_start: date,
     week_end: date,
-) -> dict[str, object]:
-    """JSON payload for the React weekly operational dashboard."""
+    week_offset: int,
+) -> None:
+    """Executive summary layout — Streamlit + Altair (no React)."""
     detail = bundle.get("detail")
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
-    n_csm = int(bundle.get("n_csm") or 0)
-    n_sales = int(bundle.get("n_sales") or 0)
-    total = int(bundle.get("total") or 0)
-
-    inv_count = 0
-    category_outcome: list[dict[str, object]] = []
-    priority_cases: list[dict[str, object]] = []
-
-    if not detail_df.empty:
-        status = detail_df["Status"].astype(str).str.strip()
-        inv_mask = status.str.contains("Investigation", case=False, na=False)
-        inv_count = int(inv_mask.sum())
-
-        grouped = (
-            detail_df.groupby(
-                [
-                    detail_df["Category"].astype(str).str.strip().replace("", "(uncategorized)"),
-                    status,
-                ],
-                dropna=False,
-            )
-            .size()
-            .reset_index(name="count")
-        )
-        for row in grouped.itertuples(index=False):
-            category_outcome.append(
-                {
-                    "category": str(row[0]),
-                    "outcome": str(row[1]),
-                    "count": int(row[2]),
-                }
-            )
-
-        if inv_mask.any():
-            inv_df = detail_df.loc[inv_mask].copy()
-            inv_df["_cat"] = (
-                inv_df["Category"].astype(str).str.strip().replace("", "(uncategorized)")
-            )
-            inv_df["_outcome"] = inv_df["Status"].astype(str).str.strip()
-            pri = (
-                inv_df.groupby(["_outcome", "_cat"], dropna=False)
-                .size()
-                .reset_index(name="tickets")
-                .sort_values(["tickets", "_cat"], ascending=[False, True])
-            )
-            for row in pri.itertuples(index=False):
-                priority_cases.append(
-                    {
-                        "outcome": str(row[0]),
-                        "category": str(row[1]),
-                        "tickets": int(row[2]),
-                    }
-                )
-
-    week_label = (
-        f"{week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
+    metrics = _perf_weekly_executive_metrics(detail_df)
+    metrics["trend_df"] = _perf_weekly_resolution_trend(
+        df_all, sales_all, end_week_offset=week_offset, weeks=4
     )
-    return {
-        "title": "NetOps | Coverage Eye",
-        "weekLabel": week_label,
-        "timezone": LOCAL_TZ_LABEL,
-        "kpis": [
-            {"label": "Total Tickets", "value": total},
-            {"label": "CSM Tickets", "value": n_csm},
-            {"label": "Sales Cases", "value": n_sales},
-            {"label": "Investigation", "value": inv_count},
-        ],
-        "categoryOutcome": category_outcome,
-        "priorityCases": priority_cases,
-    }
+
+    week_label = f"{week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
+    st.markdown(
+        f'<div class="weekly-exec-header">'
+        f'<div><p class="weekly-exec-title">NetOps | Coverage Eye</p>'
+        f'<p class="weekly-exec-sub">Executive Summary · {LOCAL_TZ_LABEL}</p></div>'
+        f'<div class="weekly-exec-badge">Weekly Operational Report ({week_label})</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### KPI Overview & Outcome Breakdown")
+    left, right = st.columns([1.35, 1])
+    with left:
+        _render_weekly_kpi_cards(metrics)
+    with right:
+        st.markdown('<div class="weekly-panel"><h4>Outcome Breakdown</h4></div>', unsafe_allow_html=True)
+        outcome_df = metrics["outcome_df"]
+        if isinstance(outcome_df, pd.DataFrame) and not outcome_df.empty:
+            donut = _weekly_altair_theme(
+                alt.Chart(outcome_df)
+                .mark_arc(innerRadius=58, outerRadius=92)
+                .encode(
+                    theta=alt.Theta("count:Q", stack=True),
+                    color=alt.Color(
+                        "outcome:N",
+                        scale=alt.Scale(
+                            domain=["Investigation", "Resolved"],
+                            range=[_WEEKLY_INV_COLOR, _WEEKLY_RESOLVED_COLOR],
+                        ),
+                        legend=alt.Legend(title=None, orient="right"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("outcome:N", title="Outcome"),
+                        alt.Tooltip("count:Q", title="Tickets"),
+                    ],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(donut, use_container_width=True)
+            st.caption(f"Total Outcome: **{metrics['total']}**")
+        else:
+            st.caption("No outcome data for this week.")
+
+    st.markdown("#### Tickets by Category & Outcome")
+    category_df = metrics["category_df"]
+    if isinstance(category_df, pd.DataFrame) and not category_df.empty:
+        bar = _weekly_altair_theme(
+            alt.Chart(category_df)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "category:N",
+                    title="Assigned Category",
+                    sort=alt.EncodingSortField(field="count", op="sum", order="descending"),
+                    axis=alt.Axis(labelAngle=-28),
+                ),
+                y=alt.Y("count:Q", title="Tickets", axis=alt.Axis(tickMinStep=1)),
+                color=alt.Color(
+                    "outcome:N",
+                    scale=alt.Scale(
+                        domain=["Investigation", "Resolved"],
+                        range=[_WEEKLY_INV_COLOR, _WEEKLY_RESOLVED_COLOR],
+                    ),
+                    legend=alt.Legend(title="Outcome"),
+                ),
+                order=alt.Order("outcome:N", sort="ascending"),
+                tooltip=[
+                    alt.Tooltip("category:N", title="Category"),
+                    alt.Tooltip("outcome:N", title="Outcome"),
+                    alt.Tooltip("count:Q", title="Tickets"),
+                ],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(bar, use_container_width=True)
+    else:
+        st.caption("No category breakdown for this week.")
+
+    st.markdown("#### Priority Cases & Efficiency Trends")
+    pri_col, trend_col = st.columns(2)
+    with pri_col:
+        st.markdown('<div class="weekly-panel"><h4>Priority Cases (Investigation)</h4></div>', unsafe_allow_html=True)
+        priority_df = metrics["priority_df"]
+        if isinstance(priority_df, pd.DataFrame) and not priority_df.empty:
+            show = priority_df.copy()
+            show["Action Required"] = show["Action Required"].map(
+                {"High": "🚩 High", "Review": "🟧 Review"}
+            )
+            st.dataframe(
+                show,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Tickets": st.column_config.NumberColumn(format="%d"),
+                },
+            )
+        else:
+            st.caption("No priority cases this week.")
+    with trend_col:
+        st.markdown('<div class="weekly-panel"><h4>Efficiency Trends</h4></div>', unsafe_allow_html=True)
+        trend_df = metrics["trend_df"]
+        if isinstance(trend_df, pd.DataFrame) and not trend_df.empty:
+            trend = _weekly_altair_theme(
+                alt.Chart(trend_df)
+                .mark_area(color=_WEEKLY_INV_COLOR, opacity=0.35, line={"color": _WEEKLY_INV_COLOR})
+                .encode(
+                    x=alt.X("week:N", title="Week", sort=alt.EncodingSortField(field="sort", order="ascending")),
+                    y=alt.Y("rate:Q", title="Resolution Rate (%)", scale=alt.Scale(domain=[0, 100])),
+                    tooltip=[
+                        alt.Tooltip("week:N", title="Week"),
+                        alt.Tooltip("rate:Q", title="Resolution %"),
+                        alt.Tooltip("total:Q", title="Tickets"),
+                    ],
+                )
+                .properties(height=260)
+            )
+            st.altair_chart(trend, use_container_width=True)
+        else:
+            st.caption("Not enough history for trends.")
 
 
 def _render_perf_weekly_attended_report(
@@ -7758,24 +8008,15 @@ def _render_perf_weekly_attended_report(
         )
     summary = bundle["summary"]
     detail = bundle["detail"]
-    n_csm = int(bundle["n_csm"])
-    n_sales = int(bundle["n_sales"])
 
-    dashboard_payload = _perf_build_weekly_dashboard_payload(
-        bundle, week_start=d0, week_end=d1
+    _render_perf_weekly_executive_dashboard(
+        df_all,
+        sales_all,
+        bundle,
+        week_start=d0,
+        week_end=d1,
+        week_offset=week_offset,
     )
-    if _perf_weekly_component is not None and _HAS_PERF_WEEKLY:
-        _perf_weekly_component(dashboard_payload, height=680, key=f"perf_weekly_dash_{week_offset}")
-    else:
-        m0, m1, m2 = st.columns(3)
-        m0.metric("Total attended", n_csm + n_sales)
-        m1.metric("CSM tickets", n_csm)
-        m2.metric("Sales cases", n_sales)
-        if not _HAS_PERF_WEEKLY:
-            st.caption(
-                "Build the weekly dashboard component: "
-                "`cd components/perf_weekly/frontend && npm install && npm run build`"
-            )
 
     if summary.empty:
         st.info("No attended CSM tickets or Sales cases in this week.")
