@@ -267,7 +267,8 @@ _SC_ATTENDED_STATUSES: frozenset[str] = frozenset(
         SC_STATUS_RESOLVED,
     }
 )
-_PERF_WEEKLY_WEEK_KEY = "perf_weekly_week_offset"
+_PERF_WEEKLY_DATE_KEY = "perf_weekly_pick_date"
+_PERF_WEEKLY_WEEK_KEY = _PERF_WEEKLY_DATE_KEY  # legacy alias (old selectbox key name)
 # CSM rows counted in Weekly attended (excludes Daily Task / Open / Unattended).
 _CSM_WEEKLY_ATTENDED_KEYS: tuple[str, ...] = (
     "on_hold",
@@ -2019,8 +2020,8 @@ def _maybe_run_unattended_close() -> None:
         if closed:
             _invalidate_dashboard_data_cache()
             st.toast(
-                f"Moved {closed} ticket(s) to **Unattended** "
-                "(no field reply before assign-day cutoff)."
+                f"Marked {closed} ticket(s) unattended and sent to **Needs Review** "
+                "(permanent count)."
             )
     except Exception:
         log.exception("dashboard unattended auto-close failed")
@@ -7364,6 +7365,26 @@ def _perf_calendar_week_range_utc(
     )
 
 
+def _perf_calendar_week_for_date(any_date: date) -> tuple[pd.Timestamp, pd.Timestamp, date, date]:
+    """Sun–Sat calendar week containing ``any_date`` in ``LOCAL_TZ``."""
+    days_since_sun = (any_date.weekday() + 1) % 7
+    week_start = any_date - timedelta(days=days_since_sun)
+    week_end = week_start + timedelta(days=6)
+    return (
+        _local_date_start(week_start),
+        _local_date_end(week_end),
+        week_start,
+        week_end,
+    )
+
+
+def _perf_week_offset_for_date(any_date: date) -> int:
+    """Calendar-week offset from the current Sun–Sat week (0 = this week)."""
+    _, _, this_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+    _, _, pick_start, _ = _perf_calendar_week_for_date(any_date)
+    return (pick_start - this_start).days // 7
+
+
 def _apply_weekly_time_range(
     df: pd.DataFrame,
     *,
@@ -7416,13 +7437,13 @@ def _perf_csm_attended_in_week(
 
 
 def _perf_unattended_ticket_numbers(df_all: pd.DataFrame) -> frozenset[str]:
-    """Ticket IDs in **Unattended** — excluded from attended / credit totals."""
+    """Ticket IDs ever auto-unattended — excluded from attended / credit totals."""
     if df_all.empty or "ticket_number" not in df_all.columns:
         return frozenset()
-    if "status" not in df_all.columns:
+    mask = _ticket_marked_unattended_mask(df_all)
+    if not mask.any():
         return frozenset()
-    norm = _normalized_status_series(df_all)
-    ids = df_all.loc[norm.eq(STATUS_UNATTENDED), "ticket_number"].astype(str).str.strip()
+    ids = df_all.loc[mask, "ticket_number"].astype(str).str.strip()
     return frozenset(t for t in ids.tolist() if t)
 
 
@@ -7794,6 +7815,17 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
   font-size: 0.85rem; color: #a39e97; padding: 0.45rem 0.85rem;
   border: 1px solid #374151; border-radius: 8px; background: #141414;
 }
+.weekly-date-wrap [data-testid="stDateInput"] label {
+  font-size: 0.85rem !important; color: #a39e97 !important;
+}
+.weekly-date-wrap [data-testid="stDateInput"] > div {
+  background: #141414 !important;
+  border: 1px solid #374151 !important;
+  border-radius: 8px !important;
+}
+.weekly-date-range {
+  font-size: 0.78rem; color: #D7B491; margin: 0.25rem 0 0; text-align: right;
+}
 .weekly-kpi-card {
   background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
   border-radius: 10px; padding: 1rem 1.1rem; min-height: 88px;
@@ -7845,16 +7877,6 @@ def _render_perf_weekly_executive_dashboard(
     metrics = _perf_weekly_executive_metrics(detail_df)
     metrics["trend_df"] = _perf_weekly_resolution_trend(
         df_all, sales_all, end_week_offset=week_offset, weeks=4
-    )
-
-    week_label = f"{week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
-    st.markdown(
-        f'<div class="weekly-exec-header">'
-        f'<div><p class="weekly-exec-title">NetOps | Coverage Eye</p>'
-        f'<p class="weekly-exec-sub">Executive Summary · {LOCAL_TZ_LABEL}</p></div>'
-        f'<div class="weekly-exec-badge">Weekly Operational Report ({week_label})</div>'
-        f"</div>",
-        unsafe_allow_html=True,
     )
 
     st.markdown("#### KPI Overview & Outcome Breakdown")
@@ -7975,29 +7997,67 @@ def _render_perf_weekly_attended_report(
     this_week_bundle: dict[str, object] | None = None,
 ) -> None:
     """Sun–Sat weekly attended counts — CSM (assignee) + Sales (attended_by)."""
-    week_labels = ("This week (Sun–Sat)", "Last week", "2 weeks ago")
-    week_offsets = (0, -1, -2)
-    pick = st.selectbox(
-        "Report week",
-        options=week_labels,
-        key=_PERF_WEEKLY_WEEK_KEY,
-        help=f"Calendar week Sun–Sat in {LOCAL_TZ_LABEL}.",
-    )
-    week_offset = week_offsets[week_labels.index(pick)]
-    range_start, range_end, d0, d1 = _perf_calendar_week_range_utc(
-        week_offset=week_offset
-    )
-    st.caption(
-        f"**{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}** · {LOCAL_TZ_LABEL} · "
-        f"In-week filter: latest activity (`last_assigned_at` / `responded_at` / "
-        f"`updated_at` / `created_at`) · "
-        f"**Unattended** tickets excluded from credit · "
-        f"CSM credit: **assigned_to** · Sales credit: field engineer or **Admin** · "
-        f"Statuses: CSM On Hold / Resolved / Investigation; "
-        f"Sales Investigation / Regional / Resolved."
+    _, _, default_week_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+
+    st.markdown(
+        """
+<style>
+.weekly-exec-header {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+  gap: 12px; margin-bottom: 1rem; padding-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(215, 180, 145, 0.35);
+}
+.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e8e6e3; margin: 0; }
+.weekly-exec-sub { font-size: 0.85rem; color: #a39e97; margin: 0.15rem 0 0; }
+.weekly-date-wrap [data-testid="stDateInput"] label {
+  font-size: 0.85rem !important; color: #a39e97 !important;
+}
+.weekly-date-wrap [data-testid="stDateInput"] > div {
+  background: #141414 !important;
+  border: 1px solid #374151 !important;
+  border-radius: 8px !important;
+}
+.weekly-date-range {
+  font-size: 0.78rem; color: #D7B491; margin: 0.25rem 0 0; text-align: right;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if week_offset == 0 and this_week_bundle is not None:
+    h_left, h_right = st.columns([1.35, 1])
+    with h_left:
+        st.markdown(
+            f'<div class="weekly-exec-header" style="border:none;padding:0;margin:0;">'
+            f'<div><p class="weekly-exec-title">NetOps | Coverage Eye</p>'
+            f'<p class="weekly-exec-sub">Executive Summary · {LOCAL_TZ_LABEL}</p></div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with h_right:
+        st.markdown('<div class="weekly-date-wrap">', unsafe_allow_html=True)
+        picked = st.date_input(
+            "Weekly Operational Report",
+            value=default_week_start,
+            key=_PERF_WEEKLY_DATE_KEY,
+            help=f"Pick any date in the week — report uses Sun–Sat ({LOCAL_TZ_LABEL}).",
+        )
+        range_start, range_end, d0, d1 = _perf_calendar_week_for_date(picked)
+        week_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
+        st.markdown(
+            f'<p class="weekly-date-range">{week_label}</p></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        '<div style="margin-bottom:1rem;padding-bottom:0.75rem;'
+        'border-bottom:1px solid rgba(215,180,145,0.35);"></div>',
+        unsafe_allow_html=True,
+    )
+
+    week_offset = _perf_week_offset_for_date(picked)
+    _, _, this_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+    if d0 == this_start and this_week_bundle is not None:
         bundle = this_week_bundle
     else:
         bundle = _perf_weekly_attended_bundle(
@@ -8033,7 +8093,7 @@ def _render_perf_weekly_attended_report(
             data=summary.to_csv(index=False).encode("utf-8"),
             file_name=f"weekly_attended_{file_stamp}_summary.csv",
             mime="text/csv",
-            key=f"perf_weekly_summary_csv_{week_offset}",
+            key=f"perf_weekly_summary_csv_{file_stamp}",
         )
     with dl2:
         st.download_button(
@@ -8041,7 +8101,7 @@ def _render_perf_weekly_attended_report(
             data=detail.to_csv(index=False).encode("utf-8"),
             file_name=f"weekly_attended_{file_stamp}_detail.csv",
             mime="text/csv",
-            key=f"perf_weekly_detail_csv_{week_offset}",
+            key=f"perf_weekly_detail_csv_{file_stamp}",
         )
 
     with st.expander(f"Case list ({len(detail)})", expanded=False):
@@ -12244,6 +12304,13 @@ def _dashboard_tickets_in_view(
         return in_range, len(in_range)
     norm = _normalized_status_series(df_all)
     active = df_all[norm.isin(_ACTIVE_QUEUE_STATUSES)].copy()
+    marked = df_all.loc[_ticket_marked_unattended_mask(df_all)].copy()
+    if not marked.empty:
+        active = pd.concat([active, marked], ignore_index=True)
+        if "ticket_number" in active.columns:
+            active = active.drop_duplicates(subset=["ticket_number"], keep="first")
+        else:
+            active = active.drop_duplicates()
     if in_range.empty:
         return active, 0
     if active.empty:
@@ -12288,8 +12355,19 @@ def _dashboard_sales_cases_in_view(
     return merged, len(in_range)
 
 
+def _ticket_marked_unattended_mask(df: pd.DataFrame) -> pd.Series:
+    """Permanent unattended flag — set once on auto-unattended; never cleared."""
+    if df.empty:
+        return pd.Series(dtype=bool)
+    if "marked_unattended_at" in df.columns:
+        return _parse_ts(df["marked_unattended_at"]).notna()
+    if "status" in df.columns:
+        return _normalized_status_series(df).eq(STATUS_UNATTENDED)
+    return pd.Series(False, index=df.index)
+
+
 def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """Boolean masks per queue tab (mutually exclusive on normalized status)."""
+    """Boolean masks per queue tab. Unattended = permanent ``marked_unattended_at`` tag."""
     empty = pd.Series(dtype=bool)
     if df.empty:
         return {
@@ -12306,9 +12384,9 @@ def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     on_hold = status.eq(STATUS_ON_HOLD)
     open_m = status.eq("Open")
     investigation = status.eq(STATUS_UNDER_INVESTIGATION)
-    unattended = status.eq(STATUS_UNATTENDED)
+    unattended = _ticket_marked_unattended_mask(df)
     completed = status.eq(STATUS_RESOLVED)
-    known = pending | on_hold | open_m | investigation | unattended | completed
+    known = pending | on_hold | open_m | investigation | completed | unattended
     other = ~known & status.ne("")
     return {
         "pending": pending,
@@ -14303,13 +14381,16 @@ def _render_dashboard(
     total_unattended = int(unattended_mask.sum())
     total_completed = int(completed_mask.sum())
     total_other = int(other_mask.sum())
-    total_in_tabs = (
-        total_pending
-        + total_on_hold
-        + total_open
-        + total_investigation
-        + total_unattended
-        + total_completed
+    total_in_tabs = int(
+        (
+            pending_mask
+            | on_hold_mask
+            | open_mask
+            | investigation_mask
+            | completed_mask
+            | unattended_mask
+            | other_mask
+        ).sum()
     )
     total_in_view = len(df) if not df.empty else 0
     if total_other:
@@ -14554,7 +14635,7 @@ def _render_dashboard(
                     )
 
     elif queue_view == "Unattended":
-        st.markdown("##### Unattended — No Same-Day Field Response")
+        st.markdown("##### Unattended — Permanent Record (No Same-Day Field Response)")
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -14562,18 +14643,21 @@ def _render_dashboard(
             if unat.empty:
                 st.info(
                     "No **Unattended** tickets in this time window. "
-                    "Tickets move here automatically after assign-day cutoff "
-                    "if the engineer never replied."
+                    "When an engineer does not reply before assign-day cutoff, the ticket is "
+                    "marked unattended permanently and moved to **Needs Review** for admin."
                 )
             else:
                 _render_ticket_toolbar_then_table(
                     unat,
                     key_prefix="unattended",
                     cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("additional_info", "unattended_nudge_sent_at"),
-                    caption="Reopen to **Daily Task** to reassign or chase again.",
+                    + ("status", "marked_unattended_at", "additional_info", "unattended_nudge_sent_at"),
+                    caption=(
+                        "Permanent unattended count — stays even if status changes. "
+                        "New auto-unattended tickets appear in **Needs Review** for admin action."
+                    ),
                     status_actions=(
-                        ("Reopen to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
+                        ("Send to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
                     ),
                     allow_delete=True,
                 )

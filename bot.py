@@ -3213,7 +3213,7 @@ async def cron_unattended_nudge(request: Request) -> dict[str, object]:
 
 @app.post("/cron/unattended-close")
 async def cron_unattended_close(request: Request) -> dict[str, object]:
-    """Close same-day Pending tickets with no field response as Unattended."""
+    """Mark auto-unattended Daily Task tickets and move them to Needs Review (Open)."""
     _verify_cron_secret(request)
     stats = run_unattended_close(
         supabase,
