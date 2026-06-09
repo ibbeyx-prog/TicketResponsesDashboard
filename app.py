@@ -157,27 +157,44 @@ def _sc_sync_region_engineer_widgets(
     fe_names: list[str],
     fe_missing: bool,
     restore_handle: str = "",
+    engineer_select2_key: str | None = None,
+    engineer_manual2_key: str | None = None,
+    restore_handle_2: str = "",
 ) -> bool:
     """When Region Team is not CENTRAL, clear engineer; restore when switching back."""
     region = str(st.session_state.get(region_key, "")).strip()
     central = _sc_region_is_central(region)
     prev = st.session_state.get(region_watch_key)
+    sel2 = engineer_select2_key or f"{engineer_select_key}_2"
+    man2 = engineer_manual2_key or f"{engineer_manual_key}_2"
     if prev != region:
         st.session_state[region_watch_key] = region
         if not central:
             st.session_state.pop(engineer_select_key, None)
             st.session_state.pop(engineer_manual_key, None)
-        elif restore_handle:
-            handle = restore_handle.lstrip("@").lower()
-            if fe_names and not fe_missing:
-                fe_opts = [f"@{n}" for n in fe_names]
-                match = next(
-                    (o for o in fe_opts if o.lstrip("@").lower() == handle),
-                    fe_opts[0] if fe_opts else "",
+            st.session_state.pop(sel2, None)
+            st.session_state.pop(man2, None)
+        else:
+            if restore_handle:
+                handle = restore_handle.lstrip("@").lower()
+                _sync_engineer_widget_value(
+                    key=engineer_select_key,
+                    current_handle=handle,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
                 )
-                st.session_state[engineer_select_key] = match
-            else:
-                st.session_state[engineer_manual_key] = restore_handle.lstrip("@")
+                if engineer_manual_key != engineer_select_key:
+                    st.session_state[engineer_manual_key] = handle
+            if restore_handle_2:
+                handle2 = restore_handle_2.lstrip("@").lower()
+                _sync_engineer_widget_value(
+                    key=sel2,
+                    current_handle=handle2,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
+                )
+                if man2 != sel2:
+                    st.session_state[man2] = handle2
     return central
 
 
@@ -189,20 +206,26 @@ def _render_sc_engineer_field(
     select_key: str,
     manual_key: str,
     blank_key: str,
+    select2_key: str | None = None,
+    manual2_key: str | None = None,
 ) -> None:
-    """Engineer picker for CENTRAL; blank disabled field for regional teams."""
+    """Engineer picker(s) for CENTRAL; blank disabled field for regional teams."""
     if central:
-        if fe_names and not fe_missing:
-            st.selectbox(
-                "Engineer",
-                options=[f"@{n}" for n in fe_names],
-                key=select_key,
+        eng2_key = select2_key or f"{select_key}_2"
+        man2_key = manual2_key or f"{manual_key}_2"
+        if select2_key is None and manual2_key is None:
+            _render_engineer_pair_fields(
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+                engineer_key=select_key if fe_names and not fe_missing else manual_key,
+                engineer2_key=eng2_key if fe_names and not fe_missing else man2_key,
             )
         else:
-            st.text_input(
-                "Engineer",
-                placeholder="username",
-                key=manual_key,
+            _render_engineer_pair_fields(
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+                engineer_key=select_key if fe_names and not fe_missing else manual_key,
+                engineer2_key=eng2_key if fe_names and not fe_missing else man2_key,
             )
     else:
         st.caption(
@@ -219,18 +242,44 @@ def _sc_resolve_sales_engineer_handle(
     fe_missing: bool,
     select_key: str,
     manual_key: str,
+    select2_key: str | None = None,
+    manual2_key: str | None = None,
 ) -> str | None:
     if not central:
         return None
-    if fe_names and not fe_missing:
-        pick = str(st.session_state.get(select_key, "")).strip()
-        if not pick:
-            raise ValueError("Pick an engineer from the list.")
-        return _cc_normalize_handle(pick)
-    raw = str(st.session_state.get(manual_key, "")).strip()
-    if not raw:
-        raise ValueError("Enter an engineer username.")
-    return _cc_normalize_handle(raw)
+    eng2 = select2_key or f"{select_key}_2"
+    man2 = manual2_key or f"{manual_key}_2"
+    h1, _h2 = _resolve_engineer_pair(
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+        engineer_key=select_key if fe_names and not fe_missing else manual_key,
+        engineer2_key=eng2 if fe_names and not fe_missing else man2,
+        required_primary=True,
+    )
+    return h1
+
+
+def _sc_resolve_sales_engineer_pair(
+    *,
+    central: bool,
+    fe_names: list[str],
+    fe_missing: bool,
+    select_key: str,
+    manual_key: str,
+    select2_key: str | None = None,
+    manual2_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    if not central:
+        return None, None
+    eng2 = select2_key or f"{select_key}_2"
+    man2 = manual2_key or f"{manual_key}_2"
+    return _resolve_engineer_pair(
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+        engineer_key=select_key if fe_names and not fe_missing else manual_key,
+        engineer2_key=eng2 if fe_names and not fe_missing else man2,
+        required_primary=True,
+    )
 
 
 SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Standard")
@@ -734,6 +783,8 @@ _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 _CC_FE_SELECT_KEY = "cc_fe_select"
 _CC_FE_MANUAL_KEY = "cc_fe_manual"
+_CC_FE_SELECT_2_KEY = "cc_fe_select_2"
+_CC_FE_MANUAL_2_KEY = "cc_fe_manual_2"
 _CC_TICKET_INPUT_KEY = "cc_ticket_number"
 _CC_ASSIGN_NOTES_KEY = "cc_assign_notes"
 _CC_CLEAR_ASSIGN_KEY = "_cc_clear_assign_form"
@@ -751,6 +802,8 @@ _SC_CC_ST_DESC_KEY = "sc_cc_st_desc"
 _SC_CC_SKIP_ASSIGN_KEY = "sc_cc_skip_field_assign"
 _SC_CC_FE_SELECT_KEY = "sc_cc_fe_select"
 _SC_CC_FE_MANUAL_KEY = "sc_cc_fe_manual"
+_SC_CC_FE_SELECT_2_KEY = "sc_cc_fe_select_2"
+_SC_CC_FE_MANUAL_2_KEY = "sc_cc_fe_manual_2"
 _SC_CC_CLEAR_ST_INTAKE_KEY = "_sc_cc_clear_st_intake"
 _CC_SIDEBAR_TAB_KEY = "_cc_sidebar_tab"
 CC_TAB_CSM = "CSM"
@@ -771,6 +824,7 @@ def _normalize_dash_main_nav(value: object) -> str:
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
     return {
         "engineer": f"{prefix}_edit_engineer",
+        "engineer_2": f"{prefix}_edit_engineer_2",
         "category": f"{prefix}_edit_category",
         "notes": f"{prefix}_edit_notes",
         "sync_tg": f"{prefix}_edit_sync_tg",
@@ -782,12 +836,101 @@ def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
 def _reassign_session_keys(prefix: str) -> dict[str, str]:
     return {
         "engineer": f"{prefix}_reassign_engineer",
+        "engineer_2": f"{prefix}_reassign_engineer_2",
         "category": f"{prefix}_reassign_category",
         "notes": f"{prefix}_reassign_notes",
         "sync_tg": f"{prefix}_reassign_sync_tg",
         "show": f"{prefix}_show_reassign",
         "synced_ticket": f"{prefix}_reassign_synced_ticket",
     }
+
+
+def _engineer_pick_optional(raw: object) -> str | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    return _cc_normalize_handle(s)
+
+
+def _resolve_engineer_pair(
+    *,
+    fe_names: list[str],
+    fe_missing: bool,
+    engineer_key: str,
+    engineer2_key: str,
+    required_primary: bool = True,
+) -> tuple[str | None, str | None]:
+    """Return ``(primary, secondary)`` handles from form session keys."""
+    h1 = _engineer_pick_optional(st.session_state.get(engineer_key))
+    h2 = _engineer_pick_optional(st.session_state.get(engineer2_key))
+    if required_primary and not h1:
+        raise ValueError("Select or enter an engineer.")
+    if h1 and h2 and h1.lower() == h2.lower():
+        raise ValueError("Engineer 2 must be different from Engineer 1.")
+    return h1, h2
+
+
+def _coassignee_telegram_note(handle2: str | None, note: str | None) -> str | None:
+    if not handle2:
+        return note
+    extra = f"Co-assignee: {handle2}"
+    base = (note or "").strip()
+    return f"{base}\n{extra}".strip() if base else extra
+
+
+def _render_engineer_pair_fields(
+    *,
+    fe_names: list[str],
+    fe_missing: bool,
+    engineer_key: str,
+    engineer2_key: str,
+    engineer_label: str = "Engineer",
+    engineer2_label: str = "Engineer 2 (optional)",
+) -> None:
+    """Engineer pickers — empty on first open (no auto-selected first name)."""
+    if fe_missing or not fe_names:
+        st.text_input(engineer_label, placeholder="username", key=engineer_key)
+        st.text_input(
+            engineer2_label,
+            placeholder="username (optional)",
+            key=engineer2_key,
+        )
+        return
+    opts = [f"@{n}" for n in fe_names]
+    st.selectbox(
+        engineer_label,
+        options=opts,
+        index=None,
+        placeholder="Select engineer",
+        key=engineer_key,
+    )
+    st.selectbox(
+        engineer2_label,
+        options=opts,
+        index=None,
+        placeholder="Optional second engineer",
+        key=engineer2_key,
+    )
+
+
+def _sync_engineer_widget_value(
+    *,
+    key: str,
+    current_handle: str,
+    fe_names: list[str],
+    fe_missing: bool,
+) -> None:
+    """Set engineer widget only when the ticket already has an assignee."""
+    handle = (current_handle or "").strip().lstrip("@")
+    if not handle:
+        st.session_state.pop(key, None)
+        return
+    if fe_names and not fe_missing:
+        target = f"@{handle}"
+        fe_opts = [f"@{n}" for n in fe_names]
+        st.session_state[key] = target if target in fe_opts else None
+    else:
+        st.session_state[key] = handle
 
 
 def _clear_reassign_panels_except(active_prefix: str) -> None:
@@ -849,6 +992,7 @@ def _sync_assignment_edit_widgets(
     keys: dict[str, str],
     picked: str,
     current_handle: str,
+    current_handle_2: str = "",
     current_cat: str,
     current_notes: str,
     cats: list[str],
@@ -862,16 +1006,22 @@ def _sync_assignment_edit_widgets(
     st.session_state[keys["synced_ticket"]] = picked
     if skip_engineer:
         st.session_state.pop(keys["engineer"], None)
-    elif fe_names and not fe_missing:
-        fe_opts = [f"@{n}" for n in fe_names]
-        default_fe = (
-            f"@{current_handle}"
-            if current_handle and f"@{current_handle}" in fe_opts
-            else (fe_opts[0] if fe_opts else "")
-        )
-        st.session_state[keys["engineer"]] = default_fe
+        st.session_state.pop(keys.get("engineer_2", ""), None)
     else:
-        st.session_state[keys["engineer"]] = current_handle
+        _sync_engineer_widget_value(
+            key=keys["engineer"],
+            current_handle=current_handle,
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+        )
+        eng2_key = keys.get("engineer_2")
+        if eng2_key:
+            _sync_engineer_widget_value(
+                key=eng2_key,
+                current_handle=current_handle_2,
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+            )
     st.session_state[keys["category"]] = (
         current_cat if current_cat in cats else (cats[0] if cats else "")
     )
@@ -8887,6 +9037,7 @@ def _cc_insert_assignment(
     *,
     additional_info: str | None = None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     row: dict = {
@@ -8902,6 +9053,8 @@ def _cc_insert_assignment(
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
+    if assigned_to_2:
+        row["assigned_to_2"] = assigned_to_2
     for _ in range(4):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
@@ -9078,6 +9231,7 @@ def _cc_reassign_ticket(
     additional_info: str | None = None,
     operator_id: str,
     expected_last_assigned_at: object | None = None,
+    assigned_to_2: str | None = None,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     updates = {
@@ -9093,6 +9247,7 @@ def _cc_reassign_ticket(
         "unattended_nudge_sent_at": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
+        "assigned_to_2": assigned_to_2,
     }
     if not _cc_execute_ticket_update_if(
         client,
@@ -9152,6 +9307,7 @@ def _cc_upsert_assignment(
     *,
     additional_info: str | None = None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> str:
     """Insert or reassign; ``assigned_to`` is ``@username``. Returns a short summary."""
     client = _get_supabase_client()
@@ -9164,6 +9320,7 @@ def _cc_upsert_assignment(
             task_category,
             additional_info=additional_info,
             operator_id=operator_id,
+            assigned_to_2=assigned_to_2,
         )
         return f"Created ticket **{ticket_number}** and logged assignment."
     _cc_reassign_ticket(
@@ -9174,6 +9331,7 @@ def _cc_upsert_assignment(
         additional_info=additional_info,
         operator_id=operator_id,
         expected_last_assigned_at=existing.get("last_assigned_at"),
+        assigned_to_2=assigned_to_2,
     )
     prev_assignee = existing.get("assigned_to") or "—"
     return (
@@ -9212,6 +9370,7 @@ def _cc_patch_assignment_fields(
     task_category: str,
     additional_info: str | None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Update assignment fields for a ticket in the given status (dashboard edit)."""
     client = _get_supabase_client()
@@ -9226,6 +9385,7 @@ def _cc_patch_assignment_fields(
     prev_handle = str(row.get("assigned_to") or "").strip()
     updates: dict[str, object] = {
         "assigned_to": assigned_to,
+        "assigned_to_2": assigned_to_2,
         "task_category": task_category,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
@@ -9256,6 +9416,7 @@ def _cc_dashboard_reassign_ticket(
     additional_info: str | None,
     operator_id: str,
     from_status: str,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Reassign for next-day field work: reset to Daily Task and clear prior response."""
     row = _fetch_ticket_row(ticket_number)
@@ -9276,6 +9437,7 @@ def _cc_dashboard_reassign_ticket(
         additional_info=additional_info,
         operator_id=operator_id,
         expected_last_assigned_at=row.get("last_assigned_at"),
+        assigned_to_2=assigned_to_2,
     )
     if from_status in ("Open", STATUS_DAILY_TASK, STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION):
         if from_status == "Open":
@@ -9436,6 +9598,7 @@ def _render_assignment_editor(
     )
 
     current_handle = str(row.get("assigned_to") or "").strip().lstrip("@")
+    current_handle_2 = str(row.get("assigned_to_2") or "").strip().lstrip("@")
     current_cat = str(row.get("task_category") or "").strip()
     current_notes = str(row.get("additional_info") or "")
 
@@ -9447,6 +9610,7 @@ def _render_assignment_editor(
         keys=keys,
         picked=picked,
         current_handle=current_handle,
+        current_handle_2=current_handle_2,
         current_cat=current_cat,
         current_notes=current_notes,
         cats=cats,
@@ -9455,19 +9619,12 @@ def _render_assignment_editor(
     )
 
     with st.form(f"{edit_key_prefix}_assignment_edit_form", clear_on_submit=False):
-        if fe_names and not fe_missing:
-            fe_opts = [f"@{n}" for n in fe_names]
-            st.selectbox(
-                "Engineer",
-                options=fe_opts,
-                key=keys["engineer"],
-            )
-        else:
-            st.text_input(
-                "Engineer",
-                placeholder="username",
-                key=keys["engineer"],
-            )
+        _render_engineer_pair_fields(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+        )
         st.selectbox(
             "Category",
             options=cats,
@@ -9489,19 +9646,18 @@ def _render_assignment_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(
-                str(st.session_state.get(keys["engineer"], ""))
-            )
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+            required_primary=True,
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        notes = _coassignee_telegram_note(handle2, notes)
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -9515,7 +9671,8 @@ def _render_assignment_editor(
         updated = _cc_patch_assignment_fields(
             picked,
             required_status=required_status,
-            assigned_to=handle,
+            assigned_to=handle or "",
+            assigned_to_2=handle2,
             task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -9600,6 +9757,7 @@ def _render_reassign_editor(
     )
 
     current_handle = str(row.get("assigned_to") or "").strip().lstrip("@")
+    current_handle_2 = str(row.get("assigned_to_2") or "").strip().lstrip("@")
     current_cat = str(row.get("task_category") or "").strip()
     current_notes = str(row.get("additional_info") or "")
 
@@ -9611,6 +9769,7 @@ def _render_reassign_editor(
         keys=keys,
         picked=picked,
         current_handle=current_handle,
+        current_handle_2=current_handle_2,
         current_cat=current_cat,
         current_notes=current_notes,
         cats=cats,
@@ -9619,10 +9778,12 @@ def _render_reassign_editor(
     )
 
     with st.form(f"{edit_key_prefix}_reassign_form", clear_on_submit=False):
-        if fe_names and not fe_missing:
-            st.selectbox("Engineer", options=[f"@{n}" for n in fe_names], key=keys["engineer"])
-        else:
-            st.text_input("Engineer", placeholder="username", key=keys["engineer"])
+        _render_engineer_pair_fields(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+        )
         st.selectbox("Category", options=cats, key=keys["category"])
         st.text_area("Notes (Additional Info)", height=80, key=keys["notes"])
         st.checkbox(
@@ -9638,17 +9799,18 @@ def _render_reassign_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(str(st.session_state.get(keys["engineer"], "")))
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+            required_primary=True,
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        notes = _coassignee_telegram_note(handle2, notes)
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -9661,7 +9823,8 @@ def _render_reassign_editor(
     try:
         updated = _cc_dashboard_reassign_ticket(
             picked,
-            assigned_to=handle,
+            assigned_to=handle or "",
+            assigned_to_2=handle2,
             task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -9724,6 +9887,7 @@ def _sc_patch_assignment_fields(
     operator_id: str,
     account_region: str | None = None,
     account_name: str | None = None,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Update sales case field assignment (same fields as CSM edit assignment)."""
     row = _fetch_sales_case_row_by_id(row_id)
@@ -9735,6 +9899,7 @@ def _sc_patch_assignment_fields(
     prev_handle = str(row.get("assigned_to") or "").strip()
     patch: dict[str, object] = {
         "assigned_to": assigned_to,
+        "assigned_to_2": assigned_to_2,
         "field_task_category": field_task_category,
         "additional_info": additional_info,
         "admin_owner": operator_id,
@@ -9848,6 +10013,7 @@ def _render_sales_assignment_editor(
     )
 
     current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
+    current_handle_2 = _sc_row_text(r0.get("assigned_to_2")).lstrip("@")
     current_cat = _sc_row_text(r0.get("field_task_category")) or _sc_row_text(
         r0.get("sales_category")
     )
@@ -9878,6 +10044,7 @@ def _render_sales_assignment_editor(
         keys=keys,
         picked=cref,
         current_handle=current_handle,
+        current_handle_2=current_handle_2,
         current_cat=current_cat,
         current_notes=current_notes,
         cats=cats,
@@ -9905,6 +10072,9 @@ def _render_sales_assignment_editor(
             fe_names=fe_names,
             fe_missing=fe_missing,
             restore_handle=current_handle,
+            engineer_select2_key=keys["engineer_2"],
+            engineer_manual2_key=keys["engineer_2"],
+            restore_handle_2=current_handle_2,
         )
         _render_sc_engineer_field(
             central=central,
@@ -9913,6 +10083,8 @@ def _render_sales_assignment_editor(
             select_key=keys["engineer"],
             manual_key=keys["engineer"],
             blank_key=engineer_blank_key,
+            select2_key=keys["engineer_2"],
+            manual2_key=keys["engineer_2"],
         )
         st.selectbox(
             "Category",
@@ -9940,17 +10112,20 @@ def _render_sales_assignment_editor(
     try:
         region = str(st.session_state.get(region_key, "")).strip()
         central = _sc_region_is_central(region)
-        handle = _sc_resolve_sales_engineer_handle(
+        handle, handle2 = _sc_resolve_sales_engineer_pair(
             central=central,
             fe_names=fe_names,
             fe_missing=fe_missing,
             select_key=keys["engineer"],
             manual_key=keys["engineer"],
+            select2_key=keys["engineer_2"],
+            manual2_key=keys["engineer_2"],
         )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        notes = _coassignee_telegram_note(handle2, notes)
         account_name = str(st.session_state.get(account_key, "")).strip()
         if not account_name:
             raise ValueError("Fill **Resort Name / Company Name**.")
@@ -9967,6 +10142,7 @@ def _render_sales_assignment_editor(
         _sc_patch_assignment_fields(
             row_id,
             assigned_to=handle,
+            assigned_to_2=handle2,
             field_task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -10018,6 +10194,7 @@ def _sc_dashboard_reassign_case(
     field_task_category: str,
     additional_info: str | None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Reassign field engineer on a sales case (same intent as CSM reassign)."""
     row = _fetch_sales_case_row_by_id(row_id)
@@ -10029,6 +10206,7 @@ def _sc_dashboard_reassign_case(
 
     patch: dict[str, object] = {
         "assigned_to": assigned_to,
+        "assigned_to_2": assigned_to_2,
         "field_task_category": field_task_category,
         "admin_owner": operator_id,
     }
@@ -10076,6 +10254,7 @@ def _render_sales_reassign_editor(
     )
 
     current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
+    current_handle_2 = _sc_row_text(r0.get("assigned_to_2")).lstrip("@")
     current_cat = _sc_row_text(r0.get("field_task_category")) or _sc_row_text(
         r0.get("sales_category")
     )
@@ -10093,6 +10272,7 @@ def _render_sales_reassign_editor(
         keys=keys,
         picked=cref,
         current_handle=current_handle,
+        current_handle_2=current_handle_2,
         current_cat=current_cat,
         current_notes=current_notes,
         cats=cats,
@@ -10101,14 +10281,12 @@ def _render_sales_reassign_editor(
     )
 
     with st.form(f"{edit_key_prefix}_sc_reassign_form", clear_on_submit=False):
-        if fe_names and not fe_missing:
-            st.selectbox(
-                "Engineer",
-                options=[f"@{n}" for n in fe_names],
-                key=keys["engineer"],
-            )
-        else:
-            st.text_input("Engineer", placeholder="username", key=keys["engineer"])
+        _render_engineer_pair_fields(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+        )
         st.selectbox("Category", options=cats, key=keys["category"])
         st.text_area("Notes (Additional Info)", height=80, key=keys["notes"])
         st.checkbox(
@@ -10126,17 +10304,18 @@ def _render_sales_reassign_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(str(st.session_state.get(keys["engineer"], "")))
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+            required_primary=True,
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        notes = _coassignee_telegram_note(handle2, notes)
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -10149,7 +10328,8 @@ def _render_sales_reassign_editor(
     try:
         _sc_dashboard_reassign_case(
             row_id,
-            assigned_to=handle,
+            assigned_to=handle or "",
+            assigned_to_2=handle2,
             field_task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -10561,33 +10741,30 @@ def _render_cc_engineer_row(
     missing: bool,
     select_key: str = _CC_FE_SELECT_KEY,
     manual_key: str = _CC_FE_MANUAL_KEY,
+    select2_key: str = _CC_FE_SELECT_2_KEY,
+    manual2_key: str = _CC_FE_MANUAL_2_KEY,
     team_popover_key: str = "cc_team_popover",
 ) -> None:
-    """Engineer picker + team list popover."""
+    """Engineer pickers + team list popover."""
     if missing:
         st.info(
             f"Directory table missing — type a username below, or add "
             f"`{FIELD_ENGINEERS_TABLE}` in Supabase."
         )
+        st.text_input("Engineer", placeholder="@ibeyx", key=manual_key)
         st.text_input(
-            "Engineer",
-            placeholder="@ibeyx",
-            key=manual_key,
+            "Engineer 2 (optional)",
+            placeholder="@username (optional)",
+            key=manual2_key,
         )
         return
 
-    if names:
-        st.selectbox(
-            "Engineer",
-            options=[f"@{n}" for n in names],
-            key=select_key,
-        )
-    else:
-        st.text_input(
-            "Engineer",
-            placeholder="@ibeyx",
-            key=manual_key,
-        )
+    _render_engineer_pair_fields(
+        fe_names=names,
+        fe_missing=missing,
+        engineer_key=select_key if names else manual_key,
+        engineer2_key=select2_key if names else manual2_key,
+    )
 
     with st.popover("Edit team", key=team_popover_key):
         _field_team_manage_popover(names, missing=missing)
@@ -10611,6 +10788,13 @@ def _reset_cc_assign_form(*, categories: list[str]) -> None:
     st.session_state[_CC_TICKET_INPUT_KEY] = ""
     st.session_state[_CC_ASSIGN_NOTES_KEY] = ""
     st.session_state[_CC_ADD_UNASSIGNED_KEY] = False
+    for k in (
+        _CC_FE_SELECT_KEY,
+        _CC_FE_SELECT_2_KEY,
+        _CC_FE_MANUAL_KEY,
+        _CC_FE_MANUAL_2_KEY,
+    ):
+        st.session_state.pop(k, None)
     opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     if opts:
         st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
@@ -10661,6 +10845,13 @@ def _reset_sc_cc_sales_ticket_form() -> None:
     st.session_state[_SC_CC_ST_ACCOUNT_KEY] = ""
     st.session_state[_SC_CC_ST_DESC_KEY] = ""
     st.session_state[_SC_CC_SKIP_ASSIGN_KEY] = False
+    for k in (
+        _SC_CC_FE_SELECT_KEY,
+        _SC_CC_FE_SELECT_2_KEY,
+        _SC_CC_FE_MANUAL_KEY,
+        _SC_CC_FE_MANUAL_2_KEY,
+    ):
+        st.session_state.pop(k, None)
     if _SC_CC_ST_PRIORITY_KEY in st.session_state:
         st.session_state[_SC_CC_ST_PRIORITY_KEY] = SALES_PRIORITY_OPTIONS[-1]
 
@@ -10678,6 +10869,7 @@ def _sc_insert_intake_case(
     queue_metric_label: str,
     clear_sales_ticket_form: bool = False,
     assigned_to: str | None = None,
+    assigned_to_2: str | None = None,
     field_task_category: str | None = None,
     post_telegram: bool = False,
     operator_id: str = "",
@@ -10697,6 +10889,8 @@ def _sc_insert_intake_case(
         row["additional_info"] = description
     if assigned_to:
         row["assigned_to"] = assigned_to
+        if assigned_to_2:
+            row["assigned_to_2"] = assigned_to_2
         row["field_task_category"] = field_task_category
         row["dispatch_region"] = account_region
         row["last_assigned_at"] = _cc_utc_now_iso()
@@ -10835,6 +11029,8 @@ def _sidebar_sales_intake() -> None:
                 region_watch_key="_sc_cc_intake_region_watch",
                 engineer_select_key=_SC_CC_FE_SELECT_KEY,
                 engineer_manual_key=_SC_CC_FE_MANUAL_KEY,
+                engineer_select2_key=_SC_CC_FE_SELECT_2_KEY,
+                engineer_manual2_key=_SC_CC_FE_MANUAL_2_KEY,
                 fe_names=fe_names,
                 fe_missing=fe_missing,
             )
@@ -10845,6 +11041,8 @@ def _sidebar_sales_intake() -> None:
                 select_key=_SC_CC_FE_SELECT_KEY,
                 manual_key=_SC_CC_FE_MANUAL_KEY,
                 blank_key="sc_cc_intake_engineer_blank",
+                select2_key=_SC_CC_FE_SELECT_2_KEY,
+                manual2_key=_SC_CC_FE_MANUAL_2_KEY,
             )
             with st.popover("Edit team", key="sc_cc_team_popover"):
                 _field_team_manage_popover(fe_names, missing=fe_missing)
@@ -10902,18 +11100,21 @@ def _sidebar_sales_intake() -> None:
         region = str(st.session_state.get(_SC_CC_ST_REGION_KEY, "")).strip()
         central = _sc_region_is_central(region)
         assigned_to: str | None = None
+        assigned_to_2: str | None = None
         field_cat: str | None = None
         post_telegram = not skip_assign and central
 
         if not skip_assign and central:
             field_cat = sales_cat
             try:
-                assigned_to = _sc_resolve_sales_engineer_handle(
+                assigned_to, assigned_to_2 = _sc_resolve_sales_engineer_pair(
                     central=True,
                     fe_names=fe_names,
                     fe_missing=fe_missing,
                     select_key=_SC_CC_FE_SELECT_KEY,
                     manual_key=_SC_CC_FE_MANUAL_KEY,
+                    select2_key=_SC_CC_FE_SELECT_2_KEY,
+                    manual2_key=_SC_CC_FE_MANUAL_2_KEY,
                 )
             except ValueError as exc:
                 _sc_set_sales_flash(str(exc), level="error")
@@ -10962,6 +11163,8 @@ def _sidebar_sales_intake() -> None:
                 st.rerun()
                 return
 
+        desc_raw = str(st.session_state.get(_SC_CC_ST_DESC_KEY, "")).strip() or None
+        desc_note = _coassignee_telegram_note(assigned_to_2, desc_raw)
         _sc_insert_intake_case(
             case_ref=cr,
             account_name=an,
@@ -10971,11 +11174,12 @@ def _sidebar_sales_intake() -> None:
             ).strip(),
             account_region=str(st.session_state.get(_SC_CC_ST_REGION_KEY, "")).strip(),
             sales_category=sales_cat,
-            description=str(st.session_state.get(_SC_CC_ST_DESC_KEY, "")).strip() or None,
+            description=desc_note,
             status=SC_STATUS_SALES_TICKET,
             queue_metric_label=SC_STATUS_SALES_TICKET,
             clear_sales_ticket_form=True,
             assigned_to=assigned_to,
+            assigned_to_2=assigned_to_2,
             field_task_category=field_cat,
             post_telegram=post_telegram,
             operator_id=op,
@@ -11139,22 +11343,17 @@ def _sidebar_field_assign() -> None:
         return
 
     try:
-        if fe_names and not fe_missing:
-            pick_choice = st.session_state.get(_CC_FE_SELECT_KEY)
-            if not pick_choice or not str(pick_choice).strip():
-                _cc_set_flash("Pick an engineer from the list.", level="error")
-                st.rerun()
-                return
-            handle = _cc_normalize_handle(str(pick_choice))
-        else:
-            fe_handle_raw = str(st.session_state.get(_CC_FE_MANUAL_KEY, "")).strip()
-            if not fe_handle_raw:
-                _cc_set_flash(
-                    "Enter an engineer Telegram username.", level="error"
-                )
-                st.rerun()
-                return
-            handle = _cc_normalize_handle(fe_handle_raw)
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=_CC_FE_SELECT_KEY if fe_names and not fe_missing else _CC_FE_MANUAL_KEY,
+            engineer2_key=_CC_FE_SELECT_2_KEY if fe_names and not fe_missing else _CC_FE_MANUAL_2_KEY,
+            required_primary=True,
+        )
+        additional_info_val = _coassignee_telegram_note(
+            handle2,
+            str(st.session_state.get(_CC_ASSIGN_NOTES_KEY, "")).strip() or None,
+        )
     except ValueError as exc:
         _cc_set_flash(str(exc), level="error")
         st.rerun()
@@ -11219,6 +11418,7 @@ def _sidebar_field_assign() -> None:
             cat,
             additional_info=additional_info_val,
             operator_id=op_assign,
+            assigned_to_2=handle2,
         )
     except Exception as exc:
         _cc_set_flash(f"Supabase upsert failed: {exc}", level="error")
@@ -13952,22 +14152,20 @@ def _render_sales_case_work_panel(
                     f"sc_region_assign_engineer_form_{key_prefix}",
                     clear_on_submit=False,
                 ):
-                    if fe_names and not fe_missing:
-                        st.selectbox(
-                            "Engineer",
-                            options=[f"@{n}" for n in fe_names],
-                            key="sc_region_assign_fe",
-                        )
-                    else:
-                        st.text_input(
-                            "Engineer @username",
-                            key="sc_region_assign_fe_manual",
-                            placeholder="username",
-                        )
+                    fe_key = f"sc_region_assign_fe_{key_prefix}"
+                    fe2_key = f"sc_region_assign_fe2_{key_prefix}"
+                    fe_man_key = f"sc_region_assign_fe_manual_{key_prefix}"
+                    fe2_man_key = f"sc_region_assign_fe2_manual_{key_prefix}"
+                    _render_engineer_pair_fields(
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        engineer_key=fe_key if fe_names and not fe_missing else fe_man_key,
+                        engineer2_key=fe2_key if fe_names and not fe_missing else fe2_man_key,
+                    )
                     st.checkbox(
                         "Post Assignment to Field Telegram",
                         value=False,
-                        key="sc_region_assign_post_tg",
+                        key=f"sc_region_assign_post_tg_{key_prefix}",
                     )
                     assign_submitted = st.form_submit_button(
                         "Save Engineer Assignment",
@@ -13975,21 +14173,25 @@ def _render_sales_case_work_panel(
                         use_container_width=True,
                     )
                 if assign_submitted:
-                    raw_h = (
-                        str(st.session_state.get("sc_region_assign_fe", "")).strip()
-                        if fe_names and not fe_missing
-                        else str(
-                            st.session_state.get("sc_region_assign_fe_manual", "")
-                        ).strip()
-                    )
                     try:
-                        handle = _cc_normalize_handle(raw_h)
+                        handle, handle2 = _resolve_engineer_pair(
+                            fe_names=fe_names,
+                            fe_missing=fe_missing,
+                            engineer_key=fe_key if fe_names and not fe_missing else fe_man_key,
+                            engineer2_key=fe2_key if fe_names and not fe_missing else fe2_man_key,
+                            required_primary=True,
+                        )
                     except ValueError as ve:
                         st.error(str(ve))
                     else:
-                        patch: dict[str, object] = {"assigned_to": handle}
+                        patch: dict[str, object] = {
+                            "assigned_to": handle,
+                            "assigned_to_2": handle2,
+                        }
                         _sc_stamp_last_assigned_at(patch)
-                        post_tg = bool(st.session_state.get("sc_region_assign_post_tg"))
+                        post_tg = bool(
+                            st.session_state.get(f"sc_region_assign_post_tg_{key_prefix}")
+                        )
                         tg_ok = False
                         if post_tg:
                             token = (
@@ -14010,16 +14212,17 @@ def _render_sales_case_work_panel(
                                 )
                             else:
                                 cref = str(r0.get("case_ref") or "").strip()
+                                tg_info = _coassignee_telegram_note(
+                                    handle2,
+                                    str(r0.get("description") or "").strip() or None,
+                                )
                                 try:
                                     asyncio.run(
                                         notify_telegram_group(
                                             handle.lstrip("@"),
                                             cref or row_id[:8],
                                             fcat,
-                                            additional_info=str(
-                                                r0.get("description") or ""
-                                            )
-                                            or None,
+                                            additional_info=tg_info,
                                             assigned_by=op,
                                             api_id=_read_setting("TG_API_ID")
                                             or _read_setting("TELEGRAM_API_ID")
@@ -14040,6 +14243,8 @@ def _render_sales_case_work_panel(
                             _sales_cases_update_row(row_id, patch)
                             _invalidate_dashboard_data_cache()
                             msg = f"Engineer **{handle}** assigned for **{region_label}**."
+                            if handle2:
+                                msg += f" Co-assignee: **{handle2}**."
                             if post_tg and tg_ok:
                                 msg += " Telegram posted."
                             _sc_set_sales_flash(msg)
