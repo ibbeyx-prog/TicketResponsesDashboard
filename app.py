@@ -11123,10 +11123,17 @@ def main() -> None:
 
     _app_chrome_fragment()
     _sidebar_controls()
-    _render_supabase_unreachable_banner()
 
     auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
+
+    @st.fragment(run_every=run_every)
+    def _metrics_fragment() -> None:
+        _render_global_assign_day_metrics()
+        _inject_bon_dash_row_align()
+
+    _metrics_fragment()
+    _render_supabase_unreachable_banner()
 
     @st.fragment(run_every=run_every)
     def _dashboard_fragment() -> None:
@@ -11156,6 +11163,8 @@ _BON_THEME_CSS = """
         --bon-box-radius: 8px;
         --bon-topbar-h: 2.75rem;
         --bon-topbar-icon: 2rem;
+        --bon-dash-top-pad: 0.5rem;
+        --bon-metrics-nudge: 0px;
         --bon-chrome-h: var(--bon-topbar-h);
         --bon-netops: #FF5A1F;
     }
@@ -11229,6 +11238,88 @@ _BON_THEME_CSS = """
     [data-testid="stMain"] [data-testid="block-container"] {
         padding-top: var(--bon-chrome-h) !important;
         padding-bottom: 1rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+    [data-testid="stMain"] [data-testid="block-container"] > div > [data-testid="stVerticalBlock"],
+    [data-testid="stMain"] [data-testid="block-container"] [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+    [data-testid="stMain"] [data-testid="element-container"]:has(div.st-key-bon_app_topbar),
+    [data-testid="stMain"] [data-testid="block-container"] > div:has(div.st-key-bon_app_topbar),
+    [data-testid="stMain"] [data-testid="block-container"] > [data-testid="stVerticalBlockBorderWrapper"]:has(div.st-key-bon_app_topbar) {
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+        border: none !important;
+    }
+    [data-testid="stSidebar"] [data-testid="block-container"],
+    [data-testid="stSidebar"] [data-testid="stSidebarUserContent"],
+    [data-testid="stSidebar"] > div:first-child {
+        padding-top: var(--bon-dash-top-pad) !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+        padding-bottom: 0.5rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="block-container"] > div > [data-testid="stVerticalBlock"],
+    [data-testid="stSidebar"] [data-testid="block-container"] [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+    div.st-key-bon_dash_metrics_row {
+        position: sticky !important;
+        top: calc(var(--bon-chrome-h) + var(--bon-dash-top-pad)) !important;
+        z-index: 50 !important;
+        background: var(--bon-bg) !important;
+        margin-top: calc(var(--bon-dash-top-pad) + var(--bon-metrics-nudge, 0px)) !important;
+        margin-bottom: 0 !important;
+        padding: 0 0 0.15rem 0 !important;
+    }
+    div.st-key-bon_dash_metrics_row,
+    div.st-key-bon_dash_metrics_row [data-testid="element-container"],
+    [data-testid="stMain"] [data-testid="element-container"]:has(div.st-key-bon_dash_metrics_row) {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        padding-top: 0 !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }
+    div.st-key-bon_dash_metrics_row [data-testid="stHorizontalBlock"] {
+        align-items: stretch !important;
+        gap: 0.65rem !important;
+        margin: 0 !important;
+    }
+    div.st-key-bon_dash_metrics_row + div [data-testid="stCaptionContainer"],
+    div.st-key-bon_dash_metrics_row + [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaptionContainer"] {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    [data-testid="stSidebar"] div[class*="st-key-bon_box_ticket"] {
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 50 !important;
+        background: var(--bon-bg) !important;
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    [data-testid="stSidebar"] div[class*="st-key-bon_box_ticket"] [data-testid="stExpander"],
+    [data-testid="stSidebar"] div[class*="st-key-bon_box_ticket"] details {
+        margin: 0 !important;
+    }
+    div.st-key-bon_dash_metrics_row [data-testid="stMetric"],
+    [data-testid="stSidebar"] div[class*="st-key-bon_box_ticket"] summary {
+        min-height: 4.35rem !important;
+        box-sizing: border-box !important;
+        background: var(--bon-card) !important;
+        border: 1px solid var(--bon-box-border) !important;
+        border-radius: var(--bon-box-radius) !important;
+    }
+    [data-testid="stSidebar"] div[class*="st-key-bon_box_ticket"] summary {
+        display: flex !important;
+        align-items: center !important;
+        padding: 0.5rem 0.75rem !important;
     }
     div.st-key-bon_app_topbar {
         position: fixed !important;
@@ -12200,9 +12291,61 @@ def _inject_bon_sidebar_visibility_css() -> None:
     )
 
 
+def _inject_bon_dash_row_align() -> None:
+    """Nudge metrics row to match TICKET box top (sidebar vs main scroll panes differ)."""
+    components.html(
+        """
+        <script>
+        (function () {
+          const doc = window.parent.document;
+          const root = doc.documentElement;
+          let alignTimer = null;
+          function alignBonDashRow() {
+            const ticket =
+              doc.querySelector('[data-testid="stSidebar"] [class*="st-key-bon_box_ticket"] summary') ||
+              doc.querySelector('[data-testid="stSidebar"] [class*="st-key-bon_box_ticket"]');
+            const metrics =
+              doc.querySelector('[data-testid="stMain"] div[class*="st-key-bon_dash_metrics_row"]');
+            if (!ticket || !metrics) {
+              root.style.setProperty("--bon-metrics-nudge", "0px");
+              return;
+            }
+            const delta = ticket.getBoundingClientRect().top - metrics.getBoundingClientRect().top;
+            root.style.setProperty(
+              "--bon-metrics-nudge",
+              Math.abs(delta) < 0.5 ? "0px" : delta + "px"
+            );
+          }
+          function scheduleAlign() {
+            if (alignTimer) {
+              window.clearTimeout(alignTimer);
+            }
+            alignTimer = window.setTimeout(alignBonDashRow, 16);
+          }
+          alignBonDashRow();
+          requestAnimationFrame(alignBonDashRow);
+          window.setTimeout(alignBonDashRow, 80);
+          window.setTimeout(alignBonDashRow, 300);
+          window.parent.addEventListener("resize", scheduleAlign);
+          if (!window.parent.__bonDashRowAlignObs) {
+            window.parent.__bonDashRowAlignObs = new MutationObserver(scheduleAlign);
+            window.parent.__bonDashRowAlignObs.observe(doc.body, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+            });
+          }
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _inject_bon_theme() -> None:
     st.markdown(_BON_THEME_CSS, unsafe_allow_html=True)
     _inject_bon_sidebar_visibility_css()
+    _inject_bon_dash_row_align()
 
 
 def _format_when(when: object) -> str:
@@ -12499,9 +12642,9 @@ def _migrate_legacy_queue_nav() -> None:
 
 
 def _render_dashboard_header(*, refreshed_at: str) -> None:
-    """Last refresh line (title lives in the top header)."""
+    """Last refresh line below the metric cards."""
     st.caption(
-        f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in header **Time Range** / **Filters**"
+        f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in menu **Filters**"
     )
 
 
@@ -12641,12 +12784,13 @@ def _render_global_assign_day_metrics() -> None:
         sc_in_view, _ = _dashboard_sales_cases_in_view(
             sc_all, range_start=range_start, range_end=range_end
         )
-    _render_assign_day_metrics(
-        df_all,
-        df_in_view=df_in_view,
-        sc_all=sc_all if not sc_all.empty else None,
-        sc_in_view=sc_in_view,
-    )
+    with st.container(key="bon_dash_metrics_row"):
+        _render_assign_day_metrics(
+            df_all,
+            df_in_view=df_in_view,
+            sc_all=sc_all if not sc_all.empty else None,
+            sc_in_view=sc_in_view,
+        )
 
 
 def _render_queue_summary_metrics(
@@ -14318,7 +14462,6 @@ def _render_dashboard(
         st.session_state[_DASH_MAIN_NAV_KEY] = nav_intent
 
     _render_dashboard_header(refreshed_at=refreshed_at)
-    _render_global_assign_day_metrics()
     main_nav = _render_main_navigation()
 
     if main_nav == "Log":
