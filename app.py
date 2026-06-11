@@ -809,6 +809,19 @@ _CC_SIDEBAR_TAB_KEY = "_cc_sidebar_tab"
 CC_TAB_CSM = "CSM"
 CC_TAB_SALES = "SALES"
 _CC_SIDEBAR_TAB_OPTIONS: tuple[str, ...] = (CC_TAB_CSM, CC_TAB_SALES)
+_BON_SIDEBAR_OPEN_KEY = "bon_sidebar_open"
+_BON_MENU_OPEN_KEY = "bon_app_menu_open"
+
+
+def _bon_sidebar_is_open() -> bool:
+    if _BON_SIDEBAR_OPEN_KEY in st.session_state:
+        return bool(st.session_state[_BON_SIDEBAR_OPEN_KEY])
+    legacy_state = st.session_state.pop("bon_sidebar_state", None)
+    if legacy_state is not None:
+        open_ = str(legacy_state) != "collapsed"
+        st.session_state[_BON_SIDEBAR_OPEN_KEY] = open_
+        return open_
+    return True
 
 
 def _normalize_dash_main_nav(value: object) -> str:
@@ -1442,158 +1455,157 @@ def _dashboard_admin_error_message(err: str) -> str:
     return messages.get(err, f"Could not complete action ({err or 'unknown'}).")
 
 
-def _render_dashboard_team_accounts() -> None:
+def _render_dashboard_team_accounts_body() -> None:
     admin_user = _session_dashboard_username()
     if not admin_user:
         return
 
-    with st.expander("Team Accounts (Admin)", expanded=False, key="bon_box_team_accounts"):
-        st.caption(
-            "Create dashboard logins for your team. "
-            "Re-enter **your** password to confirm each action."
-        )
-        admin_pw = st.text_input(
-            "Your Password (Confirm)",
-            type="password",
-            key="dash_team_admin_pw",
-            autocomplete="current-password",
-        )
+    st.caption(
+        "Create dashboard logins for your team. "
+        "Re-enter **your** password to confirm each action."
+    )
+    admin_pw = st.text_input(
+        "Your Password (Confirm)",
+        type="password",
+        key="dash_team_admin_pw",
+        autocomplete="current-password",
+    )
 
-        view_tab, add_tab = st.tabs(["Accounts", "Add user"])
+    view_tab, add_tab = st.tabs(["Accounts", "Add user"])
 
-        with view_tab:
-            if st.button("Refresh List", key="dash_team_refresh", use_container_width=True):
-                if not admin_pw:
-                    st.warning("Enter your password first.")
-                else:
-                    try:
-                        payload = _rpc_dashboard_admin_list_users(
-                            admin_user, admin_pw
-                        )
-                    except Exception as exc:
-                        st.error(f"Could not load accounts: {exc}")
-                    else:
-                        if not payload.get("ok"):
-                            st.error(
-                                _dashboard_admin_error_message(
-                                    str(payload.get("error") or "")
-                                )
-                            )
-                        else:
-                            st.session_state["_dash_team_users_cache"] = (
-                                payload.get("users") or []
-                            )
-                            st.rerun()
-
-            users = st.session_state.get("_dash_team_users_cache")
-            if not users:
-                st.caption("Click **Refresh List** to load accounts.")
-            else:
-                for row in users:
-                    uname = str(row.get("username") or "")
-                    opid = str(row.get("operator_id") or "")
-                    active = bool(row.get("is_active", True))
-                    label = f"**{uname}** → {opid}"
-                    if not active:
-                        label += " _(disabled)_"
-                    c_info, c_act = st.columns([4, 1], gap="small")
-                    with c_info:
-                        st.markdown(label)
-                    with c_act:
-                        btn_label = "Enable" if not active else "Disable"
-                        hkey = hashlib.sha256(uname.encode("utf-8")).hexdigest()[:12]
-                        if st.button(
-                            btn_label,
-                            key=f"dash_team_toggle_{hkey}",
-                            use_container_width=True,
-                        ):
-                            if not admin_pw:
-                                st.warning("Enter your password first.")
-                            else:
-                                try:
-                                    payload = _rpc_dashboard_admin_set_user_active(
-                                        admin_username=admin_user,
-                                        admin_password=admin_pw,
-                                        target_username=uname,
-                                        is_active=not active,
-                                    )
-                                except Exception as exc:
-                                    st.error(str(exc))
-                                else:
-                                    if not payload.get("ok"):
-                                        st.error(
-                                            _dashboard_admin_error_message(
-                                                str(payload.get("error") or "")
-                                            )
-                                        )
-                                    else:
-                                        st.session_state.pop(
-                                            "_dash_team_users_cache", None
-                                        )
-                                        st.rerun()
-
-        with add_tab:
-            with st.form("dash_team_create_form", clear_on_submit=True):
-                new_user = st.text_input(
-                    "Username",
-                    placeholder="e.g. ali.ops",
-                    help="Lowercase login name.",
-                )
-                new_op = st.text_input(
-                    "Operator display name",
-                    placeholder="Shown on assignments (often same as username)",
-                )
-                new_pw = st.text_input("Temporary Password", type="password")
-                confirm_pw = st.text_input("Confirm Password", type="password")
-                submitted = st.form_submit_button(
-                    "Create account", use_container_width=True
-                )
-
-            if not submitted:
-                return
+    with view_tab:
+        if st.button("Refresh List", key="dash_team_refresh", use_container_width=True):
             if not admin_pw:
-                st.error("Enter your password under **Your Password (Confirm)** first.")
-                return
-            try:
-                uname = _normalize_dashboard_username(new_user)
-            except ValueError as ve:
-                st.error(str(ve))
-                return
-            try:
-                opid = _normalize_dashboard_operator_id(new_op or uname)
-            except ValueError as ve:
-                st.error(str(ve))
-                return
-            if len(new_pw or "") < _MIN_DASHBOARD_PASSWORD_LEN:
-                st.error(
-                    f"Password must be at least {_MIN_DASHBOARD_PASSWORD_LEN} characters."
-                )
-                return
-            if new_pw != confirm_pw:
-                st.error("Passwords do not match.")
-                return
-            try:
-                payload = _rpc_dashboard_admin_create_user(
-                    admin_username=admin_user,
-                    admin_password=admin_pw,
-                    new_username=uname,
-                    operator_id=opid,
-                    new_password=new_pw,
-                )
-            except Exception as exc:
-                st.error(f"Could not create account: {exc}")
-                return
-            if not payload.get("ok"):
-                st.error(
-                    _dashboard_admin_error_message(str(payload.get("error") or ""))
-                )
-                return
-            st.session_state.pop("_dash_team_users_cache", None)
-            st.success(
-                f"Created **{uname}** (operator **{opid}**). "
-                "Share the temporary password securely; they can change it via "
-                "**Forgot password** on the login screen."
+                st.warning("Enter your password first.")
+            else:
+                try:
+                    payload = _rpc_dashboard_admin_list_users(
+                        admin_user, admin_pw
+                    )
+                except Exception as exc:
+                    st.error(f"Could not load accounts: {exc}")
+                else:
+                    if not payload.get("ok"):
+                        st.error(
+                            _dashboard_admin_error_message(
+                                str(payload.get("error") or "")
+                            )
+                        )
+                    else:
+                        st.session_state["_dash_team_users_cache"] = (
+                            payload.get("users") or []
+                        )
+                        st.rerun()
+
+        users = st.session_state.get("_dash_team_users_cache")
+        if not users:
+            st.caption("Click **Refresh List** to load accounts.")
+        else:
+            for row in users:
+                uname = str(row.get("username") or "")
+                opid = str(row.get("operator_id") or "")
+                active = bool(row.get("is_active", True))
+                label = f"**{uname}** → {opid}"
+                if not active:
+                    label += " _(disabled)_"
+                c_info, c_act = st.columns([4, 1], gap="small")
+                with c_info:
+                    st.markdown(label)
+                with c_act:
+                    btn_label = "Enable" if not active else "Disable"
+                    hkey = hashlib.sha256(uname.encode("utf-8")).hexdigest()[:12]
+                    if st.button(
+                        btn_label,
+                        key=f"dash_team_toggle_{hkey}",
+                        use_container_width=True,
+                    ):
+                        if not admin_pw:
+                            st.warning("Enter your password first.")
+                        else:
+                            try:
+                                payload = _rpc_dashboard_admin_set_user_active(
+                                    admin_username=admin_user,
+                                    admin_password=admin_pw,
+                                    target_username=uname,
+                                    is_active=not active,
+                                )
+                            except Exception as exc:
+                                st.error(str(exc))
+                            else:
+                                if not payload.get("ok"):
+                                    st.error(
+                                        _dashboard_admin_error_message(
+                                            str(payload.get("error") or "")
+                                        )
+                                    )
+                                else:
+                                    st.session_state.pop(
+                                        "_dash_team_users_cache", None
+                                    )
+                                    st.rerun()
+
+    with add_tab:
+        with st.form("dash_team_create_form", clear_on_submit=True):
+            new_user = st.text_input(
+                "Username",
+                placeholder="e.g. ali.ops",
+                help="Lowercase login name.",
             )
+            new_op = st.text_input(
+                "Operator display name",
+                placeholder="Shown on assignments (often same as username)",
+            )
+            new_pw = st.text_input("Temporary Password", type="password")
+            confirm_pw = st.text_input("Confirm Password", type="password")
+            submitted = st.form_submit_button(
+                "Create account", use_container_width=True
+            )
+
+        if not submitted:
+            return
+        if not admin_pw:
+            st.error("Enter your password under **Your Password (Confirm)** first.")
+            return
+        try:
+            uname = _normalize_dashboard_username(new_user)
+        except ValueError as ve:
+            st.error(str(ve))
+            return
+        try:
+            opid = _normalize_dashboard_operator_id(new_op or uname)
+        except ValueError as ve:
+            st.error(str(ve))
+            return
+        if len(new_pw or "") < _MIN_DASHBOARD_PASSWORD_LEN:
+            st.error(
+                f"Password must be at least {_MIN_DASHBOARD_PASSWORD_LEN} characters."
+            )
+            return
+        if new_pw != confirm_pw:
+            st.error("Passwords do not match.")
+            return
+        try:
+            payload = _rpc_dashboard_admin_create_user(
+                admin_username=admin_user,
+                admin_password=admin_pw,
+                new_username=uname,
+                operator_id=opid,
+                new_password=new_pw,
+            )
+        except Exception as exc:
+            st.error(f"Could not create account: {exc}")
+            return
+        if not payload.get("ok"):
+            st.error(
+                _dashboard_admin_error_message(str(payload.get("error") or ""))
+            )
+            return
+        st.session_state.pop("_dash_team_users_cache", None)
+        st.success(
+            f"Created **{uname}** (operator **{opid}**). "
+            "Share the temporary password securely; they can change it via "
+            "**Forgot password** on the login screen."
+        )
 
 
 def _render_login_page_styles() -> None:
@@ -6645,8 +6657,7 @@ def _ensure_dash_range_defaults() -> None:
         st.session_state[_DASH_TIME_PRESET_KEY] = "Last 7 days"
 
 
-def _sidebar_date_range() -> tuple[int, pd.Timestamp, pd.Timestamp]:
-    """Sidebar: presets or a simple From–To date pair (updates immediately)."""
+def _init_dash_date_range_state() -> None:
     _ensure_dash_range_defaults()
     if _DASH_RANGE_FROM_KEY not in st.session_state:
         start, end = _preset_range_utc("Last 7 days")
@@ -6662,54 +6673,193 @@ def _sidebar_date_range() -> tuple[int, pd.Timestamp, pd.Timestamp]:
     if _DASH_SEARCH_FROM_DATE_KEY not in st.session_state:
         _sync_search_date_widgets(*_get_dash_range())
 
-    preset = st.selectbox(
-        "Time Range",
-        options=list(_DASH_TIME_PRESET_OPTIONS),
-        key=_DASH_TIME_PRESET_KEY,
-    )
 
-    prev_preset = st.session_state.get(_DASH_PREV_PRESET_KEY)
-    if preset != prev_preset:
-        st.session_state[_DASH_PREV_PRESET_KEY] = preset
-        if preset != "Pick dates":
-            start, end = _preset_range_utc(preset)
-            _store_dash_range(start, end)
-            _sync_search_date_widgets(start, end)
-
+def _sync_dash_range_from_ui(preset: str) -> None:
+    """Apply preset or custom From–To dates to session range keys."""
     if preset == "Pick dates":
-        c1, c2 = st.columns(2)
-        with c1:
-            from_d = st.date_input(
-                "From",
-                format="YYYY-MM-DD",
-                key=_DASH_SEARCH_FROM_DATE_KEY,
-            )
-        with c2:
-            to_d = st.date_input(
-                "To",
-                format="YYYY-MM-DD",
-                key=_DASH_SEARCH_TO_DATE_KEY,
-            )
+        from_d = st.session_state.get(_DASH_SEARCH_FROM_DATE_KEY)
+        to_d = st.session_state.get(_DASH_SEARCH_TO_DATE_KEY)
+        if from_d is None or to_d is None:
+            return
         if from_d > to_d:
             to_d = from_d
-        start = _local_date_start(from_d)
-        end = _local_date_end(to_d)
-        _store_dash_range(start, end)
-    else:
-        start, end = _preset_range_utc(preset)
-        _store_dash_range(start, end)
+            st.session_state[_DASH_SEARCH_TO_DATE_KEY] = to_d
+        _store_dash_range(_local_date_start(from_d), _local_date_end(to_d))
+        return
+    start, end = _preset_range_utc(preset)
+    _store_dash_range(start, end)
+    _sync_search_date_widgets(start, end)
 
+
+def _dash_date_range_lookback() -> tuple[int, pd.Timestamp, pd.Timestamp]:
     start, end = _get_dash_range()
     lookback_days = max(
         MIN_LOOKBACK_DAYS,
         min(MAX_LOOKBACK_DAYS, int((end - start).total_seconds() // 86400) + 1),
     )
-
-    cap = _format_dash_range_caption()
-    if cap:
-        st.caption(cap)
-
     return lookback_days, start, end
+
+
+def _dash_refresh_settings() -> tuple[bool, int]:
+    return (
+        bool(st.session_state.get("bon_toolbar_auto_refresh", True)),
+        int(
+            st.session_state.get("bon_toolbar_refresh_interval", DEFAULT_REFRESH_MINUTES)
+        ),
+    )
+
+
+def _render_dash_time_preset_select(*, show_label: bool = False) -> str:
+    """Time-range preset for the filters menu."""
+    _init_dash_date_range_state()
+    _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "Last 7 days")))
+    range_help = _format_dash_range_caption() or "Time range for tickets and performance"
+    preset = st.selectbox(
+        "Time Range",
+        options=list(_DASH_TIME_PRESET_OPTIONS),
+        key=_DASH_TIME_PRESET_KEY,
+        label_visibility="visible" if show_label else "collapsed",
+        help=range_help,
+    )
+    prev_preset = st.session_state.get(_DASH_PREV_PRESET_KEY)
+    if preset != prev_preset:
+        st.session_state[_DASH_PREV_PRESET_KEY] = preset
+    _sync_dash_range_from_ui(preset)
+    return preset
+
+
+def _render_dash_filters_panel(*, preset: str) -> None:
+    """Auto-refresh, custom dates, ticket lookup — inside Filters menu."""
+    if preset == "Pick dates":
+        c1, c2 = st.columns(2)
+        with c1:
+            st.date_input(
+                "From",
+                format="YYYY-MM-DD",
+                key=_DASH_SEARCH_FROM_DATE_KEY,
+            )
+        with c2:
+            st.date_input(
+                "To",
+                format="YYYY-MM-DD",
+                key=_DASH_SEARCH_TO_DATE_KEY,
+            )
+        _sync_dash_range_from_ui("Pick dates")
+        st.divider()
+    st.toggle("Auto-Refresh", value=True, key="bon_toolbar_auto_refresh")
+    if st.session_state.get("bon_toolbar_auto_refresh", True):
+        st.slider(
+            "Every (Minutes)",
+            min_value=MIN_REFRESH_MINUTES,
+            max_value=MAX_REFRESH_MINUTES,
+            value=DEFAULT_REFRESH_MINUTES,
+            step=1,
+            key="bon_toolbar_refresh_interval",
+        )
+    lookup = st.text_input(
+        "Look Up Ticket #",
+        placeholder="9 or 16 digits",
+        key="dash_ticket_lookup",
+    )
+    if lookup.strip():
+        row = _fetch_ticket_row(lookup.strip())
+        if row:
+            st.success(
+                f"**{row.get('ticket_number')}** — **{row.get('status')}**, "
+                f"→ {row.get('assigned_to') or '—'}"
+            )
+        else:
+            st.warning("Not found.")
+    if st.button("↻ Refresh now", key="bon_menu_refresh_btn", use_container_width=True):
+        _invalidate_dashboard_data_cache()
+        st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
+        st.rerun()
+
+
+def _render_app_topbar() -> None:
+    """Header — NetOps | Coverage Eye (left) · mark + user · menu (right)."""
+    op = _session_operator_id() or _session_dashboard_username() or ""
+    op_display = html.escape(op.lstrip("@") if op else "—")
+    with st.container(key="bon_app_topbar"):
+        st.markdown(
+            f"""
+            <div class="bon-app-topbar-row">
+              <div class="bon-app-topbar-title">
+                <span class="bon-app-topbar-netops">NetOps</span>
+                <span class="bon-app-topbar-sep">|</span>
+                <span class="bon-app-topbar-sub">Coverage Eye</span>
+              </div>
+              <div class="bon-app-topbar-userchip" title="Signed in as {op_display}">
+                <span class="bon-app-topbar-mark" aria-hidden="true">
+                  <span class="bon-app-topbar-mark-bar"></span>
+                </span>
+                <span class="bon-app-topbar-username">{op_display}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        menu_open = bool(st.session_state.get(_BON_MENU_OPEN_KEY, False))
+        if menu_open:
+            st.markdown(
+                """
+                <style>
+                div.st-key-bon_app_topbar div.st-key-bon_menu_toggle_btn button::before {
+                    display: none !important;
+                }
+                div.st-key-bon_app_topbar div.st-key-bon_menu_toggle_btn button {
+                    font-size: 0.9rem !important;
+                    line-height: 1 !important;
+                    color: var(--bon-muted) !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+        if st.button(
+            "✕" if menu_open else "☰",
+            key="bon_menu_toggle_btn",
+            help="Open menu" if not menu_open else "Close menu",
+        ):
+            st.session_state[_BON_MENU_OPEN_KEY] = not menu_open
+            st.rerun(scope="fragment")
+
+
+def _render_app_menu_panel() -> None:
+    """Dropdown menu below header — Assign, Admin, Filters, Log out."""
+    if not st.session_state.get(_BON_MENU_OPEN_KEY, False):
+        return
+
+    with st.container(key="bon_app_menu"):
+        sidebar_open = _bon_sidebar_is_open()
+        if st.button(
+            "▸ Assign" if not sidebar_open else "▾ Assign",
+            key="bon_menu_assign_btn",
+            use_container_width=True,
+        ):
+            st.session_state[_BON_SIDEBAR_OPEN_KEY] = not sidebar_open
+            st.rerun(scope="fragment")
+
+        if _dashboard_users_configured() and _is_dashboard_admin():
+            with st.expander("Admin", expanded=False):
+                _render_dashboard_team_accounts_body()
+
+        with st.expander("Filters", expanded=False):
+            preset = _render_dash_time_preset_select(show_label=True)
+            cap = _format_dash_range_caption()
+            if cap:
+                st.caption(cap)
+            _render_dash_filters_panel(preset=preset)
+
+        if st.button("Log out", key="bon_menu_logout_btn", use_container_width=True):
+            _clear_auth_session()
+            st.session_state.pop(_LOGIN_VIEW_KEY, None)
+            st.rerun()
+
+
+def _render_app_chrome() -> None:
+    _render_app_topbar()
+    _render_app_menu_panel()
 
 
 def _perf_bucket_settings(
@@ -10924,64 +11074,19 @@ MIN_LOOKBACK_DAYS = 1
 MAX_LOOKBACK_DAYS = 365
 
 
-def _sidebar_controls() -> tuple[bool, int, int]:
-    """Return (auto_enabled, interval_minutes, lookback_days)."""
+def _sidebar_controls() -> None:
+    """Sidebar: Command Center assign only."""
     with st.sidebar:
-        st.markdown("### NetOps  \nCoverage Eye")
-        op = _session_operator_id()
-        if op:
-            st.caption(f"Signed in as **{op}**")
-
-        if _dashboard_users_configured() and _is_dashboard_admin():
-            _render_dashboard_team_accounts()
-
         _sidebar_command_center()
-
-        st.markdown("**Time Range**")
-        lookback_days, _range_start, _range_end = _sidebar_date_range()
-
-        with st.expander("Filters", expanded=False, key="bon_box_filters"):
-            auto = st.toggle("Auto-Refresh", value=True)
-            if auto:
-                interval_minutes = st.slider(
-                    "Every (Minutes)",
-                    min_value=MIN_REFRESH_MINUTES,
-                    max_value=MAX_REFRESH_MINUTES,
-                    value=DEFAULT_REFRESH_MINUTES,
-                    step=1,
-                )
-            else:
-                interval_minutes = DEFAULT_REFRESH_MINUTES
-            if st.button("Refresh Now", use_container_width=True):
-                _invalidate_dashboard_data_cache()
-                st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
-                st.rerun()
-            lookup = st.text_input(
-                "Look Up Ticket #",
-                placeholder="9 or 16 digits",
-                key="dash_ticket_lookup",
-            )
-            if lookup.strip():
-                row = _fetch_ticket_row(lookup.strip())
-                if row:
-                    st.success(
-                        f"**{row.get('ticket_number')}** — **{row.get('status')}**, "
-                        f"→ {row.get('assigned_to') or '—'}"
-                    )
-                else:
-                    st.warning("Not found.")
-
-        st.markdown("---")
-        if st.button("Log Out", use_container_width=True):
-            _clear_auth_session()
-            st.session_state.pop(_LOGIN_VIEW_KEY, None)
-            st.rerun()
-    return auto, int(interval_minutes), int(lookback_days)
 
 
 def main() -> None:
     # Must be the first Streamlit command every run (login + dashboard).
-    st.set_page_config(page_title="NetOps Coverage Eye", layout="wide")
+    st.set_page_config(
+        page_title="NetOps Coverage Eye",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
     _check_password()
 
@@ -11009,13 +11114,26 @@ def main() -> None:
         return
 
     _inject_bon_theme()
+    _init_dash_date_range_state()
 
-    auto, interval_minutes, lookback_days = _sidebar_controls()
+    @st.fragment
+    def _app_chrome_fragment() -> None:
+        _inject_bon_sidebar_visibility_css()
+        _render_app_chrome()
+
+    _app_chrome_fragment()
+    _sidebar_controls()
     _render_supabase_unreachable_banner()
+
+    auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
     def _dashboard_fragment() -> None:
+        _sync_dash_range_from_ui(
+            str(st.session_state.get(_DASH_TIME_PRESET_KEY, "Last 7 days"))
+        )
+        lookback_days, _, _ = _dash_date_range_lookback()
         _render_dashboard(lookback_days=lookback_days)
 
     _dashboard_fragment()
@@ -11036,6 +11154,10 @@ _BON_THEME_CSS = """
         --bon-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         --bon-box-border: rgba(215, 180, 145, 0.45);
         --bon-box-radius: 8px;
+        --bon-topbar-h: 2.75rem;
+        --bon-topbar-icon: 2rem;
+        --bon-chrome-h: var(--bon-topbar-h);
+        --bon-netops: #FF5A1F;
     }
     /* One UI font everywhere Streamlit allows (tables, metrics, forms, markdown). */
     .stApp,
@@ -11093,8 +11215,281 @@ _BON_THEME_CSS = """
         color: var(--bon-text);
     }
     [data-testid="stHeader"] {
-        background-color: var(--bon-bg) !important;
-        border-bottom: 1px solid var(--bon-oak);
+        display: none !important;
+        height: 0 !important;
+        min-height: 0 !important;
+    }
+    [data-testid="stAppViewContainer"] {
+        padding-top: 0 !important;
+        margin-top: 0 !important;
+    }
+    [data-testid="stAppViewContainer"] section.main {
+        padding-top: 0 !important;
+    }
+    [data-testid="stMain"] [data-testid="block-container"] {
+        padding-top: var(--bon-chrome-h) !important;
+        padding-bottom: 1rem !important;
+    }
+    div.st-key-bon_app_topbar {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        z-index: 1000 !important;
+        pointer-events: auto !important;
+        background: var(--bon-bg) !important;
+        border-bottom: none !important;
+        padding: 0.38rem 1rem !important;
+        margin: 0 !important;
+        height: var(--bon-topbar-h) !important;
+        min-height: var(--bon-topbar-h) !important;
+        max-height: var(--bon-topbar-h) !important;
+        box-sizing: border-box !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    [data-testid="stMain"] [data-testid="block-container"] > div:has(div.st-key-bon_app_topbar),
+    [data-testid="stMain"] [data-testid="block-container"] > [data-testid="stVerticalBlockBorderWrapper"]:has(div.st-key-bon_app_topbar) {
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        pointer-events: none !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] {
+        height: 100% !important;
+        justify-content: center !important;
+    }
+    div.st-key-bon_app_topbar [data-testid="stMarkdownContainer"] {
+        display: flex !important;
+        align-items: center !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    div.st-key-bon_app_topbar div.st-key-bon_menu_toggle_btn {
+        position: fixed !important;
+        top: 0.38rem !important;
+        right: 1rem !important;
+        z-index: 1002 !important;
+        min-width: var(--bon-topbar-icon) !important;
+        max-width: var(--bon-topbar-icon) !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        pointer-events: none !important;
+    }
+    div.st-key-bon_app_topbar div.st-key-bon_menu_toggle_btn button {
+        pointer-events: auto !important;
+        min-height: var(--bon-topbar-icon);
+        max-height: var(--bon-topbar-icon);
+        width: var(--bon-topbar-icon);
+        min-width: var(--bon-topbar-icon);
+        font-size: 0;
+        line-height: 0;
+        padding: 0;
+        border: 1px solid rgba(163, 158, 151, 0.45);
+        border-radius: 6px;
+        background: #141414;
+        box-sizing: border-box;
+        color: transparent;
+        box-shadow: none;
+        position: relative;
+    }
+    div.st-key-bon_app_topbar div.st-key-bon_menu_toggle_btn button::before {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: 0.8rem;
+        height: 2px;
+        border-radius: 1px;
+        background: #a39e97;
+        box-shadow: 0 -5px 0 #a39e97, 0 5px 0 #a39e97;
+    }
+    div.st-key-bon_app_topbar div.st-key-bon_menu_toggle_btn button:hover {
+        border-color: rgba(215, 180, 145, 0.55);
+        background: #1a1a1a;
+    }
+    div.st-key-bon_app_menu {
+        position: fixed !important;
+        top: var(--bon-topbar-h) !important;
+        right: 1rem !important;
+        left: auto !important;
+        width: min(12.5rem, calc(100vw - 2.5rem)) !important;
+        z-index: 1005 !important;
+        pointer-events: auto !important;
+        background: linear-gradient(165deg, #1a1612 0%, #121010 100%) !important;
+        border: 1px solid rgba(215, 180, 145, 0.38) !important;
+        border-radius: 8px !important;
+        padding: 0.28rem !important;
+        margin: 0.2rem 0 0 0 !important;
+        box-sizing: border-box !important;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5) !important;
+        overflow: visible !important;
+        max-height: calc(100vh - var(--bon-topbar-h) - 1rem);
+        overflow-y: auto !important;
+    }
+    [data-testid="stMain"] [data-testid="block-container"] > div:has(div.st-key-bon_app_menu),
+    [data-testid="stMain"] [data-testid="block-container"] > [data-testid="stVerticalBlockBorderWrapper"]:has(div.st-key-bon_app_menu) {
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        pointer-events: none !important;
+    }
+    div.st-key-bon_app_menu > div[data-testid="stVerticalBlock"] {
+        gap: 0.18rem !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_menu_assign_btn button,
+    div.st-key-bon_app_menu [data-testid="stExpander"] summary {
+        min-height: 1.75rem !important;
+        max-height: 1.75rem !important;
+        font-size: 0.76rem !important;
+        font-weight: 500 !important;
+        text-align: left !important;
+        padding: 0.22rem 0.45rem !important;
+        border: 1px solid rgba(215, 180, 145, 0.28) !important;
+        border-radius: 5px !important;
+        background: rgba(20, 20, 20, 0.85) !important;
+        color: var(--bon-text) !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_menu_assign_btn button {
+        background: linear-gradient(145deg, rgba(42, 36, 28, 0.9), rgba(20, 20, 20, 0.95)) !important;
+        border-color: rgba(215, 180, 145, 0.42) !important;
+        color: var(--bon-oak) !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_menu_assign_btn button:hover {
+        border-color: var(--bon-oak) !important;
+        background: rgba(215, 180, 145, 0.12) !important;
+    }
+    div.st-key-bon_app_menu [data-testid="stExpander"] {
+        border: none !important;
+        background: transparent !important;
+    }
+    div.st-key-bon_app_menu [data-testid="stExpander"] summary:hover {
+        border-color: var(--bon-oak) !important;
+        color: var(--bon-oak) !important;
+    }
+    div.st-key-bon_app_menu [data-testid="stExpander"] details {
+        font-size: 0.76rem !important;
+    }
+    div.st-key-bon_app_menu [data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+        padding: 0.35rem 0.15rem 0.25rem !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_menu_logout_btn button {
+        min-height: 1.75rem !important;
+        max-height: 1.75rem !important;
+        font-size: 0.74rem !important;
+        padding: 0.22rem 0.45rem !important;
+        border: 1px solid rgba(215, 180, 145, 0.32) !important;
+        border-radius: 5px !important;
+        background: transparent !important;
+        color: var(--bon-muted) !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_menu_logout_btn button:hover {
+        border-color: rgba(215, 180, 145, 0.55) !important;
+        color: var(--bon-text) !important;
+    }
+    .bon-app-topbar-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        width: 100%;
+        min-width: 0;
+        height: 100%;
+        padding-right: 2.55rem;
+        box-sizing: border-box;
+        font-family: var(--bon-font);
+    }
+    .bon-app-topbar-title {
+        display: flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        flex-shrink: 0;
+        min-width: 0;
+    }
+    .bon-app-topbar-netops {
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--bon-netops);
+        -webkit-text-fill-color: var(--bon-netops);
+        letter-spacing: -0.02em;
+        line-height: 1;
+        white-space: nowrap;
+    }
+    .bon-app-topbar-sep {
+        color: var(--bon-muted);
+        font-size: 0.88rem;
+        line-height: 1;
+    }
+    .bon-app-topbar-sub {
+        font-size: 0.88rem;
+        font-weight: 400;
+        color: #ffffff;
+        -webkit-text-fill-color: #ffffff;
+        line-height: 1;
+        white-space: nowrap;
+    }
+    .bon-app-topbar-userchip {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        min-width: 0;
+        flex-shrink: 1;
+        margin-left: auto;
+    }
+    .bon-app-topbar-mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: var(--bon-topbar-icon);
+        height: var(--bon-topbar-icon);
+        border-radius: 6px;
+        background: #141414;
+        border: 1px solid rgba(163, 158, 151, 0.45);
+        box-sizing: border-box;
+        flex-shrink: 0;
+    }
+    .bon-app-topbar-mark-bar {
+        display: block;
+        width: 2px;
+        height: 0.72rem;
+        background: var(--bon-oak);
+        border-radius: 1px;
+    }
+    .bon-app-topbar-username {
+        font-size: 0.92rem;
+        font-weight: 700;
+        color: #ffffff;
+        -webkit-text-fill-color: #ffffff;
+        letter-spacing: -0.01em;
+        line-height: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 10rem;
+    }
+    [data-testid="stSidebar"] {
+        top: var(--bon-chrome-h) !important;
+        height: calc(100vh - var(--bon-chrome-h)) !important;
+        z-index: 1001 !important;
+    }
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] {
+        display: none !important;
     }
     [data-testid="stSidebar"],
     [data-testid="stSidebar"] > div,
@@ -11741,8 +12136,73 @@ _BON_THEME_CSS = """
 """
 
 
+def _inject_bon_sidebar_visibility_css() -> None:
+    """Show/hide Assign sidebar via CSS — avoids Streamlit collapse localStorage."""
+    if _bon_sidebar_is_open():
+        st.markdown(
+            """
+            <style>
+            [data-testid="stSidebar"] {
+                display: block !important;
+                visibility: visible !important;
+                transform: none !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+                min-width: 19rem !important;
+                width: 21rem !important;
+                max-width: 22rem !important;
+                overflow-x: hidden !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        components.html(
+            """
+            <script>
+            (function () {
+              const doc = window.parent.document;
+              const sb = doc.querySelector('[data-testid="stSidebar"]');
+              if (sb) {
+                sb.setAttribute("aria-expanded", "true");
+                sb.style.removeProperty("display");
+                sb.style.removeProperty("visibility");
+              }
+            })();
+            </script>
+            """,
+            height=0,
+        )
+        return
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] {
+            display: none !important;
+            visibility: hidden !important;
+            width: 0 !important;
+            min-width: 0 !important;
+            max-width: 0 !important;
+            overflow: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            border: none !important;
+        }
+        [data-testid="stAppViewContainer"] > section.main,
+        section.main {
+            margin-left: 0 !important;
+            width: 100% !important;
+            max-width: 100vw !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _inject_bon_theme() -> None:
     st.markdown(_BON_THEME_CSS, unsafe_allow_html=True)
+    _inject_bon_sidebar_visibility_css()
 
 
 def _format_when(when: object) -> str:
@@ -12039,9 +12499,10 @@ def _migrate_legacy_queue_nav() -> None:
 
 
 def _render_dashboard_header(*, refreshed_at: str) -> None:
-    """Desktop top bar: title and last refresh."""
-    st.markdown("## NetOps  \nCoverage Eye")
-    st.caption(f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in sidebar **Time Range**")
+    """Last refresh line (title lives in the top header)."""
+    st.caption(
+        f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in header **Time Range** / **Filters**"
+    )
 
 
 def _apply_pending_dashboard_nav() -> None:
