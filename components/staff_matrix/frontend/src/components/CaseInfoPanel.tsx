@@ -20,6 +20,7 @@ function commentKindLabel(kind: TicketComment["kind"]): string {
   if (kind === "visit") return "Visit";
   if (kind === "assignment") return "Assignment";
   if (kind === "field") return "Field";
+  if (kind === "admin") return "Admin";
   return "Response";
 }
 

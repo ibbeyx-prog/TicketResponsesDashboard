@@ -38,8 +38,12 @@ TASK_CATEGORY_LEGACY_ALIASES: dict[str, str] = {
 
 def canonical_task_category(raw: str) -> str:
     """Normalize spacing and map retired labels (e.g. Coverage issue → Coverage Check)."""
-    s = " ".join(str(raw or "").strip().split())
-    if not s:
+    if raw is None:
+        return ""
+    if isinstance(raw, float) and raw != raw:
+        return ""
+    s = " ".join(str(raw).strip().split())
+    if not s or s.lower() in ("nan", "none", "null"):
         return ""
     mapped = TASK_CATEGORY_LEGACY_ALIASES.get(s.lower())
     return mapped if mapped else s

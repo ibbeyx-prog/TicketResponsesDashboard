@@ -65,6 +65,7 @@ import hashlib
 import html
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -140,6 +141,147 @@ SALES_REGION_CODES: tuple[str, ...] = (
     "GOC",
     "CENTRAL",
 )
+SALES_REGION_CENTRAL = "CENTRAL"
+
+
+def _sc_region_is_central(region: object) -> bool:
+    return str(region or "").strip().upper() == SALES_REGION_CENTRAL
+
+
+def _sc_sync_region_engineer_widgets(
+    *,
+    region_key: str,
+    region_watch_key: str,
+    engineer_select_key: str,
+    engineer_manual_key: str,
+    fe_names: list[str],
+    fe_missing: bool,
+    restore_handle: str = "",
+    engineer_select2_key: str | None = None,
+    engineer_manual2_key: str | None = None,
+    restore_handle_2: str = "",
+) -> bool:
+    """When Region Team is not CENTRAL, clear engineer; restore when switching back."""
+    region = str(st.session_state.get(region_key, "")).strip()
+    central = _sc_region_is_central(region)
+    prev = st.session_state.get(region_watch_key)
+    sel2 = engineer_select2_key or f"{engineer_select_key}_2"
+    man2 = engineer_manual2_key or f"{engineer_manual_key}_2"
+    if prev != region:
+        st.session_state[region_watch_key] = region
+        if not central:
+            st.session_state.pop(engineer_select_key, None)
+            st.session_state.pop(engineer_manual_key, None)
+            st.session_state.pop(sel2, None)
+            st.session_state.pop(man2, None)
+        else:
+            if restore_handle:
+                handle = restore_handle.lstrip("@").lower()
+                _sync_engineer_widget_value(
+                    key=engineer_select_key,
+                    current_handle=handle,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
+                )
+                if engineer_manual_key != engineer_select_key:
+                    st.session_state[engineer_manual_key] = handle
+            if restore_handle_2:
+                handle2 = restore_handle_2.lstrip("@").lower()
+                _sync_engineer_widget_value(
+                    key=sel2,
+                    current_handle=handle2,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
+                )
+                if man2 != sel2:
+                    st.session_state[man2] = handle2
+    return central
+
+
+def _render_sc_engineer_field(
+    *,
+    central: bool,
+    fe_names: list[str],
+    fe_missing: bool,
+    select_key: str,
+    manual_key: str,
+    blank_key: str,
+    select2_key: str | None = None,
+    manual2_key: str | None = None,
+) -> None:
+    """Engineer picker(s) for CENTRAL; blank disabled field for regional teams."""
+    if central:
+        eng2_key = select2_key or f"{select_key}_2"
+        man2_key = manual2_key or f"{manual_key}_2"
+        if select2_key is None and manual2_key is None:
+            _render_engineer_pair_fields(
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+                engineer_key=select_key if fe_names and not fe_missing else manual_key,
+                engineer2_key=eng2_key if fe_names and not fe_missing else man2_key,
+            )
+        else:
+            _render_engineer_pair_fields(
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+                engineer_key=select_key if fe_names and not fe_missing else manual_key,
+                engineer2_key=eng2_key if fe_names and not fe_missing else man2_key,
+            )
+    else:
+        st.caption(
+            "Regional team — leave engineer blank; assign from **Site Visit** "
+            "when the case is **Regional for site visit**."
+        )
+        st.text_input("Engineer", value="", disabled=True, key=blank_key)
+
+
+def _sc_resolve_sales_engineer_handle(
+    *,
+    central: bool,
+    fe_names: list[str],
+    fe_missing: bool,
+    select_key: str,
+    manual_key: str,
+    select2_key: str | None = None,
+    manual2_key: str | None = None,
+) -> str | None:
+    if not central:
+        return None
+    eng2 = select2_key or f"{select_key}_2"
+    man2 = manual2_key or f"{manual_key}_2"
+    h1, _h2 = _resolve_engineer_pair(
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+        engineer_key=select_key if fe_names and not fe_missing else manual_key,
+        engineer2_key=eng2 if fe_names and not fe_missing else man2,
+        required_primary=True,
+    )
+    return h1
+
+
+def _sc_resolve_sales_engineer_pair(
+    *,
+    central: bool,
+    fe_names: list[str],
+    fe_missing: bool,
+    select_key: str,
+    manual_key: str,
+    select2_key: str | None = None,
+    manual2_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    if not central:
+        return None, None
+    eng2 = select2_key or f"{select_key}_2"
+    man2 = manual2_key or f"{manual_key}_2"
+    return _resolve_engineer_pair(
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+        engineer_key=select_key if fe_names and not fe_missing else manual_key,
+        engineer2_key=eng2 if fe_names and not fe_missing else man2,
+        required_primary=True,
+    )
+
+
 SALES_PRIORITY_OPTIONS: tuple[str, ...] = ("Strategic", "High", "Urgent", "Standard")
 DEFAULT_SALES_CASE_CATEGORIES: tuple[str, ...] = (
     "QOS Issue",
@@ -166,6 +308,27 @@ _SC_ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
         SC_STATUS_DESIGN,
     }
 )
+# Weekly attended report — Sales cases that count as "attended" (no On Hold track).
+_SC_ATTENDED_STATUSES: frozenset[str] = frozenset(
+    {
+        SC_STATUS_INVESTIGATION,
+        SC_STATUS_REGIONAL,
+        SC_STATUS_RESOLVED,
+    }
+)
+_PERF_WEEKLY_DATE_KEY = "perf_weekly_pick_date"
+_PERF_WEEKLY_WEEK_KEY = _PERF_WEEKLY_DATE_KEY  # legacy alias (old selectbox key name)
+# CSM rows counted in Weekly attended (excludes Daily Task / Open / Unattended).
+_CSM_WEEKLY_ATTENDED_KEYS: tuple[str, ...] = (
+    "on_hold",
+    "completed",
+    "investigation",
+)
+_CSM_WEEKLY_ATTENDED_LABELS: dict[str, str] = {
+    "on_hold": STATUS_ON_HOLD,
+    "completed": STATUS_RESOLVED,
+    "investigation": STATUS_UNDER_INVESTIGATION,
+}
 
 # Older rows / labels (mapped in UI until backfill migration runs).
 _SC_LEGACY_STATUS_MAP: dict[str, str] = {
@@ -422,6 +585,8 @@ from supabase_client import (
     test_supabase_connection,
 )
 
+log = logging.getLogger(__name__)
+
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
 _TS_COLS: tuple[str, ...] = (
@@ -618,6 +783,8 @@ _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 _CC_FE_SELECT_KEY = "cc_fe_select"
 _CC_FE_MANUAL_KEY = "cc_fe_manual"
+_CC_FE_SELECT_2_KEY = "cc_fe_select_2"
+_CC_FE_MANUAL_2_KEY = "cc_fe_manual_2"
 _CC_TICKET_INPUT_KEY = "cc_ticket_number"
 _CC_ASSIGN_NOTES_KEY = "cc_assign_notes"
 _CC_CLEAR_ASSIGN_KEY = "_cc_clear_assign_form"
@@ -635,6 +802,8 @@ _SC_CC_ST_DESC_KEY = "sc_cc_st_desc"
 _SC_CC_SKIP_ASSIGN_KEY = "sc_cc_skip_field_assign"
 _SC_CC_FE_SELECT_KEY = "sc_cc_fe_select"
 _SC_CC_FE_MANUAL_KEY = "sc_cc_fe_manual"
+_SC_CC_FE_SELECT_2_KEY = "sc_cc_fe_select_2"
+_SC_CC_FE_MANUAL_2_KEY = "sc_cc_fe_manual_2"
 _SC_CC_CLEAR_ST_INTAKE_KEY = "_sc_cc_clear_st_intake"
 _CC_SIDEBAR_TAB_KEY = "_cc_sidebar_tab"
 CC_TAB_CSM = "CSM"
@@ -655,6 +824,7 @@ def _normalize_dash_main_nav(value: object) -> str:
 def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
     return {
         "engineer": f"{prefix}_edit_engineer",
+        "engineer_2": f"{prefix}_edit_engineer_2",
         "category": f"{prefix}_edit_category",
         "notes": f"{prefix}_edit_notes",
         "sync_tg": f"{prefix}_edit_sync_tg",
@@ -666,12 +836,142 @@ def _assignment_edit_session_keys(prefix: str) -> dict[str, str]:
 def _reassign_session_keys(prefix: str) -> dict[str, str]:
     return {
         "engineer": f"{prefix}_reassign_engineer",
+        "engineer_2": f"{prefix}_reassign_engineer_2",
         "category": f"{prefix}_reassign_category",
         "notes": f"{prefix}_reassign_notes",
         "sync_tg": f"{prefix}_reassign_sync_tg",
         "show": f"{prefix}_show_reassign",
         "synced_ticket": f"{prefix}_reassign_synced_ticket",
     }
+
+
+def _engineer_pick_optional(raw: object) -> str | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    return _cc_normalize_handle(s)
+
+
+def _resolve_engineer_pair(
+    *,
+    fe_names: list[str],
+    fe_missing: bool,
+    engineer_key: str,
+    engineer2_key: str,
+    required_primary: bool = True,
+) -> tuple[str | None, str | None]:
+    """Return ``(primary, secondary)`` handles from form session keys."""
+    h1 = _engineer_pick_optional(st.session_state.get(engineer_key))
+    h2 = _engineer_pick_optional(st.session_state.get(engineer2_key))
+    if required_primary and not h1:
+        raise ValueError("Select or enter an engineer.")
+    if h1 and h2 and h1.lower() == h2.lower():
+        raise ValueError("Engineer 2 must be different from Engineer 1.")
+    return h1, h2
+
+
+def _coassignee_telegram_note(handle2: str | None, note: str | None) -> str | None:
+    if not handle2:
+        return note
+    extra = f"Co-assignee: {handle2}"
+    base = (note or "").strip()
+    return f"{base}\n{extra}".strip() if base else extra
+
+
+def _render_engineer_pair_fields(
+    *,
+    fe_names: list[str],
+    fe_missing: bool,
+    engineer_key: str,
+    engineer2_key: str,
+    engineer_label: str = "Engineer",
+    engineer2_label: str = "Engineer 2 (optional)",
+) -> None:
+    """Engineer pickers — empty on first open (no auto-selected first name)."""
+    if fe_missing or not fe_names:
+        st.text_input(engineer_label, placeholder="username", key=engineer_key)
+        st.text_input(
+            engineer2_label,
+            placeholder="username (optional)",
+            key=engineer2_key,
+        )
+        return
+    opts = [f"@{n}" for n in fe_names]
+    st.selectbox(
+        engineer_label,
+        options=opts,
+        index=None,
+        placeholder="Select engineer",
+        key=engineer_key,
+    )
+    st.selectbox(
+        engineer2_label,
+        options=opts,
+        index=None,
+        placeholder="Optional second engineer",
+        key=engineer2_key,
+    )
+
+
+def _render_category_selectbox(
+    label: str,
+    options: list[str],
+    *,
+    key: str,
+    help: str | None = None,
+) -> None:
+    """Category picker — empty on first open (no auto-selected first option)."""
+    if not options:
+        st.selectbox(label, options=["—"], key=key, disabled=True, help=help)
+        return
+    st.selectbox(
+        label,
+        options=options,
+        index=None,
+        placeholder="Select category",
+        key=key,
+        help=help,
+    )
+
+
+def _sync_category_widget_value(
+    *,
+    key: str,
+    current_cat: str,
+    options: list[str],
+) -> None:
+    """Set category widget only when the ticket already has a category."""
+    cat = (current_cat or "").strip()
+    if not cat:
+        st.session_state.pop(key, None)
+        return
+    canon = canonical_task_category(cat) or cat
+    if canon in options:
+        st.session_state[key] = canon
+    elif cat in options:
+        st.session_state[key] = cat
+    else:
+        st.session_state.pop(key, None)
+
+
+def _sync_engineer_widget_value(
+    *,
+    key: str,
+    current_handle: str,
+    fe_names: list[str],
+    fe_missing: bool,
+) -> None:
+    """Set engineer widget only when the ticket already has an assignee."""
+    handle = (current_handle or "").strip().lstrip("@")
+    if not handle:
+        st.session_state.pop(key, None)
+        return
+    if fe_names and not fe_missing:
+        target = f"@{handle}"
+        fe_opts = [f"@{n}" for n in fe_names]
+        st.session_state[key] = target if target in fe_opts else None
+    else:
+        st.session_state[key] = handle
 
 
 def _clear_reassign_panels_except(active_prefix: str) -> None:
@@ -733,28 +1033,40 @@ def _sync_assignment_edit_widgets(
     keys: dict[str, str],
     picked: str,
     current_handle: str,
+    current_handle_2: str = "",
     current_cat: str,
     current_notes: str,
     cats: list[str],
     fe_names: list[str],
     fe_missing: bool,
+    skip_engineer: bool = False,
 ) -> None:
     """Push the selected ticket's values into edit widgets (Streamlit keeps stale keys)."""
     if st.session_state.get(keys["synced_ticket"]) == picked:
         return
     st.session_state[keys["synced_ticket"]] = picked
-    if fe_names and not fe_missing:
-        fe_opts = [f"@{n}" for n in fe_names]
-        default_fe = (
-            f"@{current_handle}"
-            if current_handle and f"@{current_handle}" in fe_opts
-            else (fe_opts[0] if fe_opts else "")
-        )
-        st.session_state[keys["engineer"]] = default_fe
+    if skip_engineer:
+        st.session_state.pop(keys["engineer"], None)
+        st.session_state.pop(keys.get("engineer_2", ""), None)
     else:
-        st.session_state[keys["engineer"]] = current_handle
-    st.session_state[keys["category"]] = (
-        current_cat if current_cat in cats else (cats[0] if cats else "")
+        _sync_engineer_widget_value(
+            key=keys["engineer"],
+            current_handle=current_handle,
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+        )
+        eng2_key = keys.get("engineer_2")
+        if eng2_key:
+            _sync_engineer_widget_value(
+                key=eng2_key,
+                current_handle=current_handle_2,
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+            )
+    _sync_category_widget_value(
+        key=keys["category"],
+        current_cat=current_cat,
+        options=cats,
     )
     st.session_state[keys["notes"]] = current_notes
 
@@ -1492,15 +1804,38 @@ def _session_operator_id() -> str | None:
     return s or None
 
 
-def _sc_attended_by_for_session() -> str:
-    """Sales case ``attended_by`` — the signed-in dashboard operator."""
-    op = _session_operator_id()
-    if op:
-        return op
-    user = _session_dashboard_username()
-    if user:
-        return user
-    return "unknown"
+_SC_SALES_OVERVIEW_ADMIN_LABEL = "Admin"
+_EMPTY_ASSIGNEE_TOKENS = frozenset({"", "nan", "none", "null", "nat"})
+
+
+def _sc_sales_has_field_assignee(raw: object) -> bool:
+    """True when ``assigned_to`` is a real field engineer (not null/NaN/empty)."""
+    if raw is None:
+        return False
+    try:
+        if pd.isna(raw):
+            return False
+    except (TypeError, ValueError):
+        pass
+    s = str(raw).strip()
+    return bool(s) and s.lower() not in _EMPTY_ASSIGNEE_TOKENS
+
+
+def _sc_sales_attended_by_for_case(*, assigned_to: str | None = None) -> str:
+    """Stored ``attended_by`` on the sales row (admin queue)."""
+    return _SC_SALES_OVERVIEW_ADMIN_LABEL
+
+
+def _sc_perf_sales_credit_staff(row: object) -> str:
+    """Performance credit: field engineer when dispatched, otherwise **Admin**."""
+    if isinstance(row, pd.Series):
+        assigned = row.get("assigned_to")
+    else:
+        d = row if isinstance(row, dict) else {}
+        assigned = d.get("assigned_to")
+    if _sc_sales_has_field_assignee(assigned):
+        return _perf_norm_member(assigned)
+    return _SC_SALES_OVERVIEW_ADMIN_LABEL
 
 
 def _cc_assignment_log_note(additional_info: str | None, operator_id: str) -> str | None:
@@ -1878,11 +2213,11 @@ def _maybe_run_unattended_close() -> None:
         if closed:
             _invalidate_dashboard_data_cache()
             st.toast(
-                f"Moved {closed} ticket(s) to **Unattended** "
-                "(no field reply before assign-day cutoff)."
+                f"Marked {closed} ticket(s) unattended and sent to **Needs Review** "
+                "(permanent count)."
             )
     except Exception:
-        pass
+        log.exception("dashboard unattended auto-close failed")
 
 
 def _render_login_supabase_status() -> None:
@@ -4781,16 +5116,98 @@ def _fetch_visits_in_range(
     return _perf_prepare_visits_df(pd.DataFrame(rows))
 
 
+def _perf_normalize_matrix_lookup(raw: object) -> str:
+    """Digits-only ticket id for matrix lookup (9 or 16 digits)."""
+    digits = re.sub(r"\D", "", str(raw or "").strip())
+    if len(digits) in (9, 16):
+        return digits
+    return ""
+
+
+def _perf_matrix_sync_lookup_from_component() -> str:
+    """Read Ticket ID search from matrix component state (single search box)."""
+    ret = st.session_state.get(_PERF_MATRIX_COMPONENT_KEY)
+    if isinstance(ret, dict) and "lookup" in ret:
+        raw = str(ret.get("lookup") or "").strip()
+        if not raw:
+            st.session_state.pop(_PERF_MATRIX_LOOKUP_KEY, None)
+            return ""
+        normalized = _perf_normalize_matrix_lookup(raw)
+        if normalized:
+            st.session_state[_PERF_MATRIX_LOOKUP_KEY] = normalized
+            return normalized
+    elif isinstance(ret, str) and ret.strip():
+        normalized = _perf_normalize_matrix_lookup(ret.strip())
+        if normalized:
+            st.session_state[_PERF_MATRIX_LOOKUP_KEY] = normalized
+            return normalized
+    return str(st.session_state.get(_PERF_MATRIX_LOOKUP_KEY, "") or "").strip()
+
+
+def _perf_matrix_merge_ticket_lookup(
+    visits_all: pd.DataFrame,
+    lookup: str,
+) -> pd.DataFrame:
+    """Merge visit rows for a ticket id — ignores sidebar date range."""
+    tid = _perf_normalize_matrix_lookup(lookup)
+    if not tid:
+        return visits_all
+    extra = _fetch_visits_for_tickets([tid])
+    if extra.empty:
+        return visits_all
+    parts = [df for df in (visits_all, extra) if not df.empty]
+    if not parts:
+        return extra
+    merged = pd.concat(parts, ignore_index=True)
+    dedupe_cols = [c for c in ("id", "ticket_number", "assignee", "visit_start") if c in merged.columns]
+    if "id" in dedupe_cols:
+        merged = merged.drop_duplicates(subset=["id"], keep="last")
+    elif {"ticket_number", "assignee", "visit_start"}.issubset(merged.columns):
+        merged = merged.drop_duplicates(
+            subset=["ticket_number", "assignee", "visit_start"],
+            keep="last",
+        )
+    return _perf_prepare_visits_df(merged)
+
+
 def _perf_prepare_visits_df(visits: pd.DataFrame) -> pd.DataFrame:
     """Normalize assignee labels and boolean flags for Performance UI."""
     if visits.empty:
         return visits
     out = visits.copy()
     if "assignee" in out.columns:
-        out["assignee"] = out["assignee"].map(_perf_norm_member)
+        out["assignee"] = out["assignee"].map(_normalize_visit_assignee)
+        out.loc[out["assignee"].eq(""), "assignee"] = "(unknown)"
     if "is_active" in out.columns:
         out["is_active"] = out["is_active"].fillna(False).astype(bool)
     return out
+
+
+def _perf_handled_visit_credit_counts(visits: pd.DataFrame) -> pd.DataFrame:
+    """Fair credit for Handled: distinct tickets per assignee (+ visit-cycle total)."""
+    if visits.empty or "assignee" not in visits.columns:
+        return pd.DataFrame(columns=["assignee", "Tickets", "Visit cycles"])
+    data = _perf_prepare_visits_df(visits)
+    if "ticket_number" not in data.columns:
+        grouped = (
+            data.groupby("assignee", as_index=False)
+            .size()
+            .rename(columns={"size": "Tickets"})
+        )
+        grouped["Visit cycles"] = grouped["Tickets"]
+        return grouped.sort_values("Tickets", ascending=False)
+    rows: list[dict[str, object]] = []
+    for assignee, grp in data.groupby("assignee", sort=False):
+        rows.append(
+            {
+                "assignee": assignee,
+                "Tickets": int(grp["ticket_number"].astype(str).nunique()),
+                "Visit cycles": int(len(grp)),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["assignee", "Tickets", "Visit cycles"])
+    return pd.DataFrame(rows).sort_values(["Tickets", "Visit cycles"], ascending=False)
 
 
 def _perf_build_visit_summary(visits: pd.DataFrame) -> pd.DataFrame:
@@ -4807,7 +5224,11 @@ def _perf_build_visit_summary(visits: pd.DataFrame) -> pd.DataFrame:
         person_visits = visits[visits["assignee"] == person]
         row: dict = {"Person": person}
         for o in outcomes:
-            row[o.capitalize()] = int(pdata.loc[pdata["outcome"] == o, "count"].sum())
+            o_rows = person_visits[person_visits["outcome"] == o] if "outcome" in person_visits.columns else person_visits.iloc[0:0]
+            if o == "responded" and "ticket_number" in o_rows.columns and not o_rows.empty:
+                row[o.capitalize()] = int(o_rows["ticket_number"].astype(str).nunique())
+            else:
+                row[o.capitalize()] = int(pdata.loc[pdata["outcome"] == o, "count"].sum())
         row["Total visits"] = int(pdata["count"].sum())
         if "ticket_number" in person_visits.columns:
             row["Tickets touched"] = int(person_visits["ticket_number"].nunique())
@@ -4925,6 +5346,41 @@ def _perf_solo_shared_summary_all(visits: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(
         ["Tickets touched", "Solo tickets"],
         ascending=[False, False],
+    )
+
+
+def _perf_solo_shared_board_summary(
+    visits: pd.DataFrame,
+    sales_summary: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Visit solo/shared counts plus Sales Cases staff (e.g. sales-only in window)."""
+    visit_summary = (
+        _perf_solo_shared_summary_all(visits)
+        if not visits.empty
+        else pd.DataFrame()
+    )
+    sales = sales_summary if sales_summary is not None else pd.DataFrame()
+    if visit_summary.empty and (sales.empty or "Person" not in sales.columns):
+        return pd.DataFrame()
+    if sales.empty or "Person" not in sales.columns or "Total" not in sales.columns:
+        out = visit_summary.copy()
+        if not out.empty:
+            out["Sales Cases"] = 0
+        return out
+    sales_cols = sales[["Person", "Total"]].rename(columns={"Total": "Sales Cases"})
+    if visit_summary.empty:
+        out = sales_cols.copy()
+        out["Solo tickets"] = 0
+        out["Shared tickets"] = 0
+        out["Tickets touched"] = 0
+        return out.sort_values(["Sales Cases", "Person"], ascending=[False, True])
+    merged = visit_summary.merge(sales_cols, on="Person", how="outer")
+    for col in ("Solo tickets", "Shared tickets", "Tickets touched", "Sales Cases"):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(0).astype(int)
+    return merged.sort_values(
+        ["Tickets touched", "Sales Cases", "Solo tickets"],
+        ascending=[False, False, False],
     )
 
 
@@ -5077,23 +5533,19 @@ def _render_perf_solo_shared_board(
     )
     sub_html = _perf_overview_ring_subhtml(field_n, sales_n)
 
-    if visits_all.empty:
-        st.markdown(
-            '<p class="perf-ss-hint">No visit data in this window — solo/shared breakdown '
-            "appears after assigns and reassigns create <code>ticket_visits</code> rows.</p>",
-            unsafe_allow_html=True,
-        )
-        if total_n > 0:
-            st.markdown(
-                f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
-                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total_n}</div>'
-                f'<div class="perf-ss-total-lbl">in queues</div>{sub_html}</div></div>',
-                unsafe_allow_html=True,
-            )
-        return
-
-    summary = _perf_solo_shared_summary_all(visits_all)
+    summary = _perf_solo_shared_board_summary(visits_all, sales_summary)
     if summary.empty:
+        if visits_all.empty and total_n == 0:
+            st.markdown(
+                '<p class="perf-ss-hint">No field visits or Sales Cases in this window.</p>',
+                unsafe_allow_html=True,
+            )
+        elif visits_all.empty and total_n > 0:
+            st.markdown(
+                '<p class="perf-ss-hint">No visit data — field counts come from queue snapshot; '
+                "Sales Cases: **Admin** if unassigned, else field engineer.</p>",
+                unsafe_allow_html=True,
+            )
         if total_n > 0:
             st.markdown(
                 f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
@@ -5101,8 +5553,8 @@ def _render_perf_solo_shared_board(
                 f'<div class="perf-ss-total-lbl">in queues</div>{sub_html}</div></div>',
                 unsafe_allow_html=True,
             )
-        else:
-            st.caption("No engineers in visit data for this window.")
+        elif summary.empty:
+            st.caption("No engineers in visit or Sales Cases data for this window.")
         return
 
     focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
@@ -5122,16 +5574,24 @@ def _render_perf_solo_shared_board(
     rows_html: list[str] = []
     for _, row in summary.iterrows():
         person = str(row["Person"])
-        solo = int(row["Solo tickets"])
-        shared = int(row["Shared tickets"])
+        solo = int(row.get("Solo tickets", 0))
+        shared = int(row.get("Shared tickets", 0))
+        sales_n_person = int(row.get("Sales Cases", 0))
         selected = focus_key and person == focus_key
         row_cls = "perf-ss-row is-selected" if selected else "perf-ss-row"
+        sales_seg = ""
+        if sales_n_person > 0:
+            sales_seg = (
+                f'<span class="perf-ss-seg sales">sales'
+                f'<span class="num">{sales_n_person}</span></span>'
+            )
         rows_html.append(
             f'<div class="{row_cls}">'
             f'<span class="perf-ss-name">{html.escape(person)}</span>'
-            f'<div class="perf-ss-pill">'
+            f'<div class="perf-ss-pill{" has-sales" if sales_n_person else ""}">'
             f'<span class="perf-ss-seg solo">solo<span class="num">{solo}</span></span>'
             f'<span class="perf-ss-seg shared">shared<span class="num">{shared}</span></span>'
+            f"{sales_seg}"
             f"</div>"
             f"</div>"
         )
@@ -5147,9 +5607,11 @@ def _render_perf_solo_shared_board(
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<p class="perf-ss-hint">Solo = only that engineer on visit history · '
-        "Shared = handoff/reassign · Ring = <strong>field queues + Sales Cases</strong> "
-        "(sidebar range). Use <strong>Focus Assignee</strong> to highlight a row.</p>",
+        '<p class="perf-ss-hint">Solo / shared = field visit history · '
+        "<strong>Sales</strong> = Sales Cases in window · "
+        "<strong>Admin</strong> if no field engineer · else <code>assigned_to</code> · "
+        "Ring = field queues + Sales Cases (excludes **Unattended** from credit). "
+        "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
         unsafe_allow_html=True,
     )
 
@@ -5158,21 +5620,60 @@ def _render_perf_solo_shared_detail(
     visits_all: pd.DataFrame,
     *,
     focus: str,
+    sales_cases: pd.DataFrame | None = None,
 ) -> None:
-    """Ticket list when one engineer is selected (shared drill-down)."""
-    if visits_all.empty or focus in ("", "All"):
+    """Ticket list when one engineer is selected (field visits + Sales Cases)."""
+    if focus in ("", "All"):
         return
-    detail = _perf_solo_shared_ticket_rows(visits_all, focus)
-    if detail.empty:
+    detail = (
+        _perf_solo_shared_ticket_rows(visits_all, focus)
+        if not visits_all.empty
+        else pd.DataFrame()
+    )
+    sales_view = pd.DataFrame()
+    if sales_cases is not None and not sales_cases.empty:
+        sales_view = _perf_filter_by_person(
+            _perf_enrich_sales_cases(sales_cases), focus,
+        )
+    if detail.empty and sales_view.empty:
         return
-    shared_only = detail[detail["Type"] == "Shared"]
-    with st.expander(f"Shared tickets — {focus}", expanded=not shared_only.empty):
-        if shared_only.empty:
-            st.caption("All tickets touched in this window are solo (no handoffs).")
-        else:
-            st.dataframe(shared_only, use_container_width=True, hide_index=True)
-        with st.expander("All tickets (solo + shared)", expanded=False):
-            st.dataframe(detail, use_container_width=True, hide_index=True)
+    if not detail.empty:
+        shared_only = detail[detail["Type"] == "Shared"]
+        with st.expander(f"Shared tickets — {focus}", expanded=not shared_only.empty):
+            if shared_only.empty:
+                st.caption("All tickets touched in this window are solo (no handoffs).")
+            else:
+                st.dataframe(shared_only, use_container_width=True, hide_index=True)
+            with st.expander("All field tickets (solo + shared)", expanded=False):
+                st.dataframe(detail, use_container_width=True, hide_index=True)
+    if not sales_view.empty:
+        cols = [
+            c
+            for c in (
+                "ticket_number",
+                "account_name",
+                "sales_category",
+                "status_eff",
+                "_local",
+            )
+            if c in sales_view.columns
+        ]
+        show = sales_view[cols].copy() if cols else sales_view.copy()
+        rename = {
+            "ticket_number": "Ticket",
+            "account_name": "Account",
+            "sales_category": "Category",
+            "status_eff": "Status",
+            "_local": "Updated",
+        }
+        show = show.rename(columns={k: v for k, v in rename.items() if k in show.columns})
+        if "Updated" in show.columns:
+            show["Updated"] = show["Updated"].dt.strftime("%Y-%m-%d %H:%M")
+        with st.expander(
+            f"Sales Cases — {focus} ({len(show)})",
+            expanded=detail.empty,
+        ):
+            st.dataframe(show, use_container_width=True, hide_index=True)
 
 
 _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
@@ -5194,28 +5695,8 @@ def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
     }
 
 
-def _perf_apply_map_pick_from_query() -> None:
-    """Apply engineer pick from Visits map click (?perf_map_pick=)."""
-    if "perf_map_pick" not in st.query_params:
-        return
-    raw = str(st.query_params.get("perf_map_pick", "") or "").strip()
-    try:
-        del st.query_params["perf_map_pick"]
-    except Exception:
-        pass
-    if raw.lower() in ("", "all", "__all__"):
-        st.session_state["perf_focus_person"] = "All"
-    else:
-        st.session_state["perf_focus_person"] = _perf_norm_member(raw)
-    st.rerun()
-
-
-_PERF_MAP_ENG_ROW_H = 30.0
-_PERF_MAP_PAD_V = 10.0
-_PERF_MAP_VIEWPORT_PX = 760
-_PERF_MAP_TICKET_NODE_R = 2.5
-_PERF_MAP_RING_EXTRA = 100.0
-_PERF_MAP_IFRAME_MAX = 2400
+_PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
+_PERF_MATRIX_COMPONENT_KEY = "perf_staff_matrix"
 _PERF_MATRIX_MAX_TICKETS = 40
 _PERF_MATRIX_OUTCOME_STYLE: dict[str, tuple[str, str]] = {
     "assigned": ("A", "#9ec5e8"),
@@ -5242,349 +5723,12 @@ _PERF_MATRIX_STATUS_RANK: tuple[str, ...] = (
 )
 
 
-def _perf_map_ticket_layout(n: int) -> tuple[float, float, float, int]:
-    """Row height, label font (px), highlight font (px), max chars — scale down as count grows."""
-    if n <= 6:
-        return (15.0, 7.0, 7.5, 20)
-    if n <= 12:
-        return (12.0, 6.5, 7.0, 18)
-    if n <= 20:
-        return (10.0, 6.0, 6.5, 16)
-    if n <= 35:
-        return (8.0, 5.5, 6.0, 14)
-    if n <= 55:
-        return (6.5, 5.0, 5.5, 12)
-    return (5.5, 4.5, 5.0, 11)
-
-
-def _perf_map_expand_layout(
-    *,
-    n_eng: int,
-    n_tick: int,
-    ticket_row_h: float,
-    ticket_font: float,
-    ticket_font_hl: float,
-    viewport_px: int,
-) -> tuple[float, float, float, float]:
-    """Grow row spacing and fonts to fill the visible iframe when content is short."""
-    band_top = _PERF_MAP_PAD_V + 6.0
-    legend_h = 48
-    usable_inner = float(viewport_px) - legend_h - band_top * 2 - 22.0
-    eng_band = max(0, n_eng - 1) * _PERF_MAP_ENG_ROW_H
-    tick_band = max(0, n_tick - 1) * ticket_row_h
-    inner_h = max(eng_band, tick_band, 1.0)
-    if n_tick > 1 and tick_band < usable_inner:
-        grown_row = min(22.0, usable_inner / float(n_tick - 1))
-        if grown_row > ticket_row_h:
-            ticket_row_h = grown_row
-            boost = min(1.5, (grown_row - 8.0) * 0.12)
-            ticket_font = min(8.0, ticket_font + boost)
-            ticket_font_hl = min(8.5, ticket_font_hl + boost)
-            tick_band = (n_tick - 1) * ticket_row_h
-            inner_h = max(eng_band, tick_band, 1.0)
-    return ticket_row_h, ticket_font, ticket_font_hl, inner_h
-
-
-def _perf_map_band_y_positions(
-    count: int,
-    row_h: float,
-    *,
-    inner_h: float,
-    band_top: float,
-) -> list[float]:
-    """Evenly spaced rows inside a band — compact tickets, readable engineers."""
-    if count <= 0:
-        return []
-    if count == 1:
-        return [band_top + inner_h / 2.0]
-    band_h = (count - 1) * row_h
-    offset = band_top + max(0.0, (inner_h - band_h) / 2.0)
-    return [offset + i * row_h for i in range(count)]
-
-
-def _perf_radial_ticket_font(n: int) -> tuple[float, float, int]:
-    """Label font (px), highlight font (px), max chars — scale down as ticket count grows."""
-    if n <= 12:
-        return (8.0, 9.0, 18)
-    if n <= 24:
-        return (7.0, 8.0, 14)
-    if n <= 48:
-        return (6.0, 7.0, 12)
-    if n <= 80:
-        return (5.5, 6.5, 11)
-    if n <= 120:
-        return (5.0, 6.0, 10)
-    return (4.5, 5.5, 9)
-
-
-def _perf_radial_map_geometry(
-    *,
-    n_tick: int,
-    hub_row_w: float,
-    hub_box_h: float,
-    ticket_font: float,
-) -> tuple[float, float, float, float]:
-    """Return cx, cy, ticket ring radius, and square svg size."""
-    hub_span = max(hub_row_w / 2.0 + 24.0, hub_box_h / 2.0 + 28.0)
-    min_radius = hub_span + 92.0
-    arc_per = max(12.0, ticket_font * 7.0)
-    ring_radius = (n_tick * arc_per) / (2.0 * math.pi) if n_tick else min_radius
-    radius = max(min_radius, ring_radius, 120.0) + _PERF_MAP_RING_EXTRA
-    label_outset = 16.0 + ticket_font * 2.2
-    margin = hub_span + 40.0
-    svg_size = 2.0 * (radius + label_outset + margin)
-    svg_size = max(float(_PERF_MAP_VIEWPORT_PX), min(svg_size, float(_PERF_MAP_IFRAME_MAX)))
-    cx = cy = svg_size / 2.0
-    return cx, cy, radius, svg_size
-
-
-def _perf_engineer_portrait_label(eng: str) -> str:
-    short = eng if len(eng) <= 11 else eng[:10] + "…"
-    return short
-
-
-def _perf_engineer_portrait_dims(n_eng: int) -> tuple[float, float, float]:
-    """Narrow vertical engineer card: width, height, gap."""
-    box_w = 38.0
-    box_h = 58.0 if n_eng <= 4 else 52.0 if n_eng <= 6 else 46.0
-    gap = 10.0 if n_eng <= 5 else 7.0
-    return box_w, box_h, gap
-
-
-def _perf_hub_engineer_layout_row(
-    *,
-    cx: float,
-    cy: float,
-    engineers: list[str],
-    eng_box_w: float,
-    eng_box_h: float,
-    eng_gap: float,
-) -> tuple[dict[str, tuple[float, float]], dict[str, int], float, float, float]:
-    """Portrait cards in a horizontal row; return positions, indices, row width, left/right x."""
-    n = len(engineers)
-    if n == 0:
-        return {}, {}, 0.0, cx, cx
-    row_w = n * eng_box_w + max(0, n - 1) * eng_gap
-    start_x = cx - row_w / 2.0 + eng_box_w / 2.0
-    positions: dict[str, tuple[float, float]] = {}
-    indices: dict[str, int] = {}
-    for i, eng in enumerate(engineers):
-        indices[eng] = i
-        positions[eng] = (start_x + i * (eng_box_w + eng_gap), cy)
-    hub_left_x = start_x - eng_box_w / 2.0
-    hub_right_x = start_x + (n - 1) * (eng_box_w + eng_gap) + eng_box_w / 2.0
-    return positions, indices, row_w, hub_left_x, hub_right_x
-
-
-def _perf_hub_engineer_sector_angle(eng_index: int, n_eng: int) -> float:
-    """Map hub column to ticket-ring sector (left engineer → left arc, right → right)."""
-    if n_eng <= 1:
-        return 0.0
-    return math.pi - (math.pi * eng_index / (n_eng - 1))
-
-
-def _perf_engineer_touch_anchors(
-    ex: float,
-    ey: float,
-    box_w: float,
-    box_h: float,
-    *,
-    eng_index: int,
-    n_eng: int,
-) -> dict[str, tuple[float, float]]:
-    """Fixed touch points: left/right box → top, bottom, side; middle → top, bottom only."""
-    hw, hh = box_w / 2.0, box_h / 2.0
-    x0, y0 = ex - hw, ey - hh
-    x1, y1 = ex + hw, ey + hh
-    anchors: dict[str, tuple[float, float]] = {
-        "top": (ex, y0),
-        "bottom": (ex, y1),
-    }
-    if n_eng <= 1:
-        anchors["left"] = (x0, ey)
-        anchors["right"] = (x1, ey)
-    elif eng_index == 0:
-        anchors["left"] = (x0, ey)
-    elif eng_index == n_eng - 1:
-        anchors["right"] = (x1, ey)
-    return anchors
-
-
-def _perf_pick_touch_side(
-    anchors: dict[str, tuple[float, float]],
-    *,
-    tx: float,
-    ty: float,
-    ex: float,
-    ey: float,
-    eng_index: int,
-    n_eng: int,
-) -> str:
-    """Choose touch point closest to ticket; left/right only when ticket is on that side."""
-    best_side = "top"
-    best_dist = float("inf")
-    for side, (ax, ay) in anchors.items():
-        dist = math.hypot(tx - ax, ty - ay)
-        if side == "left" and tx > ex + 4.0:
-            dist += 800.0
-        elif side == "right" and tx < ex - 4.0:
-            dist += 800.0
-        elif side == "left" and eng_index == 0 and tx < ex:
-            dist *= 0.72
-        elif side == "right" and eng_index == n_eng - 1 and tx > ex:
-            dist *= 0.72
-        if dist < best_dist:
-            best_dist = dist
-            best_side = side
-    if best_side in anchors:
-        return best_side
-    return "top" if ty < ey else "bottom"
-
-
-def _perf_curved_link_path(
-    sx: float,
-    sy: float,
-    tx: float,
-    ty: float,
-    *,
-    side: str,
-    bow: float = 32.0,
-) -> str:
-    """Quadratic curve from box touch point to ticket."""
-    if side == "left":
-        cpx, cpy = sx - bow, (sy + ty) / 2.0
-    elif side == "right":
-        cpx, cpy = sx + bow, (sy + ty) / 2.0
-    elif side == "top":
-        cpx, cpy = (sx + tx) / 2.0, sy - bow
-    else:
-        cpx, cpy = (sx + tx) / 2.0, sy + bow
-    return f"M {sx:.1f} {sy:.1f} Q {cpx:.1f} {cpy:.1f} {tx:.1f} {ty:.1f}"
-
-
-def _perf_box_edge_on_side(
-    ex: float,
-    ey: float,
-    box_w: float,
-    box_h: float,
-    tx: float,
-    ty: float,
-    *,
-    side: str,
-) -> tuple[float, float]:
-    """Fixed center touch point on the chosen face (matches hub mockup)."""
-    del tx, ty
-    anchors = _perf_engineer_touch_anchors(
-        ex, ey, box_w, box_h, eng_index=0, n_eng=1,
-    )
-    if side not in anchors:
-        hw, hh = box_w / 2.0, box_h / 2.0
-        if side == "left":
-            return ex - hw, ey
-        if side == "right":
-            return ex + hw, ey
-        if side == "top":
-            return ex, ey - hh
-        return ex, ey + hh
-    return anchors[side]
-
-
-def _perf_link_endpoint_at_ticket(
-    sx: float,
-    sy: float,
-    tx: float,
-    ty: float,
-    *,
-    node_r: float = _PERF_MAP_TICKET_NODE_R,
-) -> tuple[float, float]:
-    """Stop the wire at the ticket dot, not past it."""
-    dx, dy = tx - sx, ty - sy
-    dist = math.hypot(dx, dy)
-    if dist < node_r + 0.5:
-        return tx, ty
-    scale = (dist - node_r) / dist
-    return sx + dx * scale, sy + dy * scale
-
-
-def _perf_straight_link_path(sx: float, sy: float, tx: float, ty: float) -> str:
-    return f"M {sx:.1f} {sy:.1f} L {tx:.1f} {ty:.1f}"
-
-
-def _perf_radial_ticket_order(
-    tickets: list[str],
-    ticket_engineers: dict[str, set[str]],
-    eng_angles: dict[str, float],
-) -> list[str]:
-    """Order tickets around the ring near their engineers' sectors — fewer crossings."""
-
-    def _key(tn: str) -> tuple[float, str]:
-        engs = ticket_engineers.get(tn, set())
-        if not engs:
-            return (0.0, tn.lower())
-        avg = sum(eng_angles.get(e, 0.0) for e in engs) / len(engs)
-        return (avg, tn.lower())
-
-    return sorted(tickets, key=_key)
-
-
-def _perf_box_edge_toward(
-    cx: float,
-    cy: float,
-    box_w: float,
-    box_h: float,
-    tx: float,
-    ty: float,
-) -> tuple[float, float]:
-    """Point on rectangle edge toward target (tx, ty)."""
-    dx, dy = tx - cx, ty - cy
-    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
-        return cx, cy
-    hw, hh = box_w / 2.0, box_h / 2.0
-    scale_x = hw / abs(dx) if abs(dx) > 1e-9 else float("inf")
-    scale_y = hh / abs(dy) if abs(dy) > 1e-9 else float("inf")
-    scale = min(scale_x, scale_y)
-    return cx + dx * scale, cy + dy * scale
-
-
-def _perf_radial_text_anchor(angle: float) -> str:
-    cos_a = math.cos(angle)
-    if cos_a > 0.3:
-        return "start"
-    if cos_a < -0.3:
-        return "end"
-    return "middle"
-
-
-def _perf_radial_link_path(
-    sx: float,
-    sy: float,
-    tx: float,
-    ty: float,
-    *,
-    hub_x: float,
-    hub_y: float,
-    corridor_r: float,
-) -> str:
-    """Cubic curve via a corridor point on the ticket's radial — avoids hub clutter."""
-    tick_angle = math.atan2(ty - hub_y, tx - hub_x)
-    mx = hub_x + corridor_r * math.cos(tick_angle)
-    my = hub_y + corridor_r * math.sin(tick_angle)
-    c1x = sx + (mx - sx) * 0.62
-    c1y = sy + (my - sy) * 0.62
-    c2x = tx + (mx - tx) * 0.62
-    c2y = ty + (my - ty) * 0.62
-    return (
-        f"M {sx:.1f} {sy:.1f} C {c1x:.1f} {c1y:.1f}, {c2x:.1f} {c2y:.1f}, "
-        f"{tx:.1f} {ty:.1f}"
-    )
-
-
 def _perf_visit_bipartite_data(
     visits: pd.DataFrame,
     *,
     focus: str,
 ) -> dict[str, object] | None:
-    """Engineers, tickets, and visit links for the Visits tab map."""
+    """Engineers, tickets, and visit links for the Case Info tab matrix."""
     if visits.empty or "ticket_number" not in visits.columns or "assignee" not in visits.columns:
         return None
     prepared = _perf_prepare_visits_df(visits)
@@ -5648,29 +5792,11 @@ def _perf_bipartite_ticket_order(
     return sorted(tickets, key=_key)
 
 
-def _perf_visit_map_caption(
-    pool_total: int,
-    total_all: int,
-    *,
-    focus_key: str,
-) -> None:
-    if pool_total == 0:
-        st.caption("No tickets in this view — pick **All** in Focus Assignee or widen the time range.")
-    elif focus_key:
-        st.caption(
-            f"**{pool_total}** ticket(s) for **{focus_key}** · "
-            f"click engineer again to show all **{total_all}**"
-        )
-    else:
-        st.caption(
-            f"**{pool_total}** ticket(s) · click an engineer in the diagram to filter"
-        )
-
-
 def _perf_visit_ticket_pool(
     data: dict[str, object],
     *,
     search: str,
+    lookup_ticket: str = "",
 ) -> tuple[list[str], list[str], dict[str, set[str]], str, int]:
     all_engineers: list[str] = data["all_engineers"]  # type: ignore[assignment]
     all_tickets: list[str] = data["all_tickets"]  # type: ignore[assignment]
@@ -5678,12 +5804,14 @@ def _perf_visit_ticket_pool(
     focus_key: str = data["focus_key"]  # type: ignore[assignment]
     total_all: int = data["total_tickets"]  # type: ignore[assignment]
     eng_index = {eng: i for i, eng in enumerate(all_engineers)}
+    tid = _perf_normalize_matrix_lookup(lookup_ticket)
+    pool_focus = "" if tid and tid in all_tickets else focus_key
     pool = _perf_visit_map_ticket_pool(
         all_tickets,
         ticket_engineers,
         eng_index,
-        focus_key=focus_key,
-        search=search,
+        focus_key=pool_focus,
+        search=search or (tid if tid else ""),
     )
     return all_engineers, pool, ticket_engineers, focus_key, total_all
 
@@ -5800,6 +5928,18 @@ _PERF_MATRIX_COMMENT_PREFIX_RE = re.compile(
     r"^(?:responded by\s+@\S+:\s*|manual dashboard\s+.+?\s+by\s+@\S+:\s*)",
     re.IGNORECASE,
 )
+
+# Attendance ``action_type`` → Case Info comment ``kind`` (admin resolve/close notes included).
+_PERF_MATRIX_LOG_ACTION_KIND: dict[str, str] = {
+    "Response": "response",
+    "Assignment": "assignment",
+    "Resolved": "admin",
+    "AdminClosed": "admin",
+    "OnHold": "admin",
+    "MovedToInvestigation": "admin",
+    "Reopened": "admin",
+    "ReopenedFromUnattended": "admin",
+}
 
 
 def _perf_matrix_comment_key(author: str, text: str) -> tuple[str, str]:
@@ -5938,13 +6078,15 @@ def _perf_matrix_case_info_from_attendance(
         action = str(row.get("action_type") or "").strip()
         note = str(row.get("note") or "").strip()
         photo = str(row.get("photo_url") or "").strip()
+        kind = _PERF_MATRIX_LOG_ACTION_KIND.get(action)
+        if not kind:
+            continue
         if action == "Assignment" and not note:
             continue
         if action == "Response" and not note and not photo.startswith("http"):
             continue
-        if action not in ("Response", "Assignment"):
+        if kind == "admin" and not note:
             continue
-        kind = "response" if action == "Response" else "assignment"
         bucket.add(
             tn,
             at_raw=row.get("timestamp"),
@@ -6065,11 +6207,13 @@ def _perf_build_staff_matrix_payload(
     *,
     data: dict[str, object],
     search: str,
+    lookup_ticket: str = "",
 ) -> dict[str, object]:
     """JSON payload for the React Multi-Staff Case Management Matrix."""
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
         data,
         search=search,
+        lookup_ticket=lookup_ticket,
     )
     prepared = _perf_prepare_visits_df(visits_all)
     eng_colors = _perf_engineer_color_map(all_engineers)
@@ -6116,6 +6260,7 @@ def _perf_build_staff_matrix_payload(
         "tickets": tickets,
         "staffMembers": all_engineers,
         "staffColors": eng_colors,
+        "lookupTicket": lookup_ticket or "",
         "summary": {
             "totalCases": total,
             "avgStaffPerCase": round(avg_staff, 1),
@@ -6147,16 +6292,22 @@ def _render_perf_visit_staff_matrix(
     *,
     data: dict[str, object],
     search: str,
+    lookup_ticket: str = "",
 ) -> None:
     """Tickets × staff grid — virtualized React matrix when build is present."""
-    payload = _perf_build_staff_matrix_payload(visits_all, data=data, search=search)
+    payload = _perf_build_staff_matrix_payload(
+        visits_all,
+        data=data,
+        search=search,
+        lookup_ticket=lookup_ticket,
+    )
     tickets = payload.get("tickets") or []
     if not tickets:
         st.caption("No tickets to show in the matrix.")
         return
 
     if _staff_matrix_component is not None and _HAS_STAFF_MATRIX:
-        _staff_matrix_component(payload, height=720, key="perf_staff_matrix")
+        _staff_matrix_component(payload, height=720, key=_PERF_MATRIX_COMPONENT_KEY)
         return
 
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
@@ -6273,322 +6424,42 @@ th.perf-matrix-ticket.shared-col {{ color: #e8c9a0; }}
     components.html(matrix_html, height=min(560, 80 + 28 * max(len(tickets_pool), 1)), scrolling=True)
 
 
-def _render_perf_visit_bipartite_graph(
-    visits_all: pd.DataFrame,
-    *,
-    focus: str,
-    data: dict[str, object] | None = None,
-    search: str | None = None,
-) -> None:
-    """Engineers in a horizontal row of portrait cards; tickets on outer ring."""
-    if data is None:
-        data = _perf_visit_bipartite_data(visits_all, focus=focus)
-    if not data:
-        components.html(
-            "<html><body style='margin:0;background:#141414;'></body></html>",
-            height=8,
-        )
-        return
-
-    all_engineers, pool, ticket_engineers, focus_key, _total_all = _perf_visit_ticket_pool(
-        data,
-        search=search or "",
-    )
-    tickets = pool
-
-    if not tickets:
-        return
-
-    eng_index = {eng: i for i, eng in enumerate(all_engineers)}
-
-    eng_colors = _perf_engineer_color_map(all_engineers)
-    eng_slug = {eng: f"e{i}" for i, eng in enumerate(all_engineers)}
-    focus_slug = eng_slug.get(focus_key, "") if focus_key else ""
-    tickets_for_focus = {
-        tn for tn, engs in ticket_engineers.items() if focus_key and focus_key in engs
-    }
-
-    n_eng = len(all_engineers)
-    n_tick = len(tickets)
-    ticket_font, ticket_font_hl, ticket_max_len = _perf_radial_ticket_font(n_tick)
-
-    eng_box_w, eng_box_h, eng_gap = _perf_engineer_portrait_dims(n_eng)
-
-    eng_angle_seed = {
-        eng: _perf_hub_engineer_sector_angle(i, n_eng)
-        for i, eng in enumerate(all_engineers)
-    }
-    tickets = _perf_radial_ticket_order(tickets, ticket_engineers, eng_angle_seed)
-    n_tick = len(tickets)
-
-    row_w = n_eng * eng_box_w + max(0, n_eng - 1) * eng_gap
-    cx, cy, ring_r, svg_size = _perf_radial_map_geometry(
-        n_tick=n_tick,
-        hub_row_w=row_w,
-        hub_box_h=eng_box_h,
-        ticket_font=ticket_font,
-    )
-    eng_positions, _eng_indices, _row_w, hub_left_x, hub_right_x = _perf_hub_engineer_layout_row(
-        cx=cx,
-        cy=cy,
-        engineers=all_engineers,
-        eng_box_w=eng_box_w,
-        eng_box_h=eng_box_h,
-        eng_gap=eng_gap,
-    )
-    svg_w = svg_h = svg_size
-    svg_h_px = int(svg_h)
-    label_outset = 16.0 + ticket_font * 2.2
-    hub_pad = 12.0
-    hub_mask_x = hub_left_x - hub_pad
-    hub_mask_y = cy - eng_box_h / 2.0 - hub_pad
-    hub_mask_w = (hub_right_x - hub_left_x) + hub_pad * 2.0
-    hub_mask_h = eng_box_h + hub_pad * 2.0
-
-    tick_angles: dict[str, float] = {}
-    tick_xy: dict[str, tuple[float, float]] = {}
-    for ti, ticket in enumerate(tickets):
-        angle = (2.0 * math.pi * ti / n_tick) - math.pi / 2.0
-        tick_angles[ticket] = angle
-        tick_xy[ticket] = (
-            cx + ring_r * math.cos(angle),
-            cy + ring_r * math.sin(angle),
-        )
-
-    svg_parts: list[str] = []
-    focus_mode_cls = " focus-mode" if focus_slug else ""
-
-    legend_bits: list[str] = []
-    for eng in all_engineers:
-        col = eng_colors[eng]
-        slug = eng_slug[eng]
-        active = slug == focus_slug
-        short_eng = eng if len(eng) <= 14 else eng[:12] + "…"
-        legend_bits.append(
-            f'<button type="button" class="legend-chip{" active" if active else ""}" '
-            f'onclick="pickEng({json.dumps(eng)}, {"true" if active else "false"})">'
-            f'<i style="background:{col}"></i>{html.escape(short_eng)}</button>'
-        )
-    legend_html = "".join(legend_bits)
-
-    svg_parts.append(
-        f'<circle class="ring-guide" cx="{cx:.1f}" cy="{cy:.1f}" r="{ring_r:.1f}" '
-        f'fill="none" stroke="rgba(215,180,145,0.28)" stroke-width="2" '
-        f'stroke-dasharray="6 6"/>'
-    )
-
-    svg_parts.append(
-        f'<rect class="hub-mask" x="{hub_mask_x:.1f}" y="{hub_mask_y:.1f}" '
-        f'width="{hub_mask_w:.1f}" height="{hub_mask_h:.1f}" rx="10" ry="10" '
-        f'fill="#141414" stroke="rgba(215,180,145,0.08)" stroke-width="1"/>'
-    )
-
-    for eng in all_engineers:
-        ex, ey = eng_positions[eng]
-        col = eng_colors[eng]
-        slug = eng_slug[eng]
-        is_focus = slug == focus_slug
-        x0 = ex - eng_box_w / 2.0
-        y0 = ey - eng_box_h / 2.0
-        eng_json = json.dumps(eng)
-        focus_flag = "true" if is_focus else "false"
-        label = _perf_engineer_portrait_label(eng)
-        svg_parts.append(
-            f'<g class="eng-pick eng-portrait {slug}{" focused" if is_focus else ""}" '
-            f'role="button" tabindex="0" '
-            f'onclick="pickEng({eng_json}, {focus_flag})" '
-            f'onkeydown="if(event.key===\'Enter\'||event.key===\' \')pickEng({eng_json}, {focus_flag})">'
-            f'<rect class="eng-box" x="{x0:.1f}" y="{y0:.1f}" '
-            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="5" ry="5" '
-            f'stroke="{col}" stroke-width="{2.2 if is_focus else 1.2}"/>'
-            f'<rect class="eng-accent" x="{x0:.1f}" y="{y0:.1f}" '
-            f'width="{eng_box_w:.1f}" height="3" rx="1" fill="{col}"/>'
-            f'<text class="eng-label" x="{ex:.1f}" y="{ey:.1f}" '
-            f'text-anchor="middle" dominant-baseline="middle" '
-            f'transform="rotate(-90 {ex:.1f} {ey:.1f})" '
-            f'fill="{col if is_focus else "#e8e6e3"}">'
-            f"{html.escape(label)}</text>"
-            f"</g>"
-        )
-
-    for ticket in tickets:
-        tx, ty = tick_xy[ticket]
-        engs = ticket_engineers.get(ticket, set())
-        for eng in sorted(engs, key=str.lower):
-            if eng not in eng_positions:
-                continue
-            ex, ey = eng_positions[eng]
-            ei = eng_index.get(eng, 0)
-            touch_anchors = _perf_engineer_touch_anchors(
-                ex, ey, eng_box_w, eng_box_h, eng_index=ei, n_eng=n_eng,
-            )
-            side = _perf_pick_touch_side(
-                touch_anchors,
-                tx=tx,
-                ty=ty,
-                ex=ex,
-                ey=ey,
-                eng_index=ei,
-                n_eng=n_eng,
-            )
-            sx, sy = touch_anchors[side]
-            lx_end, ly_end = _perf_link_endpoint_at_ticket(sx, sy, tx, ty)
-            col = eng_colors[eng]
-            slug = eng_slug[eng]
-            is_hl_link = bool(focus_key and eng == focus_key)
-            sw = 2.0 if is_hl_link else 0.85
-            svg_parts.append(
-                f'<path class="link-path {slug}{" hl" if is_hl_link else ""} link-{side}" '
-                f'stroke="{col}" stroke-width="{sw}" fill="none" '
-                f'stroke-linecap="round" '
-                f'd="{_perf_curved_link_path(sx, sy, lx_end, ly_end, side=side)}"/>'
-            )
-
-    for ticket in tickets:
-        engs = ticket_engineers.get(ticket, set())
-        is_shared = len(engs) > 1
-        angle = tick_angles[ticket]
-        tx, ty = tick_xy[ticket]
-        lx = cx + (ring_r + label_outset) * math.cos(angle)
-        ly = cy + (ring_r + label_outset) * math.sin(angle)
-        is_hl = bool(focus_key and ticket in tickets_for_focus)
-        if is_hl and focus_key:
-            ticket_col = eng_colors.get(focus_key, "#e8e6e3")
-        elif is_shared:
-            ticket_col = "#D7B491"
-        else:
-            solo_eng = next(iter(engs), "")
-            ticket_col = eng_colors.get(solo_eng, "#a39e97")
-        short = ticket if len(ticket) <= ticket_max_len else ticket[: ticket_max_len - 1] + "…"
-        hl_cls = " hl" if is_hl else ""
-        shared_cls = " shared" if is_shared else ""
-        anchor = _perf_radial_text_anchor(angle)
-        rot_deg = math.degrees(angle)
-        if anchor == "end":
-            rot_deg += 180.0
-        use_rotate = abs(math.cos(angle)) < 0.85
-        transform = f' transform="rotate({rot_deg:.1f} {lx:.1f} {ly:.1f})"' if use_rotate else ""
-        svg_parts.append(
-            f'<circle class="ticket-node{hl_cls}" cx="{tx:.1f}" cy="{ty:.1f}" '
-            f'r="{_PERF_MAP_TICKET_NODE_R:.1f}" '
-            f'fill="{ticket_col}" opacity="0.85"/>'
-        )
-        svg_parts.append(
-            f'<text class="ticket-label{hl_cls}{shared_cls}" x="{lx:.1f}" y="{ly + 3.0:.1f}" '
-            f'text-anchor="{anchor}" fill="{ticket_col}"{transform}>'
-            f"{html.escape(short)}</text>"
-        )
-
-    legend_h = 48
-    content_h = svg_h_px + legend_h + 12
-    frame_h = min(max(content_h, _PERF_MAP_VIEWPORT_PX), _PERF_MAP_IFRAME_MAX)
-
-    map_html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"/>
-<style>
-html, body {{
-  margin: 0; padding: 0; background: #141414;
-  font-family: system-ui, sans-serif; color: #a39e97;
-  min-height: {frame_h}px; height: {frame_h}px;
-  overflow: auto; -webkit-overflow-scrolling: touch;
-  box-sizing: border-box;
-}}
-.perf-map-shell {{
-  padding: 4px 6px 6px; min-width: 320px;
-  min-height: {frame_h}px; box-sizing: border-box;
-}}
-.eng-legend {{ display: flex; flex-wrap: wrap; gap: 0.25rem 0.4rem; margin-bottom: 4px; }}
-.legend-chip {{
-  display: inline-flex; align-items: center; gap: 0.25rem;
-  border: 1px solid rgba(215,180,145,0.2); border-radius: 999px;
-  background: #141414; color: #e8e6e3; font-size: 9px; padding: 0.12rem 0.4rem;
-  cursor: pointer; line-height: 1.2;
-}}
-.legend-chip.active {{ border-color: #D7B491; }}
-.legend-chip i {{ width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }}
-.svg-wrap {{ width: 100%; overflow: visible; display: flex; justify-content: center; }}
-.perf-radial-svg {{
-  display: block; width: 100%; max-width: {svg_w:.0f}px; height: auto;
-  aspect-ratio: 1 / 1;
-}}
-.eng-pick {{ cursor: pointer; }}
-.eng-label {{ font-size: 8px; pointer-events: none; font-weight: 500; letter-spacing: 0.02em; }}
-.eng-portrait .eng-box {{ fill: #141414; }}
-.ticket-label {{ font-size: {ticket_font}px; fill: #a39e97; }}
-.ticket-label.shared {{ fill: #D7B491; }}
-.link-path {{ opacity: 0.5; stroke-linecap: round; }}
-.hub-mask {{ pointer-events: none; }}
-.perf-radial-svg.focus-mode .link-path {{ opacity: 0.07; }}
-.perf-radial-svg.focus-mode .link-path.hl {{ opacity: 1; stroke-width: 2.2 !important; }}
-.perf-radial-svg.focus-mode .eng-pick {{ opacity: 0.35; }}
-.perf-radial-svg.focus-mode .eng-pick.focused {{ opacity: 1; }}
-.perf-radial-svg.focus-mode .ticket-label {{ opacity: 0.16; }}
-.perf-radial-svg.focus-mode .ticket-node {{ opacity: 0.16; }}
-.perf-radial-svg.focus-mode .ticket-label.hl,
-.perf-radial-svg.focus-mode .ticket-node.hl {{
-  opacity: 1; font-size: {ticket_font_hl}px; font-weight: 600;
-}}
-</style>
-<script>
-function pickEng(eng, isFocused) {{
-  const url = new URL(window.parent.location.href);
-  url.searchParams.set("perf_map_pick", isFocused ? "All" : eng);
-  window.parent.location.href = url.toString();
-}}
-</script>
-</head><body>
-<div class="perf-map-shell">
-<div class="eng-legend">{legend_html}</div>
-<div class="svg-wrap">
-<svg class="perf-radial-svg{focus_mode_cls}" viewBox="0 0 {svg_w:.0f} {svg_h:.0f}" preserveAspectRatio="xMidYMid meet"
-     xmlns="http://www.w3.org/2000/svg" aria-label="Radial engineer to ticket visit map">
-{"".join(svg_parts)}
-</svg>
-</div>
-</div>
-</body></html>"""
-    components.html(map_html, height=frame_h, scrolling=True)
-
-
-def _render_perf_visits_tab(
+def _render_perf_case_info_tab(
     visits_all: pd.DataFrame,
     *,
     focus: str,
 ) -> None:
-    """Visits: node-link diagram and multi-staff case matrix."""
-    data = _perf_visit_bipartite_data(visits_all, focus=focus)
-    if not data:
+    """Case Info tab — multi-staff case management matrix."""
+    lookup_raw = _perf_matrix_sync_lookup_from_component()
+    lookup_tid = _perf_normalize_matrix_lookup(lookup_raw)
+    visits_matrix = _perf_matrix_merge_ticket_lookup(visits_all, lookup_raw)
+    data_matrix = _perf_visit_bipartite_data(visits_matrix, focus=focus)
+    st.caption(
+        "Rows = tickets · columns = staff · colored dots show involvement. "
+        "Use **Ticket ID** in the matrix filter bar to search or look up history "
+        "outside the sidebar date range (9 or 16 digits). Case Info on the right."
+    )
+    if lookup_tid and not data_matrix:
+        st.warning(
+            f"No visit cycles found for ticket **{lookup_tid}**. "
+            "Check the ticket number or confirm it was assigned from the dashboard."
+        )
+    elif not data_matrix:
         st.info(
-            "No visit data in this window — visit cycles appear after assigns and "
-            "reassigns create `ticket_visits` rows."
+            "No visit data in this window. Enter a full **Ticket ID** in the matrix "
+            "filter bar to look up a specific ticket, or widen the sidebar date range."
         )
-        return
-
-    _, pool, _, focus_key, total_all = _perf_visit_ticket_pool(data, search="")
-    _perf_visit_map_caption(len(pool), total_all, focus_key=focus_key)
-
-    tab_node, tab_matrix = st.tabs(
-        [
-            "Node-Link Diagram",
-            "Multi-Staff Case Management Matrix",
-        ]
-    )
-    with tab_node:
-        _render_perf_visit_bipartite_graph(
-            visits_all,
-            focus=focus,
-            data=data,
-            search="",
-        )
-    with tab_matrix:
-        st.caption(
-            "Rows = tickets · columns = staff · colored dots show involvement. "
-            "Use **Ticket ID** in the matrix filter bar to search. Case Info on the right."
-        )
+    else:
+        if lookup_tid and lookup_tid not in (data_matrix.get("all_tickets") or []):
+            st.warning(
+                f"Ticket **{lookup_tid}** has no `ticket_visits` rows — "
+                "matrix Case Info may be empty."
+            )
         _render_perf_visit_staff_matrix(
-            visits_all,
-            data=data,
-            search="",
+            visits_matrix,
+            data=data_matrix,
+            search=lookup_tid,
+            lookup_ticket=lookup_tid,
         )
 
 
@@ -6615,6 +6486,56 @@ def _render_visit_detail_table(visits: pd.DataFrame) -> None:
     ) if c in view.columns]
     st.dataframe(view[cols].sort_values("visit_start", ascending=False).head(300),
                  use_container_width=True, hide_index=True)
+
+
+def _render_handled_visit_credit_bar(visits: pd.DataFrame) -> None:
+    """Distinct tickets handled per engineer (fair credit); tooltip shows visit cycles."""
+    prepared = _perf_prepare_visits_df(visits)
+    counts = _perf_handled_visit_credit_counts(prepared)
+    if counts.empty:
+        st.caption("No responded visits in this time range.")
+        return
+    n_tickets = (
+        int(prepared["ticket_number"].astype(str).nunique())
+        if "ticket_number" in prepared.columns
+        else int(len(prepared))
+    )
+    n_cycles = int(len(prepared))
+    st.caption(
+        f"**{n_tickets}** unique tickets with a responded visit · "
+        f"**{n_cycles}** visit cycles in range "
+        "(multiple cycles on one ticket count once per engineer)."
+    )
+    height = min(520, max(180, 42 * len(counts)))
+    chart = (
+        alt.Chart(counts)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "Tickets:Q",
+                title="Tickets handled",
+                axis=alt.Axis(format=".0f", tickMinStep=1),
+            ),
+            y=alt.Y(
+                "assignee:N",
+                sort="-x",
+                title="",
+                axis=alt.Axis(
+                    labelOverlap=False,
+                    labelFontSize=13,
+                    labelPadding=8,
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("assignee:N", title="Engineer"),
+                alt.Tooltip("Tickets:Q", title="Unique tickets"),
+                alt.Tooltip("Visit cycles:Q", title="Visit cycles"),
+            ],
+            color=alt.value("#7eb8da"),
+        )
+        .properties(height=height)
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> None:
@@ -6664,8 +6585,10 @@ def _perf_norm_member(raw: object) -> str:
     """Normalize ``assigned_to`` / log ``member_username`` for chart labels."""
 
     s = str(raw or "").strip()
-    if not s or s.lower() in ("unknown", "none", "null"):
+    if not s or s.lower() in ("unknown", "none", "null", "nan", "nat"):
         return "(unknown)"
+    if s.lower().lstrip("@") == "admin":
+        return _SC_SALES_OVERVIEW_ADMIN_LABEL
     low = _canonical_username_stem(s)
     return f"@{low}" if low else "(unknown)"
 
@@ -6926,18 +6849,12 @@ def _perf_filter_sales_in_range(
 
 
 def _perf_enrich_sales_cases(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``staff`` (attended_by), ``category``, and local time from ``_ts``."""
+    """Add ``staff`` (Performance credit), ``category``, and local time from ``_ts``."""
     view = df.copy()
     if "_ts" not in view.columns and "updated_at" in view.columns:
         view["_ts"] = _parse_ts(view["updated_at"])
     view["_local"] = view["_ts"].dt.tz_convert(LOCAL_TZ)
-    if "attended_by" in view.columns:
-        ab = view["attended_by"].fillna("").astype(str).str.strip()
-        view["staff"] = ab.map(lambda s: _perf_norm_member(s) if s else "(unknown)")
-    elif "admin_owner" in view.columns:
-        view["staff"] = view["admin_owner"].map(_perf_norm_member)
-    else:
-        view["staff"] = "(unknown)"
+    view["staff"] = view.apply(_sc_perf_sales_credit_staff, axis=1)
     if "sales_category" in view.columns:
         cat = view["sales_category"].fillna("").astype(str).str.strip()
         view["category"] = cat.mask(cat.eq(""), "(uncategorized)")
@@ -7034,6 +6951,766 @@ def _perf_staff_counts(df: pd.DataFrame) -> pd.Series:
     return df.groupby("staff").size()
 
 
+def _perf_calendar_week_range_utc(
+    *,
+    week_offset: int = 0,
+) -> tuple[pd.Timestamp, pd.Timestamp, date, date]:
+    """Sun–Sat calendar week in ``LOCAL_TZ`` (UTC+5). ``week_offset`` 0 = this week."""
+    today = pd.Timestamp.now(tz=LOCAL_TZ).date()
+    days_since_sun = (today.weekday() + 1) % 7
+    week_start = today - timedelta(days=days_since_sun) + timedelta(weeks=week_offset)
+    week_end = week_start + timedelta(days=6)
+    return (
+        _local_date_start(week_start),
+        _local_date_end(week_end),
+        week_start,
+        week_end,
+    )
+
+
+def _perf_calendar_week_for_date(any_date: date) -> tuple[pd.Timestamp, pd.Timestamp, date, date]:
+    """Sun–Sat calendar week containing ``any_date`` in ``LOCAL_TZ``."""
+    days_since_sun = (any_date.weekday() + 1) % 7
+    week_start = any_date - timedelta(days=days_since_sun)
+    week_end = week_start + timedelta(days=6)
+    return (
+        _local_date_start(week_start),
+        _local_date_end(week_end),
+        week_start,
+        week_end,
+    )
+
+
+def _perf_week_offset_for_date(any_date: date) -> int:
+    """Calendar-week offset from the current Sun–Sat week (0 = this week)."""
+    _, _, this_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+    _, _, pick_start, _ = _perf_calendar_week_for_date(any_date)
+    return (pick_start - this_start).days // 7
+
+
+def _apply_weekly_time_range(
+    df: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Weekly window — latest activity timestamp (same basis as Overview in-view)."""
+    if df.empty:
+        return df
+    ref = _perf_reference_ts(df)
+    mask = ref.notna() & (ref >= range_start) & (ref <= range_end)
+    return df.loc[mask].copy()
+
+
+def _perf_csm_attended_in_week(
+    df_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """CSM tickets in On Hold / Resolved / Investigation with activity in the week."""
+    if df_all.empty or "status" not in df_all.columns:
+        return pd.DataFrame()
+    blocked = _perf_unattended_ticket_numbers(df_all)
+    in_range = _apply_weekly_time_range(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if in_range.empty:
+        return pd.DataFrame()
+    in_range = _perf_drop_unattended_tickets(in_range, blocked)
+    if in_range.empty:
+        return pd.DataFrame()
+    masks = _ticket_queue_count_masks(in_range)
+    attended_mask = pd.Series(False, index=in_range.index)
+    for key in _CSM_WEEKLY_ATTENDED_KEYS:
+        attended_mask |= masks[key]
+    part = in_range.loc[attended_mask].copy()
+    if part.empty:
+        return part
+    norm = _normalized_status_series(part)
+    label_map = {
+        STATUS_ON_HOLD.casefold(): STATUS_ON_HOLD,
+        STATUS_RESOLVED.casefold(): STATUS_RESOLVED,
+        STATUS_UNDER_INVESTIGATION.casefold(): STATUS_UNDER_INVESTIGATION,
+    }
+    part["_attended_status"] = norm.str.casefold().map(label_map).fillna(norm)
+    part["track"] = "CSM"
+    part["_ts"] = _perf_reference_ts(part)
+    return part
+
+
+def _perf_unattended_ticket_numbers(df_all: pd.DataFrame) -> frozenset[str]:
+    """Ticket IDs ever auto-unattended — excluded from attended / credit totals."""
+    if df_all.empty or "ticket_number" not in df_all.columns:
+        return frozenset()
+    mask = _ticket_marked_unattended_mask(df_all)
+    if not mask.any():
+        return frozenset()
+    ids = df_all.loc[mask, "ticket_number"].astype(str).str.strip()
+    return frozenset(t for t in ids.tolist() if t)
+
+
+def _perf_drop_unattended_tickets(
+    df: pd.DataFrame,
+    blocked: frozenset[str],
+) -> pd.DataFrame:
+    if df.empty or not blocked or "ticket_number" not in df.columns:
+        return df
+    keep = ~df["ticket_number"].astype(str).str.strip().isin(blocked)
+    return df.loc[keep].copy()
+
+
+def _perf_sales_attended_in_week(
+    df_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Sales cases in Investigation / Regional / Resolved with activity in the week."""
+    if df_all.empty or "status" not in df_all.columns:
+        return pd.DataFrame()
+    in_range = _apply_weekly_time_range(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if in_range.empty:
+        return pd.DataFrame()
+    effective = in_range["status"].astype(str).str.strip().map(_sc_effective_status)
+    mask = effective.isin(_SC_ATTENDED_STATUSES)
+    part = in_range.loc[mask].copy()
+    if part.empty:
+        return part
+    part["_attended_status"] = effective.loc[mask].values
+    part["track"] = "Sales"
+    part["_ts"] = _perf_reference_ts(part)
+    return part
+
+
+def _perf_weekly_attended_bundle(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, object]:
+    """Compute weekly CSM + Sales attended once (summary, detail, counts)."""
+    csm_attended = _perf_csm_attended_in_week(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    sales_attended = _perf_sales_attended_in_week(
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+    )
+    summary, detail = _perf_build_weekly_attended_tables(csm_attended, sales_attended)
+    return {
+        "csm": csm_attended,
+        "sales": sales_attended,
+        "summary": summary,
+        "detail": detail,
+        "n_csm": len(csm_attended),
+        "n_sales": len(sales_attended),
+        "total": len(csm_attended) + len(sales_attended),
+    }
+
+
+def _perf_resolve_display_category(row: pd.Series, *, track: str) -> str:
+    """Outcome category when set; otherwise assignment / sales category."""
+    if track == "CSM":
+        outcome = canonical_task_category(row.get("outcome_category", ""))
+        assigned = canonical_task_category(row.get("task_category", ""))
+        cat = outcome if outcome else assigned
+    else:
+        cat = canonical_task_category(row.get("sales_category", ""))
+        if not cat:
+            cat = canonical_task_category(row.get("field_task_category", ""))
+    return cat if cat else "(uncategorized)"
+
+
+def _perf_build_weekly_attended_tables(
+    csm_raw: pd.DataFrame,
+    sales_raw: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return ``(summary_by_person, detail_rows)`` for the weekly attended report."""
+    detail_cols = [
+        "Track",
+        "ID",
+        "Status",
+        "Attended by",
+        "Category",
+        "Activity (local)",
+    ]
+    detail_parts: list[pd.DataFrame] = []
+
+    if not csm_raw.empty:
+        csm = _perf_enrich_tickets(csm_raw)
+        detail_parts.append(
+            pd.DataFrame(
+                {
+                    "Track": "CSM",
+                    "ID": csm.get("ticket_number", pd.Series("", index=csm.index)),
+                    "Status": csm.get("_attended_status", pd.Series("", index=csm.index)),
+                    "Attended by": csm.get("staff", pd.Series("(unknown)", index=csm.index)),
+                    "Category": csm.get("category", pd.Series("(uncategorized)", index=csm.index)),
+                    "Activity (local)": csm["_local"].dt.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+        )
+
+    if not sales_raw.empty:
+        sales = _perf_enrich_sales_cases(sales_raw)
+        sales_cat = sales.get("sales_category", pd.Series("", index=sales.index)).map(
+            canonical_task_category
+        )
+        field_cat = sales.get(
+            "field_task_category", pd.Series("", index=sales.index)
+        ).map(canonical_task_category)
+        category = sales_cat.where(sales_cat.notna(), field_cat).fillna("(uncategorized)")
+        detail_parts.append(
+            pd.DataFrame(
+                {
+                    "Track": "Sales",
+                    "ID": sales.get("case_ref", pd.Series("", index=sales.index)),
+                    "Status": sales.get(
+                        "_attended_status", pd.Series("", index=sales.index)
+                    ),
+                    "Attended by": sales.get(
+                        "staff", pd.Series("(unknown)", index=sales.index)
+                    ),
+                    "Category": category,
+                    "Activity (local)": sales["_local"].dt.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+        )
+
+    if detail_parts:
+        detail = pd.concat(detail_parts, ignore_index=True)
+    else:
+        detail = pd.DataFrame(columns=detail_cols)
+
+    empty_summary = pd.DataFrame(
+        columns=[
+            "Attended by",
+            "CSM total",
+            f"CSM {STATUS_ON_HOLD}",
+            f"CSM {STATUS_RESOLVED}",
+            "CSM Investigation",
+            "Sales total",
+            "Sales Investigation",
+            "Sales Regional",
+            f"Sales {STATUS_RESOLVED}",
+            "Grand total",
+        ]
+    )
+    if detail.empty:
+        return empty_summary, detail
+
+    attended = detail["Attended by"].astype(str).str.strip()
+    detail = detail.loc[attended.ne("")].copy()
+    if detail.empty:
+        return empty_summary, detail
+
+    csm = detail[detail["Track"] == "CSM"]
+    sales = detail[detail["Track"] == "Sales"]
+    people = sorted(
+        detail["Attended by"].astype(str).str.strip().unique(), key=str.lower
+    )
+    idx = pd.Index(people, name="Attended by")
+
+    def _count(sub: pd.DataFrame, status: str) -> pd.Series:
+        if sub.empty:
+            return pd.Series(0, index=idx, dtype=int)
+        mask = sub["Status"].astype(str).eq(status)
+        return (
+            sub.loc[mask]
+            .groupby("Attended by")
+            .size()
+            .reindex(idx, fill_value=0)
+            .astype(int)
+        )
+
+    summary = pd.DataFrame({"Attended by": people})
+    summary["CSM total"] = (
+        csm.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
+    )
+    summary[f"CSM {STATUS_ON_HOLD}"] = _count(csm, STATUS_ON_HOLD).values
+    summary[f"CSM {STATUS_RESOLVED}"] = _count(csm, STATUS_RESOLVED).values
+    summary["CSM Investigation"] = _count(csm, STATUS_UNDER_INVESTIGATION).values
+    summary["Sales total"] = (
+        sales.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
+    )
+    summary["Sales Investigation"] = _count(sales, SC_STATUS_INVESTIGATION).values
+    summary["Sales Regional"] = _count(sales, SC_STATUS_REGIONAL).values
+    summary[f"Sales {STATUS_RESOLVED}"] = _count(sales, SC_STATUS_RESOLVED).values
+    summary["Grand total"] = (
+        detail.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
+    )
+    summary = summary.sort_values(
+        ["Grand total", "Attended by"], ascending=[False, True]
+    )
+    totals = summary.drop(columns=["Attended by"]).sum(numeric_only=True)
+    totals["Attended by"] = "TOTAL"
+    summary = pd.concat([summary, pd.DataFrame([totals])], ignore_index=True)
+    return summary, detail
+
+
+_WEEKLY_INV_COLOR = "#E8A838"
+_WEEKLY_RESOLVED_COLOR = "#9A6B2F"
+_WEEKLY_CHART_THEME = {
+    "background": "transparent",
+}
+
+
+def _weekly_altair_theme(chart: alt.Chart) -> alt.Chart:
+    return (
+        chart.configure(**_WEEKLY_CHART_THEME)
+        .configure_view(strokeWidth=0, stroke="transparent")
+        .configure_axis(labelColor="#a39e97", titleColor="#e8e6e3", gridColor="#333333")
+        .configure_legend(labelColor="#e8e6e3", titleColor="#e8e6e3")
+    )
+
+
+def _perf_weekly_outcome_group(status: str) -> str:
+    """Roll weekly statuses into Investigation vs Resolved for executive charts."""
+    s = str(status or "").strip()
+    if s in (STATUS_RESOLVED, SC_STATUS_RESOLVED):
+        return "Resolved"
+    return "Investigation"
+
+
+def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]:
+    """KPI + chart/table frames for the weekly executive summary."""
+    empty_cat = pd.DataFrame(columns=["category", "outcome", "count"])
+    empty_trend = pd.DataFrame(columns=["week", "rate", "total"])
+    base: dict[str, object] = {
+        "total": 0,
+        "resolved": 0,
+        "investigation": 0,
+        "resolution_rate": 0,
+        "top_inv_category": "—",
+        "top_resolved_category": "—",
+        "outcome_df": pd.DataFrame(columns=["outcome", "count"]),
+        "category_df": empty_cat,
+        "priority_df": pd.DataFrame(
+            columns=["Outcome", "Assigned category", "Tickets", "Action Required"]
+        ),
+        "trend_df": empty_trend,
+    }
+    if detail_df.empty:
+        return base
+
+    view = detail_df.copy()
+    view["Category"] = (
+        view["Category"].astype(str).str.strip().replace("", "(uncategorized)")
+    )
+    view["Outcome"] = view["Status"].astype(str).str.strip().map(_perf_weekly_outcome_group)
+
+    total = len(view)
+    resolved = int(view["Outcome"].eq("Resolved").sum())
+    investigation = total - resolved
+    rate = int(round(100 * resolved / total)) if total else 0
+
+    inv_by_cat = (
+        view.loc[view["Outcome"].eq("Investigation")]
+        .groupby("Category")
+        .size()
+        .sort_values(ascending=False)
+    )
+    res_by_cat = (
+        view.loc[view["Outcome"].eq("Resolved")]
+        .groupby("Category")
+        .size()
+        .sort_values(ascending=False)
+    )
+
+    category_df = (
+        view.groupby(["Category", "Outcome"], as_index=False)
+        .size()
+        .rename(columns={"size": "count", "Category": "category", "Outcome": "outcome"})
+        .sort_values(["count", "category"], ascending=[False, True])
+    )
+
+    priority = (
+        view.groupby(["Outcome", "Category"], as_index=False)
+        .size()
+        .rename(
+            columns={
+                "size": "Tickets",
+                "Outcome": "Outcome",
+                "Category": "Assigned category",
+            }
+        )
+        .sort_values(["Tickets", "Assigned category"], ascending=[False, True])
+    )
+    priority["Action Required"] = priority["Outcome"].map(
+        lambda o: "High" if o == "Investigation" else "Review"
+    )
+
+    return {
+        "total": total,
+        "resolved": resolved,
+        "investigation": investigation,
+        "resolution_rate": rate,
+        "top_inv_category": str(inv_by_cat.index[0]) if len(inv_by_cat) else "—",
+        "top_resolved_category": str(res_by_cat.index[0]) if len(res_by_cat) else "—",
+        "outcome_df": pd.DataFrame(
+            {"outcome": ["Investigation", "Resolved"], "count": [investigation, resolved]}
+        ),
+        "category_df": category_df,
+        "priority_df": priority,
+        "trend_df": empty_trend,
+    }
+
+
+def _perf_weekly_resolution_trend(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    end_week_offset: int = 0,
+    weeks: int = 4,
+) -> pd.DataFrame:
+    """Resolution rate for the last ``weeks`` Sun–Sat windows ending at ``end_week_offset``."""
+    rows: list[dict[str, object]] = []
+    for offset in range(end_week_offset - weeks + 1, end_week_offset + 1):
+        rs, re, d0, _d1 = _perf_calendar_week_range_utc(week_offset=offset)
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all if sales_all is not None else pd.DataFrame(),
+            range_start=rs,
+            range_end=re,
+        )
+        detail = bundle.get("detail")
+        detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+        total = int(bundle.get("total") or 0)
+        if total == 0 or detail_df.empty:
+            rate = 0
+        else:
+            resolved = int(
+                detail_df["Status"]
+                .astype(str)
+                .str.strip()
+                .isin([STATUS_RESOLVED, SC_STATUS_RESOLVED])
+                .sum()
+            )
+            rate = int(round(100 * resolved / total))
+        rows.append(
+            {
+                "week": d0.strftime("%d %b"),
+                "rate": rate,
+                "total": total,
+                "sort": offset,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("sort")
+
+
+def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
+    st.markdown(
+        """
+<style>
+.weekly-exec-header {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+  gap: 12px; margin-bottom: 1rem; padding-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(215, 180, 145, 0.35);
+}
+.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e8e6e3; margin: 0; }
+.weekly-exec-sub { font-size: 0.85rem; color: #a39e97; margin: 0.15rem 0 0; }
+.weekly-exec-badge {
+  font-size: 0.85rem; color: #a39e97; padding: 0.45rem 0.85rem;
+  border: 1px solid #374151; border-radius: 8px; background: #141414;
+}
+.weekly-date-wrap [data-testid="stDateInput"] label {
+  font-size: 0.85rem !important; color: #a39e97 !important;
+}
+.weekly-date-wrap [data-testid="stDateInput"] > div {
+  background: #141414 !important;
+  border: 1px solid #374151 !important;
+  border-radius: 8px !important;
+}
+.weekly-date-range {
+  font-size: 0.78rem; color: #D7B491; margin: 0.25rem 0 0; text-align: right;
+}
+.weekly-kpi-card {
+  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
+  border-radius: 10px; padding: 1rem 1.1rem; min-height: 88px;
+}
+.weekly-kpi-label { font-size: 0.78rem; color: #a39e97; margin: 0 0 0.35rem; }
+.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e8e6e3; margin: 0; line-height: 1.2; }
+.weekly-kpi-sub { font-size: 0.75rem; color: #D7B491; margin: 0.35rem 0 0; }
+.weekly-panel {
+  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
+  border-radius: 10px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
+}
+.weekly-panel h4 {
+  font-size: 0.95rem; font-weight: 600; color: #e8e6e3; margin: 0 0 0.65rem;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+    k1, k2, k3, k4 = st.columns(4)
+    cards = [
+        (k1, "Total Tickets", str(metrics["total"]), ""),
+        (k2, "Resolution Rate", f"{metrics['resolution_rate']}%", ""),
+        (k3, "Top 'Investigation' Category", str(metrics["top_inv_category"]), ""),
+        (k4, "Top 'Resolved' Category", str(metrics["top_resolved_category"]), ""),
+    ]
+    for col, label, value, sub in cards:
+        with col:
+            sub_html = f'<p class="weekly-kpi-sub">{sub}</p>' if sub else ""
+            st.markdown(
+                f'<div class="weekly-kpi-card">'
+                f'<p class="weekly-kpi-label">{label}</p>'
+                f'<p class="weekly-kpi-value">{value}</p>{sub_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+
+def _render_perf_weekly_executive_dashboard(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    bundle: dict[str, object],
+    *,
+    week_start: date,
+    week_end: date,
+    week_offset: int,
+) -> None:
+    """Executive summary layout — Streamlit + Altair (no React)."""
+    detail = bundle.get("detail")
+    detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+    metrics = _perf_weekly_executive_metrics(detail_df)
+    metrics["trend_df"] = _perf_weekly_resolution_trend(
+        df_all, sales_all, end_week_offset=week_offset, weeks=4
+    )
+
+    st.markdown("#### KPI Overview & Outcome Breakdown")
+    left, right = st.columns([1.35, 1])
+    with left:
+        _render_weekly_kpi_cards(metrics)
+    with right:
+        st.markdown('<div class="weekly-panel"><h4>Outcome Breakdown</h4></div>', unsafe_allow_html=True)
+        outcome_df = metrics["outcome_df"]
+        if isinstance(outcome_df, pd.DataFrame) and not outcome_df.empty:
+            donut = _weekly_altair_theme(
+                alt.Chart(outcome_df)
+                .mark_arc(innerRadius=58, outerRadius=92)
+                .encode(
+                    theta=alt.Theta("count:Q", stack=True),
+                    color=alt.Color(
+                        "outcome:N",
+                        scale=alt.Scale(
+                            domain=["Investigation", "Resolved"],
+                            range=[_WEEKLY_INV_COLOR, _WEEKLY_RESOLVED_COLOR],
+                        ),
+                        legend=alt.Legend(title=None, orient="right"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("outcome:N", title="Outcome"),
+                        alt.Tooltip("count:Q", title="Tickets"),
+                    ],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(donut, use_container_width=True)
+            st.caption(f"Total Outcome: **{metrics['total']}**")
+        else:
+            st.caption("No outcome data for this week.")
+
+    st.markdown("#### Tickets by Category & Outcome")
+    category_df = metrics["category_df"]
+    if isinstance(category_df, pd.DataFrame) and not category_df.empty:
+        bar = _weekly_altair_theme(
+            alt.Chart(category_df)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "category:N",
+                    title="Assigned Category",
+                    sort=alt.EncodingSortField(field="count", op="sum", order="descending"),
+                    axis=alt.Axis(labelAngle=-28),
+                ),
+                y=alt.Y("count:Q", title="Tickets", axis=alt.Axis(tickMinStep=1)),
+                color=alt.Color(
+                    "outcome:N",
+                    scale=alt.Scale(
+                        domain=["Investigation", "Resolved"],
+                        range=[_WEEKLY_INV_COLOR, _WEEKLY_RESOLVED_COLOR],
+                    ),
+                    legend=alt.Legend(title="Outcome"),
+                ),
+                order=alt.Order("outcome:N", sort="ascending"),
+                tooltip=[
+                    alt.Tooltip("category:N", title="Category"),
+                    alt.Tooltip("outcome:N", title="Outcome"),
+                    alt.Tooltip("count:Q", title="Tickets"),
+                ],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(bar, use_container_width=True)
+    else:
+        st.caption("No category breakdown for this week.")
+
+    st.markdown("#### Priority Cases & Efficiency Trends")
+    pri_col, trend_col = st.columns(2)
+    with pri_col:
+        st.markdown('<div class="weekly-panel"><h4>Priority Cases (Investigation)</h4></div>', unsafe_allow_html=True)
+        priority_df = metrics["priority_df"]
+        if isinstance(priority_df, pd.DataFrame) and not priority_df.empty:
+            show = priority_df.copy()
+            show["Action Required"] = show["Action Required"].map(
+                {"High": "🚩 High", "Review": "🟧 Review"}
+            )
+            st.dataframe(
+                show,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Tickets": st.column_config.NumberColumn(format="%d"),
+                },
+            )
+        else:
+            st.caption("No priority cases this week.")
+    with trend_col:
+        st.markdown('<div class="weekly-panel"><h4>Efficiency Trends</h4></div>', unsafe_allow_html=True)
+        trend_df = metrics["trend_df"]
+        if isinstance(trend_df, pd.DataFrame) and not trend_df.empty:
+            trend = _weekly_altair_theme(
+                alt.Chart(trend_df)
+                .mark_area(color=_WEEKLY_INV_COLOR, opacity=0.35, line={"color": _WEEKLY_INV_COLOR})
+                .encode(
+                    x=alt.X("week:N", title="Week", sort=alt.EncodingSortField(field="sort", order="ascending")),
+                    y=alt.Y("rate:Q", title="Resolution Rate (%)", scale=alt.Scale(domain=[0, 100])),
+                    tooltip=[
+                        alt.Tooltip("week:N", title="Week"),
+                        alt.Tooltip("rate:Q", title="Resolution %"),
+                        alt.Tooltip("total:Q", title="Tickets"),
+                    ],
+                )
+                .properties(height=260)
+            )
+            st.altair_chart(trend, use_container_width=True)
+        else:
+            st.caption("Not enough history for trends.")
+
+
+def _render_perf_weekly_attended_report(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    this_week_bundle: dict[str, object] | None = None,
+) -> None:
+    """Sun–Sat weekly attended counts — CSM (assignee) + Sales (attended_by)."""
+    _, _, default_week_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+
+    st.markdown(
+        """
+<style>
+.weekly-exec-header {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+  gap: 12px; margin-bottom: 1rem; padding-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(215, 180, 145, 0.35);
+}
+.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e8e6e3; margin: 0; }
+.weekly-exec-sub { font-size: 0.85rem; color: #a39e97; margin: 0.15rem 0 0; }
+.weekly-date-wrap [data-testid="stDateInput"] label {
+  font-size: 0.85rem !important; color: #a39e97 !important;
+}
+.weekly-date-wrap [data-testid="stDateInput"] > div {
+  background: #141414 !important;
+  border: 1px solid #374151 !important;
+  border-radius: 8px !important;
+}
+.weekly-date-range {
+  font-size: 0.78rem; color: #D7B491; margin: 0.25rem 0 0; text-align: right;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    h_left, h_right = st.columns([1.35, 1])
+    with h_left:
+        st.markdown(
+            f'<div class="weekly-exec-header" style="border:none;padding:0;margin:0;">'
+            f'<div><p class="weekly-exec-title">NetOps | Coverage Eye</p>'
+            f'<p class="weekly-exec-sub">Executive Summary · {LOCAL_TZ_LABEL}</p></div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with h_right:
+        st.markdown('<div class="weekly-date-wrap">', unsafe_allow_html=True)
+        picked = st.date_input(
+            "Weekly Operational Report",
+            value=default_week_start,
+            key=_PERF_WEEKLY_DATE_KEY,
+            help=f"Pick any date in the week — report uses Sun–Sat ({LOCAL_TZ_LABEL}).",
+        )
+        range_start, range_end, d0, d1 = _perf_calendar_week_for_date(picked)
+        week_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
+        st.markdown(
+            f'<p class="weekly-date-range">{week_label}</p></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        '<div style="margin-bottom:1rem;padding-bottom:0.75rem;'
+        'border-bottom:1px solid rgba(215,180,145,0.35);"></div>',
+        unsafe_allow_html=True,
+    )
+
+    week_offset = _perf_week_offset_for_date(picked)
+    _, _, this_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+    if d0 == this_start and this_week_bundle is not None:
+        bundle = this_week_bundle
+    else:
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    summary = bundle["summary"]
+    detail = bundle["detail"]
+
+    _render_perf_weekly_executive_dashboard(
+        df_all,
+        sales_all,
+        bundle,
+        week_start=d0,
+        week_end=d1,
+        week_offset=week_offset,
+    )
+
+    if summary.empty:
+        st.info("No attended CSM tickets or Sales cases in this week.")
+        return
+
+    st.subheader("Staff breakdown")
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    file_stamp = f"{d0.isoformat()}_{d1.isoformat()}"
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "Download summary CSV",
+            data=summary.to_csv(index=False).encode("utf-8"),
+            file_name=f"weekly_attended_{file_stamp}_summary.csv",
+            mime="text/csv",
+            key=f"perf_weekly_summary_csv_{file_stamp}",
+        )
+    with dl2:
+        st.download_button(
+            "Download detail CSV",
+            data=detail.to_csv(index=False).encode("utf-8"),
+            file_name=f"weekly_attended_{file_stamp}_detail.csv",
+            mime="text/csv",
+            key=f"perf_weekly_detail_csv_{file_stamp}",
+        )
+
+    with st.expander(f"Case list ({len(detail)})", expanded=False):
+        st.dataframe(detail, use_container_width=True, hide_index=True)
+
+
 def _perf_combine_work(
     completed: pd.DataFrame,
     investigation: pd.DataFrame,
@@ -7081,13 +7758,13 @@ def _perf_build_summary(
     rows = [
         {
             "Person": p,
+            # Credit total — Unattended is shown separately and does not count.
             "Total": (
                 int(p_counts.get(p, 0))
                 + int(o_counts.get(p, 0))
                 + int(c_counts.get(p, 0))
                 + int(i_counts.get(p, 0))
                 + int(h_counts.get(p, 0))
-                + int(u_counts.get(p, 0))
             ),
             STATUS_DAILY_TASK: int(p_counts.get(p, 0)),
             "Needs Review": int(o_counts.get(p, 0)),
@@ -7466,9 +8143,9 @@ def _render_perf_sales_staff_bar(view: pd.DataFrame, *, title: str) -> None:
         .mark_bar(color="#D7B491")
         .encode(
             x=alt.X("Cases:Q", title="Cases"),
-            y=alt.Y("staff:N", sort="-x", title="Attended by"),
+            y=alt.Y("staff:N", sort="-x", title="Sales credit"),
             tooltip=[
-                alt.Tooltip("staff:N", title="Attended by"),
+                alt.Tooltip("staff:N", title="Sales credit"),
                 alt.Tooltip("Cases:Q", title="Cases"),
             ],
         )
@@ -7519,7 +8196,7 @@ def _render_perf_sales_cases_tab(
     """Sales Cases in the Performance window — queues, staff, and case list."""
     st.caption(
         "Cases in the sidebar **Time range**, plus any still in an active sales queue. "
-        "**Attended by** = sales owner · **Field engineer** = assignment when dispatched."
+        "**Performance credit** = field engineer when `assigned_to` is set, otherwise **Admin**."
     )
     if sales_df.empty:
         st.info("No Sales Cases for this filter — try **All** in Focus Assignee or widen the time range.")
@@ -7541,9 +8218,9 @@ def _render_perf_sales_cases_tab(
         _render_perf_sales_status_bar(view, title="By queue")
     with chart_r:
         staff_title = (
-            f"By attended by ({focus})"
+            f"By sales credit ({focus})"
             if focus not in ("", "All")
-            else "By attended by"
+            else "By sales credit (field or Admin)"
         )
         _render_perf_sales_staff_bar(view, title=staff_title)
 
@@ -7655,6 +8332,8 @@ def _to_local(series: pd.Series) -> pd.Series:
 
 def _format_local(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    if out.columns.duplicated().any():
+        out = out.loc[:, ~out.columns.duplicated()]
     for col in _TS_COLS:
         if col in out.columns:
             out[col] = _to_local(out[col]).dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -7811,6 +8490,7 @@ def _cc_insert_assignment(
     *,
     additional_info: str | None = None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     row: dict = {
@@ -7826,6 +8506,8 @@ def _cc_insert_assignment(
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
+    if assigned_to_2:
+        row["assigned_to_2"] = assigned_to_2
     for _ in range(4):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
@@ -7917,6 +8599,7 @@ def _cc_insert_transferred_ticket(
     assigned_to: str | None,
     additional_info: str | None,
     operator_id: str,
+    last_assigned_at: object | None = None,
 ) -> None:
     """Insert a CSM ticket row when moving from Sales Cases."""
     now_iso = _cc_utc_now_iso()
@@ -7936,7 +8619,8 @@ def _cc_insert_transferred_ticket(
         "unattended_nudge_sent_at": None,
     }
     if handle:
-        row["last_assigned_at"] = now_iso
+        la = last_assigned_at if last_assigned_at else None
+        row["last_assigned_at"] = la if la else now_iso
     for _ in range(4):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
@@ -8000,6 +8684,7 @@ def _cc_reassign_ticket(
     additional_info: str | None = None,
     operator_id: str,
     expected_last_assigned_at: object | None = None,
+    assigned_to_2: str | None = None,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     updates = {
@@ -8015,6 +8700,7 @@ def _cc_reassign_ticket(
         "unattended_nudge_sent_at": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
+        "assigned_to_2": assigned_to_2,
     }
     if not _cc_execute_ticket_update_if(
         client,
@@ -8074,6 +8760,7 @@ def _cc_upsert_assignment(
     *,
     additional_info: str | None = None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> str:
     """Insert or reassign; ``assigned_to`` is ``@username``. Returns a short summary."""
     client = _get_supabase_client()
@@ -8086,6 +8773,7 @@ def _cc_upsert_assignment(
             task_category,
             additional_info=additional_info,
             operator_id=operator_id,
+            assigned_to_2=assigned_to_2,
         )
         return f"Created ticket **{ticket_number}** and logged assignment."
     _cc_reassign_ticket(
@@ -8096,6 +8784,7 @@ def _cc_upsert_assignment(
         additional_info=additional_info,
         operator_id=operator_id,
         expected_last_assigned_at=existing.get("last_assigned_at"),
+        assigned_to_2=assigned_to_2,
     )
     prev_assignee = existing.get("assigned_to") or "—"
     return (
@@ -8134,6 +8823,7 @@ def _cc_patch_assignment_fields(
     task_category: str,
     additional_info: str | None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Update assignment fields for a ticket in the given status (dashboard edit)."""
     client = _get_supabase_client()
@@ -8148,12 +8838,14 @@ def _cc_patch_assignment_fields(
     prev_handle = str(row.get("assigned_to") or "").strip()
     updates: dict[str, object] = {
         "assigned_to": assigned_to,
+        "assigned_to_2": assigned_to_2,
         "task_category": task_category,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
         "updated_at": now_iso,
     }
-    if assigned_to and not prev_handle:
+    first_assignee = bool(assigned_to and not prev_handle)
+    if first_assignee:
         updates["last_assigned_at"] = now_iso
     _cc_execute_ticket_update(client, updates, ticket_number)
     _cc_insert_attendance_log(
@@ -8163,6 +8855,8 @@ def _cc_patch_assignment_fields(
         action_type="AssignmentUpdated",
         note=_cc_assignment_log_note(additional_info, operator_id),
     )
+    if first_assignee:
+        _visits_open_new(client, ticket_number, assigned_to, visit_start=now_iso)
     updated = _fetch_ticket_row(ticket_number)
     return updated or row
 
@@ -8175,6 +8869,7 @@ def _cc_dashboard_reassign_ticket(
     additional_info: str | None,
     operator_id: str,
     from_status: str,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Reassign for next-day field work: reset to Daily Task and clear prior response."""
     row = _fetch_ticket_row(ticket_number)
@@ -8195,6 +8890,7 @@ def _cc_dashboard_reassign_ticket(
         additional_info=additional_info,
         operator_id=operator_id,
         expected_last_assigned_at=row.get("last_assigned_at"),
+        assigned_to_2=assigned_to_2,
     )
     if from_status in ("Open", STATUS_DAILY_TASK, STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION):
         if from_status == "Open":
@@ -8355,6 +9051,7 @@ def _render_assignment_editor(
     )
 
     current_handle = str(row.get("assigned_to") or "").strip().lstrip("@")
+    current_handle_2 = str(row.get("assigned_to_2") or "").strip().lstrip("@")
     current_cat = str(row.get("task_category") or "").strip()
     current_notes = str(row.get("additional_info") or "")
 
@@ -8366,6 +9063,7 @@ def _render_assignment_editor(
         keys=keys,
         picked=picked,
         current_handle=current_handle,
+        current_handle_2=current_handle_2,
         current_cat=current_cat,
         current_notes=current_notes,
         cats=cats,
@@ -8374,24 +9072,13 @@ def _render_assignment_editor(
     )
 
     with st.form(f"{edit_key_prefix}_assignment_edit_form", clear_on_submit=False):
-        if fe_names and not fe_missing:
-            fe_opts = [f"@{n}" for n in fe_names]
-            st.selectbox(
-                "Engineer",
-                options=fe_opts,
-                key=keys["engineer"],
-            )
-        else:
-            st.text_input(
-                "Engineer",
-                placeholder="username",
-                key=keys["engineer"],
-            )
-        st.selectbox(
-            "Category",
-            options=cats,
-            key=keys["category"],
+        _render_engineer_pair_fields(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
         )
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area(
             "Notes (Additional Info)",
             height=80,
@@ -8408,19 +9095,18 @@ def _render_assignment_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(
-                str(st.session_state.get(keys["engineer"], ""))
-            )
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+            required_primary=True,
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        notes = _coassignee_telegram_note(handle2, notes)
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -8434,7 +9120,8 @@ def _render_assignment_editor(
         updated = _cc_patch_assignment_fields(
             picked,
             required_status=required_status,
-            assigned_to=handle,
+            assigned_to=handle or "",
+            assigned_to_2=handle2,
             task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -8519,6 +9206,7 @@ def _render_reassign_editor(
     )
 
     current_handle = str(row.get("assigned_to") or "").strip().lstrip("@")
+    current_handle_2 = str(row.get("assigned_to_2") or "").strip().lstrip("@")
     current_cat = str(row.get("task_category") or "").strip()
     current_notes = str(row.get("additional_info") or "")
 
@@ -8530,6 +9218,7 @@ def _render_reassign_editor(
         keys=keys,
         picked=picked,
         current_handle=current_handle,
+        current_handle_2=current_handle_2,
         current_cat=current_cat,
         current_notes=current_notes,
         cats=cats,
@@ -8538,11 +9227,13 @@ def _render_reassign_editor(
     )
 
     with st.form(f"{edit_key_prefix}_reassign_form", clear_on_submit=False):
-        if fe_names and not fe_missing:
-            st.selectbox("Engineer", options=[f"@{n}" for n in fe_names], key=keys["engineer"])
-        else:
-            st.text_input("Engineer", placeholder="username", key=keys["engineer"])
-        st.selectbox("Category", options=cats, key=keys["category"])
+        _render_engineer_pair_fields(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+        )
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area("Notes (Additional Info)", height=80, key=keys["notes"])
         st.checkbox(
             "Post New Telegram Assignment",
@@ -8557,17 +9248,18 @@ def _render_reassign_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(str(st.session_state.get(keys["engineer"], "")))
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+            required_primary=True,
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        notes = _coassignee_telegram_note(handle2, notes)
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -8580,7 +9272,8 @@ def _render_reassign_editor(
     try:
         updated = _cc_dashboard_reassign_ticket(
             picked,
-            assigned_to=handle,
+            assigned_to=handle or "",
+            assigned_to_2=handle2,
             task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -8637,12 +9330,13 @@ def _render_reassign_editor(
 def _sc_patch_assignment_fields(
     row_id: str,
     *,
-    assigned_to: str,
+    assigned_to: str | None,
     field_task_category: str,
     additional_info: str | None,
     operator_id: str,
     account_region: str | None = None,
     account_name: str | None = None,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Update sales case field assignment (same fields as CSM edit assignment)."""
     row = _fetch_sales_case_row_by_id(row_id)
@@ -8654,6 +9348,7 @@ def _sc_patch_assignment_fields(
     prev_handle = str(row.get("assigned_to") or "").strip()
     patch: dict[str, object] = {
         "assigned_to": assigned_to,
+        "assigned_to_2": assigned_to_2,
         "field_task_category": field_task_category,
         "additional_info": additional_info,
         "admin_owner": operator_id,
@@ -8767,6 +9462,7 @@ def _render_sales_assignment_editor(
     )
 
     current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
+    current_handle_2 = _sc_row_text(r0.get("assigned_to_2")).lstrip("@")
     current_cat = _sc_row_text(r0.get("field_task_category")) or _sc_row_text(
         r0.get("sales_category")
     )
@@ -8774,23 +9470,15 @@ def _render_sales_assignment_editor(
         r0.get("description")
     )
 
-    cats = field_cats if field_cats else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    if current_cat and current_cat not in cats:
-        cats = [current_cat, *cats]
-
-    _sync_assignment_edit_widgets(
-        keys=keys,
-        picked=cref,
-        current_handle=current_handle,
-        current_cat=current_cat,
-        current_notes=current_notes,
-        cats=cats,
-        fe_names=fe_names,
-        fe_missing=fe_missing,
-    )
-    region_key = f"{edit_key_prefix}_sc_edit_assign_region"
+    cats = _sales_category_options(field_cats)
+    if current_cat:
+        canon = canonical_task_category(current_cat) or current_cat
+        if canon not in cats:
+            cats = [canon, *cats]
     account_key = f"{edit_key_prefix}_sc_edit_assign_account"
     synced_key = f"{edit_key_prefix}_sc_edit_assign_synced"
+    region_watch_key = f"{edit_key_prefix}_sc_edit_assign_region_watch"
+    engineer_blank_key = f"{edit_key_prefix}_sc_edit_assign_engineer_blank"
     if st.session_state.get(synced_key) != cref:
         st.session_state[synced_key] = cref
         cur_region = _sc_row_text(r0.get("account_region"))
@@ -8798,6 +9486,21 @@ def _render_sales_assignment_editor(
             cur_region if cur_region in SALES_REGION_CODES else SALES_REGION_CODES[0]
         )
         st.session_state[account_key] = _sc_row_text(r0.get("account_name"))
+        st.session_state.pop(region_watch_key, None)
+
+    central_on_load = _sc_region_is_central(st.session_state.get(region_key))
+    _sync_assignment_edit_widgets(
+        keys=keys,
+        picked=cref,
+        current_handle=current_handle,
+        current_handle_2=current_handle_2,
+        current_cat=current_cat,
+        current_notes=current_notes,
+        cats=cats,
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+        skip_engineer=not central_on_load,
+    )
 
     with st.form(f"{edit_key_prefix}_sc_assignment_edit_form", clear_on_submit=False):
         st.text_input(
@@ -8810,23 +9513,29 @@ def _render_sales_assignment_editor(
             options=list(SALES_REGION_CODES),
             key=region_key,
         )
-        if fe_names and not fe_missing:
-            st.selectbox(
-                "Engineer",
-                options=[f"@{n}" for n in fe_names],
-                key=keys["engineer"],
-            )
-        else:
-            st.text_input(
-                "Engineer",
-                placeholder="username",
-                key=keys["engineer"],
-            )
-        st.selectbox(
-            "Category",
-            options=cats,
-            key=keys["category"],
+        central = _sc_sync_region_engineer_widgets(
+            region_key=region_key,
+            region_watch_key=region_watch_key,
+            engineer_select_key=keys["engineer"],
+            engineer_manual_key=keys["engineer"],
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            restore_handle=current_handle,
+            engineer_select2_key=keys["engineer_2"],
+            engineer_manual2_key=keys["engineer_2"],
+            restore_handle_2=current_handle_2,
         )
+        _render_sc_engineer_field(
+            central=central,
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            select_key=keys["engineer"],
+            manual_key=keys["engineer"],
+            blank_key=engineer_blank_key,
+            select2_key=keys["engineer_2"],
+            manual2_key=keys["engineer_2"],
+        )
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area(
             "Notes (Additional Info)",
             height=80,
@@ -8846,20 +9555,22 @@ def _render_sales_assignment_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(
-                str(st.session_state.get(keys["engineer"], ""))
-            )
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        region = str(st.session_state.get(region_key, "")).strip()
+        central = _sc_region_is_central(region)
+        handle, handle2 = _sc_resolve_sales_engineer_pair(
+            central=central,
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            select_key=keys["engineer"],
+            manual_key=keys["engineer"],
+            select2_key=keys["engineer_2"],
+            manual2_key=keys["engineer_2"],
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
-        region = str(st.session_state.get(region_key, "")).strip()
+        notes = _coassignee_telegram_note(handle2, notes)
         account_name = str(st.session_state.get(account_key, "")).strip()
         if not account_name:
             raise ValueError("Fill **Resort Name / Company Name**.")
@@ -8876,6 +9587,7 @@ def _render_sales_assignment_editor(
         _sc_patch_assignment_fields(
             row_id,
             assigned_to=handle,
+            assigned_to_2=handle2,
             field_task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -8887,7 +9599,7 @@ def _render_sales_assignment_editor(
         return
 
     tg_note = ""
-    if st.session_state.get(keys["sync_tg"]):
+    if handle and st.session_state.get(keys["sync_tg"]):
         token, chat_id = _cc_resolve_telegram_credentials()
         if not token or chat_id is None:
             st.warning(
@@ -8927,6 +9639,7 @@ def _sc_dashboard_reassign_case(
     field_task_category: str,
     additional_info: str | None,
     operator_id: str,
+    assigned_to_2: str | None = None,
 ) -> dict:
     """Reassign field engineer on a sales case (same intent as CSM reassign)."""
     row = _fetch_sales_case_row_by_id(row_id)
@@ -8938,6 +9651,7 @@ def _sc_dashboard_reassign_case(
 
     patch: dict[str, object] = {
         "assigned_to": assigned_to,
+        "assigned_to_2": assigned_to_2,
         "field_task_category": field_task_category,
         "admin_owner": operator_id,
     }
@@ -8985,6 +9699,7 @@ def _render_sales_reassign_editor(
     )
 
     current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
+    current_handle_2 = _sc_row_text(r0.get("assigned_to_2")).lstrip("@")
     current_cat = _sc_row_text(r0.get("field_task_category")) or _sc_row_text(
         r0.get("sales_category")
     )
@@ -8992,14 +9707,17 @@ def _render_sales_reassign_editor(
         r0.get("description")
     )
 
-    cats = field_cats if field_cats else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    if current_cat and current_cat not in cats:
-        cats = [current_cat, *cats]
+    cats = _sales_category_options(field_cats)
+    if current_cat:
+        canon = canonical_task_category(current_cat) or current_cat
+        if canon not in cats:
+            cats = [canon, *cats]
 
     _sync_assignment_edit_widgets(
         keys=keys,
         picked=cref,
         current_handle=current_handle,
+        current_handle_2=current_handle_2,
         current_cat=current_cat,
         current_notes=current_notes,
         cats=cats,
@@ -9008,15 +9726,13 @@ def _render_sales_reassign_editor(
     )
 
     with st.form(f"{edit_key_prefix}_sc_reassign_form", clear_on_submit=False):
-        if fe_names and not fe_missing:
-            st.selectbox(
-                "Engineer",
-                options=[f"@{n}" for n in fe_names],
-                key=keys["engineer"],
-            )
-        else:
-            st.text_input("Engineer", placeholder="username", key=keys["engineer"])
-        st.selectbox("Category", options=cats, key=keys["category"])
+        _render_engineer_pair_fields(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+        )
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area("Notes (Additional Info)", height=80, key=keys["notes"])
         st.checkbox(
             "Post New Telegram Assignment",
@@ -9033,17 +9749,18 @@ def _render_sales_reassign_editor(
         return
 
     try:
-        if fe_names and not fe_missing:
-            handle = _cc_normalize_handle(str(st.session_state.get(keys["engineer"], "")))
-        else:
-            raw = str(st.session_state.get(keys["engineer"], "")).strip()
-            handle = _cc_normalize_handle(raw) if raw else ""
-            if not handle:
-                raise ValueError("Enter an engineer username.")
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+            required_primary=True,
+        )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
             raise ValueError("Pick a category.")
         notes = str(st.session_state.get(keys["notes"], "")).strip() or None
+        notes = _coassignee_telegram_note(handle2, notes)
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -9056,7 +9773,8 @@ def _render_sales_reassign_editor(
     try:
         _sc_dashboard_reassign_case(
             row_id,
-            assigned_to=handle,
+            assigned_to=handle or "",
+            assigned_to_2=handle2,
             field_task_category=cat,
             additional_info=notes,
             operator_id=op,
@@ -9212,7 +9930,9 @@ def _cached_task_categories() -> tuple[tuple[str, ...], bool]:
 
 def _try_fetch_task_categories() -> tuple[list[str], bool]:
     names, missing = _cached_task_categories()
-    return list(names), missing
+    if missing:
+        return list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES), True
+    return _merge_category_option_lists(DEFAULT_ASSIGNMENT_TASK_CATEGORIES, names), False
 
 
 def _try_fetch_task_categories_db_only() -> tuple[list[str], bool]:
@@ -9351,11 +10071,9 @@ def _render_cc_category_row(categories: list[str], *, missing: bool) -> None:
     pending = st.session_state.pop(_CC_CATEGORY_SELECT_PENDING_KEY, None)
     if pending is not None and pending in opts:
         st.session_state[_CC_CATEGORY_SELECT_KEY] = pending
-    else:
-        current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
-        if current not in opts:
-            st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
-    st.selectbox("Category", options=opts, key=_CC_CATEGORY_SELECT_KEY)
+    elif st.session_state.get(_CC_CATEGORY_SELECT_KEY) not in opts:
+        st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
+    _render_category_selectbox("Category", opts, key=_CC_CATEGORY_SELECT_KEY)
     with st.popover("Edit categories", key="cc_categories_popover"):
         _categories_manage_popover(missing=missing)
 
@@ -9380,11 +10098,9 @@ def _render_sales_category_row(
     pending = st.session_state.pop(pending_key, None)
     if pending is not None and pending in opts:
         st.session_state[select_key] = pending
-    else:
-        current = st.session_state.get(select_key)
-        if current not in opts and opts:
-            st.session_state[select_key] = opts[0]
-    st.selectbox(label, options=opts, key=select_key, help=help)
+    elif st.session_state.get(select_key) not in opts:
+        st.session_state.pop(select_key, None)
+    _render_category_selectbox(label, opts, key=select_key, help=help)
     with st.popover("Edit categories", key=popover_key):
         _categories_manage_popover(
             missing=missing,
@@ -9466,33 +10182,30 @@ def _render_cc_engineer_row(
     missing: bool,
     select_key: str = _CC_FE_SELECT_KEY,
     manual_key: str = _CC_FE_MANUAL_KEY,
+    select2_key: str = _CC_FE_SELECT_2_KEY,
+    manual2_key: str = _CC_FE_MANUAL_2_KEY,
     team_popover_key: str = "cc_team_popover",
 ) -> None:
-    """Engineer picker + team list popover."""
+    """Engineer pickers + team list popover."""
     if missing:
         st.info(
             f"Directory table missing — type a username below, or add "
             f"`{FIELD_ENGINEERS_TABLE}` in Supabase."
         )
+        st.text_input("Engineer", placeholder="@ibeyx", key=manual_key)
         st.text_input(
-            "Engineer",
-            placeholder="@ibeyx",
-            key=manual_key,
+            "Engineer 2 (optional)",
+            placeholder="@username (optional)",
+            key=manual2_key,
         )
         return
 
-    if names:
-        st.selectbox(
-            "Engineer",
-            options=[f"@{n}" for n in names],
-            key=select_key,
-        )
-    else:
-        st.text_input(
-            "Engineer",
-            placeholder="@ibeyx",
-            key=manual_key,
-        )
+    _render_engineer_pair_fields(
+        fe_names=names,
+        fe_missing=missing,
+        engineer_key=select_key if names else manual_key,
+        engineer2_key=select2_key if names else manual2_key,
+    )
 
     with st.popover("Edit team", key=team_popover_key):
         _field_team_manage_popover(names, missing=missing)
@@ -9516,9 +10229,14 @@ def _reset_cc_assign_form(*, categories: list[str]) -> None:
     st.session_state[_CC_TICKET_INPUT_KEY] = ""
     st.session_state[_CC_ASSIGN_NOTES_KEY] = ""
     st.session_state[_CC_ADD_UNASSIGNED_KEY] = False
-    opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    if opts:
-        st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+    for k in (
+        _CC_FE_SELECT_KEY,
+        _CC_FE_SELECT_2_KEY,
+        _CC_FE_MANUAL_KEY,
+        _CC_FE_MANUAL_2_KEY,
+    ):
+        st.session_state.pop(k, None)
+    st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
 
 
 def _cc_schedule_assign_form_clear() -> None:
@@ -9566,6 +10284,14 @@ def _reset_sc_cc_sales_ticket_form() -> None:
     st.session_state[_SC_CC_ST_ACCOUNT_KEY] = ""
     st.session_state[_SC_CC_ST_DESC_KEY] = ""
     st.session_state[_SC_CC_SKIP_ASSIGN_KEY] = False
+    for k in (
+        _SC_CC_FE_SELECT_KEY,
+        _SC_CC_FE_SELECT_2_KEY,
+        _SC_CC_FE_MANUAL_KEY,
+        _SC_CC_FE_MANUAL_2_KEY,
+        _SC_CC_ST_SCAT_KEY,
+    ):
+        st.session_state.pop(k, None)
     if _SC_CC_ST_PRIORITY_KEY in st.session_state:
         st.session_state[_SC_CC_ST_PRIORITY_KEY] = SALES_PRIORITY_OPTIONS[-1]
 
@@ -9583,6 +10309,7 @@ def _sc_insert_intake_case(
     queue_metric_label: str,
     clear_sales_ticket_form: bool = False,
     assigned_to: str | None = None,
+    assigned_to_2: str | None = None,
     field_task_category: str | None = None,
     post_telegram: bool = False,
     operator_id: str = "",
@@ -9602,6 +10329,8 @@ def _sc_insert_intake_case(
         row["additional_info"] = description
     if assigned_to:
         row["assigned_to"] = assigned_to
+        if assigned_to_2:
+            row["assigned_to_2"] = assigned_to_2
         row["field_task_category"] = field_task_category
         row["dispatch_region"] = account_region
         row["last_assigned_at"] = _cc_utc_now_iso()
@@ -9676,7 +10405,6 @@ def _sidebar_sales_intake() -> None:
         st.caption("Sign in with an **Operator ID** to create sales cases.")
         return
 
-    attended_by = _sc_attended_by_for_session()
     fe_names, fe_missing = _try_fetch_field_engineer_usernames()
     cat_names, cat_missing = _try_fetch_task_categories()
     token_env = (
@@ -9711,18 +10439,6 @@ def _sidebar_sales_intake() -> None:
                 "Assign an engineer later from the sales work panel."
             ),
         )
-        if not skip_assign:
-            _render_cc_engineer_row(
-                fe_names,
-                missing=fe_missing,
-                select_key=_SC_CC_FE_SELECT_KEY,
-                manual_key=_SC_CC_FE_MANUAL_KEY,
-                team_popover_key="sc_cc_team_popover",
-            )
-        else:
-            st.caption(
-                "No engineer yet — assign from the sales case work panel later."
-            )
         st.text_input(
             "Ticket Number",
             key=_SC_CC_ST_REF_KEY,
@@ -9746,6 +10462,34 @@ def _sidebar_sales_intake() -> None:
                 options=list(SALES_REGION_CODES),
                 key=_SC_CC_ST_REGION_KEY,
             )
+        intake_central = True
+        if not skip_assign:
+            intake_central = _sc_sync_region_engineer_widgets(
+                region_key=_SC_CC_ST_REGION_KEY,
+                region_watch_key="_sc_cc_intake_region_watch",
+                engineer_select_key=_SC_CC_FE_SELECT_KEY,
+                engineer_manual_key=_SC_CC_FE_MANUAL_KEY,
+                engineer_select2_key=_SC_CC_FE_SELECT_2_KEY,
+                engineer_manual2_key=_SC_CC_FE_MANUAL_2_KEY,
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+            )
+            _render_sc_engineer_field(
+                central=intake_central,
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+                select_key=_SC_CC_FE_SELECT_KEY,
+                manual_key=_SC_CC_FE_MANUAL_KEY,
+                blank_key="sc_cc_intake_engineer_blank",
+                select2_key=_SC_CC_FE_SELECT_2_KEY,
+                manual2_key=_SC_CC_FE_MANUAL_2_KEY,
+            )
+            with st.popover("Edit team", key="sc_cc_team_popover"):
+                _field_team_manage_popover(fe_names, missing=fe_missing)
+        else:
+            st.caption(
+                "No engineer yet — assign from the sales case work panel later."
+            )
         _render_sales_category_row(cat_names, missing=cat_missing)
         st.text_area(
             "Notes (Optional)",
@@ -9753,7 +10497,7 @@ def _sidebar_sales_intake() -> None:
             height=64,
             placeholder="Context for the field team",
         )
-        if not skip_assign:
+        if not skip_assign and intake_central:
             if not token_env:
                 st.text_input(
                     "Bot Token (Session Only)",
@@ -9793,23 +10537,30 @@ def _sidebar_sales_intake() -> None:
             return
 
         skip_assign = bool(st.session_state.get(_SC_CC_SKIP_ASSIGN_KEY))
+        region = str(st.session_state.get(_SC_CC_ST_REGION_KEY, "")).strip()
+        central = _sc_region_is_central(region)
         assigned_to: str | None = None
+        assigned_to_2: str | None = None
         field_cat: str | None = None
-        post_telegram = not skip_assign
+        post_telegram = not skip_assign and central
 
-        if post_telegram:
+        if not skip_assign and central:
             field_cat = sales_cat
             try:
-                assigned_to = _cc_resolve_intake_engineer_handle(
-                    fe_names,
+                assigned_to, assigned_to_2 = _sc_resolve_sales_engineer_pair(
+                    central=True,
+                    fe_names=fe_names,
                     fe_missing=fe_missing,
                     select_key=_SC_CC_FE_SELECT_KEY,
                     manual_key=_SC_CC_FE_MANUAL_KEY,
+                    select2_key=_SC_CC_FE_SELECT_2_KEY,
+                    manual2_key=_SC_CC_FE_MANUAL_2_KEY,
                 )
             except ValueError as exc:
                 _sc_set_sales_flash(str(exc), level="error")
                 st.rerun()
                 return
+        if post_telegram:
             token = token_env or str(
                 st.session_state.get(_CC_SESSION_TOKEN_KEY, "")
             ).strip()
@@ -9852,20 +10603,23 @@ def _sidebar_sales_intake() -> None:
                 st.rerun()
                 return
 
+        desc_raw = str(st.session_state.get(_SC_CC_ST_DESC_KEY, "")).strip() or None
+        desc_note = _coassignee_telegram_note(assigned_to_2, desc_raw)
         _sc_insert_intake_case(
             case_ref=cr,
             account_name=an,
-            attended_by=attended_by,
+            attended_by=_sc_sales_attended_by_for_case(assigned_to=assigned_to),
             sales_priority=str(
                 st.session_state.get(_SC_CC_ST_PRIORITY_KEY, "Standard")
             ).strip(),
             account_region=str(st.session_state.get(_SC_CC_ST_REGION_KEY, "")).strip(),
             sales_category=sales_cat,
-            description=str(st.session_state.get(_SC_CC_ST_DESC_KEY, "")).strip() or None,
+            description=desc_note,
             status=SC_STATUS_SALES_TICKET,
             queue_metric_label=SC_STATUS_SALES_TICKET,
             clear_sales_ticket_form=True,
             assigned_to=assigned_to,
+            assigned_to_2=assigned_to_2,
             field_task_category=field_cat,
             post_telegram=post_telegram,
             operator_id=op,
@@ -10029,22 +10783,17 @@ def _sidebar_field_assign() -> None:
         return
 
     try:
-        if fe_names and not fe_missing:
-            pick_choice = st.session_state.get(_CC_FE_SELECT_KEY)
-            if not pick_choice or not str(pick_choice).strip():
-                _cc_set_flash("Pick an engineer from the list.", level="error")
-                st.rerun()
-                return
-            handle = _cc_normalize_handle(str(pick_choice))
-        else:
-            fe_handle_raw = str(st.session_state.get(_CC_FE_MANUAL_KEY, "")).strip()
-            if not fe_handle_raw:
-                _cc_set_flash(
-                    "Enter an engineer Telegram username.", level="error"
-                )
-                st.rerun()
-                return
-            handle = _cc_normalize_handle(fe_handle_raw)
+        handle, handle2 = _resolve_engineer_pair(
+            fe_names=fe_names,
+            fe_missing=fe_missing,
+            engineer_key=_CC_FE_SELECT_KEY if fe_names and not fe_missing else _CC_FE_MANUAL_KEY,
+            engineer2_key=_CC_FE_SELECT_2_KEY if fe_names and not fe_missing else _CC_FE_MANUAL_2_KEY,
+            required_primary=True,
+        )
+        additional_info_val = _coassignee_telegram_note(
+            handle2,
+            str(st.session_state.get(_CC_ASSIGN_NOTES_KEY, "")).strip() or None,
+        )
     except ValueError as exc:
         _cc_set_flash(str(exc), level="error")
         st.rerun()
@@ -10109,6 +10858,7 @@ def _sidebar_field_assign() -> None:
             cat,
             additional_info=additional_info_val,
             operator_id=op_assign,
+            assigned_to_2=handle2,
         )
     except Exception as exc:
         _cc_set_flash(f"Supabase upsert failed: {exc}", level="error")
@@ -10894,6 +11644,9 @@ _BON_THEME_CSS = """
         overflow: hidden;
         background: var(--bon-card);
     }
+    .perf-ss-pill.has-sales {
+        max-width: 20rem;
+    }
     .perf-ss-seg {
         flex: 1 1 50%;
         display: flex;
@@ -10912,6 +11665,12 @@ _BON_THEME_CSS = """
     }
     .perf-ss-seg.shared {
         color: var(--bon-oak);
+    }
+    .perf-ss-pill.has-sales .perf-ss-seg.shared {
+        border-right: 1px solid rgba(215, 180, 145, 0.22);
+    }
+    .perf-ss-seg.sales {
+        color: #b8d4a8;
     }
     .perf-ss-seg .num {
         font-size: 0.88rem;
@@ -10977,88 +11736,6 @@ _BON_THEME_CSS = """
         color: var(--bon-text);
         font-weight: 600;
         margin-left: 0.2rem;
-    }
-    /* Performance Visits — engineer ↔ ticket map */
-    .perf-bipartite-wrap {
-        width: 100%;
-        overflow-x: auto;
-        margin: 0.25rem 0 0.75rem;
-        border: 1px solid rgba(215, 180, 145, 0.22);
-        border-radius: var(--bon-box-radius);
-        background: var(--bon-card);
-    }
-    .perf-bipartite-svg {
-        display: block;
-        width: 100%;
-        min-width: 520px;
-        font-family: var(--bon-font);
-    }
-    .perf-bipartite-svg .eng-box {
-        fill: #141414;
-        stroke: rgba(215, 180, 145, 0.35);
-        stroke-width: 1.2;
-    }
-    .perf-bipartite-svg .eng-box.focus {
-        stroke: var(--bon-oak);
-        stroke-width: 1.8;
-    }
-    .perf-bipartite-svg .eng-label {
-        fill: var(--bon-text);
-        font-size: 11px;
-    }
-    .perf-bipartite-svg .eng-label.focus {
-        fill: var(--bon-oak);
-        font-weight: 600;
-    }
-    .perf-bipartite-svg .ticket-label {
-        fill: var(--bon-muted);
-        font-size: 11px;
-    }
-    .perf-bipartite-svg .ticket-label.shared {
-        fill: var(--bon-oak);
-        font-weight: 600;
-    }
-    .perf-bipartite-svg .link-solo {
-        fill: none;
-        stroke: rgba(158, 197, 232, 0.45);
-        stroke-width: 1.2;
-    }
-    .perf-bipartite-svg .link-shared {
-        fill: none;
-        stroke: rgba(215, 180, 145, 0.55);
-        stroke-width: 1.4;
-    }
-    .perf-bipartite-legend {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.75rem 1.25rem;
-        font-size: 0.72rem;
-        color: var(--bon-muted);
-        margin: 0 0 0.5rem;
-    }
-    .perf-bipartite-legend span {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-    }
-    .perf-bipartite-legend i {
-        display: inline-block;
-        width: 1.4rem;
-        height: 2px;
-        border-radius: 1px;
-    }
-    .perf-bipartite-legend i.solo { background: rgba(158, 197, 232, 0.7); }
-    .perf-bipartite-legend i.shared { background: rgba(215, 180, 145, 0.85); }
-    .perf-bipartite-stats {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem 1rem;
-        font-size: 0.78rem;
-        color: var(--bon-muted);
-        margin-bottom: 0.35rem;
-    }
-    .perf-bipartite-stats strong {
-        color: var(--bon-text);
     }
 </style>
 """
@@ -11185,6 +11862,13 @@ def _dashboard_tickets_in_view(
         return in_range, len(in_range)
     norm = _normalized_status_series(df_all)
     active = df_all[norm.isin(_ACTIVE_QUEUE_STATUSES)].copy()
+    marked = df_all.loc[_ticket_marked_unattended_mask(df_all)].copy()
+    if not marked.empty:
+        active = pd.concat([active, marked], ignore_index=True)
+        if "ticket_number" in active.columns:
+            active = active.drop_duplicates(subset=["ticket_number"], keep="first")
+        else:
+            active = active.drop_duplicates()
     if in_range.empty:
         return active, 0
     if active.empty:
@@ -11229,8 +11913,19 @@ def _dashboard_sales_cases_in_view(
     return merged, len(in_range)
 
 
+def _ticket_marked_unattended_mask(df: pd.DataFrame) -> pd.Series:
+    """Permanent unattended flag — set once on auto-unattended; never cleared."""
+    if df.empty:
+        return pd.Series(dtype=bool)
+    if "marked_unattended_at" in df.columns:
+        return _parse_ts(df["marked_unattended_at"]).notna()
+    if "status" in df.columns:
+        return _normalized_status_series(df).eq(STATUS_UNATTENDED)
+    return pd.Series(False, index=df.index)
+
+
 def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """Boolean masks per queue tab (mutually exclusive on normalized status)."""
+    """Boolean masks per queue tab. Unattended = permanent ``marked_unattended_at`` tag."""
     empty = pd.Series(dtype=bool)
     if df.empty:
         return {
@@ -11247,9 +11942,9 @@ def _ticket_queue_count_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     on_hold = status.eq(STATUS_ON_HOLD)
     open_m = status.eq("Open")
     investigation = status.eq(STATUS_UNDER_INVESTIGATION)
-    unattended = status.eq(STATUS_UNATTENDED)
+    unattended = _ticket_marked_unattended_mask(df)
     completed = status.eq(STATUS_RESOLVED)
-    known = pending | on_hold | open_m | investigation | unattended | completed
+    known = pending | on_hold | open_m | investigation | completed | unattended
     other = ~known & status.ne("")
     return {
         "pending": pending,
@@ -11418,7 +12113,17 @@ def _render_assign_day_metrics(
     if sc_all is not None and not sc_all.empty:
         if "last_assigned_at" in sc_all.columns:
             sc_la = _parse_ts(sc_all["last_assigned_at"])
-            assigned_today += int(((sc_la >= start) & (sc_la <= end)).sum())
+            sc_mask = (sc_la >= start) & (sc_la <= end)
+            if "assigned_to" in sc_all.columns:
+                sc_mask &= (
+                    sc_all["assigned_to"].fillna("").astype(str).str.strip().ne("")
+                )
+            if "status" in sc_all.columns:
+                effective = sc_all["status"].astype(str).str.strip().map(
+                    _sc_effective_status
+                )
+                sc_mask &= effective.ne(SC_STATUS_RESOLVED)
+            assigned_today += int(sc_mask.sum())
         if "created_at" in sc_all.columns:
             created = _parse_ts(sc_all["created_at"])
             attended_today = (created >= start) & (created <= end)
@@ -11665,7 +12370,12 @@ def _ticket_queue_view(
 ) -> pd.DataFrame:
     """Subset and format ticket columns for queue tables."""
     ordered = df if preserve_order else _sort_tickets_newest_first(df)
-    show = [c for c in cols if c in ordered.columns]
+    show: list[str] = []
+    seen: set[str] = set()
+    for c in cols:
+        if c in ordered.columns and c not in seen:
+            seen.add(c)
+            show.append(c)
     if not show:
         return _format_local(ordered)
     view = ordered[show].copy()
@@ -12163,7 +12873,7 @@ def _cc_transfer_ticket_to_sales_case(
     task_cat = str(row.get("task_category") or "").strip() or "Coverage Check"
     notes = str(row.get("additional_info") or "").strip() or None
     assigned = str(row.get("assigned_to") or "").strip() or None
-    attended = str(row.get("dashboard_assigned_by") or "").strip() or operator_id
+    attended = _sc_sales_attended_by_for_case(assigned_to=assigned)
     region = (
         account_region
         if account_region in SALES_REGION_CODES
@@ -12254,6 +12964,7 @@ def _cc_transfer_sales_case_to_ticket(
         assigned_to=assigned,
         additional_info=notes,
         operator_id=operator_id,
+        last_assigned_at=sales_row.get("last_assigned_at"),
     )
     _sales_cases_delete_row(row_id)
     return tid
@@ -12799,22 +13510,20 @@ def _render_sales_case_work_panel(
                     f"sc_region_assign_engineer_form_{key_prefix}",
                     clear_on_submit=False,
                 ):
-                    if fe_names and not fe_missing:
-                        st.selectbox(
-                            "Engineer",
-                            options=[f"@{n}" for n in fe_names],
-                            key="sc_region_assign_fe",
-                        )
-                    else:
-                        st.text_input(
-                            "Engineer @username",
-                            key="sc_region_assign_fe_manual",
-                            placeholder="username",
-                        )
+                    fe_key = f"sc_region_assign_fe_{key_prefix}"
+                    fe2_key = f"sc_region_assign_fe2_{key_prefix}"
+                    fe_man_key = f"sc_region_assign_fe_manual_{key_prefix}"
+                    fe2_man_key = f"sc_region_assign_fe2_manual_{key_prefix}"
+                    _render_engineer_pair_fields(
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        engineer_key=fe_key if fe_names and not fe_missing else fe_man_key,
+                        engineer2_key=fe2_key if fe_names and not fe_missing else fe2_man_key,
+                    )
                     st.checkbox(
                         "Post Assignment to Field Telegram",
                         value=False,
-                        key="sc_region_assign_post_tg",
+                        key=f"sc_region_assign_post_tg_{key_prefix}",
                     )
                     assign_submitted = st.form_submit_button(
                         "Save Engineer Assignment",
@@ -12822,21 +13531,25 @@ def _render_sales_case_work_panel(
                         use_container_width=True,
                     )
                 if assign_submitted:
-                    raw_h = (
-                        str(st.session_state.get("sc_region_assign_fe", "")).strip()
-                        if fe_names and not fe_missing
-                        else str(
-                            st.session_state.get("sc_region_assign_fe_manual", "")
-                        ).strip()
-                    )
                     try:
-                        handle = _cc_normalize_handle(raw_h)
+                        handle, handle2 = _resolve_engineer_pair(
+                            fe_names=fe_names,
+                            fe_missing=fe_missing,
+                            engineer_key=fe_key if fe_names and not fe_missing else fe_man_key,
+                            engineer2_key=fe2_key if fe_names and not fe_missing else fe2_man_key,
+                            required_primary=True,
+                        )
                     except ValueError as ve:
                         st.error(str(ve))
                     else:
-                        patch: dict[str, object] = {"assigned_to": handle}
+                        patch: dict[str, object] = {
+                            "assigned_to": handle,
+                            "assigned_to_2": handle2,
+                        }
                         _sc_stamp_last_assigned_at(patch)
-                        post_tg = bool(st.session_state.get("sc_region_assign_post_tg"))
+                        post_tg = bool(
+                            st.session_state.get(f"sc_region_assign_post_tg_{key_prefix}")
+                        )
                         tg_ok = False
                         if post_tg:
                             token = (
@@ -12857,16 +13570,17 @@ def _render_sales_case_work_panel(
                                 )
                             else:
                                 cref = str(r0.get("case_ref") or "").strip()
+                                tg_info = _coassignee_telegram_note(
+                                    handle2,
+                                    str(r0.get("description") or "").strip() or None,
+                                )
                                 try:
                                     asyncio.run(
                                         notify_telegram_group(
                                             handle.lstrip("@"),
                                             cref or row_id[:8],
                                             fcat,
-                                            additional_info=str(
-                                                r0.get("description") or ""
-                                            )
-                                            or None,
+                                            additional_info=tg_info,
                                             assigned_by=op,
                                             api_id=_read_setting("TG_API_ID")
                                             or _read_setting("TELEGRAM_API_ID")
@@ -12887,6 +13601,8 @@ def _render_sales_case_work_panel(
                             _sales_cases_update_row(row_id, patch)
                             _invalidate_dashboard_data_cache()
                             msg = f"Engineer **{handle}** assigned for **{region_label}**."
+                            if handle2:
+                                msg += f" Co-assignee: **{handle2}**."
                             if post_tg and tg_ok:
                                 msg += " Telegram posted."
                             _sc_set_sales_flash(msg)
@@ -13228,13 +13944,16 @@ def _render_dashboard(
     total_unattended = int(unattended_mask.sum())
     total_completed = int(completed_mask.sum())
     total_other = int(other_mask.sum())
-    total_in_tabs = (
-        total_pending
-        + total_on_hold
-        + total_open
-        + total_investigation
-        + total_unattended
-        + total_completed
+    total_in_tabs = int(
+        (
+            pending_mask
+            | on_hold_mask
+            | open_mask
+            | investigation_mask
+            | completed_mask
+            | unattended_mask
+            | other_mask
+        ).sum()
     )
     total_in_view = len(df) if not df.empty else 0
     if total_other:
@@ -13479,7 +14198,7 @@ def _render_dashboard(
                     )
 
     elif queue_view == "Unattended":
-        st.markdown("##### Unattended — No Same-Day Field Response")
+        st.markdown("##### Unattended — Permanent Record (No Same-Day Field Response)")
         if df.empty:
             st.info(f"No tickets in the last {lookback_days} {day_word}.")
         else:
@@ -13487,18 +14206,21 @@ def _render_dashboard(
             if unat.empty:
                 st.info(
                     "No **Unattended** tickets in this time window. "
-                    "Tickets move here automatically after assign-day cutoff "
-                    "if the engineer never replied."
+                    "When an engineer does not reply before assign-day cutoff, the ticket is "
+                    "marked unattended permanently and moved to **Needs Review** for admin."
                 )
             else:
                 _render_ticket_toolbar_then_table(
                     unat,
                     key_prefix="unattended",
                     cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("additional_info", "last_assigned_at", "unattended_nudge_sent_at"),
-                    caption="Reopen to **Daily Task** to reassign or chase again.",
+                    + ("status", "marked_unattended_at", "additional_info", "unattended_nudge_sent_at"),
+                    caption=(
+                        "Permanent unattended count — stays even if status changes. "
+                        "New auto-unattended tickets appear in **Needs Review** for admin action."
+                    ),
                     status_actions=(
-                        ("Reopen to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
+                        ("Send to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
                     ),
                     allow_delete=True,
                 )
@@ -13780,7 +14502,23 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     n_inv = len(investigation)
     n_hold = len(on_hold)
     n_unatt = len(unattended)
-    n_tab_sum = n_pending + n_open + n_hold + n_done + n_inv + n_unatt
+    if not in_view.empty:
+        _qm = _ticket_queue_count_masks(in_view)
+        n_tab_union = int(
+            (
+                _qm["pending"]
+                | _qm["on_hold"]
+                | _qm["open"]
+                | _qm["investigation"]
+                | _qm["completed"]
+                | _qm["unattended"]
+                | _qm["other"]
+            ).sum()
+        )
+        n_other_status = int(_qm["other"].sum())
+    else:
+        n_tab_union = 0
+        n_other_status = 0
 
     if field_has_data and n_in_view == 0:
         st.info(
@@ -13801,7 +14539,8 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     sales_summary = _perf_build_sales_summary(sales_in_view)
     n_sales = len(sales_in_view)
 
-    if (field_has_data and n_in_view > 0) or n_sales > 0:
+    # Performance tabs — Weekly attended is always in the tab row.
+    if field_has_data or not sales_all.empty or not df_all.empty:
         visits_all = pd.DataFrame()
         try:
             visits_all = _fetch_visits_in_range(range_start, range_end)
@@ -13815,7 +14554,6 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
         overview_table = _perf_attach_sales_to_overview(overview_table, sales_summary)
         people = _perf_focus_people(summary, visits_all, sales_summary)
-        _perf_apply_map_pick_from_query()
         focus = st.selectbox(
             "Focus Assignee (Field)",
             options=people,
@@ -13836,6 +14574,16 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
         work_f = _perf_combine_work(completed_f, investigation_f)
         n_work = len(work_f)
+        responded_in_view = pd.DataFrame()
+        if not visits_all.empty and "outcome" in visits_all.columns:
+            responded_in_view = visits_all[
+                visits_all["outcome"].astype(str).eq("responded")
+            ].copy()
+        n_handled_visit_tickets = (
+            int(responded_in_view["ticket_number"].astype(str).nunique())
+            if not responded_in_view.empty and "ticket_number" in responded_in_view.columns
+            else 0
+        )
         n_filtered = (
             len(pending_f)
             + len(open_f)
@@ -13868,31 +14616,66 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 help="In sidebar range plus any still in an active sales queue.",
             )
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
-        n_visits = len(visits_f)
+        n_case_info = (
+            int(visits_f["ticket_number"].astype(str).nunique())
+            if not visits_f.empty and "ticket_number" in visits_f.columns
+            else 0
+        )
 
         st.caption(
             "**Ticket queues** = current snapshot (`tickets_active`). "
             "**Visit cycles** = per-assignment history (`ticket_visits`, fair credit when A→B→C on one ticket). "
             f"**Visit responded** counts closed cycles; **Handled** is {STATUS_RESOLVED} + Investigation in the window."
         )
-        if focus == "All" and n_tab_sum != n_in_view:
-            st.warning(
-                f"Queue sum (**{n_tab_sum}**) ≠ in view (**{n_in_view}**) — "
-                "some tickets have an unrecognized status."
-            )
+        if focus == "All" and n_tab_union != n_in_view:
+            if n_other_status:
+                raw_other = (
+                    in_view.loc[_qm["other"], "status"]
+                    .astype(str)
+                    .str.strip()
+                    .value_counts()
+                    .head(5)
+                    if not in_view.empty and "status" in in_view.columns
+                    else pd.Series(dtype=int)
+                )
+                detail = ", ".join(f"**{k}** ({v})" for k, v in raw_other.items())
+                st.warning(
+                    f"**{n_other_status}** in-view ticket(s) use a status not mapped to a "
+                    f"queue tab ({detail}). **{n_tab_union}** tabbed vs **{n_in_view}** in view."
+                )
+            else:
+                st.warning(
+                    f"**{n_tab_union}** ticket(s) in queue tabs vs **{n_in_view}** in view — "
+                    "some rows may have a blank or unmappable status."
+                )
 
         n_sales_tab = len(sales_f) if focus not in ("", "All") else n_sales
 
-        tab_overview, tab_sales, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
+        _wk_start, _wk_end, _, _ = _perf_calendar_week_range_utc(week_offset=0)
+        weekly_this_week = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all,
+            range_start=_wk_start,
+            range_end=_wk_end,
+        )
+        n_weekly = int(weekly_this_week["total"])
+
+        tab_overview, tab_weekly, tab_sales, tab_case_info, tab_work, tab_hold, tab_unatt = st.tabs(
             [
                 "Overview",
+                f"Weekly ({n_weekly})",
                 f"Sales Cases ({n_sales_tab})",
-                f"Visits ({n_visits})",
+                f"Case Info ({n_case_info})",
                 f"Handled ({n_work})",
                 f"On Hold ({len(on_hold_f)})",
                 f"Unattended ({len(unattended_f)})",
             ]
         )
+
+        with tab_weekly:
+            _render_perf_weekly_attended_report(
+                df_all, sales_all, this_week_bundle=weekly_this_week
+            )
 
         with tab_overview:
             _render_perf_solo_shared_board(
@@ -13903,7 +14686,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             )
             if not overview_table.empty:
                 _render_perf_queue_strip(overview_table, focus=focus)
-            _render_perf_solo_shared_detail(visits_all, focus=focus)
+            _render_perf_solo_shared_detail(
+                visits_all, focus=focus, sales_cases=sales_in_view,
+            )
 
         with tab_sales:
             _render_perf_sales_cases_tab(
@@ -13914,14 +14699,14 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 axis_format=axis_format,
             )
 
-        with tab_visits:
-            _render_perf_visits_tab(visits_all, focus=focus)
+        with tab_case_info:
+            _render_perf_case_info_tab(visits_all, focus=focus)
 
         with tab_work:
             st.caption(
-                f"**Visit responded** = fair per-engineer credit from `ticket_visits`. "
-                f"**Handled (tickets)** = {STATUS_RESOLVED} + Investigation on the ticket snapshot "
-                "(often credits the current assignee only)."
+                f"**Handled tab ({n_work})** = {STATUS_RESOLVED} + Investigation ticket snapshot. "
+                f"**Visit fair credit** = distinct tickets per engineer from responded visits "
+                f"({n_handled_visit_tickets} unique tickets in range)."
             )
             if work_f.empty and visits_f.empty:
                 st.info("No resolved/investigation tickets or visits for this filter.")
@@ -13930,12 +14715,14 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 c_chart, c_table = st.columns([3, 2])
                 with c_chart:
                     if not visits_f.empty:
-                        responded_visits = visits_f[visits_f["outcome"] == "responded"]
+                        responded_visits = visits_f[
+                            visits_f["outcome"].astype(str).eq("responded")
+                        ]
                         if responded_visits.empty:
                             st.caption("No responded visits in this time range.")
                         else:
                             st.markdown("**Handled by visit assignee (fair credit)**")
-                            _render_visit_bar(responded_visits, outcome=None)
+                            _render_handled_visit_credit_bar(responded_visits)
                     elif not view.empty:
                         _render_perf_person_bar(
                             view,
@@ -14019,7 +14806,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_unatt:
             st.caption(
-                "No same-day field response before assign-day cutoff — per assignee."
+                "No same-day field response before assign-day cutoff — listed for "
+                "accountability only; **does not count** toward Overview credit, "
+                "Handled, or Weekly attended."
             )
             if unattended_f.empty:
                 st.info("No unattended tickets for this filter.")

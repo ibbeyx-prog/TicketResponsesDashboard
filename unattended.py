@@ -10,9 +10,15 @@ from typing import Any
 log = logging.getLogger("unattended")
 
 STATUS_UNATTENDED = "Unattended"
+STATUS_NEEDS_REVIEW = "Open"
 STATUS_DAILY_TASK = "Daily Task"
 # Legacy rows may still say Pending before migration 20260626.
 DAILY_TASK_STATUSES: tuple[str, ...] = (STATUS_DAILY_TASK, "Pending")
+
+
+def is_daily_task_status(status: object) -> bool:
+    return str(status or "").strip() in DAILY_TASK_STATUSES
+
 
 UNATTENDED_NUDGE_HOURS = float(os.getenv("UNATTENDED_NUDGE_HOURS", "6"))
 UNATTENDED_POLL_MINUTES = float(os.getenv("UNATTENDED_POLL_MINUTES", "15"))
@@ -124,7 +130,8 @@ def _fetch_pending_tickets(client: Any, *, tickets_table: str) -> list[dict]:
         client.table(tickets_table)
         .select(
             "ticket_number, assigned_to, task_category, status, "
-            "last_assigned_at, responded_at, unattended_nudge_sent_at"
+            "last_assigned_at, responded_at, unattended_nudge_sent_at, "
+            "marked_unattended_at"
         )
         .in_("status", list(DAILY_TASK_STATUSES))
         .limit(500)
@@ -191,7 +198,10 @@ def run_unattended_close(
     tickets_table: str,
     attendance_table: str,
 ) -> dict[str, int]:
-    """Move eligible Pending tickets to ``Unattended``."""
+    """Mark eligible Daily Task tickets as unattended and move to **Needs Review** (Open).
+
+    Sets ``marked_unattended_at`` once (permanent count). Status becomes Open for admin.
+    """
     pending = _fetch_pending_tickets(client, tickets_table=tickets_table)
     now_iso = datetime.now(timezone.utc).isoformat()
     closed = 0
@@ -202,18 +212,22 @@ def run_unattended_close(
         if not ticket:
             continue
         try:
-            client.table(tickets_table).update(
-                {
-                    "status": STATUS_UNATTENDED,
-                    "updated_at": now_iso,
-                }
-            ).eq("ticket_number", ticket).execute()
+            payload: dict[str, object] = {
+                "status": STATUS_NEEDS_REVIEW,
+                "updated_at": now_iso,
+            }
+            if not row.get("marked_unattended_at"):
+                payload["marked_unattended_at"] = now_iso
+            client.table(tickets_table).update(payload).eq("ticket_number", ticket).execute()
             client.table(attendance_table).insert(
                 {
                     "ticket_number": ticket,
                     "member_username": "@system",
                     "action_type": "AutoUnattended",
-                    "note": "No field response before assign-day cutoff; closed from Daily Task.",
+                    "note": (
+                        "No field response before assign-day cutoff; "
+                        "marked unattended and moved to Needs Review."
+                    ),
                     "timestamp": now_iso,
                 }
             ).execute()

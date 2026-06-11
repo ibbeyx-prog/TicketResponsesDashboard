@@ -239,6 +239,8 @@ export function normalizePayload(raw: unknown): MatrixPayload {
     staffMembers: Array.isArray(obj.staffMembers) ? obj.staffMembers : [],
     staffColors:
       obj.staffColors && typeof obj.staffColors === "object" ? obj.staffColors : {},
+    lookupTicket:
+      typeof obj.lookupTicket === "string" ? obj.lookupTicket : undefined,
     summary: obj.summary ?? buildSummary(tickets),
   };
 }

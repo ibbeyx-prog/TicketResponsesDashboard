@@ -1448,6 +1448,69 @@ def _normalize_visit_assignee(raw: object) -> str:
     return f"@{s.lower()}" if s else ""
 
 
+def _bot_visits_deactivate_ticket(ticket_number: str) -> None:
+    try:
+        supabase.table(TICKET_VISITS_TABLE).update({"is_active": False}).eq(
+            "ticket_number", str(ticket_number).strip()
+        ).eq("is_active", True).execute()
+    except Exception:
+        pass
+
+
+def _bot_visits_open_new(
+    ticket_number: str,
+    assignee: str,
+    *,
+    visit_start: str | None = None,
+) -> None:
+    """Insert a new open visit row (outcome = 'assigned', is_active = true)."""
+    tn = str(ticket_number).strip()
+    engineer = _normalize_visit_assignee(assignee)
+    if not tn or not engineer:
+        return
+    try:
+        _bot_visits_deactivate_ticket(tn)
+        supabase.table(TICKET_VISITS_TABLE).insert(
+            {
+                "ticket_number": tn,
+                "assignee": engineer,
+                "visit_start": visit_start or _utc_now_iso(),
+                "visit_end": None,
+                "outcome": "assigned",
+                "closed_by": "bot",
+                "is_active": True,
+            }
+        ).execute()
+    except Exception:
+        log.exception("visit open failed for ticket %s", ticket_number)
+
+
+def _bot_visits_reassign(
+    ticket_number: str,
+    new_assignee: str,
+    *,
+    now_iso: str | None = None,
+) -> None:
+    ts = now_iso or _utc_now_iso()
+    try:
+        payload = {
+            "visit_end": ts,
+            "outcome": "reassigned",
+            "closed_by": "bot",
+            "is_active": False,
+        }
+        tn = str(ticket_number).strip()
+        supabase.table(TICKET_VISITS_TABLE).update(payload).eq(
+            "ticket_number", tn
+        ).eq("is_active", True).execute()
+        supabase.table(TICKET_VISITS_TABLE).update(payload).eq(
+            "ticket_number", tn
+        ).is_("visit_end", "null").execute()
+    except Exception:
+        log.exception("visit reassign close failed for ticket %s", ticket_number)
+    _bot_visits_open_new(ticket_number, new_assignee, visit_start=ts)
+
+
 def _bot_visits_close_responded(
     ticket_number: str,
     *,
@@ -1648,6 +1711,7 @@ def _db_insert_assignment(
         action_type="Assignment",
         note=additional_info,
     )
+    _bot_visits_open_new(ticket_number, assigned_to, visit_start=now_iso)
 
 
 def _db_reassign_ticket(
@@ -1695,6 +1759,7 @@ def _db_reassign_ticket(
         action_type="Assignment",
         note=additional_info,
     )
+    _bot_visits_reassign(ticket_number, assigned_to, now_iso=now_iso)
 
 
 def _same_assignment_target(
@@ -3148,7 +3213,7 @@ async def cron_unattended_nudge(request: Request) -> dict[str, object]:
 
 @app.post("/cron/unattended-close")
 async def cron_unattended_close(request: Request) -> dict[str, object]:
-    """Close same-day Pending tickets with no field response as Unattended."""
+    """Mark auto-unattended Daily Task tickets and move them to Needs Review (Open)."""
     _verify_cron_secret(request)
     stats = run_unattended_close(
         supabase,
