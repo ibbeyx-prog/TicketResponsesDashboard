@@ -1,14 +1,14 @@
 import { MultiStaffCaseMatrix } from "./components/MultiStaffCaseMatrix";
 import { buildDemoPayload, normalizePayload } from "./data/demoPayload";
-import type { MatrixPayload } from "./types/ticket";
+import type { MatrixComponentValue, MatrixPayload } from "./types/ticket";
 
 interface AppProps {
   payload?: MatrixPayload;
   height?: number;
-  onTicketSelect?: (ticketId: string | null) => void;
+  onLookupChange?: (value: MatrixComponentValue) => void;
 }
 
-export default function App({ payload, height = 720, onTicketSelect }: AppProps) {
+export default function App({ payload, height = 720, onLookupChange }: AppProps) {
   const data = payload ?? buildDemoPayload(1200);
 
   if (!data.tickets.length) {
@@ -20,7 +20,7 @@ export default function App({ payload, height = 720, onTicketSelect }: AppProps)
   }
 
   return (
-    <MultiStaffCaseMatrix payload={data} height={height} onTicketSelect={onTicketSelect} />
+    <MultiStaffCaseMatrix payload={data} height={height} onLookupChange={onLookupChange} />
   );
 }
 

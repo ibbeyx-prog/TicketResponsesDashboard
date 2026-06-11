@@ -9,7 +9,14 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MatrixFilters, MatrixPayload, MatrixSummary, Ticket } from "../types/ticket";
+import type {
+  MatrixComponentValue,
+  MatrixFilters,
+  MatrixPayload,
+  MatrixSummary,
+  Ticket,
+} from "../types/ticket";
+import { normalizeTicketLookup } from "../utils/ticketLookup";
 import { CaseInfoPanel } from "./CaseInfoPanel";
 import { MatrixFilterBar } from "./MatrixFilterBar";
 import { MatrixHeader } from "./MatrixHeader";
@@ -66,23 +73,23 @@ function SortIcon({ sorted }: { sorted: false | "asc" | "desc" }) {
 interface MultiStaffCaseMatrixProps {
   payload: MatrixPayload;
   height?: number;
-  onTicketSelect?: (ticketId: string | null) => void;
+  onLookupChange?: (value: MatrixComponentValue) => void;
 }
 
 export function MultiStaffCaseMatrix({
   payload,
   height = 720,
-  onTicketSelect,
+  onLookupChange,
 }: MultiStaffCaseMatrixProps) {
   const { tickets, staffMembers, staffColors } = payload;
   const summary = payload.summary ?? buildSummary(tickets);
 
-  const [filters, setFilters] = useState<MatrixFilters>({
-    search: "",
+  const [filters, setFilters] = useState<MatrixFilters>(() => ({
+    search: payload.lookupTicket ?? "",
     staff: "All",
     priority: "All",
     status: "All",
-  });
+  }));
   const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -90,6 +97,31 @@ export function MultiStaffCaseMatrix({
     () => tickets.filter((t) => matchesFilters(t, filters)),
     [tickets, filters],
   );
+
+  useEffect(() => {
+    if (payload.lookupTicket && payload.lookupTicket !== filters.search) {
+      setFilters((prev) => ({ ...prev, search: payload.lookupTicket ?? "" }));
+    }
+  }, [payload.lookupTicket, filters.search]);
+
+  useEffect(() => {
+    if (!onLookupChange) return undefined;
+    const timer = window.setTimeout(() => {
+      const trimmed = filters.search.trim();
+      const normalized = normalizeTicketLookup(trimmed);
+      const serverLookup = payload.lookupTicket ?? "";
+      if (trimmed === "") {
+        if (serverLookup !== "") {
+          onLookupChange({ lookup: "" });
+        }
+        return;
+      }
+      if (normalized && normalized !== serverLookup) {
+        onLookupChange({ lookup: normalized });
+      }
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [filters.search, onLookupChange, payload.lookupTicket]);
 
   useEffect(() => {
     if (!filteredTickets.length) {
@@ -197,7 +229,6 @@ export function MultiStaffCaseMatrix({
 
   const selectTicket = (ticket: Ticket) => {
     setSelectedId(ticket.id);
-    onTicketSelect?.(ticket.id);
   };
 
   const chromeH = 200;

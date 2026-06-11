@@ -21,7 +21,7 @@ function ConnectedMatrix(props: { args: StreamlitArgs }) {
     <App
       payload={payload}
       height={height}
-      onTicketSelect={(ticketId) => Streamlit.setComponentValue(ticketId)}
+      onLookupChange={(value) => Streamlit.setComponentValue(value)}
     />
   );
 }

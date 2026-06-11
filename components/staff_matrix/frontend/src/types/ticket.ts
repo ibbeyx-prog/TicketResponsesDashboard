@@ -59,11 +59,18 @@ export interface MatrixSummary {
   topCollaborativeStaffCount: number;
 }
 
+/** Value sent to Streamlit when Ticket ID search triggers a server lookup. */
+export interface MatrixComponentValue {
+  lookup: string;
+}
+
 /** Payload from Streamlit / demo loader. */
 export interface MatrixPayload {
   tickets: Ticket[];
   staffMembers: string[];
   staffColors: Record<string, string>;
+  /** Active server-side ticket lookup (9 or 16 digits). */
+  lookupTicket?: string;
   summary?: MatrixSummary;
 }
 

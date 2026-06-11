@@ -913,6 +913,47 @@ def _render_engineer_pair_fields(
     )
 
 
+def _render_category_selectbox(
+    label: str,
+    options: list[str],
+    *,
+    key: str,
+    help: str | None = None,
+) -> None:
+    """Category picker — empty on first open (no auto-selected first option)."""
+    if not options:
+        st.selectbox(label, options=["—"], key=key, disabled=True, help=help)
+        return
+    st.selectbox(
+        label,
+        options=options,
+        index=None,
+        placeholder="Select category",
+        key=key,
+        help=help,
+    )
+
+
+def _sync_category_widget_value(
+    *,
+    key: str,
+    current_cat: str,
+    options: list[str],
+) -> None:
+    """Set category widget only when the ticket already has a category."""
+    cat = (current_cat or "").strip()
+    if not cat:
+        st.session_state.pop(key, None)
+        return
+    canon = canonical_task_category(cat) or cat
+    if canon in options:
+        st.session_state[key] = canon
+    elif cat in options:
+        st.session_state[key] = cat
+    else:
+        st.session_state.pop(key, None)
+
+
 def _sync_engineer_widget_value(
     *,
     key: str,
@@ -1022,8 +1063,10 @@ def _sync_assignment_edit_widgets(
                 fe_names=fe_names,
                 fe_missing=fe_missing,
             )
-    st.session_state[keys["category"]] = (
-        current_cat if current_cat in cats else (cats[0] if cats else "")
+    _sync_category_widget_value(
+        key=keys["category"],
+        current_cat=current_cat,
+        options=cats,
     )
     st.session_state[keys["notes"]] = current_notes
 
@@ -5073,6 +5116,60 @@ def _fetch_visits_in_range(
     return _perf_prepare_visits_df(pd.DataFrame(rows))
 
 
+def _perf_normalize_matrix_lookup(raw: object) -> str:
+    """Digits-only ticket id for matrix lookup (9 or 16 digits)."""
+    digits = re.sub(r"\D", "", str(raw or "").strip())
+    if len(digits) in (9, 16):
+        return digits
+    return ""
+
+
+def _perf_matrix_sync_lookup_from_component() -> str:
+    """Read Ticket ID search from matrix component state (single search box)."""
+    ret = st.session_state.get(_PERF_MATRIX_COMPONENT_KEY)
+    if isinstance(ret, dict) and "lookup" in ret:
+        raw = str(ret.get("lookup") or "").strip()
+        if not raw:
+            st.session_state.pop(_PERF_MATRIX_LOOKUP_KEY, None)
+            return ""
+        normalized = _perf_normalize_matrix_lookup(raw)
+        if normalized:
+            st.session_state[_PERF_MATRIX_LOOKUP_KEY] = normalized
+            return normalized
+    elif isinstance(ret, str) and ret.strip():
+        normalized = _perf_normalize_matrix_lookup(ret.strip())
+        if normalized:
+            st.session_state[_PERF_MATRIX_LOOKUP_KEY] = normalized
+            return normalized
+    return str(st.session_state.get(_PERF_MATRIX_LOOKUP_KEY, "") or "").strip()
+
+
+def _perf_matrix_merge_ticket_lookup(
+    visits_all: pd.DataFrame,
+    lookup: str,
+) -> pd.DataFrame:
+    """Merge visit rows for a ticket id — ignores sidebar date range."""
+    tid = _perf_normalize_matrix_lookup(lookup)
+    if not tid:
+        return visits_all
+    extra = _fetch_visits_for_tickets([tid])
+    if extra.empty:
+        return visits_all
+    parts = [df for df in (visits_all, extra) if not df.empty]
+    if not parts:
+        return extra
+    merged = pd.concat(parts, ignore_index=True)
+    dedupe_cols = [c for c in ("id", "ticket_number", "assignee", "visit_start") if c in merged.columns]
+    if "id" in dedupe_cols:
+        merged = merged.drop_duplicates(subset=["id"], keep="last")
+    elif {"ticket_number", "assignee", "visit_start"}.issubset(merged.columns):
+        merged = merged.drop_duplicates(
+            subset=["ticket_number", "assignee", "visit_start"],
+            keep="last",
+        )
+    return _perf_prepare_visits_df(merged)
+
+
 def _perf_prepare_visits_df(visits: pd.DataFrame) -> pd.DataFrame:
     """Normalize assignee labels and boolean flags for Performance UI."""
     if visits.empty:
@@ -5598,28 +5695,8 @@ def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
     }
 
 
-def _perf_apply_map_pick_from_query() -> None:
-    """Apply engineer pick from Visits map click (?perf_map_pick=)."""
-    if "perf_map_pick" not in st.query_params:
-        return
-    raw = str(st.query_params.get("perf_map_pick", "") or "").strip()
-    try:
-        del st.query_params["perf_map_pick"]
-    except Exception:
-        pass
-    if raw.lower() in ("", "all", "__all__"):
-        st.session_state["perf_focus_person"] = "All"
-    else:
-        st.session_state["perf_focus_person"] = _perf_norm_member(raw)
-    st.rerun()
-
-
-_PERF_MAP_ENG_ROW_H = 30.0
-_PERF_MAP_PAD_V = 10.0
-_PERF_MAP_VIEWPORT_PX = 760
-_PERF_MAP_TICKET_NODE_R = 2.5
-_PERF_MAP_RING_EXTRA = 100.0
-_PERF_MAP_IFRAME_MAX = 2400
+_PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
+_PERF_MATRIX_COMPONENT_KEY = "perf_staff_matrix"
 _PERF_MATRIX_MAX_TICKETS = 40
 _PERF_MATRIX_OUTCOME_STYLE: dict[str, tuple[str, str]] = {
     "assigned": ("A", "#9ec5e8"),
@@ -5646,349 +5723,12 @@ _PERF_MATRIX_STATUS_RANK: tuple[str, ...] = (
 )
 
 
-def _perf_map_ticket_layout(n: int) -> tuple[float, float, float, int]:
-    """Row height, label font (px), highlight font (px), max chars — scale down as count grows."""
-    if n <= 6:
-        return (15.0, 7.0, 7.5, 20)
-    if n <= 12:
-        return (12.0, 6.5, 7.0, 18)
-    if n <= 20:
-        return (10.0, 6.0, 6.5, 16)
-    if n <= 35:
-        return (8.0, 5.5, 6.0, 14)
-    if n <= 55:
-        return (6.5, 5.0, 5.5, 12)
-    return (5.5, 4.5, 5.0, 11)
-
-
-def _perf_map_expand_layout(
-    *,
-    n_eng: int,
-    n_tick: int,
-    ticket_row_h: float,
-    ticket_font: float,
-    ticket_font_hl: float,
-    viewport_px: int,
-) -> tuple[float, float, float, float]:
-    """Grow row spacing and fonts to fill the visible iframe when content is short."""
-    band_top = _PERF_MAP_PAD_V + 6.0
-    legend_h = 48
-    usable_inner = float(viewport_px) - legend_h - band_top * 2 - 22.0
-    eng_band = max(0, n_eng - 1) * _PERF_MAP_ENG_ROW_H
-    tick_band = max(0, n_tick - 1) * ticket_row_h
-    inner_h = max(eng_band, tick_band, 1.0)
-    if n_tick > 1 and tick_band < usable_inner:
-        grown_row = min(22.0, usable_inner / float(n_tick - 1))
-        if grown_row > ticket_row_h:
-            ticket_row_h = grown_row
-            boost = min(1.5, (grown_row - 8.0) * 0.12)
-            ticket_font = min(8.0, ticket_font + boost)
-            ticket_font_hl = min(8.5, ticket_font_hl + boost)
-            tick_band = (n_tick - 1) * ticket_row_h
-            inner_h = max(eng_band, tick_band, 1.0)
-    return ticket_row_h, ticket_font, ticket_font_hl, inner_h
-
-
-def _perf_map_band_y_positions(
-    count: int,
-    row_h: float,
-    *,
-    inner_h: float,
-    band_top: float,
-) -> list[float]:
-    """Evenly spaced rows inside a band — compact tickets, readable engineers."""
-    if count <= 0:
-        return []
-    if count == 1:
-        return [band_top + inner_h / 2.0]
-    band_h = (count - 1) * row_h
-    offset = band_top + max(0.0, (inner_h - band_h) / 2.0)
-    return [offset + i * row_h for i in range(count)]
-
-
-def _perf_radial_ticket_font(n: int) -> tuple[float, float, int]:
-    """Label font (px), highlight font (px), max chars — scale down as ticket count grows."""
-    if n <= 12:
-        return (8.0, 9.0, 18)
-    if n <= 24:
-        return (7.0, 8.0, 14)
-    if n <= 48:
-        return (6.0, 7.0, 12)
-    if n <= 80:
-        return (5.5, 6.5, 11)
-    if n <= 120:
-        return (5.0, 6.0, 10)
-    return (4.5, 5.5, 9)
-
-
-def _perf_radial_map_geometry(
-    *,
-    n_tick: int,
-    hub_row_w: float,
-    hub_box_h: float,
-    ticket_font: float,
-) -> tuple[float, float, float, float]:
-    """Return cx, cy, ticket ring radius, and square svg size."""
-    hub_span = max(hub_row_w / 2.0 + 24.0, hub_box_h / 2.0 + 28.0)
-    min_radius = hub_span + 92.0
-    arc_per = max(12.0, ticket_font * 7.0)
-    ring_radius = (n_tick * arc_per) / (2.0 * math.pi) if n_tick else min_radius
-    radius = max(min_radius, ring_radius, 120.0) + _PERF_MAP_RING_EXTRA
-    label_outset = 16.0 + ticket_font * 2.2
-    margin = hub_span + 40.0
-    svg_size = 2.0 * (radius + label_outset + margin)
-    svg_size = max(float(_PERF_MAP_VIEWPORT_PX), min(svg_size, float(_PERF_MAP_IFRAME_MAX)))
-    cx = cy = svg_size / 2.0
-    return cx, cy, radius, svg_size
-
-
-def _perf_engineer_portrait_label(eng: str) -> str:
-    short = eng if len(eng) <= 11 else eng[:10] + "…"
-    return short
-
-
-def _perf_engineer_portrait_dims(n_eng: int) -> tuple[float, float, float]:
-    """Narrow vertical engineer card: width, height, gap."""
-    box_w = 38.0
-    box_h = 58.0 if n_eng <= 4 else 52.0 if n_eng <= 6 else 46.0
-    gap = 10.0 if n_eng <= 5 else 7.0
-    return box_w, box_h, gap
-
-
-def _perf_hub_engineer_layout_row(
-    *,
-    cx: float,
-    cy: float,
-    engineers: list[str],
-    eng_box_w: float,
-    eng_box_h: float,
-    eng_gap: float,
-) -> tuple[dict[str, tuple[float, float]], dict[str, int], float, float, float]:
-    """Portrait cards in a horizontal row; return positions, indices, row width, left/right x."""
-    n = len(engineers)
-    if n == 0:
-        return {}, {}, 0.0, cx, cx
-    row_w = n * eng_box_w + max(0, n - 1) * eng_gap
-    start_x = cx - row_w / 2.0 + eng_box_w / 2.0
-    positions: dict[str, tuple[float, float]] = {}
-    indices: dict[str, int] = {}
-    for i, eng in enumerate(engineers):
-        indices[eng] = i
-        positions[eng] = (start_x + i * (eng_box_w + eng_gap), cy)
-    hub_left_x = start_x - eng_box_w / 2.0
-    hub_right_x = start_x + (n - 1) * (eng_box_w + eng_gap) + eng_box_w / 2.0
-    return positions, indices, row_w, hub_left_x, hub_right_x
-
-
-def _perf_hub_engineer_sector_angle(eng_index: int, n_eng: int) -> float:
-    """Map hub column to ticket-ring sector (left engineer → left arc, right → right)."""
-    if n_eng <= 1:
-        return 0.0
-    return math.pi - (math.pi * eng_index / (n_eng - 1))
-
-
-def _perf_engineer_touch_anchors(
-    ex: float,
-    ey: float,
-    box_w: float,
-    box_h: float,
-    *,
-    eng_index: int,
-    n_eng: int,
-) -> dict[str, tuple[float, float]]:
-    """Fixed touch points: left/right box → top, bottom, side; middle → top, bottom only."""
-    hw, hh = box_w / 2.0, box_h / 2.0
-    x0, y0 = ex - hw, ey - hh
-    x1, y1 = ex + hw, ey + hh
-    anchors: dict[str, tuple[float, float]] = {
-        "top": (ex, y0),
-        "bottom": (ex, y1),
-    }
-    if n_eng <= 1:
-        anchors["left"] = (x0, ey)
-        anchors["right"] = (x1, ey)
-    elif eng_index == 0:
-        anchors["left"] = (x0, ey)
-    elif eng_index == n_eng - 1:
-        anchors["right"] = (x1, ey)
-    return anchors
-
-
-def _perf_pick_touch_side(
-    anchors: dict[str, tuple[float, float]],
-    *,
-    tx: float,
-    ty: float,
-    ex: float,
-    ey: float,
-    eng_index: int,
-    n_eng: int,
-) -> str:
-    """Choose touch point closest to ticket; left/right only when ticket is on that side."""
-    best_side = "top"
-    best_dist = float("inf")
-    for side, (ax, ay) in anchors.items():
-        dist = math.hypot(tx - ax, ty - ay)
-        if side == "left" and tx > ex + 4.0:
-            dist += 800.0
-        elif side == "right" and tx < ex - 4.0:
-            dist += 800.0
-        elif side == "left" and eng_index == 0 and tx < ex:
-            dist *= 0.72
-        elif side == "right" and eng_index == n_eng - 1 and tx > ex:
-            dist *= 0.72
-        if dist < best_dist:
-            best_dist = dist
-            best_side = side
-    if best_side in anchors:
-        return best_side
-    return "top" if ty < ey else "bottom"
-
-
-def _perf_curved_link_path(
-    sx: float,
-    sy: float,
-    tx: float,
-    ty: float,
-    *,
-    side: str,
-    bow: float = 32.0,
-) -> str:
-    """Quadratic curve from box touch point to ticket."""
-    if side == "left":
-        cpx, cpy = sx - bow, (sy + ty) / 2.0
-    elif side == "right":
-        cpx, cpy = sx + bow, (sy + ty) / 2.0
-    elif side == "top":
-        cpx, cpy = (sx + tx) / 2.0, sy - bow
-    else:
-        cpx, cpy = (sx + tx) / 2.0, sy + bow
-    return f"M {sx:.1f} {sy:.1f} Q {cpx:.1f} {cpy:.1f} {tx:.1f} {ty:.1f}"
-
-
-def _perf_box_edge_on_side(
-    ex: float,
-    ey: float,
-    box_w: float,
-    box_h: float,
-    tx: float,
-    ty: float,
-    *,
-    side: str,
-) -> tuple[float, float]:
-    """Fixed center touch point on the chosen face (matches hub mockup)."""
-    del tx, ty
-    anchors = _perf_engineer_touch_anchors(
-        ex, ey, box_w, box_h, eng_index=0, n_eng=1,
-    )
-    if side not in anchors:
-        hw, hh = box_w / 2.0, box_h / 2.0
-        if side == "left":
-            return ex - hw, ey
-        if side == "right":
-            return ex + hw, ey
-        if side == "top":
-            return ex, ey - hh
-        return ex, ey + hh
-    return anchors[side]
-
-
-def _perf_link_endpoint_at_ticket(
-    sx: float,
-    sy: float,
-    tx: float,
-    ty: float,
-    *,
-    node_r: float = _PERF_MAP_TICKET_NODE_R,
-) -> tuple[float, float]:
-    """Stop the wire at the ticket dot, not past it."""
-    dx, dy = tx - sx, ty - sy
-    dist = math.hypot(dx, dy)
-    if dist < node_r + 0.5:
-        return tx, ty
-    scale = (dist - node_r) / dist
-    return sx + dx * scale, sy + dy * scale
-
-
-def _perf_straight_link_path(sx: float, sy: float, tx: float, ty: float) -> str:
-    return f"M {sx:.1f} {sy:.1f} L {tx:.1f} {ty:.1f}"
-
-
-def _perf_radial_ticket_order(
-    tickets: list[str],
-    ticket_engineers: dict[str, set[str]],
-    eng_angles: dict[str, float],
-) -> list[str]:
-    """Order tickets around the ring near their engineers' sectors — fewer crossings."""
-
-    def _key(tn: str) -> tuple[float, str]:
-        engs = ticket_engineers.get(tn, set())
-        if not engs:
-            return (0.0, tn.lower())
-        avg = sum(eng_angles.get(e, 0.0) for e in engs) / len(engs)
-        return (avg, tn.lower())
-
-    return sorted(tickets, key=_key)
-
-
-def _perf_box_edge_toward(
-    cx: float,
-    cy: float,
-    box_w: float,
-    box_h: float,
-    tx: float,
-    ty: float,
-) -> tuple[float, float]:
-    """Point on rectangle edge toward target (tx, ty)."""
-    dx, dy = tx - cx, ty - cy
-    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
-        return cx, cy
-    hw, hh = box_w / 2.0, box_h / 2.0
-    scale_x = hw / abs(dx) if abs(dx) > 1e-9 else float("inf")
-    scale_y = hh / abs(dy) if abs(dy) > 1e-9 else float("inf")
-    scale = min(scale_x, scale_y)
-    return cx + dx * scale, cy + dy * scale
-
-
-def _perf_radial_text_anchor(angle: float) -> str:
-    cos_a = math.cos(angle)
-    if cos_a > 0.3:
-        return "start"
-    if cos_a < -0.3:
-        return "end"
-    return "middle"
-
-
-def _perf_radial_link_path(
-    sx: float,
-    sy: float,
-    tx: float,
-    ty: float,
-    *,
-    hub_x: float,
-    hub_y: float,
-    corridor_r: float,
-) -> str:
-    """Cubic curve via a corridor point on the ticket's radial — avoids hub clutter."""
-    tick_angle = math.atan2(ty - hub_y, tx - hub_x)
-    mx = hub_x + corridor_r * math.cos(tick_angle)
-    my = hub_y + corridor_r * math.sin(tick_angle)
-    c1x = sx + (mx - sx) * 0.62
-    c1y = sy + (my - sy) * 0.62
-    c2x = tx + (mx - tx) * 0.62
-    c2y = ty + (my - ty) * 0.62
-    return (
-        f"M {sx:.1f} {sy:.1f} C {c1x:.1f} {c1y:.1f}, {c2x:.1f} {c2y:.1f}, "
-        f"{tx:.1f} {ty:.1f}"
-    )
-
-
 def _perf_visit_bipartite_data(
     visits: pd.DataFrame,
     *,
     focus: str,
 ) -> dict[str, object] | None:
-    """Engineers, tickets, and visit links for the Visits tab map."""
+    """Engineers, tickets, and visit links for the Case Info tab matrix."""
     if visits.empty or "ticket_number" not in visits.columns or "assignee" not in visits.columns:
         return None
     prepared = _perf_prepare_visits_df(visits)
@@ -6052,29 +5792,11 @@ def _perf_bipartite_ticket_order(
     return sorted(tickets, key=_key)
 
 
-def _perf_visit_map_caption(
-    pool_total: int,
-    total_all: int,
-    *,
-    focus_key: str,
-) -> None:
-    if pool_total == 0:
-        st.caption("No tickets in this view — pick **All** in Focus Assignee or widen the time range.")
-    elif focus_key:
-        st.caption(
-            f"**{pool_total}** ticket(s) for **{focus_key}** · "
-            f"click engineer again to show all **{total_all}**"
-        )
-    else:
-        st.caption(
-            f"**{pool_total}** ticket(s) · click an engineer in the diagram to filter"
-        )
-
-
 def _perf_visit_ticket_pool(
     data: dict[str, object],
     *,
     search: str,
+    lookup_ticket: str = "",
 ) -> tuple[list[str], list[str], dict[str, set[str]], str, int]:
     all_engineers: list[str] = data["all_engineers"]  # type: ignore[assignment]
     all_tickets: list[str] = data["all_tickets"]  # type: ignore[assignment]
@@ -6082,12 +5804,14 @@ def _perf_visit_ticket_pool(
     focus_key: str = data["focus_key"]  # type: ignore[assignment]
     total_all: int = data["total_tickets"]  # type: ignore[assignment]
     eng_index = {eng: i for i, eng in enumerate(all_engineers)}
+    tid = _perf_normalize_matrix_lookup(lookup_ticket)
+    pool_focus = "" if tid and tid in all_tickets else focus_key
     pool = _perf_visit_map_ticket_pool(
         all_tickets,
         ticket_engineers,
         eng_index,
-        focus_key=focus_key,
-        search=search,
+        focus_key=pool_focus,
+        search=search or (tid if tid else ""),
     )
     return all_engineers, pool, ticket_engineers, focus_key, total_all
 
@@ -6483,11 +6207,13 @@ def _perf_build_staff_matrix_payload(
     *,
     data: dict[str, object],
     search: str,
+    lookup_ticket: str = "",
 ) -> dict[str, object]:
     """JSON payload for the React Multi-Staff Case Management Matrix."""
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
         data,
         search=search,
+        lookup_ticket=lookup_ticket,
     )
     prepared = _perf_prepare_visits_df(visits_all)
     eng_colors = _perf_engineer_color_map(all_engineers)
@@ -6534,6 +6260,7 @@ def _perf_build_staff_matrix_payload(
         "tickets": tickets,
         "staffMembers": all_engineers,
         "staffColors": eng_colors,
+        "lookupTicket": lookup_ticket or "",
         "summary": {
             "totalCases": total,
             "avgStaffPerCase": round(avg_staff, 1),
@@ -6565,16 +6292,22 @@ def _render_perf_visit_staff_matrix(
     *,
     data: dict[str, object],
     search: str,
+    lookup_ticket: str = "",
 ) -> None:
     """Tickets × staff grid — virtualized React matrix when build is present."""
-    payload = _perf_build_staff_matrix_payload(visits_all, data=data, search=search)
+    payload = _perf_build_staff_matrix_payload(
+        visits_all,
+        data=data,
+        search=search,
+        lookup_ticket=lookup_ticket,
+    )
     tickets = payload.get("tickets") or []
     if not tickets:
         st.caption("No tickets to show in the matrix.")
         return
 
     if _staff_matrix_component is not None and _HAS_STAFF_MATRIX:
-        _staff_matrix_component(payload, height=720, key="perf_staff_matrix")
+        _staff_matrix_component(payload, height=720, key=_PERF_MATRIX_COMPONENT_KEY)
         return
 
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
@@ -6691,322 +6424,42 @@ th.perf-matrix-ticket.shared-col {{ color: #e8c9a0; }}
     components.html(matrix_html, height=min(560, 80 + 28 * max(len(tickets_pool), 1)), scrolling=True)
 
 
-def _render_perf_visit_bipartite_graph(
-    visits_all: pd.DataFrame,
-    *,
-    focus: str,
-    data: dict[str, object] | None = None,
-    search: str | None = None,
-) -> None:
-    """Engineers in a horizontal row of portrait cards; tickets on outer ring."""
-    if data is None:
-        data = _perf_visit_bipartite_data(visits_all, focus=focus)
-    if not data:
-        components.html(
-            "<html><body style='margin:0;background:#141414;'></body></html>",
-            height=8,
-        )
-        return
-
-    all_engineers, pool, ticket_engineers, focus_key, _total_all = _perf_visit_ticket_pool(
-        data,
-        search=search or "",
-    )
-    tickets = pool
-
-    if not tickets:
-        return
-
-    eng_index = {eng: i for i, eng in enumerate(all_engineers)}
-
-    eng_colors = _perf_engineer_color_map(all_engineers)
-    eng_slug = {eng: f"e{i}" for i, eng in enumerate(all_engineers)}
-    focus_slug = eng_slug.get(focus_key, "") if focus_key else ""
-    tickets_for_focus = {
-        tn for tn, engs in ticket_engineers.items() if focus_key and focus_key in engs
-    }
-
-    n_eng = len(all_engineers)
-    n_tick = len(tickets)
-    ticket_font, ticket_font_hl, ticket_max_len = _perf_radial_ticket_font(n_tick)
-
-    eng_box_w, eng_box_h, eng_gap = _perf_engineer_portrait_dims(n_eng)
-
-    eng_angle_seed = {
-        eng: _perf_hub_engineer_sector_angle(i, n_eng)
-        for i, eng in enumerate(all_engineers)
-    }
-    tickets = _perf_radial_ticket_order(tickets, ticket_engineers, eng_angle_seed)
-    n_tick = len(tickets)
-
-    row_w = n_eng * eng_box_w + max(0, n_eng - 1) * eng_gap
-    cx, cy, ring_r, svg_size = _perf_radial_map_geometry(
-        n_tick=n_tick,
-        hub_row_w=row_w,
-        hub_box_h=eng_box_h,
-        ticket_font=ticket_font,
-    )
-    eng_positions, _eng_indices, _row_w, hub_left_x, hub_right_x = _perf_hub_engineer_layout_row(
-        cx=cx,
-        cy=cy,
-        engineers=all_engineers,
-        eng_box_w=eng_box_w,
-        eng_box_h=eng_box_h,
-        eng_gap=eng_gap,
-    )
-    svg_w = svg_h = svg_size
-    svg_h_px = int(svg_h)
-    label_outset = 16.0 + ticket_font * 2.2
-    hub_pad = 12.0
-    hub_mask_x = hub_left_x - hub_pad
-    hub_mask_y = cy - eng_box_h / 2.0 - hub_pad
-    hub_mask_w = (hub_right_x - hub_left_x) + hub_pad * 2.0
-    hub_mask_h = eng_box_h + hub_pad * 2.0
-
-    tick_angles: dict[str, float] = {}
-    tick_xy: dict[str, tuple[float, float]] = {}
-    for ti, ticket in enumerate(tickets):
-        angle = (2.0 * math.pi * ti / n_tick) - math.pi / 2.0
-        tick_angles[ticket] = angle
-        tick_xy[ticket] = (
-            cx + ring_r * math.cos(angle),
-            cy + ring_r * math.sin(angle),
-        )
-
-    svg_parts: list[str] = []
-    focus_mode_cls = " focus-mode" if focus_slug else ""
-
-    legend_bits: list[str] = []
-    for eng in all_engineers:
-        col = eng_colors[eng]
-        slug = eng_slug[eng]
-        active = slug == focus_slug
-        short_eng = eng if len(eng) <= 14 else eng[:12] + "…"
-        legend_bits.append(
-            f'<button type="button" class="legend-chip{" active" if active else ""}" '
-            f'onclick="pickEng({json.dumps(eng)}, {"true" if active else "false"})">'
-            f'<i style="background:{col}"></i>{html.escape(short_eng)}</button>'
-        )
-    legend_html = "".join(legend_bits)
-
-    svg_parts.append(
-        f'<circle class="ring-guide" cx="{cx:.1f}" cy="{cy:.1f}" r="{ring_r:.1f}" '
-        f'fill="none" stroke="rgba(215,180,145,0.28)" stroke-width="2" '
-        f'stroke-dasharray="6 6"/>'
-    )
-
-    svg_parts.append(
-        f'<rect class="hub-mask" x="{hub_mask_x:.1f}" y="{hub_mask_y:.1f}" '
-        f'width="{hub_mask_w:.1f}" height="{hub_mask_h:.1f}" rx="10" ry="10" '
-        f'fill="#141414" stroke="rgba(215,180,145,0.08)" stroke-width="1"/>'
-    )
-
-    for eng in all_engineers:
-        ex, ey = eng_positions[eng]
-        col = eng_colors[eng]
-        slug = eng_slug[eng]
-        is_focus = slug == focus_slug
-        x0 = ex - eng_box_w / 2.0
-        y0 = ey - eng_box_h / 2.0
-        eng_json = json.dumps(eng)
-        focus_flag = "true" if is_focus else "false"
-        label = _perf_engineer_portrait_label(eng)
-        svg_parts.append(
-            f'<g class="eng-pick eng-portrait {slug}{" focused" if is_focus else ""}" '
-            f'role="button" tabindex="0" '
-            f'onclick="pickEng({eng_json}, {focus_flag})" '
-            f'onkeydown="if(event.key===\'Enter\'||event.key===\' \')pickEng({eng_json}, {focus_flag})">'
-            f'<rect class="eng-box" x="{x0:.1f}" y="{y0:.1f}" '
-            f'width="{eng_box_w:.1f}" height="{eng_box_h:.1f}" rx="5" ry="5" '
-            f'stroke="{col}" stroke-width="{2.2 if is_focus else 1.2}"/>'
-            f'<rect class="eng-accent" x="{x0:.1f}" y="{y0:.1f}" '
-            f'width="{eng_box_w:.1f}" height="3" rx="1" fill="{col}"/>'
-            f'<text class="eng-label" x="{ex:.1f}" y="{ey:.1f}" '
-            f'text-anchor="middle" dominant-baseline="middle" '
-            f'transform="rotate(-90 {ex:.1f} {ey:.1f})" '
-            f'fill="{col if is_focus else "#e8e6e3"}">'
-            f"{html.escape(label)}</text>"
-            f"</g>"
-        )
-
-    for ticket in tickets:
-        tx, ty = tick_xy[ticket]
-        engs = ticket_engineers.get(ticket, set())
-        for eng in sorted(engs, key=str.lower):
-            if eng not in eng_positions:
-                continue
-            ex, ey = eng_positions[eng]
-            ei = eng_index.get(eng, 0)
-            touch_anchors = _perf_engineer_touch_anchors(
-                ex, ey, eng_box_w, eng_box_h, eng_index=ei, n_eng=n_eng,
-            )
-            side = _perf_pick_touch_side(
-                touch_anchors,
-                tx=tx,
-                ty=ty,
-                ex=ex,
-                ey=ey,
-                eng_index=ei,
-                n_eng=n_eng,
-            )
-            sx, sy = touch_anchors[side]
-            lx_end, ly_end = _perf_link_endpoint_at_ticket(sx, sy, tx, ty)
-            col = eng_colors[eng]
-            slug = eng_slug[eng]
-            is_hl_link = bool(focus_key and eng == focus_key)
-            sw = 2.0 if is_hl_link else 0.85
-            svg_parts.append(
-                f'<path class="link-path {slug}{" hl" if is_hl_link else ""} link-{side}" '
-                f'stroke="{col}" stroke-width="{sw}" fill="none" '
-                f'stroke-linecap="round" '
-                f'd="{_perf_curved_link_path(sx, sy, lx_end, ly_end, side=side)}"/>'
-            )
-
-    for ticket in tickets:
-        engs = ticket_engineers.get(ticket, set())
-        is_shared = len(engs) > 1
-        angle = tick_angles[ticket]
-        tx, ty = tick_xy[ticket]
-        lx = cx + (ring_r + label_outset) * math.cos(angle)
-        ly = cy + (ring_r + label_outset) * math.sin(angle)
-        is_hl = bool(focus_key and ticket in tickets_for_focus)
-        if is_hl and focus_key:
-            ticket_col = eng_colors.get(focus_key, "#e8e6e3")
-        elif is_shared:
-            ticket_col = "#D7B491"
-        else:
-            solo_eng = next(iter(engs), "")
-            ticket_col = eng_colors.get(solo_eng, "#a39e97")
-        short = ticket if len(ticket) <= ticket_max_len else ticket[: ticket_max_len - 1] + "…"
-        hl_cls = " hl" if is_hl else ""
-        shared_cls = " shared" if is_shared else ""
-        anchor = _perf_radial_text_anchor(angle)
-        rot_deg = math.degrees(angle)
-        if anchor == "end":
-            rot_deg += 180.0
-        use_rotate = abs(math.cos(angle)) < 0.85
-        transform = f' transform="rotate({rot_deg:.1f} {lx:.1f} {ly:.1f})"' if use_rotate else ""
-        svg_parts.append(
-            f'<circle class="ticket-node{hl_cls}" cx="{tx:.1f}" cy="{ty:.1f}" '
-            f'r="{_PERF_MAP_TICKET_NODE_R:.1f}" '
-            f'fill="{ticket_col}" opacity="0.85"/>'
-        )
-        svg_parts.append(
-            f'<text class="ticket-label{hl_cls}{shared_cls}" x="{lx:.1f}" y="{ly + 3.0:.1f}" '
-            f'text-anchor="{anchor}" fill="{ticket_col}"{transform}>'
-            f"{html.escape(short)}</text>"
-        )
-
-    legend_h = 48
-    content_h = svg_h_px + legend_h + 12
-    frame_h = min(max(content_h, _PERF_MAP_VIEWPORT_PX), _PERF_MAP_IFRAME_MAX)
-
-    map_html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"/>
-<style>
-html, body {{
-  margin: 0; padding: 0; background: #141414;
-  font-family: system-ui, sans-serif; color: #a39e97;
-  min-height: {frame_h}px; height: {frame_h}px;
-  overflow: auto; -webkit-overflow-scrolling: touch;
-  box-sizing: border-box;
-}}
-.perf-map-shell {{
-  padding: 4px 6px 6px; min-width: 320px;
-  min-height: {frame_h}px; box-sizing: border-box;
-}}
-.eng-legend {{ display: flex; flex-wrap: wrap; gap: 0.25rem 0.4rem; margin-bottom: 4px; }}
-.legend-chip {{
-  display: inline-flex; align-items: center; gap: 0.25rem;
-  border: 1px solid rgba(215,180,145,0.2); border-radius: 999px;
-  background: #141414; color: #e8e6e3; font-size: 9px; padding: 0.12rem 0.4rem;
-  cursor: pointer; line-height: 1.2;
-}}
-.legend-chip.active {{ border-color: #D7B491; }}
-.legend-chip i {{ width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }}
-.svg-wrap {{ width: 100%; overflow: visible; display: flex; justify-content: center; }}
-.perf-radial-svg {{
-  display: block; width: 100%; max-width: {svg_w:.0f}px; height: auto;
-  aspect-ratio: 1 / 1;
-}}
-.eng-pick {{ cursor: pointer; }}
-.eng-label {{ font-size: 8px; pointer-events: none; font-weight: 500; letter-spacing: 0.02em; }}
-.eng-portrait .eng-box {{ fill: #141414; }}
-.ticket-label {{ font-size: {ticket_font}px; fill: #a39e97; }}
-.ticket-label.shared {{ fill: #D7B491; }}
-.link-path {{ opacity: 0.5; stroke-linecap: round; }}
-.hub-mask {{ pointer-events: none; }}
-.perf-radial-svg.focus-mode .link-path {{ opacity: 0.07; }}
-.perf-radial-svg.focus-mode .link-path.hl {{ opacity: 1; stroke-width: 2.2 !important; }}
-.perf-radial-svg.focus-mode .eng-pick {{ opacity: 0.35; }}
-.perf-radial-svg.focus-mode .eng-pick.focused {{ opacity: 1; }}
-.perf-radial-svg.focus-mode .ticket-label {{ opacity: 0.16; }}
-.perf-radial-svg.focus-mode .ticket-node {{ opacity: 0.16; }}
-.perf-radial-svg.focus-mode .ticket-label.hl,
-.perf-radial-svg.focus-mode .ticket-node.hl {{
-  opacity: 1; font-size: {ticket_font_hl}px; font-weight: 600;
-}}
-</style>
-<script>
-function pickEng(eng, isFocused) {{
-  const url = new URL(window.parent.location.href);
-  url.searchParams.set("perf_map_pick", isFocused ? "All" : eng);
-  window.parent.location.href = url.toString();
-}}
-</script>
-</head><body>
-<div class="perf-map-shell">
-<div class="eng-legend">{legend_html}</div>
-<div class="svg-wrap">
-<svg class="perf-radial-svg{focus_mode_cls}" viewBox="0 0 {svg_w:.0f} {svg_h:.0f}" preserveAspectRatio="xMidYMid meet"
-     xmlns="http://www.w3.org/2000/svg" aria-label="Radial engineer to ticket visit map">
-{"".join(svg_parts)}
-</svg>
-</div>
-</div>
-</body></html>"""
-    components.html(map_html, height=frame_h, scrolling=True)
-
-
-def _render_perf_visits_tab(
+def _render_perf_case_info_tab(
     visits_all: pd.DataFrame,
     *,
     focus: str,
 ) -> None:
-    """Visits: node-link diagram and multi-staff case matrix."""
-    data = _perf_visit_bipartite_data(visits_all, focus=focus)
-    if not data:
+    """Case Info tab — multi-staff case management matrix."""
+    lookup_raw = _perf_matrix_sync_lookup_from_component()
+    lookup_tid = _perf_normalize_matrix_lookup(lookup_raw)
+    visits_matrix = _perf_matrix_merge_ticket_lookup(visits_all, lookup_raw)
+    data_matrix = _perf_visit_bipartite_data(visits_matrix, focus=focus)
+    st.caption(
+        "Rows = tickets · columns = staff · colored dots show involvement. "
+        "Use **Ticket ID** in the matrix filter bar to search or look up history "
+        "outside the sidebar date range (9 or 16 digits). Case Info on the right."
+    )
+    if lookup_tid and not data_matrix:
+        st.warning(
+            f"No visit cycles found for ticket **{lookup_tid}**. "
+            "Check the ticket number or confirm it was assigned from the dashboard."
+        )
+    elif not data_matrix:
         st.info(
-            "No visit data in this window — visit cycles appear after assigns and "
-            "reassigns create `ticket_visits` rows."
+            "No visit data in this window. Enter a full **Ticket ID** in the matrix "
+            "filter bar to look up a specific ticket, or widen the sidebar date range."
         )
-        return
-
-    _, pool, _, focus_key, total_all = _perf_visit_ticket_pool(data, search="")
-    _perf_visit_map_caption(len(pool), total_all, focus_key=focus_key)
-
-    tab_node, tab_matrix = st.tabs(
-        [
-            "Node-Link Diagram",
-            "Multi-Staff Case Management Matrix",
-        ]
-    )
-    with tab_node:
-        _render_perf_visit_bipartite_graph(
-            visits_all,
-            focus=focus,
-            data=data,
-            search="",
-        )
-    with tab_matrix:
-        st.caption(
-            "Rows = tickets · columns = staff · colored dots show involvement. "
-            "Use **Ticket ID** in the matrix filter bar to search. Case Info on the right."
-        )
+    else:
+        if lookup_tid and lookup_tid not in (data_matrix.get("all_tickets") or []):
+            st.warning(
+                f"Ticket **{lookup_tid}** has no `ticket_visits` rows — "
+                "matrix Case Info may be empty."
+            )
         _render_perf_visit_staff_matrix(
-            visits_all,
-            data=data,
-            search="",
+            visits_matrix,
+            data=data_matrix,
+            search=lookup_tid,
+            lookup_ticket=lookup_tid,
         )
 
 
@@ -9625,11 +9078,7 @@ def _render_assignment_editor(
             engineer_key=keys["engineer"],
             engineer2_key=keys["engineer_2"],
         )
-        st.selectbox(
-            "Category",
-            options=cats,
-            key=keys["category"],
-        )
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area(
             "Notes (Additional Info)",
             height=80,
@@ -9784,7 +9233,7 @@ def _render_reassign_editor(
             engineer_key=keys["engineer"],
             engineer2_key=keys["engineer_2"],
         )
-        st.selectbox("Category", options=cats, key=keys["category"])
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area("Notes (Additional Info)", height=80, key=keys["notes"])
         st.checkbox(
             "Post New Telegram Assignment",
@@ -10086,11 +9535,7 @@ def _render_sales_assignment_editor(
             select2_key=keys["engineer_2"],
             manual2_key=keys["engineer_2"],
         )
-        st.selectbox(
-            "Category",
-            options=cats,
-            key=keys["category"],
-        )
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area(
             "Notes (Additional Info)",
             height=80,
@@ -10287,7 +9732,7 @@ def _render_sales_reassign_editor(
             engineer_key=keys["engineer"],
             engineer2_key=keys["engineer_2"],
         )
-        st.selectbox("Category", options=cats, key=keys["category"])
+        _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area("Notes (Additional Info)", height=80, key=keys["notes"])
         st.checkbox(
             "Post New Telegram Assignment",
@@ -10626,11 +10071,9 @@ def _render_cc_category_row(categories: list[str], *, missing: bool) -> None:
     pending = st.session_state.pop(_CC_CATEGORY_SELECT_PENDING_KEY, None)
     if pending is not None and pending in opts:
         st.session_state[_CC_CATEGORY_SELECT_KEY] = pending
-    else:
-        current = st.session_state.get(_CC_CATEGORY_SELECT_KEY)
-        if current not in opts:
-            st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
-    st.selectbox("Category", options=opts, key=_CC_CATEGORY_SELECT_KEY)
+    elif st.session_state.get(_CC_CATEGORY_SELECT_KEY) not in opts:
+        st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
+    _render_category_selectbox("Category", opts, key=_CC_CATEGORY_SELECT_KEY)
     with st.popover("Edit categories", key="cc_categories_popover"):
         _categories_manage_popover(missing=missing)
 
@@ -10655,11 +10098,9 @@ def _render_sales_category_row(
     pending = st.session_state.pop(pending_key, None)
     if pending is not None and pending in opts:
         st.session_state[select_key] = pending
-    else:
-        current = st.session_state.get(select_key)
-        if current not in opts and opts:
-            st.session_state[select_key] = opts[0]
-    st.selectbox(label, options=opts, key=select_key, help=help)
+    elif st.session_state.get(select_key) not in opts:
+        st.session_state.pop(select_key, None)
+    _render_category_selectbox(label, opts, key=select_key, help=help)
     with st.popover("Edit categories", key=popover_key):
         _categories_manage_popover(
             missing=missing,
@@ -10795,9 +10236,7 @@ def _reset_cc_assign_form(*, categories: list[str]) -> None:
         _CC_FE_MANUAL_2_KEY,
     ):
         st.session_state.pop(k, None)
-    opts = categories if categories else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    if opts:
-        st.session_state[_CC_CATEGORY_SELECT_KEY] = opts[0]
+    st.session_state.pop(_CC_CATEGORY_SELECT_KEY, None)
 
 
 def _cc_schedule_assign_form_clear() -> None:
@@ -10850,6 +10289,7 @@ def _reset_sc_cc_sales_ticket_form() -> None:
         _SC_CC_FE_SELECT_2_KEY,
         _SC_CC_FE_MANUAL_KEY,
         _SC_CC_FE_MANUAL_2_KEY,
+        _SC_CC_ST_SCAT_KEY,
     ):
         st.session_state.pop(k, None)
     if _SC_CC_ST_PRIORITY_KEY in st.session_state:
@@ -12296,88 +11736,6 @@ _BON_THEME_CSS = """
         color: var(--bon-text);
         font-weight: 600;
         margin-left: 0.2rem;
-    }
-    /* Performance Visits — engineer ↔ ticket map */
-    .perf-bipartite-wrap {
-        width: 100%;
-        overflow-x: auto;
-        margin: 0.25rem 0 0.75rem;
-        border: 1px solid rgba(215, 180, 145, 0.22);
-        border-radius: var(--bon-box-radius);
-        background: var(--bon-card);
-    }
-    .perf-bipartite-svg {
-        display: block;
-        width: 100%;
-        min-width: 520px;
-        font-family: var(--bon-font);
-    }
-    .perf-bipartite-svg .eng-box {
-        fill: #141414;
-        stroke: rgba(215, 180, 145, 0.35);
-        stroke-width: 1.2;
-    }
-    .perf-bipartite-svg .eng-box.focus {
-        stroke: var(--bon-oak);
-        stroke-width: 1.8;
-    }
-    .perf-bipartite-svg .eng-label {
-        fill: var(--bon-text);
-        font-size: 11px;
-    }
-    .perf-bipartite-svg .eng-label.focus {
-        fill: var(--bon-oak);
-        font-weight: 600;
-    }
-    .perf-bipartite-svg .ticket-label {
-        fill: var(--bon-muted);
-        font-size: 11px;
-    }
-    .perf-bipartite-svg .ticket-label.shared {
-        fill: var(--bon-oak);
-        font-weight: 600;
-    }
-    .perf-bipartite-svg .link-solo {
-        fill: none;
-        stroke: rgba(158, 197, 232, 0.45);
-        stroke-width: 1.2;
-    }
-    .perf-bipartite-svg .link-shared {
-        fill: none;
-        stroke: rgba(215, 180, 145, 0.55);
-        stroke-width: 1.4;
-    }
-    .perf-bipartite-legend {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.75rem 1.25rem;
-        font-size: 0.72rem;
-        color: var(--bon-muted);
-        margin: 0 0 0.5rem;
-    }
-    .perf-bipartite-legend span {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-    }
-    .perf-bipartite-legend i {
-        display: inline-block;
-        width: 1.4rem;
-        height: 2px;
-        border-radius: 1px;
-    }
-    .perf-bipartite-legend i.solo { background: rgba(158, 197, 232, 0.7); }
-    .perf-bipartite-legend i.shared { background: rgba(215, 180, 145, 0.85); }
-    .perf-bipartite-stats {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem 1rem;
-        font-size: 0.78rem;
-        color: var(--bon-muted);
-        margin-bottom: 0.35rem;
-    }
-    .perf-bipartite-stats strong {
-        color: var(--bon-text);
     }
 </style>
 """
@@ -15144,7 +14502,23 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
     n_inv = len(investigation)
     n_hold = len(on_hold)
     n_unatt = len(unattended)
-    n_tab_sum = n_pending + n_open + n_hold + n_done + n_inv + n_unatt
+    if not in_view.empty:
+        _qm = _ticket_queue_count_masks(in_view)
+        n_tab_union = int(
+            (
+                _qm["pending"]
+                | _qm["on_hold"]
+                | _qm["open"]
+                | _qm["investigation"]
+                | _qm["completed"]
+                | _qm["unattended"]
+                | _qm["other"]
+            ).sum()
+        )
+        n_other_status = int(_qm["other"].sum())
+    else:
+        n_tab_union = 0
+        n_other_status = 0
 
     if field_has_data and n_in_view == 0:
         st.info(
@@ -15180,7 +14554,6 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
         overview_table = _perf_attach_sales_to_overview(overview_table, sales_summary)
         people = _perf_focus_people(summary, visits_all, sales_summary)
-        _perf_apply_map_pick_from_query()
         focus = st.selectbox(
             "Focus Assignee (Field)",
             options=people,
@@ -15243,18 +14616,38 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 help="In sidebar range plus any still in an active sales queue.",
             )
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
-        n_visits = len(visits_f)
+        n_case_info = (
+            int(visits_f["ticket_number"].astype(str).nunique())
+            if not visits_f.empty and "ticket_number" in visits_f.columns
+            else 0
+        )
 
         st.caption(
             "**Ticket queues** = current snapshot (`tickets_active`). "
             "**Visit cycles** = per-assignment history (`ticket_visits`, fair credit when A→B→C on one ticket). "
             f"**Visit responded** counts closed cycles; **Handled** is {STATUS_RESOLVED} + Investigation in the window."
         )
-        if focus == "All" and n_tab_sum != n_in_view:
-            st.warning(
-                f"Queue sum (**{n_tab_sum}**) ≠ in view (**{n_in_view}**) — "
-                "some tickets have an unrecognized status."
-            )
+        if focus == "All" and n_tab_union != n_in_view:
+            if n_other_status:
+                raw_other = (
+                    in_view.loc[_qm["other"], "status"]
+                    .astype(str)
+                    .str.strip()
+                    .value_counts()
+                    .head(5)
+                    if not in_view.empty and "status" in in_view.columns
+                    else pd.Series(dtype=int)
+                )
+                detail = ", ".join(f"**{k}** ({v})" for k, v in raw_other.items())
+                st.warning(
+                    f"**{n_other_status}** in-view ticket(s) use a status not mapped to a "
+                    f"queue tab ({detail}). **{n_tab_union}** tabbed vs **{n_in_view}** in view."
+                )
+            else:
+                st.warning(
+                    f"**{n_tab_union}** ticket(s) in queue tabs vs **{n_in_view}** in view — "
+                    "some rows may have a blank or unmappable status."
+                )
 
         n_sales_tab = len(sales_f) if focus not in ("", "All") else n_sales
 
@@ -15267,12 +14660,12 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
         n_weekly = int(weekly_this_week["total"])
 
-        tab_overview, tab_weekly, tab_sales, tab_visits, tab_work, tab_hold, tab_unatt = st.tabs(
+        tab_overview, tab_weekly, tab_sales, tab_case_info, tab_work, tab_hold, tab_unatt = st.tabs(
             [
                 "Overview",
                 f"Weekly ({n_weekly})",
                 f"Sales Cases ({n_sales_tab})",
-                f"Visits ({n_visits})",
+                f"Case Info ({n_case_info})",
                 f"Handled ({n_work})",
                 f"On Hold ({len(on_hold_f)})",
                 f"Unattended ({len(unattended_f)})",
@@ -15306,8 +14699,8 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 axis_format=axis_format,
             )
 
-        with tab_visits:
-            _render_perf_visits_tab(visits_all, focus=focus)
+        with tab_case_info:
+            _render_perf_case_info_tab(visits_all, focus=focus)
 
         with tab_work:
             st.caption(
