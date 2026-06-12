@@ -759,15 +759,23 @@ _DASH_RANGE_TO_KEY = "_dash_range_to_utc"
 _DASH_TIME_PRESET_KEY = "_dash_time_preset"
 _DASH_TIME_PRESET_OPTIONS: tuple[str, ...] = (
     "Today",
-    "Last 7 days",
+    "This week",
     "Last 30 days",
     "Pick dates",
 )
 _DASH_SEARCH_FROM_DATE_KEY = "_dash_search_from_date"
 _DASH_SEARCH_TO_DATE_KEY = "_dash_search_to_date"
 _DASH_PREV_PRESET_KEY = "_dash_prev_preset"
+_DASH_RANGE_CUSTOM_OPEN_KEY = "_dash_range_custom_open"
+_DASH_TIME_PRESET_MENU: tuple[str, ...] = ("Today", "This week", "Last 30 days")
+_DASH_TIME_PRESET_PILL_KEYS: dict[str, str] = {
+    "Today": "bon_dash_range_pill_today",
+    "This week": "bon_dash_range_pill_week",
+    "Last 30 days": "bon_dash_range_pill_30d",
+}
 _LEGACY_TIME_PRESET_MAP: dict[str, str] = {
     "Last 24 hours": "Today",
+    "Last 7 days": "This week",
     "Single day": "Pick dates",
     "Custom range": "Pick dates",
 }
@@ -6641,9 +6649,13 @@ def _preset_range_utc(preset: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     if preset == "Today":
         today = now.tz_convert(LOCAL_TZ).date()
         return _local_date_start(today), now
+    if preset == "This week":
+        start, end, _, _ = _perf_calendar_week_range_utc(week_offset=0)
+        return start, end
     if preset == "Last 30 days":
         return now - pd.Timedelta(days=30), now
-    return now - pd.Timedelta(days=7), now
+    start, end, _, _ = _perf_calendar_week_range_utc(week_offset=0)
+    return start, end
 
 
 def _store_dash_range(start: pd.Timestamp, end: pd.Timestamp) -> None:
@@ -6663,31 +6675,52 @@ def _format_dash_range_caption() -> str:
     start, end = _get_dash_range()
     lo = start.tz_convert(LOCAL_TZ).strftime("%d %b")
     hi = end.tz_convert(LOCAL_TZ).strftime("%d %b %Y")
-    return f"{lo} – {hi} · {LOCAL_TZ_LABEL}"
+    return f"{lo} – {hi} • {LOCAL_TZ_LABEL}"
+
+
+def _dash_time_preset_display(preset: str) -> str:
+    labels = {
+        "Today": "Today",
+        "This week": "This week",
+        "Last 30 days": "Last 30 Days",
+        "Pick dates": "Custom Date Range",
+    }
+    return labels.get(preset, preset)
+
+
+def _dash_time_preset_trigger_label(preset: str) -> str:
+    """Compact single-line label for the header trigger button."""
+    labels = {
+        "Today": "Today",
+        "This week": "This week",
+        "Last 30 days": "Last 30 Days",
+        "Pick dates": "Custom",
+    }
+    return labels.get(preset, preset)
 
 
 def _ensure_dash_range_defaults() -> None:
     if _DASH_RANGE_FROM_KEY not in st.session_state:
-        start, end = _preset_range_utc("Last 7 days")
+        start, end = _preset_range_utc("This week")
         _store_dash_range(start, end)
         _sync_search_date_widgets(start, end)
     if _DASH_TIME_PRESET_KEY not in st.session_state:
-        st.session_state[_DASH_TIME_PRESET_KEY] = "Last 7 days"
+        st.session_state[_DASH_TIME_PRESET_KEY] = "This week"
 
 
 def _init_dash_date_range_state() -> None:
     _ensure_dash_range_defaults()
     if _DASH_RANGE_FROM_KEY not in st.session_state:
-        start, end = _preset_range_utc("Last 7 days")
+        start, end = _preset_range_utc("This week")
         _store_dash_range(start, end)
         _sync_search_date_widgets(start, end)
     if _DASH_TIME_PRESET_KEY not in st.session_state:
-        st.session_state[_DASH_TIME_PRESET_KEY] = "Last 7 days"
+        st.session_state[_DASH_TIME_PRESET_KEY] = "This week"
     cur = st.session_state.get(_DASH_TIME_PRESET_KEY)
     if cur in _LEGACY_TIME_PRESET_MAP:
         st.session_state[_DASH_TIME_PRESET_KEY] = _LEGACY_TIME_PRESET_MAP[cur]
     elif cur not in _DASH_TIME_PRESET_OPTIONS:
-        st.session_state[_DASH_TIME_PRESET_KEY] = "Last 7 days"
+        st.session_state[_DASH_TIME_PRESET_KEY] = "This week"
     if _DASH_SEARCH_FROM_DATE_KEY not in st.session_state:
         _sync_search_date_widgets(*_get_dash_range())
 
@@ -6730,7 +6763,7 @@ def _dash_refresh_settings() -> tuple[bool, int]:
 def _render_dash_time_preset_select(*, show_label: bool = False) -> str:
     """Time-range preset for the filters menu."""
     _init_dash_date_range_state()
-    _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "Last 7 days")))
+    _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week")))
     range_help = _format_dash_range_caption() or "Time range for tickets and performance"
     preset = st.selectbox(
         "Time Range",
@@ -6743,6 +6776,89 @@ def _render_dash_time_preset_select(*, show_label: bool = False) -> str:
     if preset != prev_preset:
         st.session_state[_DASH_PREV_PRESET_KEY] = preset
     _sync_dash_range_from_ui(preset)
+    return preset
+
+
+def _render_dash_time_range_pills(*, preset: str, custom_open: bool) -> None:
+    """Preset pill buttons + optional custom date inputs."""
+    selected_pill_key = (
+        _DASH_TIME_PRESET_PILL_KEYS.get(preset)
+        if preset in _DASH_TIME_PRESET_MENU
+        else "bon_dash_range_custom_btn"
+        if preset == "Pick dates"
+        else None
+    )
+    if selected_pill_key:
+        st.markdown(
+            f"""
+            <style>
+            div.st-key-{selected_pill_key} button {{
+                border-color: var(--bon-oak) !important;
+                color: var(--bon-oak) !important;
+                background: rgba(215, 180, 145, 0.12) !important;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    with st.container(key="bon_dash_range_menu"):
+        for opt in _DASH_TIME_PRESET_MENU:
+            pill_label = _dash_time_preset_display(opt)
+            if preset == opt:
+                pill_label = f"✓ {pill_label}"
+            if st.button(
+                pill_label,
+                key=_DASH_TIME_PRESET_PILL_KEYS[opt],
+                use_container_width=True,
+            ):
+                st.session_state[_DASH_TIME_PRESET_KEY] = opt
+                st.session_state[_DASH_RANGE_CUSTOM_OPEN_KEY] = False
+                st.session_state[_DASH_PREV_PRESET_KEY] = opt
+                _sync_dash_range_from_ui(opt)
+                st.rerun()
+
+        st.markdown(
+            '<div class="bon-dash-range-divider" aria-hidden="true"></div>',
+            unsafe_allow_html=True,
+        )
+
+        custom_label = "⚙ Custom Date Range"
+        if preset == "Pick dates":
+            custom_label = "✓ ⚙ Custom Date Range"
+        if st.button(
+            custom_label,
+            key="bon_dash_range_custom_btn",
+            use_container_width=True,
+        ):
+            st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
+            st.session_state[_DASH_RANGE_CUSTOM_OPEN_KEY] = True
+            st.session_state[_DASH_PREV_PRESET_KEY] = "Pick dates"
+            st.rerun()
+
+        if preset == "Pick dates" or custom_open:
+            _render_dash_custom_date_inputs()
+
+
+def _render_dash_menu_time_range() -> str:
+    """Time-range presets inside the ☰ menu."""
+    _init_dash_date_range_state()
+    preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    _sync_dash_range_from_ui(preset)
+    custom_open = bool(
+        st.session_state.get(_DASH_RANGE_CUSTOM_OPEN_KEY, preset == "Pick dates")
+    )
+    range_cap = _format_dash_range_caption()
+    expander_label = f"Time range · {_dash_time_preset_trigger_label(preset)}"
+
+    with st.container(key="bon_dash_range_picker"):
+        with st.expander(expander_label, expanded=True):
+            if range_cap:
+                st.markdown(
+                    f'<p class="bon-menu-range-cap">{html.escape(range_cap)}</p>',
+                    unsafe_allow_html=True,
+                )
+            _render_dash_time_range_pills(preset=preset, custom_open=custom_open)
+
     return preset
 
 
@@ -6765,7 +6881,7 @@ def _render_dash_custom_date_inputs() -> None:
 
 
 def _render_dash_filters_panel() -> None:
-    """Auto-refresh, ticket lookup — Filters menu (dates are in the header)."""
+    """Auto-refresh, ticket lookup — Filters menu."""
     st.toggle("Auto-Refresh", value=True, key="bon_toolbar_auto_refresh")
     if st.session_state.get("bon_toolbar_auto_refresh", True):
         st.slider(
@@ -6804,9 +6920,11 @@ def _render_app_topbar() -> None:
     menu_open = bool(st.session_state.get(_BON_MENU_OPEN_KEY, False))
     with st.container(key="bon_app_header_shell"):
         with st.container(key="bon_app_topbar"):
-            c_brand, c_range, c_user, c_menu = st.columns(
-                [1.85, 3.05, 1.35, 0.38],
+            range_cap = _format_dash_range_caption()
+            c_brand, c_right = st.columns(
+                [1.15, 5],
                 vertical_alignment="center",
+                gap="small",
             )
             with c_brand:
                 st.markdown(
@@ -6819,58 +6937,68 @@ def _render_app_topbar() -> None:
                     """,
                     unsafe_allow_html=True,
                 )
-            with c_range:
-                c_preset, c_cap = st.columns(
-                    [1.05, 1.15], vertical_alignment="center", gap="small"
+            with c_right:
+                c_spacer, c_tail = st.columns(
+                    [1, 2.5],
+                    vertical_alignment="center",
+                    gap="small",
                 )
-                with c_preset:
-                    preset = _render_dash_time_preset_select(show_label=False)
-                    if preset == "Pick dates":
-                        with st.popover("📅", help="Pick custom from/to dates"):
-                            _render_dash_custom_date_inputs()
-                with c_cap:
-                    cap = _format_dash_range_caption()
-                    if cap:
-                        st.markdown(
-                            f'<span class="bon-app-topbar-range-cap">{html.escape(cap)}</span>',
-                            unsafe_allow_html=True,
-                        )
-            with c_user:
-                st.markdown(
-                    f"""
-                    <div class="bon-app-topbar-userchip" title="Signed in as {op_display}">
-                      <span class="bon-app-topbar-mark" aria-hidden="true">
-                        <span class="bon-app-topbar-mark-bar"></span>
-                      </span>
-                      <span class="bon-app-topbar-username">{op_display}</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            with c_menu:
-                if menu_open:
-                    st.markdown(
-                        """
-                        <style>
-                        div.st-key-bon_app_header_shell div.st-key-bon_menu_toggle_btn button::before {
-                            display: none !important;
-                        }
-                        div.st-key-bon_app_header_shell div.st-key-bon_menu_toggle_btn button {
-                            font-size: 0.9rem !important;
-                            line-height: 1 !important;
-                            color: var(--bon-muted) !important;
-                        }
-                        </style>
-                        """,
-                        unsafe_allow_html=True,
+                with c_spacer:
+                    st.empty()
+                with c_tail:
+                    c_cap, c_account = st.columns(
+                        [1.6, 1],
+                        vertical_alignment="center",
+                        gap="small",
                     )
-                if st.button(
-                    "✕" if menu_open else "☰",
-                    key="bon_menu_toggle_btn",
-                    help="Open menu" if not menu_open else "Close menu",
-                ):
-                    st.session_state[_BON_MENU_OPEN_KEY] = not menu_open
-                    st.rerun()
+                    with c_cap:
+                        if range_cap:
+                            st.markdown(
+                                f'<span class="bon-app-topbar-range-cap">{html.escape(range_cap)}</span>',
+                                unsafe_allow_html=True,
+                            )
+                    with c_account:
+                        c_user, c_menu = st.columns(
+                            [1, 1],
+                            vertical_alignment="center",
+                            gap="small",
+                        )
+                        with c_user:
+                            st.markdown(
+                                f"""
+                                <div class="bon-app-topbar-userchip" title="Signed in as {op_display}">
+                                  <span class="bon-app-topbar-mark" aria-hidden="true">
+                                    <span class="bon-app-topbar-mark-bar"></span>
+                                  </span>
+                                  <span class="bon-app-topbar-username">{op_display}</span>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+                        with c_menu:
+                            if menu_open:
+                                st.markdown(
+                                    """
+                                    <style>
+                                    div.st-key-bon_app_header_shell div.st-key-bon_menu_toggle_btn button::before {
+                                        display: none !important;
+                                    }
+                                    div.st-key-bon_app_header_shell div.st-key-bon_menu_toggle_btn button {
+                                        font-size: 0.9rem !important;
+                                        line-height: 1 !important;
+                                        color: var(--bon-muted) !important;
+                                    }
+                                    </style>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
+                            if st.button(
+                                "✕" if menu_open else "☰",
+                                key="bon_menu_toggle_btn",
+                                help="Open menu" if not menu_open else "Close menu",
+                            ):
+                                st.session_state[_BON_MENU_OPEN_KEY] = not menu_open
+                                st.rerun()
 
 
 def _render_app_menu_controls() -> None:
@@ -6884,6 +7012,7 @@ def _render_app_menu_panel() -> None:
         return
 
     with st.container(key="bon_app_menu"):
+        _render_dash_menu_time_range()
         sidebar_open = _bon_sidebar_is_open()
         if st.button(
             "▸ Assign" if not sidebar_open else "▾ Assign",
@@ -6909,6 +7038,7 @@ def _render_app_menu_panel() -> None:
 def _render_app_chrome() -> None:
     _render_app_topbar()
     _render_app_menu_controls()
+    _inject_bon_header_pin()
 
 
 def _perf_bucket_settings(
@@ -11183,7 +11313,7 @@ def main() -> None:
     @st.fragment(run_every=run_every)
     def _dashboard_fragment() -> None:
         _sync_dash_range_from_ui(
-            str(st.session_state.get(_DASH_TIME_PRESET_KEY, "Last 7 days"))
+            str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
         lookback_days, _, _ = _dash_date_range_lookback()
         _render_dashboard(lookback_days=lookback_days)
@@ -11206,14 +11336,15 @@ _BON_THEME_CSS = """
         --bon-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         --bon-box-border: rgba(215, 180, 145, 0.45);
         --bon-box-radius: 8px;
-        --bon-topbar-h: 3.15rem;
-        --bon-topbar-icon: 2rem;
+        --bon-topbar-h: 3.5rem;
+        --bon-topbar-icon: 2.125rem;
         --bon-dash-top-pad: 0.5rem;
         --bon-metrics-nudge: 0px;
         --bon-sidebar-ticket-nudge: 0px;
         --bon-dash-band-top: calc(var(--bon-topbar-h) + var(--bon-dash-top-pad));
         --bon-chrome-h: var(--bon-topbar-h);
         --bon-netops: #FF5A1F;
+        --bon-metric-label-size: 0.875rem;
     }
     /* One UI font everywhere Streamlit allows (tables, metrics, forms, markdown). */
     .stApp,
@@ -11288,11 +11419,19 @@ _BON_THEME_CSS = """
         overflow: visible !important;
         min-height: auto !important;
     }
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewContainer"] > section,
+    [data-testid="stAppViewContainer"] section.main,
+    [data-testid="stAppViewContainer"] .main,
+    [data-testid="stAppViewContainer"] .main > div,
     [data-testid="stMain"],
-    [data-testid="stMain"] > div {
+    [data-testid="stMain"] > div,
+    [data-testid="stMain"] [data-testid="block-container"] {
         transform: none !important;
         filter: none !important;
         perspective: none !important;
+        contain: none !important;
     }
     [data-testid="stMain"] [data-testid="block-container"] {
         padding-top: var(--bon-dash-band-top) !important;
@@ -11390,11 +11529,12 @@ _BON_THEME_CSS = """
         left: 0 !important;
         right: 0 !important;
         width: 100% !important;
-        z-index: 1000 !important;
+        max-width: 100vw !important;
+        z-index: 1001 !important;
         pointer-events: auto !important;
         background: var(--bon-bg) !important;
         border-bottom: 1px solid rgba(215, 180, 145, 0.18) !important;
-        padding: 0.38rem 1rem !important;
+        padding: 0.45rem 1.15rem !important;
         margin: 0 !important;
         height: var(--bon-topbar-h) !important;
         min-height: var(--bon-topbar-h) !important;
@@ -11452,8 +11592,10 @@ _BON_THEME_CSS = """
     div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
         align-items: center !important;
         height: 100% !important;
-        gap: 0.5rem !important;
+        gap: 0.75rem !important;
         width: 100% !important;
+        flex-wrap: nowrap !important;
+        justify-content: space-between !important;
     }
     div.st-key-bon_app_header_shell [data-testid="column"],
     div.st-key-bon_app_topbar [data-testid="column"] {
@@ -11462,10 +11604,179 @@ _BON_THEME_CSS = """
         justify-content: center !important;
         min-height: 0 !important;
         padding: 0 !important;
+        overflow: visible !important;
     }
-    div.st-key-bon_app_header_shell [data-testid="column"]:nth-child(2) [data-testid="stHorizontalBlock"] {
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
+        flex: 1 1 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        align-items: stretch !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] {
+        width: 100% !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-flow: row nowrap !important;
         align-items: center !important;
+        justify-content: flex-start !important;
+        gap: 0.45rem !important;
+        width: 100% !important;
+        min-height: var(--bon-topbar-icon) !important;
+        height: var(--bon-topbar-icon) !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
+        flex: 1 1 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: max-content !important;
+        max-width: none !important;
+        margin-left: auto !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-flow: row nowrap !important;
+        align-items: center !important;
+        justify-content: flex-end !important;
+        gap: 0.25rem !important;
+        width: auto !important;
+        min-height: var(--bon-topbar-icon) !important;
+        height: var(--bon-topbar-icon) !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        flex-shrink: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"] [data-testid="stVerticalBlock"] {
+        justify-content: center !important;
+        min-height: var(--bon-topbar-icon) !important;
+        width: auto !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        margin-right: 0.45rem !important;
+    }
+    div.st-key-bon_app_topbar > div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) [data-testid="column"] [data-testid="stVerticalBlock"] {
+        justify-content: center !important;
+        min-height: var(--bon-topbar-icon) !important;
+        overflow: visible !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_picker,
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_picker > [data-testid="stVerticalBlock"] {
+        width: 100% !important;
+        max-width: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_picker [data-testid="stExpander"] {
+        border: none !important;
+        background: transparent !important;
+        margin: 0 0 0.12rem 0 !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_picker [data-testid="stExpander"] summary {
+        min-height: 1.75rem !important;
+        max-height: none !important;
+        font-size: 0.76rem !important;
+        font-weight: 600 !important;
+        text-align: left !important;
+        padding: 0.22rem 0.45rem !important;
+        border: 1px solid rgba(215, 180, 145, 0.35) !important;
+        border-radius: 5px !important;
+        background: rgba(20, 20, 20, 0.85) !important;
+        color: var(--bon-oak) !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_picker [data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+        padding: 0.35rem 0.15rem 0.15rem !important;
+    }
+    .bon-menu-range-cap {
+        margin: 0 0 0.35rem 0 !important;
+        padding: 0 0.15rem !important;
+        font-size: 0.72rem !important;
+        font-weight: 400 !important;
+        color: var(--bon-muted) !important;
+        line-height: 1.2 !important;
+        white-space: nowrap !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_menu {
+        min-width: 0 !important;
+        padding: 0 !important;
+    }
+    div.st-key-bon_dash_range_menu > [data-testid="stVerticalBlock"] {
         gap: 0.35rem !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_menu button {
+        min-height: 1.85rem !important;
+        max-height: 1.85rem !important;
+        font-size: 0.76rem !important;
+        font-weight: 500 !important;
+        text-align: center !important;
+        padding: 0.2rem 0.65rem !important;
+        border: 1px solid rgba(215, 180, 145, 0.32) !important;
+        border-radius: 999px !important;
+        background: rgba(20, 20, 20, 0.92) !important;
+        color: var(--bon-text) !important;
+        box-shadow: none !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_menu button:hover {
+        border-color: rgba(215, 180, 145, 0.55) !important;
+        color: var(--bon-oak) !important;
+        background: rgba(215, 180, 145, 0.08) !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_menu div.st-key-bon_dash_range_custom_btn button {
+        border-radius: 6px !important;
+        text-align: left !important;
+        padding-left: 0.55rem !important;
+        margin-top: 0.1rem !important;
+        background: transparent !important;
+    }
+    .bon-dash-range-divider {
+        height: 1px;
+        margin: 0.35rem 0 0.2rem;
+        background: rgba(215, 180, 145, 0.28);
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_menu .stDateInput {
+        margin-top: 0.15rem !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_menu .stDateInput label {
+        font-size: 0.72rem !important;
+    }
+    div.st-key-bon_app_menu div.st-key-bon_dash_range_menu .stDateInput input {
+        min-height: 1.85rem !important;
+        font-size: 0.74rem !important;
+    }
+    div.st-key-bon_app_topbar .bon-app-topbar-userchip {
+        margin-left: 0 !important;
+        gap: 0.45rem !important;
+        padding-right: 0 !important;
+    }
+    div.st-key-bon_app_topbar div.st-key-bon_menu_toggle_btn {
+        margin-left: 0 !important;
+        padding-left: 0 !important;
     }
     div.st-key-bon_app_header_shell .stSelectbox > div > div {
         min-height: 1.85rem !important;
@@ -11475,15 +11786,15 @@ _BON_THEME_CSS = """
     div.st-key-bon_app_header_shell .stSelectbox label {
         display: none !important;
     }
-    div.st-key-bon_app_header_shell .stPopover > button {
-        min-height: 1.85rem !important;
-        max-height: 1.85rem !important;
-        min-width: 1.85rem !important;
-        padding: 0 0.35rem !important;
-        font-size: 0.85rem !important;
-        border: 1px solid rgba(215, 180, 145, 0.35) !important;
-        background: var(--bon-card) !important;
-        color: var(--bon-oak) !important;
+    div.st-key-bon_app_topbar .bon-app-topbar-range-cap {
+        display: inline-block;
+        white-space: nowrap !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        line-height: 1.15 !important;
+        font-size: var(--bon-metric-label-size) !important;
+        font-weight: 400 !important;
+        color: var(--bon-muted) !important;
     }
     div.st-key-bon_app_header_shell div.st-key-bon_menu_toggle_btn {
         min-width: var(--bon-topbar-icon) !important;
@@ -11534,7 +11845,7 @@ _BON_THEME_CSS = """
         top: var(--bon-topbar-h) !important;
         right: 1rem !important;
         left: auto !important;
-        width: min(12.5rem, calc(100vw - 2.5rem)) !important;
+        width: min(14rem, calc(100vw - 2.5rem)) !important;
         z-index: 1005 !important;
         pointer-events: auto !important;
         background: linear-gradient(165deg, #1a1612 0%, #121010 100%) !important;
@@ -11612,26 +11923,28 @@ _BON_THEME_CSS = """
         color: var(--bon-text) !important;
     }
     .bon-app-topbar-range-cap {
-        display: block;
-        font-size: 0.68rem;
-        font-weight: 500;
+        display: inline-block;
+        font-size: var(--bon-metric-label-size);
+        font-weight: 400;
         color: var(--bon-muted);
         line-height: 1.15;
         white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        flex-shrink: 0;
         font-family: var(--bon-font);
     }
     .bon-app-topbar-userchip {
-        display: flex;
+        display: inline-flex;
         align-items: center;
-        justify-content: flex-end;
-        gap: 0.5rem;
-        min-width: 0;
-        flex-shrink: 1;
-        margin-left: auto;
+        justify-content: flex-start;
+        gap: 0.45rem;
+        min-width: max-content;
+        flex-shrink: 0;
+        margin-left: 0;
         padding-right: 0;
         box-sizing: border-box;
+        height: var(--bon-topbar-icon);
+        min-height: var(--bon-topbar-icon);
+        white-space: nowrap;
     }
     .bon-app-topbar-title {
         display: flex;
@@ -12116,6 +12429,13 @@ _BON_THEME_CSS = """
         border-color: var(--bon-oak);
     }
     [data-testid="stMetric"] label { color: var(--bon-muted) !important; }
+    [data-testid="stMetric"] [data-testid="stMetricLabel"],
+    [data-testid="stMetric"] label,
+    div.st-key-bon_dash_metrics_row [data-testid="stMetricLabel"] {
+        font-size: var(--bon-metric-label-size) !important;
+        font-weight: 400 !important;
+        line-height: 1.25 !important;
+    }
     [data-testid="stMetric"] [data-testid="stMetricValue"] {
         color: var(--bon-oak) !important;
     }
@@ -12412,6 +12732,73 @@ def _inject_bon_sidebar_visibility_css() -> None:
         </style>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def _inject_bon_header_pin() -> None:
+    """Keep the full dashboard header fixed while the main pane scrolls."""
+    components.html(
+        """
+        <script>
+        (function () {
+          const win = window.parent;
+          const doc = win.document;
+          let pinTimer = null;
+
+          function pinBonHeader() {
+            const app = doc.querySelector(".stApp");
+            const header = doc.querySelector("div.st-key-bon_app_header_shell");
+            if (!app || !header) return;
+
+            if (header.parentElement !== app) {
+              app.insertBefore(header, app.firstChild);
+            }
+
+            const height = header.getBoundingClientRect().height;
+            if (height > 0) {
+              doc.documentElement.style.setProperty("--bon-topbar-h", height + "px");
+            }
+
+            header.style.setProperty("position", "fixed", "important");
+            header.style.setProperty("top", "0px", "important");
+            header.style.setProperty("left", "0px", "important");
+            header.style.setProperty("right", "0px", "important");
+            header.style.setProperty("width", "100%", "important");
+            header.style.setProperty("max-width", "100vw", "important");
+            header.style.setProperty("z-index", "1001", "important");
+            header.style.setProperty("box-sizing", "border-box", "important");
+          }
+
+          function schedulePin() {
+            if (pinTimer) win.clearTimeout(pinTimer);
+            pinTimer = win.setTimeout(function () {
+              win.requestAnimationFrame(pinBonHeader);
+            }, 16);
+          }
+
+          pinBonHeader();
+          win.requestAnimationFrame(pinBonHeader);
+          win.setTimeout(pinBonHeader, 80);
+          win.setTimeout(pinBonHeader, 350);
+          win.addEventListener("resize", schedulePin);
+          doc
+            .querySelector('[data-testid="stAppViewContainer"]')
+            ?.addEventListener("scroll", schedulePin, { passive: true });
+
+          if (!win.__bonHeaderPinObs) {
+            win.__bonHeaderPinObs = new MutationObserver(schedulePin);
+            win.__bonHeaderPinObs.observe(doc.body, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+            });
+          } else {
+            schedulePin();
+          }
+        })();
+        </script>
+        """,
+        height=0,
     )
 
 
