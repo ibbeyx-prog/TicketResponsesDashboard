@@ -2196,6 +2196,10 @@ _SUPABASE_HTTP_TIMEOUT_SEC = float(os.getenv("SUPABASE_HTTP_TIMEOUT_SEC", "25"))
 _DASH_SUPABASE_DOWN_KEY = "_dash_supabase_unreachable"
 _DASH_UNATTENDED_TICK_KEY = "_dash_unattended_last_tick"
 _DASH_MISMATCH_CACHE_KEY = "_dash_pending_mismatch_cache"
+_DASH_ATTENDANCE_POLL_KEY = "_dash_attendance_poll_ts"
+_DASH_ATTENDANCE_POLL_SEC = max(
+    15, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "30") or "30"))
+)
 _DASH_DATA_CACHE_TTL_SEC = max(
     15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "20") or "20"))
 )
@@ -2207,6 +2211,7 @@ def _invalidate_dashboard_data_cache() -> None:
         _fetch_tickets_cached,
         _fetch_sales_cases_cached,
         _fetch_latest_attendance_ts_cached,
+        _fetch_visits_in_range_cached,
         _cached_field_engineer_usernames,
         _cached_task_categories,
     ):
@@ -5109,14 +5114,16 @@ def _fetch_visits_for_tickets(
     return pd.concat(parts, ignore_index=True)
 
 
-def _fetch_visits_in_range(
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-    *,
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_visits_in_range_cached(
+    range_start_iso: str,
+    range_end_iso: str,
     limit: int = 8000,
 ) -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
     client = _get_supabase_client()
     try:
         res = (
@@ -5134,6 +5141,19 @@ def _fetch_visits_in_range(
     if not rows:
         return pd.DataFrame()
     return _perf_prepare_visits_df(pd.DataFrame(rows))
+
+
+def _fetch_visits_in_range(
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    *,
+    limit: int = 8000,
+) -> pd.DataFrame:
+    return _fetch_visits_in_range_cached(
+        range_start.isoformat(),
+        range_end.isoformat(),
+        limit,
+    )
 
 
 def _perf_normalize_matrix_lookup(raw: object) -> str:
@@ -7038,7 +7058,6 @@ def _render_app_menu_panel() -> None:
 def _render_app_chrome() -> None:
     _render_app_topbar()
     _render_app_menu_controls()
-    _inject_bon_header_pin()
 
 
 def _perf_bucket_settings(
@@ -8620,7 +8639,12 @@ def _fetch_latest_attendance_timestamp() -> datetime | None:
 
 def _maybe_toast_new_telegram_activity() -> None:
     """Detect new bot/field log rows; refresh ticket cache so queues update."""
-    _fetch_latest_attendance_ts_cached.clear()
+    now_ts = datetime.now(timezone.utc).timestamp()
+    last_poll = float(st.session_state.get(_DASH_ATTENDANCE_POLL_KEY, 0))
+    if (now_ts - last_poll) < _DASH_ATTENDANCE_POLL_SEC:
+        return
+    st.session_state[_DASH_ATTENDANCE_POLL_KEY] = now_ts
+
     try:
         latest = _fetch_latest_attendance_timestamp()
     except Exception:
@@ -11295,6 +11319,7 @@ def main() -> None:
     _inject_bon_theme()
     _init_dash_date_range_state()
     _inject_bon_sidebar_visibility_css()
+    _inject_bon_dashboard_scripts()
     _render_app_chrome()
 
     _sidebar_controls()
@@ -11303,22 +11328,16 @@ def main() -> None:
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
-    def _metrics_fragment() -> None:
+    def _dashboard_body_fragment() -> None:
         _render_global_assign_day_metrics()
-        _inject_bon_dash_row_align()
-
-    _metrics_fragment()
-    _render_supabase_unreachable_banner()
-
-    @st.fragment(run_every=run_every)
-    def _dashboard_fragment() -> None:
         _sync_dash_range_from_ui(
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
         lookback_days, _, _ = _dash_date_range_lookback()
         _render_dashboard(lookback_days=lookback_days)
 
-    _dashboard_fragment()
+    _dashboard_body_fragment()
+    _render_supabase_unreachable_banner()
 
 
 PHOTO_THUMB_WIDTH = 220  # px — tight enough that 3 fit per row on a laptop
@@ -11413,6 +11432,10 @@ _BON_THEME_CSS = """
         overflow-x: hidden !important;
         height: 100vh !important;
         max-height: 100vh !important;
+        overscroll-behavior-y: contain !important;
+    }
+    [data-testid="stMain"] iframe {
+        overscroll-behavior: contain !important;
     }
     [data-testid="stAppViewContainer"] section.main {
         padding-top: 0 !important;
@@ -12671,6 +12694,35 @@ _BON_THEME_CSS = """
 """
 
 
+def _bon_theme_css_text() -> str:
+    css = _BON_THEME_CSS.strip()
+    if css.startswith("<style>"):
+        css = css[len("<style>") :]
+    if css.endswith("</style>"):
+        css = css[: -len("</style>")]
+    return css.strip()
+
+
+def _inject_bon_theme_styles_once() -> None:
+    """Inject the large theme stylesheet once into the parent document head."""
+    css_json = json.dumps(_bon_theme_css_text())
+    components.html(
+        f"""
+        <script>
+        (function () {{
+          const doc = window.parent.document;
+          if (doc.getElementById("bon-theme-css")) return;
+          const style = doc.createElement("style");
+          style.id = "bon-theme-css";
+          style.textContent = {css_json};
+          doc.head.appendChild(style);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _inject_bon_sidebar_visibility_css() -> None:
     """Show/hide Assign sidebar via CSS — avoids Streamlit collapse localStorage."""
     if _bon_sidebar_is_open():
@@ -12691,22 +12743,6 @@ def _inject_bon_sidebar_visibility_css() -> None:
             </style>
             """,
             unsafe_allow_html=True,
-        )
-        components.html(
-            """
-            <script>
-            (function () {
-              const doc = window.parent.document;
-              const sb = doc.querySelector('[data-testid="stSidebar"]');
-              if (sb) {
-                sb.setAttribute("aria-expanded", "true");
-                sb.style.removeProperty("display");
-                sb.style.removeProperty("visibility");
-              }
-            })();
-            </script>
-            """,
-            height=0,
         )
         return
     st.markdown(
@@ -12735,23 +12771,40 @@ def _inject_bon_sidebar_visibility_css() -> None:
     )
 
 
-def _inject_bon_header_pin() -> None:
-    """Keep the full dashboard header fixed while the main pane scrolls."""
+def _inject_bon_dashboard_scripts() -> None:
+    """One-time dashboard JS: fixed header pin + metrics/sidebar row alignment."""
     components.html(
         """
         <script>
         (function () {
           const win = window.parent;
           const doc = win.document;
-          let pinTimer = null;
+
+          function scrollRoot(el) {
+            if (!el) return null;
+            const oy = getComputedStyle(el).overflowY;
+            if (oy === "auto" || oy === "scroll") return el;
+            return el.querySelector('[data-testid="block-container"]') || el;
+          }
 
           function pinBonHeader() {
             const app = doc.querySelector(".stApp");
             const header = doc.querySelector("div.st-key-bon_app_header_shell");
-            if (!app || !header) return;
+            if (!app || !header) return false;
+
+            if (
+              header.dataset.bonPinned === "1" &&
+              header.parentElement === app
+            ) {
+              return true;
+            }
+
+            const main = doc.querySelector('[data-testid="stAppViewContainer"]');
+            const scrollY = main ? main.scrollTop : 0;
 
             if (header.parentElement !== app) {
               app.insertBefore(header, app.firstChild);
+              if (main) main.scrollTop = scrollY;
             }
 
             const height = header.getBoundingClientRect().height;
@@ -12767,74 +12820,29 @@ def _inject_bon_header_pin() -> None:
             header.style.setProperty("max-width", "100vw", "important");
             header.style.setProperty("z-index", "1001", "important");
             header.style.setProperty("box-sizing", "border-box", "important");
+            header.dataset.bonPinned = "1";
+            return true;
           }
 
-          function schedulePin() {
-            if (pinTimer) win.clearTimeout(pinTimer);
-            pinTimer = win.setTimeout(function () {
-              win.requestAnimationFrame(pinBonHeader);
-            }, 16);
-          }
+          function alignBonDashRow() {
+            const root = doc.documentElement;
+            root.style.setProperty("--bon-metrics-nudge", "0px");
+            root.style.setProperty("--bon-sidebar-ticket-nudge", "0px");
 
-          pinBonHeader();
-          win.requestAnimationFrame(pinBonHeader);
-          win.setTimeout(pinBonHeader, 80);
-          win.setTimeout(pinBonHeader, 350);
-          win.addEventListener("resize", schedulePin);
-          doc
-            .querySelector('[data-testid="stAppViewContainer"]')
-            ?.addEventListener("scroll", schedulePin, { passive: true });
-
-          if (!win.__bonHeaderPinObs) {
-            win.__bonHeaderPinObs = new MutationObserver(schedulePin);
-            win.__bonHeaderPinObs.observe(doc.body, {
-              childList: true,
-              subtree: true,
-              attributes: true,
-            });
-          } else {
-            schedulePin();
-          }
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def _inject_bon_dash_row_align() -> None:
-    """Align TICKET box (sidebar) with metrics row (main) when scrolled to top."""
-    components.html(
-        """
-        <script>
-        (function () {
-          const doc = window.parent.document;
-          const root = doc.documentElement;
-          let alignTimer = null;
-          function scrollRoot(el) {
-            if (!el) return null;
-            const oy = getComputedStyle(el).overflowY;
-            if (oy === "auto" || oy === "scroll") return el;
-            return el.querySelector('[data-testid="block-container"]') || el;
-          }
-          function atScrollTop() {
             const main = doc.querySelector('[data-testid="stAppViewContainer"]');
             const sidebar = doc.querySelector('[data-testid="stSidebar"]');
             const mainTop = main ? main.scrollTop < 2 : true;
             const sbRoot = scrollRoot(sidebar);
             const sbTop = sbRoot ? sbRoot.scrollTop < 2 : true;
-            return mainTop && sbTop;
-          }
-          function alignBonDashRow() {
-            root.style.setProperty("--bon-metrics-nudge", "0px");
-            root.style.setProperty("--bon-sidebar-ticket-nudge", "0px");
-            if (!atScrollTop()) return;
+            if (!mainTop || !sbTop) return;
+
             const ticket =
               doc.querySelector('[data-testid="stSidebar"] [class*="st-key-bon_box_ticket"] summary') ||
               doc.querySelector('[data-testid="stSidebar"] [class*="st-key-bon_box_ticket"]');
             const metrics =
               doc.querySelector('[data-testid="stMain"] div[class*="st-key-bon_dash_metrics_row"]');
             if (!ticket || !metrics) return;
+
             const delta =
               ticket.getBoundingClientRect().top - metrics.getBoundingClientRect().top;
             if (Math.abs(delta) < 0.5) return;
@@ -12844,27 +12852,66 @@ def _inject_bon_dash_row_align() -> None:
               root.style.setProperty("--bon-sidebar-ticket-nudge", (-delta) + "px");
             }
           }
-          function scheduleAlign() {
-            if (alignTimer) window.clearTimeout(alignTimer);
-            alignTimer = window.setTimeout(alignBonDashRow, 16);
+
+          function syncSidebarAria() {
+            const sb = doc.querySelector('[data-testid="stSidebar"]');
+            if (!sb) return;
+            const hidden = getComputedStyle(sb).display === "none";
+            sb.setAttribute("aria-expanded", hidden ? "false" : "true");
           }
-          alignBonDashRow();
-          requestAnimationFrame(alignBonDashRow);
-          window.setTimeout(alignBonDashRow, 80);
-          window.setTimeout(alignBonDashRow, 350);
-          window.parent.addEventListener("resize", scheduleAlign);
-          const main = doc.querySelector('[data-testid="stAppViewContainer"]');
-          const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-          main?.addEventListener("scroll", scheduleAlign, { passive: true });
-          sidebar?.addEventListener("scroll", scheduleAlign, { passive: true });
-          scrollRoot(sidebar)?.addEventListener("scroll", scheduleAlign, { passive: true });
-          if (!window.parent.__bonDashRowAlignObs) {
-            window.parent.__bonDashRowAlignObs = new MutationObserver(scheduleAlign);
-            window.parent.__bonDashRowAlignObs.observe(doc.body, {
-              childList: true,
-              subtree: true,
-              attributes: true,
+
+          function runDashboardChrome() {
+            if (pinBonHeader()) syncSidebarAria();
+            alignBonDashRow();
+          }
+
+          function scheduleChrome() {
+            win.clearTimeout(win.__bonDashboardChromeTimer);
+            win.__bonDashboardChromeTimer = win.setTimeout(function () {
+              win.requestAnimationFrame(runDashboardChrome);
+            }, 48);
+          }
+
+          runDashboardChrome();
+
+          if (!win.__bonDashboardScriptsInit) {
+            win.__bonDashboardScriptsInit = true;
+            win.addEventListener("resize", scheduleChrome, { passive: true });
+            const main = doc.querySelector('[data-testid="stAppViewContainer"]');
+            const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+            main?.addEventListener("scroll", scheduleChrome, { passive: true });
+            sidebar?.addEventListener("scroll", scheduleChrome, { passive: true });
+            scrollRoot(sidebar)?.addEventListener("scroll", scheduleChrome, {
+              passive: true,
             });
+            const app = doc.querySelector(".stApp");
+            if (app) {
+              win.__bonDashboardChromeObs = new MutationObserver(function (mutations) {
+                for (const mutation of mutations) {
+                  if (mutation.type !== "childList") continue;
+                  for (const node of mutation.addedNodes) {
+                    if (node.nodeType !== 1) continue;
+                    if (
+                      node.matches?.("div.st-key-bon_app_header_shell") ||
+                      node.querySelector?.("div.st-key-bon_app_header_shell") ||
+                      node.matches?.('[class*="st-key-bon_dash_metrics_row"]') ||
+                      node.querySelector?.('[class*="st-key-bon_dash_metrics_row"]') ||
+                      node.matches?.('[class*="st-key-bon_box_ticket"]') ||
+                      node.querySelector?.('[class*="st-key-bon_box_ticket"]')
+                    ) {
+                      scheduleChrome();
+                      return;
+                    }
+                  }
+                }
+              });
+              win.__bonDashboardChromeObs.observe(app, {
+                childList: true,
+                subtree: true,
+              });
+            }
+          } else if (!pinBonHeader()) {
+            scheduleChrome();
           }
         })();
         </script>
@@ -12874,9 +12921,7 @@ def _inject_bon_dash_row_align() -> None:
 
 
 def _inject_bon_theme() -> None:
-    st.markdown(_BON_THEME_CSS, unsafe_allow_html=True)
-    _inject_bon_sidebar_visibility_css()
-    _inject_bon_dash_row_align()
+    _inject_bon_theme_styles_once()
 
 
 def _format_when(when: object) -> str:

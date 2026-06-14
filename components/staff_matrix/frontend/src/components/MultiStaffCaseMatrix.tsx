@@ -211,6 +211,26 @@ export function MultiStaffCaseMatrix({
 
   const { rows } = table.getRowModel();
   const parentRef = useRef<HTMLDivElement>(null);
+  const scrollStorageKey = "bon_perf_matrix_scroll_y";
+
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el) return undefined;
+
+    const saved = sessionStorage.getItem(scrollStorageKey);
+    if (saved) {
+      const y = Number(saved);
+      if (Number.isFinite(y) && y > 0) {
+        el.scrollTop = y;
+      }
+    }
+
+    const onScroll = () => {
+      sessionStorage.setItem(scrollStorageKey, String(el.scrollTop));
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [scrollStorageKey]);
 
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
@@ -254,7 +274,7 @@ export function MultiStaffCaseMatrix({
         <div className="flex min-w-0 flex-1 flex-col">
           <div
             ref={parentRef}
-            className="min-h-0 flex-1 overflow-auto bg-[#0a0a0a]"
+            className="min-h-0 flex-1 overflow-auto overscroll-y-contain bg-[#0a0a0a]"
             style={{ maxHeight: gridBodyHeight }}
           >
             <div style={{ minWidth: totalWidth }}>
