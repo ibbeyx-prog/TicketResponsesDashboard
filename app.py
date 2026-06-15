@@ -5936,6 +5936,205 @@ def _perf_visit_bipartite_data(
     }
 
 
+def _perf_sales_case_matrix_outcome(status: object) -> tuple[str, str]:
+    """Map sales status to matrix visit-style outcome codes."""
+    eff = _sc_effective_status(status)
+    if eff == SC_STATUS_RESOLVED:
+        return "responded", _PERF_MATRIX_OUTCOME_LABELS["responded"]
+    if eff in (SC_STATUS_REGIONAL, SC_STATUS_DESIGN):
+        return "active", "Sales in progress"
+    if eff == SC_STATUS_INVESTIGATION:
+        return "assigned", "Investigation"
+    if eff == SC_STATUS_SALES_TICKET:
+        return "assigned", _PERF_MATRIX_OUTCOME_LABELS["assigned"]
+    return "assigned", str(eff or "Open")
+
+
+def _perf_sales_case_matrix_staff(row: object) -> dict[str, tuple[str, str]]:
+    """Staff → (outcome_code, label) for one sales case row."""
+    if isinstance(row, pd.Series):
+        data = row
+    else:
+        data = pd.Series(row if isinstance(row, dict) else {})
+    status = data.get("status")
+    outcome, label = _perf_sales_case_matrix_outcome(status)
+    staff: dict[str, tuple[str, str]] = {}
+
+    assigned = data.get("assigned_to")
+    if _sc_sales_has_field_assignee(assigned):
+        eng = _perf_norm_member(assigned)
+        staff[eng] = (outcome, label)
+
+    admin = str(data.get("admin_owner") or "").strip()
+    if admin:
+        admin_key = _perf_norm_member(admin)
+        staff.setdefault(admin_key, ("assigned", "Admin"))
+
+    attended = str(data.get("attended_by") or "").strip()
+    if attended:
+        att_key = _perf_norm_member(attended)
+        if att_key not in (_SC_SALES_OVERVIEW_ADMIN_LABEL, "(unknown)"):
+            staff.setdefault(att_key, ("assigned", "Sales queue"))
+
+    if not staff:
+        staff[_SC_SALES_OVERVIEW_ADMIN_LABEL] = (outcome, label)
+    return staff
+
+
+def _perf_sales_case_bipartite_data(
+    sales: pd.DataFrame,
+    *,
+    focus: str,
+) -> dict[str, object] | None:
+    """Sales cases (case_ref) and involved staff for the Case Info matrix."""
+    if sales.empty or "case_ref" not in sales.columns:
+        return None
+    ticket_engineers: dict[str, set[str]] = {}
+    for _, row in sales.iterrows():
+        ref = str(row.get("case_ref") or "").strip()
+        if not ref:
+            continue
+        ticket_engineers[ref] = set(_perf_sales_case_matrix_staff(row).keys())
+    if not ticket_engineers:
+        return None
+    focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
+    all_engineers = sorted(
+        {e for engs in ticket_engineers.values() for e in engs},
+        key=str.lower,
+    )
+    all_tickets = sorted(
+        ticket_engineers.keys(),
+        key=lambda t: (-len(ticket_engineers[t]), str(t).lower()),
+    )
+    return {
+        "all_engineers": all_engineers,
+        "all_tickets": all_tickets,
+        "ticket_engineers": ticket_engineers,
+        "focus_key": focus_key,
+        "total_tickets": len(all_tickets),
+    }
+
+
+def _perf_merge_case_info_bipartite_data(
+    visits_data: dict[str, object] | None,
+    sales_data: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Union field-visit and sales-case rows for the Case Info matrix."""
+    if visits_data is None and sales_data is None:
+        return None
+    if visits_data is None:
+        return sales_data
+    if sales_data is None:
+        return visits_data
+    ticket_engineers: dict[str, set[str]] = {
+        str(tn): set(engs)
+        for tn, engs in visits_data["ticket_engineers"].items()  # type: ignore[index]
+    }
+    for tn, engs in sales_data["ticket_engineers"].items():  # type: ignore[index]
+        ticket_engineers.setdefault(str(tn), set()).update(engs)
+    all_engineers = sorted(
+        set(visits_data["all_engineers"]) | set(sales_data["all_engineers"]),  # type: ignore[arg-type]
+        key=str.lower,
+    )
+    all_tickets = sorted(
+        ticket_engineers.keys(),
+        key=lambda t: (-len(ticket_engineers.get(t, set())), str(t).lower()),
+    )
+    focus_key = str(visits_data.get("focus_key") or sales_data.get("focus_key") or "")
+    return {
+        "all_engineers": all_engineers,
+        "all_tickets": all_tickets,
+        "ticket_engineers": ticket_engineers,
+        "focus_key": focus_key,
+        "total_tickets": len(all_tickets),
+    }
+
+
+def _perf_sales_cases_for_case_info(
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Sales cases in the Performance date range (+ open queue rows)."""
+    if sales_all is None or sales_all.empty:
+        return pd.DataFrame()
+    in_view, _ = _dashboard_sales_cases_in_view(
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    return in_view
+
+
+def _perf_matrix_merge_sales_lookup(
+    sales_in_view: pd.DataFrame,
+    lookup: str,
+) -> pd.DataFrame:
+    """Append a sales case by ``case_ref`` — ignores sidebar date range."""
+    tid = _perf_normalize_matrix_lookup(lookup)
+    if not tid or sales_in_view is None:
+        return sales_in_view if sales_in_view is not None else pd.DataFrame()
+    view = sales_in_view if not sales_in_view.empty else pd.DataFrame()
+    if not view.empty and "case_ref" in view.columns:
+        if tid in view["case_ref"].astype(str).str.strip().tolist():
+            return view
+    try:
+        all_sales = _fetch_sales_cases_cached()
+    except Exception:
+        all_sales = None
+    if all_sales is None or all_sales.empty or "case_ref" not in all_sales.columns:
+        return view
+    extra = all_sales[all_sales["case_ref"].astype(str).str.strip() == tid]
+    if extra.empty:
+        return view
+    parts = [df for df in (view, extra) if not df.empty]
+    merged = pd.concat(parts, ignore_index=True)
+    return merged.drop_duplicates(subset=["case_ref"], keep="last")
+
+
+def _perf_sales_cases_by_ref(sales: pd.DataFrame) -> dict[str, pd.Series]:
+    """Index sales rows by ``case_ref`` for matrix payload building."""
+    out: dict[str, pd.Series] = {}
+    if sales.empty or "case_ref" not in sales.columns:
+        return out
+    for _, row in sales.iterrows():
+        ref = str(row.get("case_ref") or "").strip()
+        if ref:
+            out[ref] = row
+    return out
+
+
+def _perf_case_info_ticket_ids(
+    visits: pd.DataFrame,
+    sales: pd.DataFrame,
+    *,
+    focus: str,
+) -> int:
+    """Distinct field tickets + sales cases for the Case Info tab count."""
+    ids: set[str] = set()
+    if not visits.empty and "ticket_number" in visits.columns:
+        prepared = _perf_prepare_visits_df(visits)
+        if focus in ("", "All"):
+            ids.update(prepared["ticket_number"].astype(str).str.strip().tolist())
+        elif "assignee" in prepared.columns:
+            focus_key = _perf_norm_member(focus)
+            mask = prepared["assignee"].astype(str).map(_perf_norm_member) == focus_key
+            ids.update(
+                prepared.loc[mask, "ticket_number"].astype(str).str.strip().tolist()
+            )
+    if not sales.empty and "case_ref" in sales.columns:
+        for _, row in sales.iterrows():
+            ref = str(row.get("case_ref") or "").strip()
+            if not ref:
+                continue
+            if focus not in ("", "All"):
+                if _perf_norm_member(focus) not in _perf_sales_case_matrix_staff(row):
+                    continue
+            ids.add(ref)
+    return len({i for i in ids if i})
+
+
 def _perf_visit_map_ticket_pool(
     all_tickets: list[str],
     ticket_engineers: dict[str, set[str]],
@@ -6079,9 +6278,16 @@ def _perf_matrix_staff_role(outcome: str) -> str:
     }.get(outcome, "Contributor")
 
 
-def _perf_matrix_case_label(ticket_id: str, priority: str, *, seq: int) -> str:
+def _perf_matrix_case_label(
+    ticket_id: str,
+    priority: str,
+    *,
+    seq: int,
+    track: str = "Field",
+) -> str:
     code = {"Critical": "C", "High": "H", "Normal": "N", "Low": "L"}.get(priority, "N")
-    return f"Case #{ticket_id} ({code}-{seq:02d})"
+    prefix = "Sales" if track == "Sales" else "Case"
+    return f"{prefix} #{ticket_id} ({code}-{seq:02d})"
 
 
 _PERF_MATRIX_COMMENTS_MAX = 40
@@ -6304,6 +6510,57 @@ def _perf_matrix_case_info_from_tickets_snapshot(
         )
 
 
+def _perf_matrix_case_info_from_sales_cases(
+    sales_df: pd.DataFrame,
+    ticket_numbers: set[str],
+    bucket: _PerfMatrixCaseInfoBucket,
+) -> None:
+    if sales_df.empty or "case_ref" not in sales_df.columns:
+        return
+    for _, row in sales_df.iterrows():
+        ref = str(row.get("case_ref") or "").strip()
+        if ref not in ticket_numbers:
+            continue
+        ts = (
+            row.get("updated_at")
+            or row.get("last_assigned_at")
+            or row.get("created_at")
+        )
+        author = str(
+            row.get("admin_owner")
+            or row.get("assigned_to")
+            or row.get("attended_by")
+            or "Admin"
+        )
+        status_eff = _sc_effective_status(row.get("status"))
+        if status_eff:
+            bucket.add(
+                ref,
+                at_raw=ts,
+                author=author,
+                text=f"Status: {status_eff}",
+                photo_url=None,
+                kind="admin",
+            )
+        for field, kind in (
+            ("description", "admin"),
+            ("additional_info", "admin"),
+            ("close_note", "admin"),
+            ("dispatch_reason", "assignment"),
+        ):
+            text = str(row.get(field) or "").strip()
+            if not text:
+                continue
+            bucket.add(
+                ref,
+                at_raw=ts,
+                author=author,
+                text=text,
+                photo_url=None,
+                kind=kind,
+            )
+
+
 def _perf_matrix_case_info_finalize(
     bucket: _PerfMatrixCaseInfoBucket,
     ticket_numbers: set[str],
@@ -6343,6 +6600,8 @@ def _perf_matrix_case_info_finalize(
 def _perf_matrix_case_info_by_ticket(
     visits_all: pd.DataFrame,
     ticket_numbers: list[str],
+    *,
+    sales_cases: pd.DataFrame | None = None,
 ) -> dict[str, dict[str, list[dict[str, object]]]]:
     """Comments and photos for Case Info — text and images kept separate, deduped."""
     ids = {str(t).strip() for t in ticket_numbers if str(t).strip()}
@@ -6350,6 +6609,19 @@ def _perf_matrix_case_info_by_ticket(
         return {}
     bucket = _PerfMatrixCaseInfoBucket()
     _perf_matrix_case_info_from_visits(visits_all, ids, bucket)
+    sales_view = sales_cases if sales_cases is not None else pd.DataFrame()
+    if not sales_view.empty:
+        _perf_matrix_case_info_from_sales_cases(sales_view, ids, bucket)
+    else:
+        try:
+            all_sales = _fetch_sales_cases_cached()
+        except Exception:
+            all_sales = None
+        if all_sales is not None and not all_sales.empty and "case_ref" in all_sales.columns:
+            subset = all_sales[
+                all_sales["case_ref"].astype(str).str.strip().isin(ids)
+            ]
+            _perf_matrix_case_info_from_sales_cases(subset, ids, bucket)
     try:
         logs = _fetch_attendance_for_matrix_tickets(sorted(ids))
     except Exception:
@@ -6387,6 +6659,7 @@ def _perf_build_staff_matrix_payload(
     data: dict[str, object],
     search: str,
     lookup_ticket: str = "",
+    sales_cases: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     """JSON payload for the React Multi-Staff Case Management Matrix."""
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
@@ -6395,18 +6668,30 @@ def _perf_build_staff_matrix_payload(
         lookup_ticket=lookup_ticket,
     )
     prepared = _perf_prepare_visits_df(visits_all)
+    sales_by_ref = _perf_sales_cases_by_ref(
+        sales_cases if sales_cases is not None else pd.DataFrame()
+    )
     eng_colors = _perf_engineer_color_map(all_engineers)
-    case_info_by_ticket = _perf_matrix_case_info_by_ticket(visits_all, pool)
+    case_info_by_ticket = _perf_matrix_case_info_by_ticket(
+        visits_all,
+        pool,
+        sales_cases=sales_cases,
+    )
     tickets: list[dict[str, object]] = []
     for seq, tn in enumerate(pool, start=1):
         assigned = sorted(ticket_engineers.get(tn, set()), key=str.lower)
         staff_assignments: dict[str, dict[str, str]] = {}
+        sales_row = sales_by_ref.get(tn)
         for eng in assigned:
             outcome, label = _perf_visit_staff_outcome(
                 prepared,
                 assignee=eng,
                 ticket=tn,
             )
+            if not outcome and sales_row is not None:
+                sales_staff = _perf_sales_case_matrix_staff(sales_row)
+                if eng in sales_staff:
+                    outcome, label = sales_staff[eng]
             if outcome:
                 staff_assignments[eng] = {
                     "outcome": outcome,
@@ -6416,10 +6701,13 @@ def _perf_build_staff_matrix_payload(
         is_shared = len(assigned) > 1
         status = _perf_ticket_matrix_status(staff_assignments, assigned)
         priority = _perf_ticket_matrix_priority(assigned_count=len(assigned))
+        track = "Sales" if sales_row is not None else "Field"
         tickets.append(
             {
                 "id": tn,
-                "caseLabel": _perf_matrix_case_label(tn, priority, seq=seq),
+                "caseLabel": _perf_matrix_case_label(
+                    tn, priority, seq=seq, track=track
+                ),
                 "status": status,
                 "displayStatus": _perf_matrix_display_status(status),
                 "priority": priority,
@@ -6472,6 +6760,7 @@ def _render_perf_visit_staff_matrix(
     data: dict[str, object],
     search: str,
     lookup_ticket: str = "",
+    sales_cases: pd.DataFrame | None = None,
 ) -> None:
     """Tickets × staff grid — virtualized React matrix when build is present."""
     payload = _perf_build_staff_matrix_payload(
@@ -6479,6 +6768,7 @@ def _render_perf_visit_staff_matrix(
         data=data,
         search=search,
         lookup_ticket=lookup_ticket,
+        sales_cases=sales_cases,
     )
     tickets = payload.get("tickets") or []
     if not tickets:
@@ -6502,6 +6792,9 @@ def _render_perf_visit_staff_matrix(
         )
 
     prepared = _perf_prepare_visits_df(visits_all)
+    sales_by_ref = _perf_sales_cases_by_ref(
+        sales_cases if sales_cases is not None else pd.DataFrame()
+    )
     eng_colors = _perf_engineer_color_map(all_engineers)
 
     header_cells = [
@@ -6534,6 +6827,23 @@ def _render_perf_visit_staff_matrix(
                 ticket=tn,
                 eng_colors=eng_colors,
             )
+            if not sym:
+                sales_row = sales_by_ref.get(tn)
+                if sales_row is not None:
+                    sales_staff = _perf_sales_case_matrix_staff(sales_row)
+                    if eng in sales_staff:
+                        outcome, label = sales_staff[eng]
+                        if outcome == "active":
+                            sym, sym_col, title = (
+                                "●",
+                                eng_colors.get(eng, "#9ec5e8"),
+                                label,
+                            )
+                        else:
+                            sym, sym_col = _PERF_MATRIX_OUTCOME_STYLE.get(
+                                outcome, ("·", "#a39e97")
+                            )
+                            title = label
             cells.append(
                 f'<td class="perf-matrix-cell" style="color:{sym_col}" '
                 f'title="{html.escape(title)}">{html.escape(sym)}</td>'
@@ -6607,38 +6917,55 @@ def _render_perf_case_info_tab(
     visits_all: pd.DataFrame,
     *,
     focus: str,
+    sales_all: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> None:
-    """Case Info tab — multi-staff case management matrix."""
+    """Case Info tab — multi-staff case management matrix (field + sales)."""
     lookup_raw = _perf_matrix_sync_lookup_from_component()
     lookup_tid = _perf_normalize_matrix_lookup(lookup_raw)
     visits_matrix = _perf_matrix_merge_ticket_lookup(visits_all, lookup_raw)
-    data_matrix = _perf_visit_bipartite_data(visits_matrix, focus=focus)
+    sales_base = (
+        _perf_sales_cases_for_case_info(
+            sales_all if sales_all is not None else pd.DataFrame(),
+            range_start=range_start,
+            range_end=range_end,
+        )
+        if range_start is not None and range_end is not None
+        else (sales_all if sales_all is not None else pd.DataFrame())
+    )
+    sales_matrix = _perf_matrix_merge_sales_lookup(sales_base, lookup_raw)
+    visits_data = _perf_visit_bipartite_data(visits_matrix, focus=focus)
+    sales_data = _perf_sales_case_bipartite_data(sales_matrix, focus=focus)
+    data_matrix = _perf_merge_case_info_bipartite_data(visits_data, sales_data)
     st.caption(
-        "Rows = tickets · columns = staff · colored dots show involvement. "
-        "Use **Ticket ID** in the matrix filter bar to search or look up history "
-        "outside the sidebar date range (9 or 16 digits). Case Info on the right."
+        "Rows = field tickets and **sales cases** · columns = staff · colored dots show "
+        "involvement. Use **Ticket ID** / **case ref** in the matrix filter bar to search "
+        "or look up history outside the sidebar date range (9 or 16 digits). "
+        "Case Info on the right."
     )
     if lookup_tid and not data_matrix:
         st.warning(
-            f"No visit cycles found for ticket **{lookup_tid}**. "
-            "Check the ticket number or confirm it was assigned from the dashboard."
+            f"No field visits or sales case found for **{lookup_tid}**. "
+            "Check the ID or confirm it exists in tickets_active / sales cases."
         )
     elif not data_matrix:
         st.info(
-            "No visit data in this window. Enter a full **Ticket ID** in the matrix "
-            "filter bar to look up a specific ticket, or widen the sidebar date range."
+            "No field or sales case activity in this window. Enter a full **Ticket ID** "
+            "or **case ref** in the matrix filter bar, or widen the sidebar date range."
         )
     else:
         if lookup_tid and lookup_tid not in (data_matrix.get("all_tickets") or []):
             st.warning(
-                f"Ticket **{lookup_tid}** has no `ticket_visits` rows — "
-                "matrix Case Info may be empty."
+                f"**{lookup_tid}** is not in the current matrix pool — "
+                "try widening the date range or check the ID."
             )
         _render_perf_visit_staff_matrix(
             visits_matrix,
             data=data_matrix,
             search=lookup_tid,
             lookup_ticket=lookup_tid,
+            sales_cases=sales_matrix,
         )
 
 
@@ -7434,6 +7761,63 @@ def _perf_prepare_handled_in_range(
         visit_ticket_ids=visit_ids,
     )
     return completed, investigation
+
+
+def _perf_prepare_sales_handled_in_range(
+    sales_all: pd.DataFrame,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Sales cases attended in range (Investigation / Regional / Resolved)."""
+    return _perf_sales_attended_in_week(
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+
+
+def _perf_enrich_sales_handled(df: pd.DataFrame) -> pd.DataFrame:
+    """Sales rows for Handled charts/tables (staff, outcome, category)."""
+    view = _perf_enrich_sales_cases(df)
+    if view.empty:
+        return view
+    status = view.get(
+        "_attended_status",
+        view.get("status_eff", pd.Series("", index=view.index)),
+    )
+    view["_outcome"] = status.astype(str).str.strip().map(_perf_weekly_outcome_group)
+    if "case_ref" in view.columns:
+        view["ticket_number"] = view["case_ref"].astype(str).str.strip()
+    view["track"] = "Sales"
+    return view
+
+
+def _perf_prepare_handled_work_view(
+    completed: pd.DataFrame,
+    investigation: pd.DataFrame,
+    sales_handled: pd.DataFrame,
+) -> pd.DataFrame:
+    """Field + Sales cases for the Handled tab (enriched, one row per case)."""
+    parts: list[pd.DataFrame] = []
+    field = _perf_combine_work(completed, investigation)
+    if not field.empty:
+        f = _perf_enrich_tickets(field)
+        f["track"] = "Field"
+        parts.append(f)
+    if not sales_handled.empty:
+        parts.append(_perf_enrich_sales_handled(sales_handled))
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def _perf_filter_handled_work_by_person(df: pd.DataFrame, person: str) -> pd.DataFrame:
+    if df.empty or person in ("", "All"):
+        return df
+    if "staff" not in df.columns:
+        return df
+    key = _perf_norm_member(person)
+    return df.loc[df["staff"] == key].copy()
 
 
 def _perf_reference_ts(df: pd.DataFrame) -> pd.Series:
@@ -8442,6 +8826,7 @@ def _perf_build_summary(
     *,
     handled_completed: pd.DataFrame | None = None,
     handled_investigation: pd.DataFrame | None = None,
+    handled_sales: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     p_counts = _perf_staff_counts(pending)
     o_counts = _perf_staff_counts(open_df)
@@ -8453,6 +8838,11 @@ def _perf_build_summary(
     hi_counts = _perf_staff_counts(
         handled_investigation if handled_investigation is not None else investigation
     )
+    hs_counts = (
+        _perf_staff_counts(_perf_enrich_sales_handled(handled_sales))
+        if handled_sales is not None and not handled_sales.empty
+        else pd.Series(dtype=int)
+    )
     h_counts = _perf_staff_counts(on_hold)
     u_counts = _perf_staff_counts(unattended)
     people = sorted(
@@ -8460,6 +8850,7 @@ def _perf_build_summary(
         | set(o_counts.index)
         | set(c_counts.index)
         | set(i_counts.index)
+        | set(hs_counts.index)
         | set(h_counts.index)
         | set(u_counts.index),
         key=str.lower,
@@ -8483,7 +8874,11 @@ def _perf_build_summary(
             "Investigation": int(i_counts.get(p, 0)),
             "On Hold": int(h_counts.get(p, 0)),
             "Unattended": int(u_counts.get(p, 0)),
-            "Handled": int(hc_counts.get(p, 0)) + int(hi_counts.get(p, 0)),
+            "Handled": (
+                int(hc_counts.get(p, 0))
+                + int(hi_counts.get(p, 0))
+                + int(hs_counts.get(p, 0))
+            ),
         }
         for p in people
     ]
@@ -8640,6 +9035,43 @@ def _render_perf_outcome_trend(
         .properties(height=260)
     )
     st.altair_chart(chart, use_container_width=True)
+
+
+def _render_perf_handled_work_table(df: pd.DataFrame) -> None:
+    """Field tickets + Sales cases handled in the selected window."""
+    if df.empty:
+        st.caption("No handled cases to list.")
+        return
+    detail = df.sort_values("_ts", ascending=False).head(200)
+    cols = [
+        c
+        for c in (
+            "track",
+            "ticket_number",
+            "status_eff",
+            "status",
+            "_outcome",
+            "staff",
+            "category",
+            "_local",
+            "updated_at",
+        )
+        if c in detail.columns
+    ]
+    show = detail[cols].copy()
+    rename = {
+        "track": "Track",
+        "ticket_number": "ID",
+        "status_eff": "Status",
+        "status": "Status (raw)",
+        "_outcome": "Outcome",
+        "staff": "Staff",
+        "category": "Category",
+    }
+    show = show.rename(columns={k: v for k, v in rename.items() if k in show.columns})
+    if "_local" in detail.columns:
+        show["Activity (local)"] = detail["_local"].dt.strftime("%Y-%m-%d %H:%M")
+    st.dataframe(_format_local(show), use_container_width=True, hide_index=True)
 
 
 def _render_perf_ticket_table(df: pd.DataFrame) -> None:
@@ -16137,6 +16569,11 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 range_end,
                 visits=visits_all,
             )
+        sales_handled = _perf_prepare_sales_handled_in_range(
+            sales_all,
+            range_start,
+            range_end,
+        )
 
         summary = _perf_build_summary(
             pending,
@@ -16147,6 +16584,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             unattended,
             handled_completed=handled_completed,
             handled_investigation=handled_investigation,
+            handled_sales=sales_handled,
         )
         visit_summary = _perf_build_visit_summary(visits_all)
         overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
@@ -16170,13 +16608,25 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         sales_f = _perf_filter_by_person(
             _perf_enrich_sales_cases(sales_all), focus,
         )
-        work_f = _perf_combine_work(
+        sales_handled_f = _perf_filter_by_person(
+            _perf_enrich_sales_cases(sales_handled), focus,
+        )
+        work_view = _perf_prepare_handled_work_view(
             _perf_filter_by_person(handled_completed, focus),
             _perf_filter_by_person(handled_investigation, focus),
+            sales_handled_f,
         )
-        n_work = len(work_f)
+        n_work = len(work_view)
+        n_work_field = (
+            int((work_view["track"] == "Field").sum())
+            if not work_view.empty and "track" in work_view.columns
+            else 0
+        )
+        n_work_sales = n_work - n_work_field
         n_handled_resolved = (
-            int((work_f["_outcome"] == STATUS_RESOLVED).sum()) if not work_f.empty else 0
+            int((work_view["_outcome"] == STATUS_RESOLVED).sum())
+            if not work_view.empty
+            else 0
         )
         n_handled_investigation = n_work - n_handled_resolved
         responded_in_view = pd.DataFrame()
@@ -16221,10 +16671,15 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 help="All sales cases (not filtered by time range).",
             )
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
-        n_case_info = (
-            int(visits_f["ticket_number"].astype(str).nunique())
-            if not visits_f.empty and "ticket_number" in visits_f.columns
-            else 0
+        sales_case_info = _perf_sales_cases_for_case_info(
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
+        n_case_info = _perf_case_info_ticket_ids(
+            visits_f,
+            sales_case_info,
+            focus=focus,
         )
 
         st.caption(
@@ -16307,20 +16762,32 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             )
 
         with tab_case_info:
-            _render_perf_case_info_tab(visits_all, focus=focus)
+            _render_perf_case_info_tab(
+                visits_all,
+                focus=focus,
+                sales_all=sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
 
         with tab_work:
+            sales_part = (
+                f" + **{n_work_sales}** Sales"
+                if n_work_sales
+                else ""
+            )
             st.caption(
-                f"**Assigned / reassigned in range:** {n_assigned_in_range} ticket(s) · "
-                f"**Handled ({n_work})** = **{n_handled_resolved}** {STATUS_RESOLVED} + "
+                f"**Assigned / reassigned in range:** {n_assigned_in_range} field ticket(s) · "
+                f"**Handled ({n_work})** = **{n_work_field}** Field{sales_part} · "
+                f"**{n_handled_resolved}** {STATUS_RESOLVED} + "
                 f"**{n_handled_investigation}** Investigation with activity in "
-                f"**{range_caption}** (resolve, reassign, or admin action). "
+                f"**{range_caption}** (resolve, reassign, admin action, or sales update). "
                 f"**Visit fair credit:** {n_handled_visit_tickets} responded ticket(s)."
             )
-            if work_f.empty and visits_f.empty:
-                st.info("No resolved/investigation tickets or visits for this filter.")
+            if work_view.empty and visits_f.empty:
+                st.info("No handled field/sales cases or visits for this filter.")
             else:
-                view = _perf_enrich_tickets(work_f) if not work_f.empty else work_f
+                view = work_view
                 c_chart, c_table = st.columns([3, 2])
                 with c_chart:
                     if not visits_f.empty:
@@ -16339,24 +16806,39 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                             value_name="Handled",
                         )
                 with c_table:
-                    if work_f.empty:
-                        st.caption("No handled tickets in this time range.")
+                    if view.empty:
+                        st.caption("No handled cases in this time range.")
                     else:
                         st.markdown(f"**Split ({range_caption})**")
+                        group_cols = ["track", "_outcome", "category"]
+                        group_cols = [c for c in group_cols if c in view.columns]
                         split = (
-                            view.groupby(["_outcome", "category"], as_index=False)
+                            view.groupby(group_cols, as_index=False)
                             .size()
-                            .rename(columns={"size": "Tickets"})
+                            .rename(columns={"size": "Cases"})
                             .sort_values(
-                                ["Tickets", "_outcome", "category"],
-                                ascending=[False, True, True],
+                                ["Cases"] + group_cols,
+                                ascending=[False] + [True] * len(group_cols),
                             )
-                            .rename(columns={"_outcome": "Outcome", "category": "Outcome category"})
+                        )
+                        split = split.rename(
+                            columns={
+                                "track": "Track",
+                                "_outcome": "Outcome",
+                                "category": "Category",
+                            }
                         )
                         st.dataframe(split, use_container_width=True, hide_index=True)
-                        if "assigned_category" in view.columns:
+                        field_view = (
+                            view.loc[view["track"].eq("Field")]
+                            if "track" in view.columns
+                            else view
+                        )
+                        if "assigned_category" in field_view.columns and not field_view.empty:
                             assign_split = (
-                                view.groupby(["_outcome", "assigned_category"], as_index=False)
+                                field_view.groupby(
+                                    ["_outcome", "assigned_category"], as_index=False
+                                )
                                 .size()
                                 .rename(
                                     columns={
@@ -16370,21 +16852,21 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                                     ascending=[False, True, True],
                                 )
                             )
-                            st.markdown("**Assigned vs outcome (mismatch check)**")
+                            st.markdown("**Field: assigned vs outcome (mismatch check)**")
                             st.dataframe(
                                 assign_split,
                                 use_container_width=True,
                                 hide_index=True,
                             )
                 if not view.empty:
-                    with st.expander("Trend & ticket list", expanded=False):
+                    with st.expander("Trend & case list", expanded=False):
                         _render_perf_outcome_trend(
                             view,
                             bucket_fmt=bucket_fmt,
                             x_title=x_title,
                             axis_format=axis_format,
                         )
-                        _render_perf_ticket_table(view)
+                        _render_perf_handled_work_table(view)
                 elif not visits_f.empty:
                     with st.expander("Visit detail list", expanded=False):
                         _render_visit_detail_table(visits_f)
