@@ -113,15 +113,9 @@ def should_send_nudge(row: dict, *, now: datetime | None = None) -> bool:
 def nudge_message(*, assigned_to: str, ticket_number: str, task_category: str) -> str:
     handle = assigned_to if str(assigned_to).startswith("@") else f"@{assigned_to}"
     cat = (task_category or "").strip() or "—"
-    hours = (
-        int(UNATTENDED_NUDGE_HOURS)
-        if UNATTENDED_NUDGE_HOURS == int(UNATTENDED_NUDGE_HOURS)
-        else UNATTENDED_NUDGE_HOURS
-    )
     return (
         f"Reminder {handle}: ticket {ticket_number} ({cat}) — "
-        f"no field response after {hours}h. "
-        "Please swipe-reply to the assignment message with text and/or a photo."
+        "no field response, please update."
     )
 
 

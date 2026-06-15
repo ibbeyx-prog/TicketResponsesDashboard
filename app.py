@@ -3374,11 +3374,7 @@ def _render_selectable_ticket_table(
         st.caption("No tickets in this queue.")
         return []
 
-    search_q = st.text_input(
-        "Search Ticket #",
-        placeholder="Enter ticket number…",
-        key=_ticket_search_session_key(key_prefix),
-    )
+    search_q = str(st.session_state.get(_ticket_search_session_key(key_prefix), "") or "")
     work = _sort_investigation_by_follow_up(df) if highlight_follow_up else df
     filtered = _filter_df_by_ticket_number(work, search_q)
     if highlight_follow_up and "follow_up_at" in filtered.columns:
@@ -4752,8 +4748,17 @@ def _render_ticket_queue_actions_row(
     sel_key = _ticket_selection_session_key(key_prefix)
 
     with st.container(key=f"{key_prefix}_ctx_toolbar"):
-        left, right = st.columns([4.1, 1.05], vertical_alignment="center", gap="small")
-        with left:
+        c_search, c_msg, c_act = st.columns(
+            [2.0, 2.5, 1.05], vertical_alignment="center", gap="small"
+        )
+        with c_search:
+            st.text_input(
+                "Search Ticket #",
+                placeholder="Search ticket #…",
+                key=_ticket_search_session_key(key_prefix),
+                label_visibility="collapsed",
+            )
+        with c_msg:
             if picked:
                 lc1, lc2 = st.columns([1.2, 1.3], vertical_alignment="center")
                 with lc1:
@@ -4771,7 +4776,7 @@ def _render_ticket_queue_actions_row(
                 st.caption(
                     "Tick **Select** on ticket(s) in the table below, then open **Actions**."
                 )
-        with right:
+        with c_act:
             _render_ticket_actions_popover(df, key_prefix=key_prefix, options=options, **toolbar_kwargs)
 
 
@@ -12583,7 +12588,8 @@ _BON_THEME_CSS = """
         border-top: 1px solid rgba(215, 180, 145, 0.22);
     }
     /* Contextual queue toolbar (selection + primary actions) */
-    div[class*="st-key-"][class*="_ctx_toolbar"] {
+    div[class*="st-key-"][class*="_ctx_toolbar"],
+    div[class*="st-key-"][class*="_sc_toolbar"] {
         margin: 0 0 0.5rem 0 !important;
         padding: 0.5rem 0.65rem !important;
         border: 1px solid rgba(215, 180, 145, 0.28) !important;
@@ -12594,14 +12600,26 @@ _BON_THEME_CSS = """
             rgba(0, 0, 0, 0.15) 100%
         ) !important;
     }
-    div[class*="st-key-"][class*="_ctx_toolbar"] .stMarkdown p {
+    div[class*="st-key-"][class*="_ctx_toolbar"] .stMarkdown p,
+    div[class*="st-key-"][class*="_sc_toolbar"] .stMarkdown p {
         margin: 0 !important;
         font-size: 0.88rem !important;
     }
-    div[class*="st-key-"][class*="_ctx_toolbar"] .stButton > button {
+    div[class*="st-key-"][class*="_ctx_toolbar"] .stButton > button,
+    div[class*="st-key-"][class*="_sc_toolbar"] .stButton > button {
         font-size: 0.78rem !important;
         min-height: 2rem !important;
         padding: 0.25rem 0.65rem !important;
+    }
+    div[class*="st-key-"][class*="_ctx_toolbar"] [data-testid="stTextInput"],
+    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stTextInput"] {
+        margin: 0 !important;
+    }
+    div[class*="st-key-"][class*="_ctx_toolbar"] [data-testid="stTextInput"] input,
+    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stTextInput"] input {
+        min-height: 2rem !important;
+        font-size: 0.8125rem !important;
+        padding: 0.28rem 0.55rem !important;
     }
     /* Queue Actions popover — clean readable menu */
     [data-testid="stPopoverBody"] {
@@ -12679,20 +12697,17 @@ _BON_THEME_CSS = """
     }
     /* Legacy ticket toolbar (unused) */
     div[class*="st-key-"][class*="_tq_toolbar"] .stButton > button,
-    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stPopover"] > button,
-    div[class*="st-key-"][class*="_sc_toolbar"] .stButton > button {
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stPopover"] > button {
         font-size: 0.72rem !important;
         padding: 0.2rem 0.35rem !important;
         min-height: 1.85rem !important;
         line-height: 1.2 !important;
         white-space: nowrap !important;
     }
-    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] label,
-    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stSelectbox"] label {
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] label {
         display: none !important;
     }
-    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] > div,
-    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stSelectbox"] > div {
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] > div {
         min-height: 1.85rem !important;
     }
     div[class*="st-key-"][class*="_work_panel"] {
@@ -14194,11 +14209,7 @@ def _render_selectable_sales_case_table(
         st.caption("No cases in this queue.")
         return []
 
-    search_q = st.text_input(
-        "Search Cases",
-        placeholder="Ticket #, resort, sales owner, or category…",
-        key=_sc_case_search_session_key(key_prefix),
-    )
+    search_q = str(st.session_state.get(_sc_case_search_session_key(key_prefix), "") or "")
     filtered = _filter_sales_cases_search(df, search_q)
     if (search_q or "").strip() and len(filtered) < len(df):
         st.caption(f"Showing **{len(filtered)}** of **{len(df)}** cases.")
@@ -14799,8 +14810,17 @@ def _render_sales_case_queue_actions_row(
     sel_key = _sc_case_selection_session_key(key_prefix)
 
     with st.container(key=f"{key_prefix}_sc_toolbar"):
-        left, right = st.columns([4.1, 1.05], vertical_alignment="center", gap="small")
-        with left:
+        c_search, c_msg, c_act = st.columns(
+            [2.0, 2.5, 1.05], vertical_alignment="center", gap="small"
+        )
+        with c_search:
+            st.text_input(
+                "Search Cases",
+                placeholder="Search ticket #, resort, owner…",
+                key=_sc_case_search_session_key(key_prefix),
+                label_visibility="collapsed",
+            )
+        with c_msg:
             if picked:
                 lc1, lc2 = st.columns([1.2, 1.3], vertical_alignment="center")
                 with lc1:
@@ -14818,7 +14838,7 @@ def _render_sales_case_queue_actions_row(
                 st.caption(
                     "Tick **Select** on case(s) in the table below, then open **Actions**."
                 )
-        with right:
+        with c_act:
             _render_sales_case_actions_popover(
                 df, key_prefix=key_prefix, options=options, **toolbar_kwargs
             )
