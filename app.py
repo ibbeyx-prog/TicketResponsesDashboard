@@ -2196,6 +2196,10 @@ _SUPABASE_HTTP_TIMEOUT_SEC = float(os.getenv("SUPABASE_HTTP_TIMEOUT_SEC", "25"))
 _DASH_SUPABASE_DOWN_KEY = "_dash_supabase_unreachable"
 _DASH_UNATTENDED_TICK_KEY = "_dash_unattended_last_tick"
 _DASH_MISMATCH_CACHE_KEY = "_dash_pending_mismatch_cache"
+_DASH_ATTENDANCE_POLL_KEY = "_dash_attendance_poll_ts"
+_DASH_ATTENDANCE_POLL_SEC = max(
+    15, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "30") or "30"))
+)
 _DASH_DATA_CACHE_TTL_SEC = max(
     15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "20") or "20"))
 )
@@ -2207,6 +2211,7 @@ def _invalidate_dashboard_data_cache() -> None:
         _fetch_tickets_cached,
         _fetch_sales_cases_cached,
         _fetch_latest_attendance_ts_cached,
+        _fetch_visits_in_range_cached,
         _cached_field_engineer_usernames,
         _cached_task_categories,
     ):
@@ -3369,11 +3374,7 @@ def _render_selectable_ticket_table(
         st.caption("No tickets in this queue.")
         return []
 
-    search_q = st.text_input(
-        "Search Ticket #",
-        placeholder="Enter ticket number…",
-        key=_ticket_search_session_key(key_prefix),
-    )
+    search_q = str(st.session_state.get(_ticket_search_session_key(key_prefix), "") or "")
     work = _sort_investigation_by_follow_up(df) if highlight_follow_up else df
     filtered = _filter_df_by_ticket_number(work, search_q)
     if highlight_follow_up and "follow_up_at" in filtered.columns:
@@ -4747,8 +4748,17 @@ def _render_ticket_queue_actions_row(
     sel_key = _ticket_selection_session_key(key_prefix)
 
     with st.container(key=f"{key_prefix}_ctx_toolbar"):
-        left, right = st.columns([4.1, 1.05], vertical_alignment="center", gap="small")
-        with left:
+        c_search, c_msg, c_act = st.columns(
+            [2.0, 2.5, 1.05], vertical_alignment="center", gap="small"
+        )
+        with c_search:
+            st.text_input(
+                "Search Ticket #",
+                placeholder="Search ticket #…",
+                key=_ticket_search_session_key(key_prefix),
+                label_visibility="collapsed",
+            )
+        with c_msg:
             if picked:
                 lc1, lc2 = st.columns([1.2, 1.3], vertical_alignment="center")
                 with lc1:
@@ -4766,7 +4776,7 @@ def _render_ticket_queue_actions_row(
                 st.caption(
                     "Tick **Select** on ticket(s) in the table below, then open **Actions**."
                 )
-        with right:
+        with c_act:
             _render_ticket_actions_popover(df, key_prefix=key_prefix, options=options, **toolbar_kwargs)
 
 
@@ -5109,14 +5119,16 @@ def _fetch_visits_for_tickets(
     return pd.concat(parts, ignore_index=True)
 
 
-def _fetch_visits_in_range(
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-    *,
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_visits_in_range_cached(
+    range_start_iso: str,
+    range_end_iso: str,
     limit: int = 8000,
 ) -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
     client = _get_supabase_client()
     try:
         res = (
@@ -5134,6 +5146,29 @@ def _fetch_visits_in_range(
     if not rows:
         return pd.DataFrame()
     return _perf_prepare_visits_df(pd.DataFrame(rows))
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_visits_for_snapshot_cached(ticket_numbers_key: str) -> pd.DataFrame:
+    """All visit cycles for active snapshot tickets (solo/shared classification)."""
+    nums = [n for n in ticket_numbers_key.split("\n") if n.strip()]
+    if not nums:
+        return pd.DataFrame()
+    raw = _fetch_visits_for_tickets(nums)
+    return _perf_prepare_visits_df(raw) if not raw.empty else pd.DataFrame()
+
+
+def _fetch_visits_in_range(
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    *,
+    limit: int = 8000,
+) -> pd.DataFrame:
+    return _fetch_visits_in_range_cached(
+        range_start.isoformat(),
+        range_end.isoformat(),
+        limit,
+    )
 
 
 def _perf_normalize_matrix_lookup(raw: object) -> str:
@@ -5350,6 +5385,104 @@ def _perf_ticket_detail_rows(
     return pd.DataFrame(rows)
 
 
+def _perf_credited_ticket_numbers(
+    df_all: pd.DataFrame,
+    *,
+    person: str | None = None,
+) -> list[str]:
+    """Ticket numbers in field queue credit (same basis as Overview ``Total``)."""
+    if df_all.empty or "ticket_number" not in df_all.columns:
+        return []
+    masks = _ticket_queue_count_masks(df_all)
+    credited = (
+        masks["pending"]
+        | masks["open"]
+        | masks["on_hold"]
+        | masks["investigation"]
+        | masks["completed"]
+    )
+    part = df_all.loc[credited].copy()
+    if person and person not in ("", "All"):
+        if "assigned_to" not in part.columns:
+            return []
+        part["staff"] = part["assigned_to"].map(_perf_norm_member)
+        part = part.loc[part["staff"] == _perf_norm_member(person)]
+    nums = part["ticket_number"].astype(str).str.strip()
+    return sorted({n for n in nums.tolist() if n}, key=str)
+
+
+def _perf_ticket_collaboration_map(visits: pd.DataFrame) -> dict[str, int]:
+    """Map ticket_number → distinct engineer count (visit history)."""
+    out: dict[str, int] = {}
+    if visits.empty or "ticket_number" not in visits.columns:
+        return out
+    prepared = _perf_prepare_visits_df(visits)
+    for tn, grp in prepared.groupby(prepared["ticket_number"].astype(str).str.strip()):
+        if not tn:
+            continue
+        out[tn] = int(grp["assignee"].dropna().astype(str).nunique()) if "assignee" in grp.columns else 1
+    return out
+
+
+def _perf_overview_board_summary(
+    df_all: pd.DataFrame,
+    overview_table: pd.DataFrame,
+    sales_summary: pd.DataFrame | None,
+    *,
+    visits_history: pd.DataFrame,
+) -> pd.DataFrame:
+    """Overview board rows: solo/shared on all credited field tickets + all Sales Cases."""
+    sales = sales_summary if sales_summary is not None else pd.DataFrame()
+    people: set[str] = set()
+    if not overview_table.empty and "Person" in overview_table.columns:
+        people |= {str(p) for p in overview_table["Person"].tolist() if str(p).strip()}
+    if not sales.empty and "Person" in sales.columns:
+        people |= {str(p) for p in sales["Person"].tolist() if str(p).strip()}
+    if not people:
+        return pd.DataFrame()
+
+    collab = _perf_ticket_collaboration_map(visits_history)
+    sales_map: dict[str, int] = {}
+    if not sales.empty and "Total" in sales.columns:
+        for person, total in zip(sales["Person"], sales["Total"]):
+            sales_map[str(person)] = int(total)
+
+    field_map: dict[str, int] = {}
+    if not overview_table.empty and "Total" in overview_table.columns:
+        for person, total in zip(overview_table["Person"], overview_table["Total"]):
+            field_map[str(person)] = int(total)
+
+    rows: list[dict[str, object]] = []
+    for person in sorted(people, key=str.lower):
+        solo = shared = 0
+        for tn in _perf_credited_ticket_numbers(df_all, person=person):
+            n_eng = collab.get(tn, 1)
+            if n_eng <= 1:
+                solo += 1
+            else:
+                shared += 1
+        rows.append(
+            {
+                "Person": person,
+                "Solo tickets": solo,
+                "Shared tickets": shared,
+                "Tickets touched": solo + shared,
+                "Field queues": int(field_map.get(person, 0)),
+                "Sales Cases": int(sales_map.get(person, 0)),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out = out[(out["Field queues"] > 0) | (out["Sales Cases"] > 0)]
+    if out.empty:
+        return out
+    return out.sort_values(
+        ["Field queues", "Sales Cases", "Tickets touched"],
+        ascending=[False, False, False],
+    )
+
+
 def _perf_solo_shared_ticket_rows(visits: pd.DataFrame, person: str) -> pd.DataFrame:
     """Per ticket: solo vs shared for tickets this engineer touched in the window."""
     if person in ("", "All"):
@@ -5559,10 +5692,14 @@ def _render_perf_solo_shared_board(
     focus: str,
     overview_table: pd.DataFrame | None = None,
     sales_summary: pd.DataFrame | None = None,
+    df_all: pd.DataFrame | None = None,
+    visits_history: pd.DataFrame | None = None,
 ) -> None:
     """Engineer rows (solo | shared pills) + total ring."""
     overview_table = overview_table if overview_table is not None else pd.DataFrame()
     sales_summary = sales_summary if sales_summary is not None else pd.DataFrame()
+    df_all = df_all if df_all is not None else pd.DataFrame()
+    visits_history = visits_history if visits_history is not None else pd.DataFrame()
     total_n, field_n, sales_n = _perf_overview_total_breakdown(
         overview_table,
         sales_summary=sales_summary,
@@ -5570,17 +5707,21 @@ def _render_perf_solo_shared_board(
     )
     sub_html = _perf_overview_ring_subhtml(field_n, sales_n)
 
-    summary = _perf_solo_shared_board_summary(visits_all, sales_summary)
+    summary = _perf_overview_board_summary(
+        df_all,
+        overview_table,
+        sales_summary,
+        visits_history=visits_history,
+    )
     if summary.empty:
-        if visits_all.empty and total_n == 0:
+        if total_n == 0:
             st.markdown(
-                '<p class="perf-ss-hint">No field visits or Sales Cases in this window.</p>',
+                '<p class="perf-ss-hint">No field tickets or Sales Cases in the system.</p>',
                 unsafe_allow_html=True,
             )
-        elif visits_all.empty and total_n > 0:
+        elif total_n > 0:
             st.markdown(
-                '<p class="perf-ss-hint">No visit data — field counts come from queue snapshot; '
-                "Sales Cases: **Admin** if unassigned, else field engineer.</p>",
+                '<p class="perf-ss-hint">Overview counts all tickets in queue snapshot + Sales Cases.</p>',
                 unsafe_allow_html=True,
             )
         if total_n > 0:
@@ -5644,10 +5785,10 @@ def _render_perf_solo_shared_board(
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<p class="perf-ss-hint">Solo / shared = field visit history · '
-        "<strong>Sales</strong> = Sales Cases in window · "
-        "<strong>Admin</strong> if no field engineer · else <code>assigned_to</code> · "
-        "Ring = field queues + Sales Cases (excludes **Unattended** from credit). "
+        '<p class="perf-ss-hint">Solo / shared = <strong>all</strong> credited field tickets '
+        "(current assignee, full visit history) · "
+        "<strong>Sales</strong> = all Sales Cases · "
+        "Ring = field queues + Sales (excludes <strong>Unattended</strong>). "
         "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
         unsafe_allow_html=True,
     )
@@ -7038,7 +7179,6 @@ def _render_app_menu_panel() -> None:
 def _render_app_chrome() -> None:
     _render_app_topbar()
     _render_app_menu_controls()
-    _inject_bon_header_pin()
 
 
 def _perf_bucket_settings(
@@ -7071,6 +7211,29 @@ def _perf_status_timestamp(
     return u_col.where(u_col.notna(), r_col)
 
 
+def _perf_handled_outcome_ts(df: pd.DataFrame, *, status: str) -> pd.Series:
+    """When a ticket was handled — closed or entered investigation — not reassigned."""
+    u_col = (
+        _parse_ts(df["updated_at"])
+        if "updated_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    r_col = (
+        _parse_ts(df["responded_at"])
+        if "responded_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    target = status.strip().casefold()
+    if target == STATUS_RESOLVED.casefold():
+        return pd.concat([r_col, u_col], axis=1).max(axis=1, skipna=True)
+    if target == STATUS_UNDER_INVESTIGATION.casefold():
+        if "follow_up_at" in df.columns:
+            fu = _parse_ts(df["follow_up_at"])
+            return fu.where(fu.notna(), u_col)
+        return u_col
+    return u_col.where(u_col.notna(), r_col)
+
+
 def _perf_filter_status_in_range(
     df_all: pd.DataFrame,
     status: str,
@@ -7078,8 +7241,9 @@ def _perf_filter_status_in_range(
     range_end: pd.Timestamp,
     *,
     prefer_follow_up: bool = False,
+    handled_outcome: bool = False,
 ) -> pd.DataFrame:
-    """Rows in ``status`` whose activity timestamp falls in the sidebar range."""
+    """Rows in ``status`` whose timestamp falls in the sidebar range."""
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
     target = status.strip().casefold()
@@ -7088,12 +7252,188 @@ def _perf_filter_status_in_range(
     ].copy()
     if slice_df.empty:
         return slice_df
-    ts = _perf_status_timestamp(slice_df, prefer_follow_up=prefer_follow_up)
+    if handled_outcome:
+        ts = _perf_handled_outcome_ts(slice_df, status=status)
+    elif prefer_follow_up and "follow_up_at" in slice_df.columns:
+        ts = _perf_status_timestamp(slice_df, prefer_follow_up=True)
+    else:
+        ts = _perf_reference_ts(slice_df)
     slice_df = slice_df[ts.notna()].copy()
-    slice_df["_ts"] = ts[ts.notna()]
-    return slice_df[
+    ts = ts[ts.notna()]
+    slice_df["_ts"] = ts
+    out = slice_df[
         (slice_df["_ts"] >= range_start) & (slice_df["_ts"] <= range_end)
     ]
+    if out.empty or "ticket_number" not in out.columns:
+        return out
+    return out.drop_duplicates(subset=["ticket_number"], keep="first")
+
+
+def _perf_visit_ticket_ids_in_range(
+    visits: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> frozenset[str]:
+    """Distinct ticket IDs with a visit cycle starting in the sidebar range."""
+    if visits.empty or "ticket_number" not in visits.columns:
+        return frozenset()
+    if "visit_start" in visits.columns:
+        vs = _parse_ts(visits["visit_start"])
+        mask = vs.notna() & (vs >= range_start) & (vs <= range_end)
+        tids = visits.loc[mask, "ticket_number"].astype(str).str.strip()
+    else:
+        tids = visits["ticket_number"].astype(str).str.strip()
+    return frozenset(t for t in tids.unique().tolist() if t)
+
+
+def _perf_assigned_ticket_ids_in_range(
+    visits: pd.DataFrame,
+    df_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> frozenset[str]:
+    """Ticket IDs assigned or reassigned in range (visit cycles, else last_assigned_at)."""
+    ids = set(_perf_visit_ticket_ids_in_range(
+        visits, range_start=range_start, range_end=range_end
+    ))
+    if ids:
+        return frozenset(ids)
+    if (
+        df_all.empty
+        or "last_assigned_at" not in df_all.columns
+        or "ticket_number" not in df_all.columns
+    ):
+        return frozenset()
+    la = _parse_ts(df_all["last_assigned_at"])
+    mask = la.notna() & (la >= range_start) & (la <= range_end)
+    tids = df_all.loc[mask, "ticket_number"].astype(str).str.strip()
+    return frozenset(t for t in tids if t)
+
+
+def _perf_handled_range_activity_mask(
+    df: pd.DataFrame,
+    *,
+    status: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    visit_ticket_ids: frozenset[str],
+) -> pd.Series:
+    """True when handled, reassigned, visited, or admin-updated in the sidebar range."""
+    handle = _perf_handled_outcome_ts(df, status=status)
+    handle_in = handle.notna() & (handle >= range_start) & (handle <= range_end)
+
+    la_in = pd.Series(False, index=df.index)
+    if "last_assigned_at" in df.columns:
+        la = _parse_ts(df["last_assigned_at"])
+        la_in = la.notna() & (la >= range_start) & (la <= range_end)
+
+    ua_in = pd.Series(False, index=df.index)
+    if "updated_at" in df.columns:
+        ua = _parse_ts(df["updated_at"])
+        ua_in = ua.notna() & (ua >= range_start) & (ua <= range_end)
+
+    visit_in = pd.Series(False, index=df.index)
+    if visit_ticket_ids and "ticket_number" in df.columns:
+        tn = df["ticket_number"].astype(str).str.strip()
+        visit_in = tn.isin(visit_ticket_ids)
+
+    return handle_in | la_in | visit_in | ua_in
+
+
+def _perf_handled_range_reference_ts(
+    df: pd.DataFrame,
+    *,
+    status: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.Series:
+    """Best in-range timestamp per row for charts (handle, reassign, or admin update)."""
+    parts: list[pd.Series] = []
+    handle = _perf_handled_outcome_ts(df, status=status)
+    parts.append(handle.where(
+        handle.notna() & (handle >= range_start) & (handle <= range_end)
+    ))
+    if "last_assigned_at" in df.columns:
+        la = _parse_ts(df["last_assigned_at"])
+        parts.append(la.where(
+            la.notna() & (la >= range_start) & (la <= range_end)
+        ))
+    if "updated_at" in df.columns:
+        ua = _parse_ts(df["updated_at"])
+        parts.append(ua.where(
+            ua.notna() & (ua >= range_start) & (ua <= range_end)
+        ))
+    if not parts:
+        return pd.Series(pd.NaT, index=df.index)
+    return pd.concat(parts, axis=1).max(axis=1, skipna=True)
+
+
+def _perf_filter_handled_status_in_range(
+    df_all: pd.DataFrame,
+    status: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    *,
+    visit_ticket_ids: frozenset[str],
+) -> pd.DataFrame:
+    """Resolved / Investigation rows with handle, reassign, visit, or admin action in range."""
+    if df_all.empty or "status" not in df_all.columns:
+        return pd.DataFrame()
+    target = status.strip().casefold()
+    slice_df = df_all[
+        df_all["status"].astype(str).str.strip().str.casefold() == target
+    ].copy()
+    if slice_df.empty:
+        return slice_df
+    mask = _perf_handled_range_activity_mask(
+        slice_df,
+        status=status,
+        range_start=range_start,
+        range_end=range_end,
+        visit_ticket_ids=visit_ticket_ids,
+    )
+    slice_df = slice_df.loc[mask].copy()
+    if slice_df.empty:
+        return slice_df
+    slice_df["_ts"] = _perf_handled_range_reference_ts(
+        slice_df,
+        status=status,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    if "ticket_number" not in slice_df.columns:
+        return slice_df
+    return slice_df.drop_duplicates(subset=["ticket_number"], keep="first")
+
+
+def _perf_prepare_handled_in_range(
+    df_all: pd.DataFrame,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    *,
+    visits: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Resolved + Investigation with handle, reassign, visit, or admin action in range."""
+    visit_ids = _perf_visit_ticket_ids_in_range(
+        visits, range_start=range_start, range_end=range_end
+    )
+    completed = _perf_filter_handled_status_in_range(
+        df_all,
+        STATUS_RESOLVED,
+        range_start,
+        range_end,
+        visit_ticket_ids=visit_ids,
+    )
+    investigation = _perf_filter_handled_status_in_range(
+        df_all,
+        STATUS_UNDER_INVESTIGATION,
+        range_start,
+        range_end,
+        visit_ticket_ids=visit_ids,
+    )
+    return completed, investigation
 
 
 def _perf_reference_ts(df: pd.DataFrame) -> pd.Series:
@@ -7151,6 +7491,39 @@ def _perf_prepare_slices(
         "completed",
     ):
         part = in_view.loc[masks[key]].copy()
+        if not part.empty:
+            part["_ts"] = ref_ts.loc[masks[key]]
+        out[key] = part
+    return out
+
+
+def _perf_prepare_snapshot_slices(df_all: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """All field tickets by queue — current snapshot, no sidebar time filter."""
+    empty = pd.DataFrame()
+    out: dict[str, pd.DataFrame] = {
+        "in_view": empty,
+        "pending": empty,
+        "open": empty,
+        "completed": empty,
+        "investigation": empty,
+        "on_hold": empty,
+        "unattended": empty,
+    }
+    if df_all.empty or "status" not in df_all.columns:
+        return out
+
+    out["in_view"] = df_all.copy()
+    masks = _ticket_queue_count_masks(df_all)
+    ref_ts = _perf_reference_ts(df_all)
+    for key in (
+        "pending",
+        "open",
+        "on_hold",
+        "investigation",
+        "unattended",
+        "completed",
+    ):
+        part = df_all.loc[masks[key]].copy()
         if not part.empty:
             part["_ts"] = ref_ts.loc[masks[key]]
         out[key] = part
@@ -8066,11 +8439,20 @@ def _perf_build_summary(
     investigation: pd.DataFrame,
     on_hold: pd.DataFrame,
     unattended: pd.DataFrame,
+    *,
+    handled_completed: pd.DataFrame | None = None,
+    handled_investigation: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     p_counts = _perf_staff_counts(pending)
     o_counts = _perf_staff_counts(open_df)
     c_counts = _perf_staff_counts(completed)
     i_counts = _perf_staff_counts(investigation)
+    hc_counts = _perf_staff_counts(
+        handled_completed if handled_completed is not None else completed
+    )
+    hi_counts = _perf_staff_counts(
+        handled_investigation if handled_investigation is not None else investigation
+    )
     h_counts = _perf_staff_counts(on_hold)
     u_counts = _perf_staff_counts(unattended)
     people = sorted(
@@ -8101,7 +8483,7 @@ def _perf_build_summary(
             "Investigation": int(i_counts.get(p, 0)),
             "On Hold": int(h_counts.get(p, 0)),
             "Unattended": int(u_counts.get(p, 0)),
-            "Handled": int(c_counts.get(p, 0)) + int(i_counts.get(p, 0)),
+            "Handled": int(hc_counts.get(p, 0)) + int(hi_counts.get(p, 0)),
         }
         for p in people
     ]
@@ -8620,7 +9002,12 @@ def _fetch_latest_attendance_timestamp() -> datetime | None:
 
 def _maybe_toast_new_telegram_activity() -> None:
     """Detect new bot/field log rows; refresh ticket cache so queues update."""
-    _fetch_latest_attendance_ts_cached.clear()
+    now_ts = datetime.now(timezone.utc).timestamp()
+    last_poll = float(st.session_state.get(_DASH_ATTENDANCE_POLL_KEY, 0))
+    if (now_ts - last_poll) < _DASH_ATTENDANCE_POLL_SEC:
+        return
+    st.session_state[_DASH_ATTENDANCE_POLL_KEY] = now_ts
+
     try:
         latest = _fetch_latest_attendance_timestamp()
     except Exception:
@@ -11295,6 +11682,7 @@ def main() -> None:
     _inject_bon_theme()
     _init_dash_date_range_state()
     _inject_bon_sidebar_visibility_css()
+    _inject_bon_dashboard_scripts()
     _render_app_chrome()
 
     _sidebar_controls()
@@ -11303,22 +11691,16 @@ def main() -> None:
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
-    def _metrics_fragment() -> None:
+    def _dashboard_body_fragment() -> None:
         _render_global_assign_day_metrics()
-        _inject_bon_dash_row_align()
-
-    _metrics_fragment()
-    _render_supabase_unreachable_banner()
-
-    @st.fragment(run_every=run_every)
-    def _dashboard_fragment() -> None:
         _sync_dash_range_from_ui(
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
         lookback_days, _, _ = _dash_date_range_lookback()
         _render_dashboard(lookback_days=lookback_days)
 
-    _dashboard_fragment()
+    _dashboard_body_fragment()
+    _render_supabase_unreachable_banner()
 
 
 PHOTO_THUMB_WIDTH = 220  # px — tight enough that 3 fit per row on a laptop
@@ -11413,6 +11795,10 @@ _BON_THEME_CSS = """
         overflow-x: hidden !important;
         height: 100vh !important;
         max-height: 100vh !important;
+        overscroll-behavior-y: contain !important;
+    }
+    [data-testid="stMain"] iframe {
+        overscroll-behavior: contain !important;
     }
     [data-testid="stAppViewContainer"] section.main {
         padding-top: 0 !important;
@@ -12013,6 +12399,7 @@ _BON_THEME_CSS = """
         z-index: 998 !important;
         overflow-y: auto !important;
         overflow-x: hidden !important;
+        overscroll-behavior-y: contain !important;
     }
     [data-testid="stSidebarCollapsedControl"],
     [data-testid="collapsedControl"],
@@ -12201,7 +12588,8 @@ _BON_THEME_CSS = """
         border-top: 1px solid rgba(215, 180, 145, 0.22);
     }
     /* Contextual queue toolbar (selection + primary actions) */
-    div[class*="st-key-"][class*="_ctx_toolbar"] {
+    div[class*="st-key-"][class*="_ctx_toolbar"],
+    div[class*="st-key-"][class*="_sc_toolbar"] {
         margin: 0 0 0.5rem 0 !important;
         padding: 0.5rem 0.65rem !important;
         border: 1px solid rgba(215, 180, 145, 0.28) !important;
@@ -12212,14 +12600,26 @@ _BON_THEME_CSS = """
             rgba(0, 0, 0, 0.15) 100%
         ) !important;
     }
-    div[class*="st-key-"][class*="_ctx_toolbar"] .stMarkdown p {
+    div[class*="st-key-"][class*="_ctx_toolbar"] .stMarkdown p,
+    div[class*="st-key-"][class*="_sc_toolbar"] .stMarkdown p {
         margin: 0 !important;
         font-size: 0.88rem !important;
     }
-    div[class*="st-key-"][class*="_ctx_toolbar"] .stButton > button {
+    div[class*="st-key-"][class*="_ctx_toolbar"] .stButton > button,
+    div[class*="st-key-"][class*="_sc_toolbar"] .stButton > button {
         font-size: 0.78rem !important;
         min-height: 2rem !important;
         padding: 0.25rem 0.65rem !important;
+    }
+    div[class*="st-key-"][class*="_ctx_toolbar"] [data-testid="stTextInput"],
+    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stTextInput"] {
+        margin: 0 !important;
+    }
+    div[class*="st-key-"][class*="_ctx_toolbar"] [data-testid="stTextInput"] input,
+    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stTextInput"] input {
+        min-height: 2rem !important;
+        font-size: 0.8125rem !important;
+        padding: 0.28rem 0.55rem !important;
     }
     /* Queue Actions popover — clean readable menu */
     [data-testid="stPopoverBody"] {
@@ -12297,20 +12697,17 @@ _BON_THEME_CSS = """
     }
     /* Legacy ticket toolbar (unused) */
     div[class*="st-key-"][class*="_tq_toolbar"] .stButton > button,
-    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stPopover"] > button,
-    div[class*="st-key-"][class*="_sc_toolbar"] .stButton > button {
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stPopover"] > button {
         font-size: 0.72rem !important;
         padding: 0.2rem 0.35rem !important;
         min-height: 1.85rem !important;
         line-height: 1.2 !important;
         white-space: nowrap !important;
     }
-    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] label,
-    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stSelectbox"] label {
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] label {
         display: none !important;
     }
-    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] > div,
-    div[class*="st-key-"][class*="_sc_toolbar"] [data-testid="stSelectbox"] > div {
+    div[class*="st-key-"][class*="_tq_toolbar"] [data-testid="stSelectbox"] > div {
         min-height: 1.85rem !important;
     }
     div[class*="st-key-"][class*="_work_panel"] {
@@ -12671,6 +13068,35 @@ _BON_THEME_CSS = """
 """
 
 
+def _bon_theme_css_text() -> str:
+    css = _BON_THEME_CSS.strip()
+    if css.startswith("<style>"):
+        css = css[len("<style>") :]
+    if css.endswith("</style>"):
+        css = css[: -len("</style>")]
+    return css.strip()
+
+
+def _inject_bon_theme_styles_once() -> None:
+    """Inject the large theme stylesheet once into the parent document head."""
+    css_json = json.dumps(_bon_theme_css_text())
+    components.html(
+        f"""
+        <script>
+        (function () {{
+          const doc = window.parent.document;
+          if (doc.getElementById("bon-theme-css")) return;
+          const style = doc.createElement("style");
+          style.id = "bon-theme-css";
+          style.textContent = {css_json};
+          doc.head.appendChild(style);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _inject_bon_sidebar_visibility_css() -> None:
     """Show/hide Assign sidebar via CSS — avoids Streamlit collapse localStorage."""
     if _bon_sidebar_is_open():
@@ -12691,22 +13117,6 @@ def _inject_bon_sidebar_visibility_css() -> None:
             </style>
             """,
             unsafe_allow_html=True,
-        )
-        components.html(
-            """
-            <script>
-            (function () {
-              const doc = window.parent.document;
-              const sb = doc.querySelector('[data-testid="stSidebar"]');
-              if (sb) {
-                sb.setAttribute("aria-expanded", "true");
-                sb.style.removeProperty("display");
-                sb.style.removeProperty("visibility");
-              }
-            })();
-            </script>
-            """,
-            height=0,
         )
         return
     st.markdown(
@@ -12735,23 +13145,40 @@ def _inject_bon_sidebar_visibility_css() -> None:
     )
 
 
-def _inject_bon_header_pin() -> None:
-    """Keep the full dashboard header fixed while the main pane scrolls."""
+def _inject_bon_dashboard_scripts() -> None:
+    """One-time dashboard JS: fixed header pin + metrics/sidebar row alignment."""
     components.html(
         """
         <script>
         (function () {
           const win = window.parent;
           const doc = win.document;
-          let pinTimer = null;
+
+          function scrollRoot(el) {
+            if (!el) return null;
+            const oy = getComputedStyle(el).overflowY;
+            if (oy === "auto" || oy === "scroll") return el;
+            return el.querySelector('[data-testid="block-container"]') || el;
+          }
 
           function pinBonHeader() {
             const app = doc.querySelector(".stApp");
             const header = doc.querySelector("div.st-key-bon_app_header_shell");
-            if (!app || !header) return;
+            if (!app || !header) return false;
+
+            if (
+              header.dataset.bonPinned === "1" &&
+              header.parentElement === app
+            ) {
+              return true;
+            }
+
+            const main = doc.querySelector('[data-testid="stAppViewContainer"]');
+            const scrollY = main ? main.scrollTop : 0;
 
             if (header.parentElement !== app) {
               app.insertBefore(header, app.firstChild);
+              if (main) main.scrollTop = scrollY;
             }
 
             const height = header.getBoundingClientRect().height;
@@ -12767,74 +13194,33 @@ def _inject_bon_header_pin() -> None:
             header.style.setProperty("max-width", "100vw", "important");
             header.style.setProperty("z-index", "1001", "important");
             header.style.setProperty("box-sizing", "border-box", "important");
+            header.dataset.bonPinned = "1";
+            return true;
           }
 
-          function schedulePin() {
-            if (pinTimer) win.clearTimeout(pinTimer);
-            pinTimer = win.setTimeout(function () {
-              win.requestAnimationFrame(pinBonHeader);
-            }, 16);
-          }
-
-          pinBonHeader();
-          win.requestAnimationFrame(pinBonHeader);
-          win.setTimeout(pinBonHeader, 80);
-          win.setTimeout(pinBonHeader, 350);
-          win.addEventListener("resize", schedulePin);
-          doc
-            .querySelector('[data-testid="stAppViewContainer"]')
-            ?.addEventListener("scroll", schedulePin, { passive: true });
-
-          if (!win.__bonHeaderPinObs) {
-            win.__bonHeaderPinObs = new MutationObserver(schedulePin);
-            win.__bonHeaderPinObs.observe(doc.body, {
-              childList: true,
-              subtree: true,
-              attributes: true,
-            });
-          } else {
-            schedulePin();
-          }
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def _inject_bon_dash_row_align() -> None:
-    """Align TICKET box (sidebar) with metrics row (main) when scrolled to top."""
-    components.html(
-        """
-        <script>
-        (function () {
-          const doc = window.parent.document;
-          const root = doc.documentElement;
-          let alignTimer = null;
-          function scrollRoot(el) {
-            if (!el) return null;
-            const oy = getComputedStyle(el).overflowY;
-            if (oy === "auto" || oy === "scroll") return el;
-            return el.querySelector('[data-testid="block-container"]') || el;
-          }
-          function atScrollTop() {
+          function atViewportTop() {
             const main = doc.querySelector('[data-testid="stAppViewContainer"]');
             const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-            const mainTop = main ? main.scrollTop < 2 : true;
             const sbRoot = scrollRoot(sidebar);
+            const mainTop = main ? main.scrollTop < 2 : true;
             const sbTop = sbRoot ? sbRoot.scrollTop < 2 : true;
             return mainTop && sbTop;
           }
-          function alignBonDashRow() {
+
+          function alignBonDashRowIfAtTop() {
+            if (!atViewportTop()) return;
+
+            const root = doc.documentElement;
             root.style.setProperty("--bon-metrics-nudge", "0px");
             root.style.setProperty("--bon-sidebar-ticket-nudge", "0px");
-            if (!atScrollTop()) return;
+
             const ticket =
               doc.querySelector('[data-testid="stSidebar"] [class*="st-key-bon_box_ticket"] summary') ||
               doc.querySelector('[data-testid="stSidebar"] [class*="st-key-bon_box_ticket"]');
             const metrics =
               doc.querySelector('[data-testid="stMain"] div[class*="st-key-bon_dash_metrics_row"]');
             if (!ticket || !metrics) return;
+
             const delta =
               ticket.getBoundingClientRect().top - metrics.getBoundingClientRect().top;
             if (Math.abs(delta) < 0.5) return;
@@ -12844,27 +13230,73 @@ def _inject_bon_dash_row_align() -> None:
               root.style.setProperty("--bon-sidebar-ticket-nudge", (-delta) + "px");
             }
           }
-          function scheduleAlign() {
-            if (alignTimer) window.clearTimeout(alignTimer);
-            alignTimer = window.setTimeout(alignBonDashRow, 16);
+
+          function syncSidebarAria() {
+            const sb = doc.querySelector('[data-testid="stSidebar"]');
+            if (!sb) return;
+            const hidden = getComputedStyle(sb).display === "none";
+            sb.setAttribute("aria-expanded", hidden ? "false" : "true");
           }
-          alignBonDashRow();
-          requestAnimationFrame(alignBonDashRow);
-          window.setTimeout(alignBonDashRow, 80);
-          window.setTimeout(alignBonDashRow, 350);
-          window.parent.addEventListener("resize", scheduleAlign);
-          const main = doc.querySelector('[data-testid="stAppViewContainer"]');
-          const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-          main?.addEventListener("scroll", scheduleAlign, { passive: true });
-          sidebar?.addEventListener("scroll", scheduleAlign, { passive: true });
-          scrollRoot(sidebar)?.addEventListener("scroll", scheduleAlign, { passive: true });
-          if (!window.parent.__bonDashRowAlignObs) {
-            window.parent.__bonDashRowAlignObs = new MutationObserver(scheduleAlign);
-            window.parent.__bonDashRowAlignObs.observe(doc.body, {
-              childList: true,
-              subtree: true,
-              attributes: true,
+
+          function runDashboardChrome() {
+            if (pinBonHeader()) syncSidebarAria();
+            alignBonDashRowIfAtTop();
+          }
+
+          function scheduleChrome() {
+            win.clearTimeout(win.__bonDashboardChromeTimer);
+            win.__bonDashboardChromeTimer = win.setTimeout(function () {
+              win.requestAnimationFrame(runDashboardChrome);
+            }, 48);
+          }
+
+          function scheduleAlignIfAtTop() {
+            win.clearTimeout(win.__bonAlignOnScrollTimer);
+            win.__bonAlignOnScrollTimer = win.setTimeout(function () {
+              win.requestAnimationFrame(alignBonDashRowIfAtTop);
+            }, 80);
+          }
+
+          runDashboardChrome();
+
+          if (!win.__bonDashboardScriptsInit) {
+            win.__bonDashboardScriptsInit = true;
+            win.addEventListener("resize", scheduleChrome, { passive: true });
+            const main = doc.querySelector('[data-testid="stAppViewContainer"]');
+            const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+            main?.addEventListener("scroll", scheduleAlignIfAtTop, { passive: true });
+            sidebar?.addEventListener("scroll", scheduleAlignIfAtTop, { passive: true });
+            scrollRoot(sidebar)?.addEventListener("scroll", scheduleAlignIfAtTop, {
+              passive: true,
             });
+            const app = doc.querySelector(".stApp");
+            if (app) {
+              win.__bonDashboardChromeObs = new MutationObserver(function (mutations) {
+                for (const mutation of mutations) {
+                  if (mutation.type !== "childList") continue;
+                  for (const node of mutation.addedNodes) {
+                    if (node.nodeType !== 1) continue;
+                    if (
+                      node.matches?.("div.st-key-bon_app_header_shell") ||
+                      node.querySelector?.("div.st-key-bon_app_header_shell") ||
+                      node.matches?.('[class*="st-key-bon_dash_metrics_row"]') ||
+                      node.querySelector?.('[class*="st-key-bon_dash_metrics_row"]') ||
+                      node.matches?.('[class*="st-key-bon_box_ticket"]') ||
+                      node.querySelector?.('[class*="st-key-bon_box_ticket"]')
+                    ) {
+                      scheduleChrome();
+                      return;
+                    }
+                  }
+                }
+              });
+              win.__bonDashboardChromeObs.observe(app, {
+                childList: true,
+                subtree: true,
+              });
+            }
+          } else if (!pinBonHeader()) {
+            scheduleChrome();
           }
         })();
         </script>
@@ -12874,9 +13306,7 @@ def _inject_bon_dash_row_align() -> None:
 
 
 def _inject_bon_theme() -> None:
-    st.markdown(_BON_THEME_CSS, unsafe_allow_html=True)
-    _inject_bon_sidebar_visibility_css()
-    _inject_bon_dash_row_align()
+    _inject_bon_theme_styles_once()
 
 
 def _format_when(when: object) -> str:
@@ -13779,11 +14209,7 @@ def _render_selectable_sales_case_table(
         st.caption("No cases in this queue.")
         return []
 
-    search_q = st.text_input(
-        "Search Cases",
-        placeholder="Ticket #, resort, sales owner, or category…",
-        key=_sc_case_search_session_key(key_prefix),
-    )
+    search_q = str(st.session_state.get(_sc_case_search_session_key(key_prefix), "") or "")
     filtered = _filter_sales_cases_search(df, search_q)
     if (search_q or "").strip() and len(filtered) < len(df):
         st.caption(f"Showing **{len(filtered)}** of **{len(df)}** cases.")
@@ -14384,8 +14810,17 @@ def _render_sales_case_queue_actions_row(
     sel_key = _sc_case_selection_session_key(key_prefix)
 
     with st.container(key=f"{key_prefix}_sc_toolbar"):
-        left, right = st.columns([4.1, 1.05], vertical_alignment="center", gap="small")
-        with left:
+        c_search, c_msg, c_act = st.columns(
+            [2.0, 2.5, 1.05], vertical_alignment="center", gap="small"
+        )
+        with c_search:
+            st.text_input(
+                "Search Cases",
+                placeholder="Search ticket #, resort, owner…",
+                key=_sc_case_search_session_key(key_prefix),
+                label_visibility="collapsed",
+            )
+        with c_msg:
             if picked:
                 lc1, lc2 = st.columns([1.2, 1.3], vertical_alignment="center")
                 with lc1:
@@ -14403,7 +14838,7 @@ def _render_sales_case_queue_actions_row(
                 st.caption(
                     "Tick **Select** on case(s) in the table below, then open **Actions**."
                 )
-        with right:
+        with c_act:
             _render_sales_case_actions_popover(
                 df, key_prefix=key_prefix, options=options, **toolbar_kwargs
             )
@@ -15620,8 +16055,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         in_view = pending = open_df = completed = investigation = on_hold = unattended = (
             pd.DataFrame()
         )
+        handled_completed = handled_investigation = pd.DataFrame()
     else:
-        slices = _perf_prepare_slices(df_all, range_start, range_end)
+        slices = _perf_prepare_snapshot_slices(df_all)
         in_view = slices["in_view"]
         pending = slices["pending"]
         open_df = slices["open"]
@@ -15630,7 +16066,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         on_hold = slices["on_hold"]
         unattended = slices["unattended"]
 
-    n_in_view = len(in_view)
+    n_total_all = len(in_view)
     n_pending = len(pending)
     n_open = len(open_df)
     n_done = len(completed)
@@ -15655,10 +16091,8 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         n_tab_union = 0
         n_other_status = 0
 
-    if field_has_data and n_in_view == 0:
-        st.info(
-            "No field tickets in this time window. Try **Last 30 days** in the sidebar."
-        )
+    if field_has_data and n_total_all == 0:
+        st.info("No field tickets in the system.")
 
     sales_all = pd.DataFrame()
     try:
@@ -15666,24 +16100,53 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
     except Exception as exc:
         st.warning(f"Could not load Sales Cases for Performance: {exc}")
-    sales_in_view, _n_sales_range = _dashboard_sales_cases_in_view(
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
-    )
-    sales_summary = _perf_build_sales_summary(sales_in_view)
-    n_sales = len(sales_in_view)
+    sales_summary = _perf_build_sales_summary(sales_all)
+    n_sales = len(sales_all)
+
+    handled_completed = handled_investigation = pd.DataFrame()
+    n_assigned_in_range = 0
+    visits_history = pd.DataFrame()
 
     # Performance tabs — Weekly attended is always in the tab row.
     if field_has_data or not sales_all.empty or not df_all.empty:
+        if field_has_data and "ticket_number" in df_all.columns:
+            tnums = _perf_credited_ticket_numbers(df_all)
+            if tnums:
+                try:
+                    visits_history = _fetch_visits_for_snapshot_cached("\n".join(tnums))
+                except Exception:
+                    visits_history = pd.DataFrame()
+
         visits_all = pd.DataFrame()
         try:
             visits_all = _fetch_visits_in_range(range_start, range_end)
         except Exception:
             pass
 
+        assigned_ids = _perf_assigned_ticket_ids_in_range(
+            visits_all,
+            df_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
+        n_assigned_in_range = len(assigned_ids)
+        if field_has_data:
+            handled_completed, handled_investigation = _perf_prepare_handled_in_range(
+                df_all,
+                range_start,
+                range_end,
+                visits=visits_all,
+            )
+
         summary = _perf_build_summary(
-            pending, open_df, completed, investigation, on_hold, unattended
+            pending,
+            open_df,
+            completed,
+            investigation,
+            on_hold,
+            unattended,
+            handled_completed=handled_completed,
+            handled_investigation=handled_investigation,
         )
         visit_summary = _perf_build_visit_summary(visits_all)
         overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
@@ -15705,10 +16168,17 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         on_hold_f = _perf_filter_by_person(on_hold, focus)
         unattended_f = _perf_filter_by_person(unattended, focus)
         sales_f = _perf_filter_by_person(
-            _perf_enrich_sales_cases(sales_in_view), focus,
+            _perf_enrich_sales_cases(sales_all), focus,
         )
-        work_f = _perf_combine_work(completed_f, investigation_f)
+        work_f = _perf_combine_work(
+            _perf_filter_by_person(handled_completed, focus),
+            _perf_filter_by_person(handled_investigation, focus),
+        )
         n_work = len(work_f)
+        n_handled_resolved = (
+            int((work_f["_outcome"] == STATUS_RESOLVED).sum()) if not work_f.empty else 0
+        )
+        n_handled_investigation = n_work - n_handled_resolved
         responded_in_view = pd.DataFrame()
         if not visits_all.empty and "outcome" in visits_all.columns:
             responded_in_view = visits_all[
@@ -15734,9 +16204,9 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             m0, m1, m2, m3, m4, m5, m6 = st.columns(7)
             m7 = None
         m0.metric(
-            "In view",
-            n_in_view if focus == "All" else n_filtered,
-            help="Field tickets in the sidebar window (snapshot queues).",
+            "Total",
+            n_total_all if focus == "All" else n_filtered,
+            help="All field tickets in tickets_active (not filtered by time range).",
         )
         m1.metric(STATUS_DAILY_TASK, len(pending_f))
         m2.metric("Needs Review", len(open_f))
@@ -15748,7 +16218,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             m7.metric(
                 "Sales Cases",
                 n_sales if focus == "All" else len(sales_f),
-                help="In sidebar range plus any still in an active sales queue.",
+                help="All sales cases (not filtered by time range).",
             )
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
         n_case_info = (
@@ -15758,11 +16228,11 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         )
 
         st.caption(
-            "**Ticket queues** = current snapshot (`tickets_active`). "
-            "**Visit cycles** = per-assignment history (`ticket_visits`, fair credit when A→B→C on one ticket). "
-            f"**Visit responded** counts closed cycles; **Handled** is {STATUS_RESOLVED} + Investigation in the window."
+            f"**{range_caption}** · {LOCAL_TZ_LABEL} — "
+            "**Queue metrics & Overview** = all tickets (current snapshot). "
+            "**Handled**, **Case Info**, and **Visit** tabs use the selected date range."
         )
-        if focus == "All" and n_tab_union != n_in_view:
+        if focus == "All" and n_tab_union != n_total_all:
             if n_other_status:
                 raw_other = (
                     in_view.loc[_qm["other"], "status"]
@@ -15776,11 +16246,11 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 detail = ", ".join(f"**{k}** ({v})" for k, v in raw_other.items())
                 st.warning(
                     f"**{n_other_status}** in-view ticket(s) use a status not mapped to a "
-                    f"queue tab ({detail}). **{n_tab_union}** tabbed vs **{n_in_view}** in view."
+                    f"queue tab ({detail}). **{n_tab_union}** tabbed vs **{n_total_all}** total."
                 )
             else:
                 st.warning(
-                    f"**{n_tab_union}** ticket(s) in queue tabs vs **{n_in_view}** in view — "
+                    f"**{n_tab_union}** ticket(s) in queue tabs vs **{n_total_all}** total — "
                     "some rows may have a blank or unmappable status."
                 )
 
@@ -15818,11 +16288,13 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 focus=focus,
                 overview_table=overview_table,
                 sales_summary=sales_summary,
+                df_all=df_all,
+                visits_history=visits_history,
             )
             if not overview_table.empty:
                 _render_perf_queue_strip(overview_table, focus=focus)
             _render_perf_solo_shared_detail(
-                visits_all, focus=focus, sales_cases=sales_in_view,
+                visits_all, focus=focus, sales_cases=sales_all,
             )
 
         with tab_sales:
@@ -15839,9 +16311,11 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_work:
             st.caption(
-                f"**Handled tab ({n_work})** = {STATUS_RESOLVED} + Investigation ticket snapshot. "
-                f"**Visit fair credit** = distinct tickets per engineer from responded visits "
-                f"({n_handled_visit_tickets} unique tickets in range)."
+                f"**Assigned / reassigned in range:** {n_assigned_in_range} ticket(s) · "
+                f"**Handled ({n_work})** = **{n_handled_resolved}** {STATUS_RESOLVED} + "
+                f"**{n_handled_investigation}** Investigation with activity in "
+                f"**{range_caption}** (resolve, reassign, or admin action). "
+                f"**Visit fair credit:** {n_handled_visit_tickets} responded ticket(s)."
             )
             if work_f.empty and visits_f.empty:
                 st.info("No resolved/investigation tickets or visits for this filter.")
@@ -15861,14 +16335,14 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                     elif not view.empty:
                         _render_perf_person_bar(
                             view,
-                            title="Handled by assignee (ticket snapshot)",
+                            title=f"Handled by assignee ({range_caption})",
                             value_name="Handled",
                         )
                 with c_table:
                     if work_f.empty:
-                        st.caption("No ticket snapshot rows for split table.")
+                        st.caption("No handled tickets in this time range.")
                     else:
-                        st.markdown("**Split (ticket snapshot)**")
+                        st.markdown(f"**Split ({range_caption})**")
                         split = (
                             view.groupby(["_outcome", "category"], as_index=False)
                             .size()
