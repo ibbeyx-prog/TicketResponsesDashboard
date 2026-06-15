@@ -7098,7 +7098,7 @@ def _perf_filter_status_in_range(
     *,
     prefer_follow_up: bool = False,
 ) -> pd.DataFrame:
-    """Rows in ``status`` whose activity timestamp falls in the sidebar range."""
+    """Rows in ``status`` whose latest activity falls in the sidebar range."""
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
     target = status.strip().casefold()
@@ -7107,9 +7107,13 @@ def _perf_filter_status_in_range(
     ].copy()
     if slice_df.empty:
         return slice_df
-    ts = _perf_status_timestamp(slice_df, prefer_follow_up=prefer_follow_up)
+    if prefer_follow_up and "follow_up_at" in slice_df.columns:
+        ts = _perf_status_timestamp(slice_df, prefer_follow_up=True)
+    else:
+        ts = _perf_reference_ts(slice_df)
     slice_df = slice_df[ts.notna()].copy()
-    slice_df["_ts"] = ts[ts.notna()]
+    ts = ts[ts.notna()]
+    slice_df["_ts"] = ts
     return slice_df[
         (slice_df["_ts"] >= range_start) & (slice_df["_ts"] <= range_end)
     ]
@@ -8085,11 +8089,20 @@ def _perf_build_summary(
     investigation: pd.DataFrame,
     on_hold: pd.DataFrame,
     unattended: pd.DataFrame,
+    *,
+    handled_completed: pd.DataFrame | None = None,
+    handled_investigation: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     p_counts = _perf_staff_counts(pending)
     o_counts = _perf_staff_counts(open_df)
     c_counts = _perf_staff_counts(completed)
     i_counts = _perf_staff_counts(investigation)
+    hc_counts = _perf_staff_counts(
+        handled_completed if handled_completed is not None else completed
+    )
+    hi_counts = _perf_staff_counts(
+        handled_investigation if handled_investigation is not None else investigation
+    )
     h_counts = _perf_staff_counts(on_hold)
     u_counts = _perf_staff_counts(unattended)
     people = sorted(
@@ -8120,7 +8133,7 @@ def _perf_build_summary(
             "Investigation": int(i_counts.get(p, 0)),
             "On Hold": int(h_counts.get(p, 0)),
             "Unattended": int(u_counts.get(p, 0)),
-            "Handled": int(c_counts.get(p, 0)) + int(i_counts.get(p, 0)),
+            "Handled": int(hc_counts.get(p, 0)) + int(hi_counts.get(p, 0)),
         }
         for p in people
     ]
@@ -12036,6 +12049,7 @@ _BON_THEME_CSS = """
         z-index: 998 !important;
         overflow-y: auto !important;
         overflow-x: hidden !important;
+        overscroll-behavior-y: contain !important;
     }
     [data-testid="stSidebarCollapsedControl"],
     [data-testid="collapsedControl"],
@@ -12824,17 +12838,21 @@ def _inject_bon_dashboard_scripts() -> None:
             return true;
           }
 
-          function alignBonDashRow() {
+          function atViewportTop() {
+            const main = doc.querySelector('[data-testid="stAppViewContainer"]');
+            const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+            const sbRoot = scrollRoot(sidebar);
+            const mainTop = main ? main.scrollTop < 2 : true;
+            const sbTop = sbRoot ? sbRoot.scrollTop < 2 : true;
+            return mainTop && sbTop;
+          }
+
+          function alignBonDashRowIfAtTop() {
+            if (!atViewportTop()) return;
+
             const root = doc.documentElement;
             root.style.setProperty("--bon-metrics-nudge", "0px");
             root.style.setProperty("--bon-sidebar-ticket-nudge", "0px");
-
-            const main = doc.querySelector('[data-testid="stAppViewContainer"]');
-            const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-            const mainTop = main ? main.scrollTop < 2 : true;
-            const sbRoot = scrollRoot(sidebar);
-            const sbTop = sbRoot ? sbRoot.scrollTop < 2 : true;
-            if (!mainTop || !sbTop) return;
 
             const ticket =
               doc.querySelector('[data-testid="stSidebar"] [class*="st-key-bon_box_ticket"] summary') ||
@@ -12862,7 +12880,7 @@ def _inject_bon_dashboard_scripts() -> None:
 
           function runDashboardChrome() {
             if (pinBonHeader()) syncSidebarAria();
-            alignBonDashRow();
+            alignBonDashRowIfAtTop();
           }
 
           function scheduleChrome() {
@@ -12872,6 +12890,13 @@ def _inject_bon_dashboard_scripts() -> None:
             }, 48);
           }
 
+          function scheduleAlignIfAtTop() {
+            win.clearTimeout(win.__bonAlignOnScrollTimer);
+            win.__bonAlignOnScrollTimer = win.setTimeout(function () {
+              win.requestAnimationFrame(alignBonDashRowIfAtTop);
+            }, 80);
+          }
+
           runDashboardChrome();
 
           if (!win.__bonDashboardScriptsInit) {
@@ -12879,9 +12904,9 @@ def _inject_bon_dashboard_scripts() -> None:
             win.addEventListener("resize", scheduleChrome, { passive: true });
             const main = doc.querySelector('[data-testid="stAppViewContainer"]');
             const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-            main?.addEventListener("scroll", scheduleChrome, { passive: true });
-            sidebar?.addEventListener("scroll", scheduleChrome, { passive: true });
-            scrollRoot(sidebar)?.addEventListener("scroll", scheduleChrome, {
+            main?.addEventListener("scroll", scheduleAlignIfAtTop, { passive: true });
+            sidebar?.addEventListener("scroll", scheduleAlignIfAtTop, { passive: true });
+            scrollRoot(sidebar)?.addEventListener("scroll", scheduleAlignIfAtTop, {
               passive: true,
             });
             const app = doc.querySelector(".stApp");
@@ -15665,6 +15690,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         in_view = pending = open_df = completed = investigation = on_hold = unattended = (
             pd.DataFrame()
         )
+        handled_completed = handled_investigation = pd.DataFrame()
     else:
         slices = _perf_prepare_slices(df_all, range_start, range_end)
         in_view = slices["in_view"]
@@ -15674,6 +15700,12 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         investigation = slices["investigation"]
         on_hold = slices["on_hold"]
         unattended = slices["unattended"]
+        handled_completed = _perf_filter_status_in_range(
+            df_all, STATUS_RESOLVED, range_start, range_end
+        )
+        handled_investigation = _perf_filter_status_in_range(
+            df_all, STATUS_UNDER_INVESTIGATION, range_start, range_end
+        )
 
     n_in_view = len(in_view)
     n_pending = len(pending)
@@ -15728,7 +15760,14 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
             pass
 
         summary = _perf_build_summary(
-            pending, open_df, completed, investigation, on_hold, unattended
+            pending,
+            open_df,
+            completed,
+            investigation,
+            on_hold,
+            unattended,
+            handled_completed=handled_completed,
+            handled_investigation=handled_investigation,
         )
         visit_summary = _perf_build_visit_summary(visits_all)
         overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
@@ -15752,7 +15791,10 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
         sales_f = _perf_filter_by_person(
             _perf_enrich_sales_cases(sales_in_view), focus,
         )
-        work_f = _perf_combine_work(completed_f, investigation_f)
+        work_f = _perf_combine_work(
+            _perf_filter_by_person(handled_completed, focus),
+            _perf_filter_by_person(handled_investigation, focus),
+        )
         n_work = len(work_f)
         responded_in_view = pd.DataFrame()
         if not visits_all.empty and "outcome" in visits_all.columns:
@@ -15884,7 +15926,8 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
 
         with tab_work:
             st.caption(
-                f"**Handled tab ({n_work})** = {STATUS_RESOLVED} + Investigation ticket snapshot. "
+                f"**Handled tab ({n_work})** = {STATUS_RESOLVED} + Investigation with activity "
+                f"in {range_caption}. "
                 f"**Visit fair credit** = distinct tickets per engineer from responded visits "
                 f"({n_handled_visit_tickets} unique tickets in range)."
             )
@@ -15906,14 +15949,14 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                     elif not view.empty:
                         _render_perf_person_bar(
                             view,
-                            title="Handled by assignee (ticket snapshot)",
+                            title=f"Handled by assignee ({range_caption})",
                             value_name="Handled",
                         )
                 with c_table:
                     if work_f.empty:
-                        st.caption("No ticket snapshot rows for split table.")
+                        st.caption("No handled tickets in this time range.")
                     else:
-                        st.markdown("**Split (ticket snapshot)**")
+                        st.markdown(f"**Split ({range_caption})**")
                         split = (
                             view.groupby(["_outcome", "category"], as_index=False)
                             .size()

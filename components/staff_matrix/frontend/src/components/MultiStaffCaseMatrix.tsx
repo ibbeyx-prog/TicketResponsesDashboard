@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   MatrixComponentValue,
   MatrixFilters,
@@ -212,10 +212,11 @@ export function MultiStaffCaseMatrix({
   const { rows } = table.getRowModel();
   const parentRef = useRef<HTMLDivElement>(null);
   const scrollStorageKey = "bon_perf_matrix_scroll_y";
+  const scrollSaveTimerRef = useRef<number | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = parentRef.current;
-    if (!el) return undefined;
+    if (!el) return;
 
     const saved = sessionStorage.getItem(scrollStorageKey);
     if (saved) {
@@ -224,12 +225,27 @@ export function MultiStaffCaseMatrix({
         el.scrollTop = y;
       }
     }
+  }, [scrollStorageKey]);
+
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el) return undefined;
 
     const onScroll = () => {
-      sessionStorage.setItem(scrollStorageKey, String(el.scrollTop));
+      if (scrollSaveTimerRef.current !== null) {
+        window.clearTimeout(scrollSaveTimerRef.current);
+      }
+      scrollSaveTimerRef.current = window.setTimeout(() => {
+        sessionStorage.setItem(scrollStorageKey, String(el.scrollTop));
+      }, 120);
     };
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (scrollSaveTimerRef.current !== null) {
+        window.clearTimeout(scrollSaveTimerRef.current);
+      }
+    };
   }, [scrollStorageKey]);
 
   const rowVirtualizer = useVirtualizer({
