@@ -715,6 +715,11 @@ ATTENDANCE_LOGS_TABLE = (
     _read_setting("ATTENDANCE_LOGS_TABLE", "ticket_attendance_logs")
     or "ticket_attendance_logs"
 )
+# Attendance ``action_type`` values (Log tab lists all rows; filter by Ticket # / Member):
+# Assignment, AssignmentUpdated, Response, Resolved, OnHold, Nudge, AutoUnattended,
+# TicketQueued, TransferredFromSales, TransferredToSales, ReassignedFromOpen,
+# ReassignedFromInvestigation, ReassignedFromOnHold, ReassignedFromPending, Deleted,
+# LegacyLogin (shared-password dashboard sign-in; operator ID not cryptographically verified).
 TICKET_VISITS_TABLE = (
     _read_setting("TICKET_VISITS_TABLE", "ticket_visits")
     or "ticket_visits"
@@ -1244,6 +1249,25 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_AUTH_PWD_VER_KEY] = session_fp
     st.session_state[_AUTH_USERNAME_KEY] = username
     st.session_state[_OPERATOR_ID_KEY] = operator_id
+
+
+def _log_legacy_login_attendance(operator_id: str) -> None:
+    """One audit row per legacy (shared-password) sign-in for weaker identity tracking."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        client = _get_supabase_client()
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": None,
+                "member_username": operator_id,
+                "action_type": "LegacyLogin",
+                "note": "Session authenticated via shared password — identity unverified",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        ).execute()
+    except Exception:
+        pass
 
 
 def _normalize_dashboard_username(raw: str) -> str:
@@ -1990,6 +2014,7 @@ def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
         return
     fp = _password_fingerprint(legacy_password)
     _complete_auth_session(username=op.casefold(), operator_id=op, session_fp=fp)
+    _log_legacy_login_attendance(op)
     st.rerun()
 
 
@@ -5385,14 +5410,103 @@ def _perf_ticket_detail_rows(
     return pd.DataFrame(rows)
 
 
-def _perf_credited_ticket_numbers(
+def _perf_has_second_assignee(row: object) -> bool:
+    """True when ``assigned_to_2`` is a real field engineer handle."""
+    if isinstance(row, pd.Series):
+        raw = row.get("assigned_to_2")
+    else:
+        d = row if isinstance(row, dict) else {}
+        raw = d.get("assigned_to_2")
+    return _sc_sales_has_field_assignee(raw)
+
+
+def get_credit_type(row: object) -> str:
+    """Returns ``solo`` or ``shared`` for a field ticket or sales case row."""
+    return "shared" if _perf_has_second_assignee(row) else "solo"
+
+
+def _perf_ticket_credit_assignees(row: object) -> list[str]:
+    """Normalized ``@handle`` list credited on assignment (``assigned_to`` + ``assigned_to_2``)."""
+    if isinstance(row, pd.Series):
+        data = row
+    else:
+        data = pd.Series(row if isinstance(row, dict) else {})
+    assignees: list[str] = []
+    seen: set[str] = set()
+    for col in ("assigned_to", "assigned_to_2"):
+        raw = data.get(col)
+        if not _sc_sales_has_field_assignee(raw):
+            continue
+        eng = _perf_norm_member(raw)
+        if eng not in seen and eng != "(unknown)":
+            seen.add(eng)
+            assignees.append(eng)
+    if assignees:
+        return assignees
+    if "case_ref" in data.index or "case_ref" in data:
+        return [_sc_perf_sales_credit_staff(data)]
+    staff = data.get("staff")
+    if staff and str(staff).strip() and str(staff).strip() != "(unknown)":
+        return [_perf_norm_member(staff)]
+    assigned = data.get("assigned_to")
+    if assigned and str(assigned).strip():
+        return [_perf_norm_member(assigned)]
+    return []
+
+
+def _perf_explode_credit_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per credited engineer (shared tickets → two rows, same ``ticket_number``/``case_ref``)."""
+    if df.empty:
+        return df
+    rows: list[pd.Series] = []
+    for _, row in df.iterrows():
+        assignees = _perf_ticket_credit_assignees(row)
+        credit_type = get_credit_type(row)
+        if not assignees:
+            r = row.copy()
+            if "staff" not in r.index or not str(r.get("staff") or "").strip():
+                r["staff"] = "(unknown)"
+            r["_credit_type"] = credit_type
+            rows.append(r)
+            continue
+        for eng in assignees:
+            r = row.copy()
+            r["staff"] = eng
+            r["_credit_type"] = credit_type
+            rows.append(r)
+    if not rows:
+        return df.iloc[0:0].copy()
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+def _perf_prepare_credit_count_view(df: pd.DataFrame) -> pd.DataFrame:
+    """Enrich then explode for Performance engineer credit counts."""
+    if df.empty:
+        return df
+    if "ticket_number" in df.columns:
+        view = _perf_enrich_tickets(df) if "_local" not in df.columns else df.copy()
+    elif "case_ref" in df.columns:
+        view = _perf_enrich_sales_cases(df) if "staff" not in df.columns else df.copy()
+    else:
+        view = df.copy()
+    return _perf_explode_credit_rows(view)
+
+
+def _perf_row_credited_to_person(row: object, person: str) -> bool:
+    if person in ("", "All"):
+        return True
+    key = _perf_norm_member(person)
+    return key in _perf_ticket_credit_assignees(row)
+
+
+def _perf_credited_field_tickets(
     df_all: pd.DataFrame,
     *,
     person: str | None = None,
-) -> list[str]:
-    """Ticket numbers in field queue credit (same basis as Overview ``Total``)."""
+) -> pd.DataFrame:
+    """Field tickets in queue credit with optional engineer filter (both assignees)."""
     if df_all.empty or "ticket_number" not in df_all.columns:
-        return []
+        return pd.DataFrame()
     masks = _ticket_queue_count_masks(df_all)
     credited = (
         masks["pending"]
@@ -5403,10 +5517,20 @@ def _perf_credited_ticket_numbers(
     )
     part = df_all.loc[credited].copy()
     if person and person not in ("", "All"):
-        if "assigned_to" not in part.columns:
-            return []
-        part["staff"] = part["assigned_to"].map(_perf_norm_member)
-        part = part.loc[part["staff"] == _perf_norm_member(person)]
+        mask = part.apply(lambda r: _perf_row_credited_to_person(r, person), axis=1)
+        part = part.loc[mask]
+    return part
+
+
+def _perf_credited_ticket_numbers(
+    df_all: pd.DataFrame,
+    *,
+    person: str | None = None,
+) -> list[str]:
+    """Ticket numbers in field queue credit (same basis as Overview ``Total``)."""
+    part = _perf_credited_field_tickets(df_all, person=person)
+    if part.empty:
+        return []
     nums = part["ticket_number"].astype(str).str.strip()
     return sorted({n for n in nums.tolist() if n}, key=str)
 
@@ -5441,7 +5565,6 @@ def _perf_overview_board_summary(
     if not people:
         return pd.DataFrame()
 
-    collab = _perf_ticket_collaboration_map(visits_history)
     sales_map: dict[str, int] = {}
     if not sales.empty and "Total" in sales.columns:
         for person, total in zip(sales["Person"], sales["Total"]):
@@ -5455,12 +5578,12 @@ def _perf_overview_board_summary(
     rows: list[dict[str, object]] = []
     for person in sorted(people, key=str.lower):
         solo = shared = 0
-        for tn in _perf_credited_ticket_numbers(df_all, person=person):
-            n_eng = collab.get(tn, 1)
-            if n_eng <= 1:
-                solo += 1
-            else:
+        credited = _perf_credited_field_tickets(df_all, person=person)
+        for _, row in credited.iterrows():
+            if get_credit_type(row) == "shared":
                 shared += 1
+            else:
+                solo += 1
         rows.append(
             {
                 "Person": person,
@@ -5785,8 +5908,8 @@ def _render_perf_solo_shared_board(
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<p class="perf-ss-hint">Solo / shared = <strong>all</strong> credited field tickets '
-        "(current assignee, full visit history) · "
+        '<p class="perf-ss-hint">Solo / shared = <strong>assignment</strong> (one vs two engineers on '
+        "the ticket). Visit fair credit uses who responded on each visit cycle. "
         "<strong>Sales</strong> = all Sales Cases · "
         "Ring = field queues + Sales (excludes <strong>Unattended</strong>). "
         "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
@@ -5902,6 +6025,50 @@ _PERF_MATRIX_STATUS_RANK: tuple[str, ...] = (
 )
 
 
+def _perf_merge_field_assignment_staff(
+    ticket_engineers: dict[str, set[str]],
+    tickets_df: pd.DataFrame,
+) -> dict[str, set[str]]:
+    """Add ``assigned_to`` / ``assigned_to_2`` credits to Case Info matrix staff columns."""
+    out: dict[str, set[str]] = {str(k): set(v) for k, v in ticket_engineers.items()}
+    if tickets_df.empty or "ticket_number" not in tickets_df.columns:
+        return out
+    for _, row in tickets_df.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if not tn:
+            continue
+        for eng in _perf_ticket_credit_assignees(row):
+            out.setdefault(tn, set()).add(eng)
+    return out
+
+
+def _perf_apply_field_assignment_credits(
+    data_matrix: dict[str, object] | None,
+    tickets_df: pd.DataFrame,
+) -> dict[str, object] | None:
+    if data_matrix is None:
+        return None
+    ticket_engineers = _perf_merge_field_assignment_staff(
+        data_matrix["ticket_engineers"],  # type: ignore[arg-type]
+        tickets_df,
+    )
+    all_engineers = sorted(
+        {e for engs in ticket_engineers.values() for e in engs},
+        key=str.lower,
+    )
+    all_tickets = sorted(
+        ticket_engineers.keys(),
+        key=lambda t: (-len(ticket_engineers.get(t, set())), str(t).lower()),
+    )
+    return {
+        **data_matrix,
+        "all_engineers": all_engineers,
+        "all_tickets": all_tickets,
+        "ticket_engineers": ticket_engineers,
+        "total_tickets": len(all_tickets),
+    }
+
+
 def _perf_visit_bipartite_data(
     visits: pd.DataFrame,
     *,
@@ -5964,6 +6131,11 @@ def _perf_sales_case_matrix_staff(row: object) -> dict[str, tuple[str, str]]:
     if _sc_sales_has_field_assignee(assigned):
         eng = _perf_norm_member(assigned)
         staff[eng] = (outcome, label)
+
+    assigned_2 = data.get("assigned_to_2")
+    if _sc_sales_has_field_assignee(assigned_2):
+        eng2 = _perf_norm_member(assigned_2)
+        staff[eng2] = (outcome, label)
 
     admin = str(data.get("admin_owner") or "").strip()
     if admin:
@@ -6129,7 +6301,7 @@ def _perf_case_info_ticket_ids(
             if not ref:
                 continue
             if focus not in ("", "All"):
-                if _perf_norm_member(focus) not in _perf_sales_case_matrix_staff(row):
+                if not _perf_row_credited_to_person(row, focus):
                     continue
             ids.add(ref)
     return len({i for i in ids if i})
@@ -6660,6 +6832,7 @@ def _perf_build_staff_matrix_payload(
     search: str,
     lookup_ticket: str = "",
     sales_cases: pd.DataFrame | None = None,
+    tickets_df: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     """JSON payload for the React Multi-Staff Case Management Matrix."""
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
@@ -6671,6 +6844,13 @@ def _perf_build_staff_matrix_payload(
     sales_by_ref = _perf_sales_cases_by_ref(
         sales_cases if sales_cases is not None else pd.DataFrame()
     )
+    tickets_by_num: dict[str, pd.Series] = {}
+    tdf = tickets_df if tickets_df is not None else pd.DataFrame()
+    if not tdf.empty and "ticket_number" in tdf.columns:
+        for _, row in tdf.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                tickets_by_num[tn] = row
     eng_colors = _perf_engineer_color_map(all_engineers)
     case_info_by_ticket = _perf_matrix_case_info_by_ticket(
         visits_all,
@@ -6682,6 +6862,7 @@ def _perf_build_staff_matrix_payload(
         assigned = sorted(ticket_engineers.get(tn, set()), key=str.lower)
         staff_assignments: dict[str, dict[str, str]] = {}
         sales_row = sales_by_ref.get(tn)
+        ticket_row = tickets_by_num.get(tn)
         for eng in assigned:
             outcome, label = _perf_visit_staff_outcome(
                 prepared,
@@ -6692,13 +6873,29 @@ def _perf_build_staff_matrix_payload(
                 sales_staff = _perf_sales_case_matrix_staff(sales_row)
                 if eng in sales_staff:
                     outcome, label = sales_staff[eng]
+            elif not outcome and ticket_row is not None:
+                credit_type = get_credit_type(ticket_row)
+                if eng in _perf_ticket_credit_assignees(ticket_row):
+                    outcome, label = (
+                        "assigned",
+                        "Shared assignee" if credit_type == "shared" else "Assigned",
+                    )
             if outcome:
                 staff_assignments[eng] = {
                     "outcome": outcome,
                     "label": label,
                     "role": _perf_matrix_staff_role(outcome),
                 }
-        is_shared = len(assigned) > 1
+        credit_type = (
+            get_credit_type(sales_row)
+            if sales_row is not None
+            else (
+                get_credit_type(ticket_row)
+                if ticket_row is not None
+                else ("shared" if len(assigned) > 1 else "solo")
+            )
+        )
+        is_shared = credit_type == "shared" or len(assigned) > 1
         status = _perf_ticket_matrix_status(staff_assignments, assigned)
         priority = _perf_ticket_matrix_priority(assigned_count=len(assigned))
         track = "Sales" if sales_row is not None else "Field"
@@ -6761,6 +6958,7 @@ def _render_perf_visit_staff_matrix(
     search: str,
     lookup_ticket: str = "",
     sales_cases: pd.DataFrame | None = None,
+    tickets_df: pd.DataFrame | None = None,
 ) -> None:
     """Tickets × staff grid — virtualized React matrix when build is present."""
     payload = _perf_build_staff_matrix_payload(
@@ -6769,6 +6967,7 @@ def _render_perf_visit_staff_matrix(
         search=search,
         lookup_ticket=lookup_ticket,
         sales_cases=sales_cases,
+        tickets_df=tickets_df,
     )
     tickets = payload.get("tickets") or []
     if not tickets:
@@ -6918,6 +7117,7 @@ def _render_perf_case_info_tab(
     *,
     focus: str,
     sales_all: pd.DataFrame | None = None,
+    tickets_all: pd.DataFrame | None = None,
     range_start: pd.Timestamp | None = None,
     range_end: pd.Timestamp | None = None,
 ) -> None:
@@ -6938,6 +7138,10 @@ def _render_perf_case_info_tab(
     visits_data = _perf_visit_bipartite_data(visits_matrix, focus=focus)
     sales_data = _perf_sales_case_bipartite_data(sales_matrix, focus=focus)
     data_matrix = _perf_merge_case_info_bipartite_data(visits_data, sales_data)
+    data_matrix = _perf_apply_field_assignment_credits(
+        data_matrix,
+        tickets_all if tickets_all is not None else pd.DataFrame(),
+    )
     st.caption(
         "Rows = field tickets and **sales cases** · columns = staff · colored dots show "
         "involvement. Use **Ticket ID** / **case ref** in the matrix filter bar to search "
@@ -6966,6 +7170,7 @@ def _render_perf_case_info_tab(
             search=lookup_tid,
             lookup_ticket=lookup_tid,
             sales_cases=sales_matrix,
+            tickets_df=tickets_all,
         )
 
 
@@ -7980,10 +8185,12 @@ def _perf_build_sales_summary(df: pd.DataFrame) -> pd.DataFrame:
 def _perf_filter_by_person(df: pd.DataFrame, person: str) -> pd.DataFrame:
     if df.empty or person in ("", "All"):
         return df
-    view = _perf_enrich_tickets(df) if "staff" not in df.columns else df.copy()
-    if "staff" not in view.columns:
-        return df
-    return view[view["staff"] == person]
+    if "case_ref" in df.columns:
+        view = _perf_enrich_sales_cases(df) if "staff" not in df.columns else df.copy()
+    else:
+        view = _perf_enrich_tickets(df) if "staff" not in df.columns else df.copy()
+    mask = view.apply(lambda r: _perf_row_credited_to_person(r, person), axis=1)
+    return view.loc[mask].copy()
 
 
 def _perf_sales_account_names(df: pd.DataFrame) -> list[str]:
@@ -8032,9 +8239,10 @@ def _perf_enrich_tickets(df: pd.DataFrame) -> pd.DataFrame:
 def _perf_staff_counts(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=int)
-    if "staff" not in df.columns:
-        df = _perf_enrich_tickets(df)
-    return df.groupby("staff").size()
+    exploded = _perf_prepare_credit_count_view(df)
+    if exploded.empty or "staff" not in exploded.columns:
+        return pd.Series(dtype=int)
+    return exploded.groupby("staff").size()
 
 
 def _perf_calendar_week_range_utc(
@@ -8188,6 +8396,7 @@ def _perf_weekly_attended_bundle(
         range_end=range_end,
     )
     summary, detail = _perf_build_weekly_attended_tables(csm_attended, sales_attended)
+    n_unique = int(detail["ID"].astype(str).nunique()) if not detail.empty else 0
     return {
         "csm": csm_attended,
         "sales": sales_attended,
@@ -8195,7 +8404,7 @@ def _perf_weekly_attended_bundle(
         "detail": detail,
         "n_csm": len(csm_attended),
         "n_sales": len(sales_attended),
-        "total": len(csm_attended) + len(sales_attended),
+        "total": n_unique,
     }
 
 
@@ -8222,6 +8431,7 @@ def _perf_build_weekly_attended_tables(
         "ID",
         "Status",
         "Attended by",
+        "Credit",
         "Category",
         "Activity (local)",
     ]
@@ -8229,18 +8439,24 @@ def _perf_build_weekly_attended_tables(
 
     if not csm_raw.empty:
         csm = _perf_enrich_tickets(csm_raw)
-        detail_parts.append(
-            pd.DataFrame(
-                {
-                    "Track": "CSM",
-                    "ID": csm.get("ticket_number", pd.Series("", index=csm.index)),
-                    "Status": csm.get("_attended_status", pd.Series("", index=csm.index)),
-                    "Attended by": csm.get("staff", pd.Series("(unknown)", index=csm.index)),
-                    "Category": csm.get("category", pd.Series("(uncategorized)", index=csm.index)),
-                    "Activity (local)": csm["_local"].dt.strftime("%Y-%m-%d %H:%M"),
-                }
-            )
-        )
+        csm_rows: list[dict[str, object]] = []
+        for _, row in csm.iterrows():
+            assignees = _perf_ticket_credit_assignees(row)
+            if not assignees:
+                assignees = [str(row.get("staff") or "(unknown)")]
+            credit = get_credit_type(row)
+            base = {
+                "Track": "CSM",
+                "ID": str(row.get("ticket_number") or ""),
+                "Status": str(row.get("_attended_status") or row.get("status") or ""),
+                "Category": str(row.get("category") or "(uncategorized)"),
+                "Activity (local)": row["_local"].strftime("%Y-%m-%d %H:%M"),
+                "Credit": credit,
+            }
+            for eng in assignees:
+                csm_rows.append({**base, "Attended by": eng})
+        if csm_rows:
+            detail_parts.append(pd.DataFrame(csm_rows))
 
     if not sales_raw.empty:
         sales = _perf_enrich_sales_cases(sales_raw)
@@ -8251,22 +8467,24 @@ def _perf_build_weekly_attended_tables(
             "field_task_category", pd.Series("", index=sales.index)
         ).map(canonical_task_category)
         category = sales_cat.where(sales_cat.notna(), field_cat).fillna("(uncategorized)")
-        detail_parts.append(
-            pd.DataFrame(
-                {
-                    "Track": "Sales",
-                    "ID": sales.get("case_ref", pd.Series("", index=sales.index)),
-                    "Status": sales.get(
-                        "_attended_status", pd.Series("", index=sales.index)
-                    ),
-                    "Attended by": sales.get(
-                        "staff", pd.Series("(unknown)", index=sales.index)
-                    ),
-                    "Category": category,
-                    "Activity (local)": sales["_local"].dt.strftime("%Y-%m-%d %H:%M"),
-                }
-            )
-        )
+        sales_rows: list[dict[str, object]] = []
+        for idx, row in sales.iterrows():
+            assignees = _perf_ticket_credit_assignees(row)
+            if not assignees:
+                assignees = [str(row.get("staff") or "(unknown)")]
+            credit = get_credit_type(row)
+            base = {
+                "Track": "Sales",
+                "ID": str(row.get("case_ref") or ""),
+                "Status": str(row.get("_attended_status") or row.get("status_eff") or ""),
+                "Category": str(category.loc[idx] if idx in category.index else "(uncategorized)"),
+                "Activity (local)": row["_local"].strftime("%Y-%m-%d %H:%M"),
+                "Credit": credit,
+            }
+            for eng in assignees:
+                sales_rows.append({**base, "Attended by": eng})
+        if sales_rows:
+            detail_parts.append(pd.DataFrame(sales_rows))
 
     if detail_parts:
         detail = pd.concat(detail_parts, ignore_index=True)
@@ -8333,8 +8551,59 @@ def _perf_build_weekly_attended_tables(
     summary = summary.sort_values(
         ["Grand total", "Attended by"], ascending=[False, True]
     )
-    totals = summary.drop(columns=["Attended by"]).sum(numeric_only=True)
-    totals["Attended by"] = "TOTAL"
+    totals: dict[str, object] = {"Attended by": "TOTAL"}
+    totals["CSM total"] = int(csm["ID"].astype(str).nunique()) if not csm.empty else 0
+    totals[f"CSM {STATUS_ON_HOLD}"] = (
+        int(csm.loc[csm["Status"].astype(str).eq(STATUS_ON_HOLD), "ID"].astype(str).nunique())
+        if not csm.empty
+        else 0
+    )
+    totals[f"CSM {STATUS_RESOLVED}"] = (
+        int(csm.loc[csm["Status"].astype(str).eq(STATUS_RESOLVED), "ID"].astype(str).nunique())
+        if not csm.empty
+        else 0
+    )
+    totals["CSM Investigation"] = (
+        int(
+            csm.loc[
+                csm["Status"].astype(str).eq(STATUS_UNDER_INVESTIGATION),
+                "ID",
+            ]
+            .astype(str)
+            .nunique()
+        )
+        if not csm.empty
+        else 0
+    )
+    totals["Sales total"] = int(sales["ID"].astype(str).nunique()) if not sales.empty else 0
+    totals["Sales Investigation"] = (
+        int(
+            sales.loc[sales["Status"].astype(str).eq(SC_STATUS_INVESTIGATION), "ID"]
+            .astype(str)
+            .nunique()
+        )
+        if not sales.empty
+        else 0
+    )
+    totals["Sales Regional"] = (
+        int(
+            sales.loc[sales["Status"].astype(str).eq(SC_STATUS_REGIONAL), "ID"]
+            .astype(str)
+            .nunique()
+        )
+        if not sales.empty
+        else 0
+    )
+    totals[f"Sales {STATUS_RESOLVED}"] = (
+        int(
+            sales.loc[sales["Status"].astype(str).eq(SC_STATUS_RESOLVED), "ID"]
+            .astype(str)
+            .nunique()
+        )
+        if not sales.empty
+        else 0
+    )
+    totals["Grand total"] = int(detail["ID"].astype(str).nunique())
     summary = pd.concat([summary, pd.DataFrame([totals])], ignore_index=True)
     return summary, detail
 
@@ -8390,33 +8659,34 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
     )
     view["Outcome"] = view["Status"].astype(str).str.strip().map(_perf_weekly_outcome_group)
 
-    total = len(view)
-    resolved = int(view["Outcome"].eq("Resolved").sum())
+    total = int(view["ID"].astype(str).nunique())
+    id_first = view.drop_duplicates(subset=["ID"], keep="first")
+    resolved = int(id_first["Outcome"].eq("Resolved").sum())
     investigation = total - resolved
     rate = int(round(100 * resolved / total)) if total else 0
 
     inv_by_cat = (
-        view.loc[view["Outcome"].eq("Investigation")]
+        id_first.loc[id_first["Outcome"].eq("Investigation")]
         .groupby("Category")
         .size()
         .sort_values(ascending=False)
     )
     res_by_cat = (
-        view.loc[view["Outcome"].eq("Resolved")]
+        id_first.loc[id_first["Outcome"].eq("Resolved")]
         .groupby("Category")
         .size()
         .sort_values(ascending=False)
     )
 
     category_df = (
-        view.groupby(["Category", "Outcome"], as_index=False)
+        id_first.groupby(["Category", "Outcome"], as_index=False)
         .size()
         .rename(columns={"size": "count", "Category": "category", "Outcome": "outcome"})
         .sort_values(["count", "category"], ascending=[False, True])
     )
 
     priority = (
-        view.groupby(["Outcome", "Category"], as_index=False)
+        id_first.groupby(["Outcome", "Category"], as_index=False)
         .size()
         .rename(
             columns={
@@ -8906,10 +9176,9 @@ def _render_perf_person_bar(
         st.caption("No data for this filter.")
         return
     if "staff" not in view.columns:
-        view = _perf_enrich_tickets(view)
+        view = _perf_prepare_credit_count_view(view)
     else:
-        view = view.copy()
-        view["staff"] = view["staff"].map(_perf_norm_member)
+        view = _perf_explode_credit_rows(view.copy())
     totals = (
         view.groupby("staff", as_index=False)
         .size()
@@ -11014,6 +11283,7 @@ def _cached_field_engineer_usernames() -> tuple[tuple[str, ...], bool]:
         res = (
             client.table(FIELD_ENGINEERS_TABLE)
             .select("username")
+            .eq("is_active", True)
             .order("username")
             .execute()
         )
@@ -11036,12 +11306,25 @@ def _try_fetch_field_engineer_usernames() -> tuple[list[str], bool]:
 
 def _insert_field_engineer(username: str) -> None:
     client = _get_supabase_client()
-    client.table(FIELD_ENGINEERS_TABLE).insert({"username": username}).execute()
+    try:
+        client.table(FIELD_ENGINEERS_TABLE).insert(
+            {"username": username, "is_active": True}
+        ).execute()
+    except Exception as exc:
+        err = str(exc).lower()
+        if "duplicate" in err or "23505" in str(exc) or "unique" in err:
+            client.table(FIELD_ENGINEERS_TABLE).update({"is_active": True}).eq(
+                "username", username
+            ).execute()
+        else:
+            raise
 
 
 def _delete_field_engineer(username: str) -> None:
     client = _get_supabase_client()
-    client.table(FIELD_ENGINEERS_TABLE).delete().eq("username", username).execute()
+    client.table(FIELD_ENGINEERS_TABLE).update({"is_active": False}).eq(
+        "username", username
+    ).execute()
 
 
 def _ensure_task_categories_synced(client) -> None:
@@ -16766,6 +17049,7 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 visits_all,
                 focus=focus,
                 sales_all=sales_all,
+                tickets_all=df_all,
                 range_start=range_start,
                 range_end=range_end,
             )
