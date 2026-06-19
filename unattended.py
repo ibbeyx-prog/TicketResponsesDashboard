@@ -71,6 +71,8 @@ def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> boo
     """Pending with no same-day (or prior-day) field response after assign-day cutoff."""
     if not is_daily_task_status(row.get("status")):
         return False
+    if row.get("marked_unattended_at"):
+        return False
     if has_field_response_since_assign(row):
         return False
     assigned_at = _parse_ts(row.get("last_assigned_at"))
@@ -119,8 +121,15 @@ def nudge_message(*, assigned_to: str, ticket_number: str, task_category: str) -
     )
 
 
-def _fetch_pending_tickets(client: Any, *, tickets_table: str) -> list[dict]:
-    res = (
+def _fetch_daily_task_tickets(
+    client: Any,
+    *,
+    tickets_table: str,
+    nudge_not_sent: bool = False,
+    not_marked_unattended: bool = False,
+) -> list[dict]:
+    """Daily Task rows for unattended cron (optional idempotency filters)."""
+    q = (
         client.table(tickets_table)
         .select(
             "ticket_number, assigned_to, task_category, status, "
@@ -128,9 +137,12 @@ def _fetch_pending_tickets(client: Any, *, tickets_table: str) -> list[dict]:
             "marked_unattended_at"
         )
         .in_("status", list(DAILY_TASK_STATUSES))
-        .limit(500)
-        .execute()
     )
+    if nudge_not_sent:
+        q = q.is_("unattended_nudge_sent_at", "null")
+    if not_marked_unattended:
+        q = q.is_("marked_unattended_at", "null")
+    res = q.limit(500).execute()
     return list(res.data or [])
 
 
@@ -142,7 +154,9 @@ async def run_unattended_nudges(
     send_telegram: Any | None = None,
 ) -> dict[str, int]:
     """Send nudges for eligible Pending tickets. ``send_telegram`` is async ``(row) -> None``."""
-    pending = _fetch_pending_tickets(client, tickets_table=tickets_table)
+    pending = _fetch_daily_task_tickets(
+        client, tickets_table=tickets_table, nudge_not_sent=True
+    )
     now_iso = datetime.now(timezone.utc).isoformat()
     sent = 0
     skipped = 0
@@ -196,7 +210,9 @@ def run_unattended_close(
 
     Sets ``marked_unattended_at`` once (permanent count). Status becomes Open for admin.
     """
-    pending = _fetch_pending_tickets(client, tickets_table=tickets_table)
+    pending = _fetch_daily_task_tickets(
+        client, tickets_table=tickets_table, not_marked_unattended=True
+    )
     now_iso = datetime.now(timezone.utc).isoformat()
     closed = 0
     for row in pending:
@@ -209,9 +225,8 @@ def run_unattended_close(
             payload: dict[str, object] = {
                 "status": STATUS_NEEDS_REVIEW,
                 "updated_at": now_iso,
+                "marked_unattended_at": now_iso,
             }
-            if not row.get("marked_unattended_at"):
-                payload["marked_unattended_at"] = now_iso
             client.table(tickets_table).update(payload).eq("ticket_number", ticket).execute()
             client.table(attendance_table).insert(
                 {
