@@ -146,6 +146,10 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 _WEBHOOK_SECRET_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 BOT_SESSIONS_TABLE = (os.getenv("BOT_SESSIONS_TABLE") or "bot_sessions").strip()
 TICKETS_TABLE = (os.getenv("TICKETS_TABLE") or "tickets_active").strip()
+SALES_CASES_TABLE = (
+    os.getenv("SALES_CASES_TABLE") or "dashboard_sales_cases"
+).strip()
+_SALES_STATUS_RESOLVED = "Resolved"
 STATUS_ON_HOLD = "On Hold"
 _FIELD_REPLY_STATUSES = frozenset({STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD})
 ATTENDANCE_LOGS_TABLE = (
@@ -832,6 +836,61 @@ def _db_get_ticket(ticket_number: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def _db_get_sales_case_by_ref(case_ref: str) -> dict[str, Any] | None:
+    res = (
+        supabase.table(SALES_CASES_TABLE)
+        .select(
+            "case_ref, assigned_to, assigned_to_2, status, description, additional_info"
+        )
+        .eq("case_ref", case_ref)
+        .limit(1)
+        .execute()
+    )
+    rows = res.data or []
+    return rows[0] if rows else None
+
+
+def _sales_field_reply_eligible(case_ref: str) -> bool:
+    """Sales cases with a field assignee (not Resolved) can receive bot field replies."""
+    try:
+        row = _db_get_sales_case_by_ref(case_ref)
+    except Exception:
+        log.exception("sales lookup failed for field reply: %s", case_ref)
+        return False
+    if not row:
+        return False
+    if str(row.get("status") or "").strip() == _SALES_STATUS_RESOLVED:
+        return False
+    return bool(str(row.get("assigned_to") or "").strip())
+
+
+def _field_reply_lookup(case_ref: str) -> dict[str, Any] | None:
+    """``tickets_active`` row, else ``dashboard_sales_cases`` (tagged ``_field_source``)."""
+    try:
+        row = _db_get_ticket(case_ref)
+    except Exception:
+        row = None
+    if row:
+        row["_field_source"] = "ticket"
+        return row
+    try:
+        sales = _db_get_sales_case_by_ref(case_ref)
+    except Exception:
+        sales = None
+    if sales:
+        sales["_field_source"] = "sales"
+        return sales
+    return None
+
+
+def _field_reply_row_accepting_response(row: dict[str, Any]) -> bool:
+    if row.get("_field_source") == "sales":
+        if str(row.get("status") or "").strip() == _SALES_STATUS_RESOLVED:
+            return False
+        return bool(str(row.get("assigned_to") or "").strip())
+    return str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES
+
+
 def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | None) -> bool:
     if not replier_username:
         return False
@@ -840,15 +899,15 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
 
 
 def _ticket_field_reply_eligible(ticket_number: str) -> bool:
-    """Pending / On Hold / Open tickets can receive a field completion."""
+    """Pending / On Hold / Open tickets, or active sales cases, can receive field completion."""
     try:
         row = _db_get_ticket(ticket_number)
     except Exception:
         log.exception("tickets lookup failed for field reply: %s", ticket_number)
         return False
-    if not row:
-        return False
-    return str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES
+    if row:
+        return str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES
+    return _sales_field_reply_eligible(ticket_number)
 
 
 def _resolve_ticket_from_assignment_reply(
@@ -888,8 +947,10 @@ def _resolve_ticket_from_assignment_reply(
         try:
             row = _db_get_ticket(ticket_number)
         except Exception:
-            continue
+            row = None
         if row and str(row.get("status") or "").strip() == STATUS_DAILY_TASK:
+            pending_on_parent.append(ticket_number)
+        elif not row and _sales_field_reply_eligible(ticket_number):
             pending_on_parent.append(ticket_number)
     if len(pending_on_parent) == 1:
         return pending_on_parent[0]
@@ -943,8 +1004,10 @@ def _resolve_ticket_by_unique_id(
             try:
                 row = _db_get_ticket(tid)
             except Exception:
-                continue
+                row = None
             if row and str(row.get("status") or "").strip() == STATUS_DAILY_TASK:
+                pending.append(tid)
+            elif not row and _sales_field_reply_eligible(tid):
                 pending.append(tid)
         if len(pending) == 1:
             return pending[0]
@@ -966,7 +1029,13 @@ def _resolve_ticket_by_unique_id(
             row = _db_get_ticket(tid)
         except Exception:
             log.exception("tickets lookup failed for ticket id %s", tid)
-            continue
+            row = None
+        if not row:
+            try:
+                row = _db_get_sales_case_by_ref(tid)
+            except Exception:
+                log.exception("sales lookup failed for case ref %s", tid)
+                row = None
         if not row:
             continue
         if _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
@@ -1011,17 +1080,45 @@ def _pending_tickets_for_assignee(replier_username: str | None) -> list[dict[str
     ]
 
 
+def _pending_field_targets_for_assignee(replier_username: str | None) -> list[str]:
+    """Open CSM tickets and active sales cases awaiting field completion for one assignee."""
+    out: list[str] = []
+    for r in _pending_tickets_for_assignee(replier_username):
+        tn = str(r.get("ticket_number") or "").strip()
+        if tn:
+            out.append(tn)
+    if not replier_username:
+        return out
+    try:
+        res = (
+            supabase.table(SALES_CASES_TABLE)
+            .select("case_ref, assigned_to, status")
+            .neq("status", _SALES_STATUS_RESOLVED)
+            .execute()
+        )
+    except Exception:
+        log.exception("pending sales cases lookup failed for @%s", replier_username)
+    else:
+        for r in res.data or []:
+            if not _sender_matches_assigned_to(r.get("assigned_to"), replier_username):
+                continue
+            cref = str(r.get("case_ref") or "").strip()
+            if cref:
+                out.append(cref)
+    return out
+
+
 def _resolve_ticket_single_pending_for_assignee(replier_username: str | None) -> str | None:
     """Use the sole Pending row for this assignee (never guess among several)."""
-    rows = _pending_tickets_for_assignee(replier_username)
-    if len(rows) == 1:
-        return str(rows[0].get("ticket_number") or "") or None
-    if len(rows) > 1:
+    pending = _pending_field_targets_for_assignee(replier_username)
+    if len(pending) == 1:
+        return pending[0]
+    if len(pending) > 1:
         log.warning(
             "field_reply ambiguous: @%s has %s pending tickets; require reply to "
             "assignment or ticket id in message",
             replier_username,
-            len(rows),
+            len(pending),
         )
     return None
 
@@ -1576,34 +1673,54 @@ def _db_complete_ticket_field_response(
             return
 
     responded_at = _utc_now_iso()
-    updates: dict[str, Any] = {
-        "status": "Open",
-        "responded_at": responded_at,
-        "field_response": field_response,
-        "updated_at": responded_at,
-    }
-    if update_photo_url:
-        updates["photo_url"] = photo_url
-    if telegram_chat_id is not None:
-        updates["last_response_telegram_chat_id"] = int(telegram_chat_id)
-    if telegram_message_id is not None:
-        updates["last_response_telegram_message_id"] = int(telegram_message_id)
-    if field_responded_by:
-        updates["field_responded_by"] = field_responded_by
+    sales_row: dict[str, Any] | None = None
+    if row:
+        updates: dict[str, Any] = {
+            "status": "Open",
+            "responded_at": responded_at,
+            "field_response": field_response,
+            "updated_at": responded_at,
+        }
+        if update_photo_url:
+            updates["photo_url"] = photo_url
+        if telegram_chat_id is not None:
+            updates["last_response_telegram_chat_id"] = int(telegram_chat_id)
+        if telegram_message_id is not None:
+            updates["last_response_telegram_message_id"] = int(telegram_message_id)
+        if field_responded_by:
+            updates["field_responded_by"] = field_responded_by
+        else:
+            updates["field_responded_by"] = None
+        _execute_ticket_update(updates, ticket_number)
+        try:
+            row = _db_get_ticket(ticket_number)
+            if row and str(row.get("status") or "").strip() != "Open":
+                log.error(
+                    "ticket %s status is still %r after field response update",
+                    ticket_number,
+                    row.get("status"),
+                )
+        except Exception:
+            log.exception("post-update verify failed for ticket %s", ticket_number)
     else:
-        updates["field_responded_by"] = None
-    _execute_ticket_update(updates, ticket_number)
-    row: dict | None = None
-    try:
-        row = _db_get_ticket(ticket_number)
-        if row and str(row.get("status") or "").strip() != "Open":
-            log.error(
-                "ticket %s status is still %r after field response update",
-                ticket_number,
-                row.get("status"),
+        sales_row = _db_get_sales_case_by_ref(ticket_number)
+        if not sales_row:
+            raise RuntimeError(
+                f"ticket {ticket_number} not found in {TICKETS_TABLE!r} "
+                f"or {SALES_CASES_TABLE!r}"
             )
-    except Exception:
-        log.exception("post-update verify failed for ticket %s", ticket_number)
+        payload: dict[str, Any] = {"updated_at": responded_at}
+        if field_response:
+            payload["additional_info"] = field_response
+        supabase.table(SALES_CASES_TABLE).update(payload).eq(
+            "case_ref", ticket_number
+        ).execute()
+        row = sales_row
+        log.info(
+            "field response saved sales case=%s photo=%s",
+            ticket_number,
+            bool(update_photo_url and photo_url),
+        )
 
     if responder_username:
         log_note = field_response
@@ -2110,7 +2227,7 @@ async def _apply_field_completion(
         return
 
     try:
-        ticket_row = _db_get_ticket(ticket_number)
+        ticket_row = _field_reply_lookup(ticket_number)
     except Exception:
         ticket_row = None
     db_assignee = assigned_to or (ticket_row or {}).get("assigned_to")
@@ -2376,11 +2493,11 @@ async def ingest_telethon_field_media_reply(event: object) -> bool:
         return False
 
     try:
-        row = _db_get_ticket(ticket_number)
+        row = _field_reply_lookup(ticket_number)
     except Exception:
         log.exception("telethon media reply: db lookup failed %s", ticket_number)
         return False
-    if not row or str(row.get("status") or "").strip() not in _FIELD_REPLY_STATUSES:
+    if not row or not _field_reply_row_accepting_response(row):
         return False
 
     client = getattr(event, "client", None)
@@ -2419,7 +2536,9 @@ async def ingest_telethon_field_media_reply(event: object) -> bool:
         responded_by = str(row.get("field_responded_by") or "").strip() or None
     field_response = reply_text
     if not field_response:
-        existing = str(row.get("field_response") or "").strip()
+        existing = str(
+            row.get("field_response") or row.get("additional_info") or ""
+        ).strip()
         field_response = existing or None
     if not field_response and upload_url:
         field_response = "(photo)"
@@ -2498,16 +2617,16 @@ async def handle_group_standalone_field_reply(
     )
 
     try:
-        row = _db_get_ticket(ticket_number)
+        row = _field_reply_lookup(ticket_number)
     except Exception:
         log.exception("standalone field_reply db lookup failed %s", ticket_number)
         return
     if not row:
-        log.warning("standalone field_reply: ticket %s not in dashboard", ticket_number)
+        log.warning("standalone field_reply: %s not in dashboard", ticket_number)
         return
-    if str(row.get("status") or "").strip() not in _FIELD_REPLY_STATUSES:
+    if not _field_reply_row_accepting_response(row):
         log.info(
-            "standalone field_reply: ticket %s status=%s — skip",
+            "standalone field_reply: %s status=%s — skip",
             ticket_number,
             row.get("status"),
         )
@@ -2585,21 +2704,24 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        row = _db_get_ticket(ticket_number)
+        row = _field_reply_lookup(ticket_number)
     except Exception:
-        log.exception("tickets lookup failed for field reply: %s", ticket_number)
-        await _reply(update, f"Database error while loading ticket {ticket_number}.")
+        log.exception("field reply db lookup failed: %s", ticket_number)
+        await _reply(update, f"Database error while loading case {ticket_number}.")
         return
 
     if not row:
-        await _reply(update, f"No ticket record found for {ticket_number}.")
-        return
-
-    ticket_status = str(row.get("status") or "").strip()
-    if ticket_status not in _FIELD_REPLY_STATUSES:
         await _reply(
             update,
-            f"Ticket {ticket_number} is already {ticket_status} — no new field reply needed.",
+            f"No ticket or sales case record found for {ticket_number}.",
+        )
+        return
+
+    if not _field_reply_row_accepting_response(row):
+        label = str(row.get("status") or "").strip() or "—"
+        await _reply(
+            update,
+            f"Case {ticket_number} is already {label} — no new field reply needed.",
         )
         return
 
@@ -2842,10 +2964,10 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if has_photo and standalone:
             ticket_number, field_text = standalone
             try:
-                row = _db_get_ticket(ticket_number)
+                row = _field_reply_lookup(ticket_number)
             except Exception:
                 row = None
-            if row and str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES:
+            if row and _field_reply_row_accepting_response(row):
                 log.info(
                     "handle_non_text: group photo+caption standalone for %s",
                     ticket_number,
@@ -2863,7 +2985,7 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ticket_number = _resolve_ticket_for_field_reply("", username, None)
             if ticket_number:
                 try:
-                    row = _db_get_ticket(ticket_number)
+                    row = _field_reply_lookup(ticket_number)
                 except Exception:
                     row = None
                 if row and _sender_matches_assigned_to(row.get("assigned_to"), username):

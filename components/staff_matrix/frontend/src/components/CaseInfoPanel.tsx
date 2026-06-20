@@ -31,7 +31,7 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
         <div className="border-b border-dashboard-border px-4 py-4">
           <h2 className="text-sm font-semibold text-dashboard-text">Case Info</h2>
         </div>
-        <p className="px-4 py-6 text-xs text-dashboard-muted">
+        <p className="px-4 py-6 text-[13px] text-dashboard-muted">
           Select a row to view case details and staff involvement.
         </p>
       </aside>
@@ -55,7 +55,7 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
         <h2 className="text-sm font-semibold text-white">Case Info</h2>
       </div>
 
-      <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4 text-xs">
+      <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4 text-[13px]">
         <dl className="space-y-2.5">
           <div>
             <dt className="text-dashboard-muted">Case #</dt>
@@ -80,10 +80,10 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
         </dl>
 
         <div>
-          <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-dashboard-muted">
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-dashboard-muted">
             Staffs
           </h3>
-          <p className="mb-2 text-[10px] text-dashboard-muted">Involved</p>
+          <p className="mb-2 text-[11px] text-dashboard-muted">Involved</p>
           <ul className="space-y-2">
             {involved.map((staff) => {
               const a = ticket.staffAssignments[staff];
@@ -97,7 +97,7 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
                   <span className="min-w-0 flex-1 truncate font-medium text-dashboard-text">
                     {staff}
                   </span>
-                  <span className="shrink-0 text-[10px] text-dashboard-muted">
+                  <span className="shrink-0 text-[11px] text-dashboard-muted">
                     {a?.role ?? staffRoleLabel(a?.outcome)}
                   </span>
                 </li>
@@ -106,7 +106,7 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
           </ul>
           {observers.length > 0 ? (
             <>
-              <p className="mb-2 mt-4 text-[10px] text-dashboard-muted">Observer</p>
+              <p className="mb-2 mt-4 text-[11px] text-dashboard-muted">Observer</p>
               <ul className="space-y-2">
                 {observers.map((staff) => {
                   const color = staffColors[staff] ?? "#8fa89e";
@@ -128,7 +128,7 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
         {hasCaseActivity ? (
           <>
             <div>
-              <h3 className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-dashboard-muted">
+              <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-dashboard-muted">
                 <MessageSquare className="h-3 w-3" />
                 Comments
                 {comments.length > 0 ? (
@@ -148,26 +148,26 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
                         <span className="truncate font-medium text-dashboard-text">
                           {item.author}
                         </span>
-                        <span className="shrink-0 text-[10px] text-dashboard-muted">
+                        <span className="shrink-0 text-[11px] text-dashboard-muted">
                           {commentKindLabel(item.kind)}
                         </span>
                       </div>
                       {item.at ? (
-                        <p className="mt-0.5 text-[10px] text-dashboard-muted">{item.at}</p>
+                        <p className="mt-0.5 text-[11px] text-dashboard-muted">{item.at}</p>
                       ) : null}
-                      <p className="mt-1.5 whitespace-pre-wrap break-words text-[11px] leading-snug text-dashboard-text">
+                      <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-snug text-dashboard-text">
                         {item.text}
                       </p>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="text-[10px] text-dashboard-muted">No comment text for this ticket.</p>
+                <p className="text-[11px] text-dashboard-muted">No comment text for this ticket.</p>
               )}
             </div>
 
             <div>
-              <h3 className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-dashboard-muted">
+              <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-dashboard-muted">
                 <ImageIcon className="h-3 w-3" />
                 Photos
                 {photos.length > 0 ? (
@@ -190,11 +190,11 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
                           <ImageIcon className="h-3.5 w-3.5" />
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="flex items-center gap-1 text-[11px] font-medium text-dashboard-accent">
+                          <span className="flex items-center gap-1 text-[13px] font-medium text-dashboard-accent">
                             Photo {photos.length > 1 ? idx + 1 : ""}
                             <ExternalLink className="h-3 w-3 shrink-0 opacity-70" />
                           </span>
-                          <span className="block truncate text-[10px] text-dashboard-muted">
+                          <span className="block truncate text-[11px] text-dashboard-muted">
                             {item.author}
                             {item.at ? ` · ${item.at}` : ""}
                           </span>
@@ -204,12 +204,12 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
                   ))}
                 </ul>
               ) : (
-                <p className="text-[10px] text-dashboard-muted">No photos uploaded for this ticket.</p>
+                <p className="text-[11px] text-dashboard-muted">No photos uploaded for this ticket.</p>
               )}
             </div>
           </>
         ) : (
-          <p className="text-[10px] text-dashboard-muted">
+          <p className="text-[11px] text-dashboard-muted">
             No responses or comments recorded for this ticket.
           </p>
         )}

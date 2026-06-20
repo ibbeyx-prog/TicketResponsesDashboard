@@ -143,7 +143,7 @@ export function MultiStaffCaseMatrix({
         sortingFn: (a, b) => a.original.id.localeCompare(b.original.id),
         cell: ({ row }) => (
           <span
-            className="truncate text-xs font-medium text-dashboard-text"
+            className="truncate text-[13px] font-medium text-dashboard-text"
             title={row.original.id}
           >
             {row.original.caseLabel}
@@ -160,7 +160,7 @@ export function MultiStaffCaseMatrix({
             p === "Critical" || p === "High"
               ? "font-semibold text-dashboard-accent"
               : "text-dashboard-muted";
-          return <span className={`text-[11px] ${tone}`}>{p}</span>;
+          return <span className={`text-[13px] ${tone}`}>{p}</span>;
         },
       },
       {
@@ -168,7 +168,7 @@ export function MultiStaffCaseMatrix({
         header: "Status",
         size: STATUS_COL_W,
         cell: ({ getValue }) => (
-          <span className="text-[11px] text-dashboard-muted">{String(getValue())}</span>
+          <span className="text-[13px] text-dashboard-muted">{String(getValue())}</span>
         ),
       },
     ];
@@ -180,7 +180,7 @@ export function MultiStaffCaseMatrix({
         const short = staff.length > 12 ? `${staff.slice(0, 11)}…` : staff;
         const color = staffColors[staff] ?? "#9ec5e8";
         return (
-          <span className="max-w-[60px] truncate text-[10px] font-medium normal-case" title={staff}>
+          <span className="max-w-[60px] truncate text-[11px] font-medium normal-case" title={staff}>
             <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full align-middle" style={{ backgroundColor: color }} />
             {short}
           </span>
@@ -295,7 +295,7 @@ export function MultiStaffCaseMatrix({
           >
             <div style={{ minWidth: totalWidth }}>
               <div
-                className="sticky top-0 z-30 flex border-b border-dashboard-border bg-[#161616] text-[10px] font-semibold uppercase tracking-wide text-dashboard-muted"
+                className="sticky top-0 z-30 flex border-b border-dashboard-border bg-[#161616] text-[11px] font-semibold uppercase tracking-wide text-dashboard-muted"
                 style={{ height: HEADER_H }}
               >
                 {table.getHeaderGroups().map((hg) =>
@@ -359,7 +359,7 @@ export function MultiStaffCaseMatrix({
                             selectTicket(ticket);
                           }
                         }}
-                        className={`absolute left-0 flex w-full cursor-pointer border-b border-[#1f1f1f] text-xs transition ${
+                        className={`absolute left-0 flex w-full cursor-pointer border-b border-[#1f1f1f] text-[13px] transition ${
                           isSelected ? "bg-[#2a241c] ring-1 ring-inset ring-dashboard-accent/35" : "hover:bg-white/[0.02]"
                         }`}
                         style={{
@@ -404,7 +404,7 @@ export function MultiStaffCaseMatrix({
             </div>
           </div>
 
-          <footer className="flex items-center justify-end border-t border-dashboard-border bg-[#121212] px-4 py-2 text-[11px] text-dashboard-muted">
+          <footer className="flex items-center justify-end border-t border-dashboard-border bg-[#121212] px-4 py-2 text-[13px] text-dashboard-muted">
             {filteredTickets.length > 0 ? (
               <span>
                 Viewing {viewStart}-{viewEnd} of {filteredTickets.length.toLocaleString()}
