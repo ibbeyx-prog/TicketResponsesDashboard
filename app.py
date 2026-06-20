@@ -69,6 +69,7 @@ import logging
 import math
 import os
 import re
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -106,6 +107,27 @@ from task_categories import (
     task_categories_table,
     upsert_task_category,
 )
+from dispatch_console import (
+    DISPATCH_LAYOUT_RULES,
+    DISPATCH_LOGIN_CSS,
+    QUEUE_DOTS,
+    QUEUE_ORDER,
+    SALES_QUEUE_DOTS,
+    SALES_QUEUE_ORDER,
+    active_queue_key,
+    display_status,
+    format_utc5,
+    render_engineer_row,
+    render_nudge_banner,
+    render_queue_list,
+    render_refresh_caption,
+    render_sales_case_table,
+    render_settings_popover,
+    render_ticket_table,
+    render_timeline_entry,
+    render_topbar,
+    status_pill,
+)
 from unattended import (
     OPS_TZ,
     STATUS_DAILY_TASK,
@@ -114,9 +136,500 @@ from unattended import (
     run_unattended_close,
 )
 
+
+# ── Typography helpers (use in st.markdown f-strings) ──
+
+def tx(
+    text: object,
+    size: str = "13px",
+    weight: str = "400",
+    color: str = "#8a9ac0",
+    extra: str = "",
+    tag: str = "span",
+) -> str:
+    safe = html.escape(str(text))
+    return (
+        f'<{tag} style="font-size:{size};font-weight:{weight};'
+        f"color:{color};{extra}\">{safe}</{tag}>"
+    )
+
+
+def t_heading(text: object) -> str:
+    return tx(text, "15px", "500", "#e2e8f8")
+
+
+def t_section_label(
+    text: object,
+    *,
+    spacing: str = ".06em",
+    margin: str = "margin-bottom:7px",
+) -> str:
+    safe = html.escape(str(text))
+    return (
+        f'<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        f"text-transform:uppercase;letter-spacing:{spacing};{margin}\">"
+        f"{safe}</p>"
+    )
+
+
+def t_col_header(text: object) -> str:
+    safe = html.escape(str(text))
+    return (
+        f'<span style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        f'text-transform:uppercase;letter-spacing:.05em">{safe}</span>'
+    )
+
+
+def t_ticket_num(num: object) -> str:
+    return tx(
+        num, "13px", "500", "#8a9ac0", "font-variant-numeric:tabular-nums"
+    )
+
+
+def t_secondary(text: object) -> str:
+    return tx(text, "13px", "400", "#4a5a7a")
+
+
+def t_queue_sub(text: object) -> str:
+    """Queue ticket count — 13px 400 #2a3a5a."""
+    return tx(text, "13px", "400", "#2a3a5a")
+
+
+def t_body(text: object) -> str:
+    return tx(text, "13px", "400", "#8a9ac0")
+
+
+def t_caption(text: object) -> str:
+    return tx(text, "11px", "400", "#2a3a5a")
+
+
+def t_detail_id(num: object) -> str:
+    return tx(
+        num, "16px", "500", "#e2e8f8", "margin-bottom:4px", tag="div"
+    )
+
+
+def t_metric_val(val: object, colour: str = "#8a9ac0") -> str:
+    return tx(
+        val, "22px", "600", colour, "font-variant-numeric:tabular-nums"
+    )
+
+
+def _perf_count_span(n: int | float) -> str:
+    """Inline count for Performance overview staff pills (always visible)."""
+    return (
+        f'<span class="perf-count" style="font-size:14px;font-weight:600;'
+        f'color:#e2e8f8;margin-left:4px;font-variant-numeric:tabular-nums">'
+        f"{int(n)}</span>"
+    )
+
+
+PERF_OVERVIEW_CSS = """
+    /* Performance overview — staff solo/shared board + queue chips */
+    .perf-ss-board {
+      display: flex;
+      align-items: stretch;
+      gap: 1.25rem;
+      margin: 0.35rem 0 0.75rem;
+    }
+    .perf-ss-list {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+      min-width: 0;
+    }
+    .perf-ss-row {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+    }
+    .perf-ss-row.is-selected .perf-ss-name {
+      color: #e2e8f8;
+    }
+    .perf-ss-name {
+      flex: 0 0 9.5rem;
+      font-size:13px;
+      font-weight: 400;
+      color: #8a9ac0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .perf-ss-pill {
+      flex: 1 1 auto;
+      display: flex;
+      max-width: 14rem;
+      border: 0.5px solid #1a2035;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #0d1220;
+    }
+    .perf-ss-pill.has-sales { max-width: 20rem; }
+    .perf-ss-seg {
+      flex: 1 1 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.25rem;
+      padding: 0.28rem 0.55rem;
+      font-size:11px;
+      font-weight: 400;
+      line-height: 1.1;
+      text-transform: lowercase;
+      letter-spacing: 0.02em;
+    }
+    .perf-ss-seg.solo {
+      border-right: 0.5px solid #1a2035;
+      color: #e2e8f8;
+    }
+    .perf-ss-seg.shared { color: #8a9ac0; }
+    .perf-ss-pill.has-sales .perf-ss-seg.shared {
+      border-right: 0.5px solid #1a2035;
+    }
+    .perf-ss-seg.sales { color: #22c55e; }
+    .perf-ss-seg .num, .perf-ss-seg .perf-count {
+      font-size:14px;
+      font-weight: 600;
+      color: #e2e8f8;
+      margin-left: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .perf-ss-total {
+      flex: 0 0 auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 0 0.25rem;
+    }
+    .perf-ss-circle {
+      width: 4.6rem;
+      height: 4.6rem;
+      border-radius: 50%;
+      border: 0.5px solid #1a3460;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size:22px;
+      font-weight: 600;
+      color: #8a9ac0;
+      background: #0d1e3a;
+      font-variant-numeric: tabular-nums;
+    }
+    .perf-ss-total-lbl {
+      margin-top: 0.25rem;
+      font-size:11px;
+      font-weight: 400;
+      color: #2a3a5a;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .perf-ss-total-sub {
+      margin-top: 0.15rem;
+      font-size:11px;
+      font-weight: 400;
+      color: #e2e8f8;
+      letter-spacing: 0.02em;
+      text-align: center;
+      line-height: 1.25;
+    }
+    .perf-ss-hint {
+      font-size:11px;
+      font-weight: 400;
+      color: #2a3a5a;
+      margin: 0 0 0.5rem;
+    }
+    .perf-queue-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 0.65rem;
+      margin: 0.25rem 0 0.65rem;
+      font-size:11px;
+    }
+    .perf-queue-chip {
+      padding: 0.18rem 0.55rem;
+      border-radius: 999px;
+      border: 0.5px solid #1a2035;
+      color: #4a5a7a;
+      background: #0d1220;
+    }
+    .perf-queue-chip strong {
+      color: #e2e8f8;
+      font-weight: 600;
+      margin-left: 0.2rem;
+      font-variant-numeric: tabular-nums;
+    }
+"""
+
+
+def apply_theme(*, login: bool = False) -> None:
+    """Global typography + colour system for the dispatch dashboard."""
+    st.markdown(
+        f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+    /* ── Base ── */
+    [data-testid="stAppViewContainer"] {{ background: #0b0f18; }}
+    [data-testid="stSidebar"]          {{ background: #080b14; border-right: 0.5px solid #1a2035; }}
+    [data-testid="block-container"],
+    [data-testid="stMainBlockContainer"]    {{ padding: 0 !important; max-width: 100% !important; width: 100% !important; }}
+
+    html, body, [class*="css"] {{
+      font-family: 'Inter', 'system-ui', sans-serif;
+      font-size:14px;
+      font-weight: 400;
+      color: #8a9ac0;
+    }}
+
+    /* ── Headings — only two heading sizes used ── */
+    h1, h2, h3 {{
+      font-family: 'Inter', 'system-ui', sans-serif !important;
+      font-weight: 500 !important;
+      color: #e2e8f8 !important;
+      letter-spacing: 0 !important;
+    }}
+
+    /* ── Streamlit metric cards ── */
+    [data-testid="metric-container"] {{
+      background: #0d1220;
+      border: 0.5px solid #1a2035;
+      border-radius: 6px;
+      padding: 6px 8px;
+    }}
+    [data-testid="metric-container"] label {{
+      font-size:11px !important;
+      font-weight: 400 !important;
+      color: #2a3a5a !important;
+      text-transform: none;
+      letter-spacing: 0;
+    }}
+    [data-testid="stMetricValue"] {{
+      font-size:22px !important;
+      font-weight: 600 !important;
+      font-variant-numeric: tabular-nums;
+      color: #8a9ac0 !important;
+    }}
+
+    /* ── Streamlit radio (nav tabs) ── */
+    [data-testid="stRadio"] label {{
+      font-size:13px !important;
+      color: #4a5a7a !important;
+    }}
+    [data-testid="stRadio"] [aria-checked="true"] + div label {{
+      color: #3b82f6 !important;
+      font-weight: 500 !important;
+    }}
+
+    /* ── Streamlit tabs ── */
+    .stTabs [data-baseweb="tab-list"] {{
+      background: transparent;
+      border-bottom: 0.5px solid #1a2035;
+      gap: 0;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+      font-size:14px !important;
+      font-weight: 400 !important;
+      color: #4a5a7a !important;
+      padding: 8px 16px;
+      border-bottom: 2px solid transparent;
+      background: transparent !important;
+    }}
+    .stTabs [aria-selected="true"] {{
+      color: #e2e8f8 !important;
+      font-weight: 400 !important;
+      border-bottom-color: #3b82f6 !important;
+    }}
+
+    /* ── All buttons base ── */
+    .stButton > button {{
+      font-family: 'Inter', 'system-ui', sans-serif !important;
+      font-size:13px !important;
+      font-weight: 400 !important;
+      background: transparent;
+      border: 0.5px solid #1a2035;
+      border-radius: 4px;
+      color: #4a5a7a;
+      padding: 6px 12px;
+      transition: border-color .15s, color .15s, background .15s;
+    }}
+    .stButton > button:hover {{
+      border-color: #2a3a5a;
+      color: #8a9ac0;
+      background: #0d1220;
+    }}
+
+    div.primary-btn > div.stButton > button,
+    div.primary-btn > .stButton > button {{
+      font-weight: 500 !important;
+      background: #0d2a50 !important;
+      border-color: #1a4a80 !important;
+      color: #3b82f6 !important;
+    }}
+    div.primary-btn > div.stButton > button:hover,
+    div.primary-btn > .stButton > button:hover {{
+      background: #102f5a !important;
+    }}
+
+    div.queue-btn > div.stButton > button,
+    div.queue-btn > .stButton > button {{
+      font-weight: 500 !important;
+      background: #0d2218 !important;
+      border-color: #14381e !important;
+      color: #22c55e !important;
+    }}
+    div.queue-btn > div.stButton > button:hover,
+    div.queue-btn > .stButton > button:hover {{
+      background: #102a1e !important;
+    }}
+
+    div.danger-btn > div.stButton > button,
+    div.danger-btn > .stButton > button,
+    div.danger-row > div.stButton > button,
+    div.danger-row > .stButton > button {{
+      border-color: #2d1515 !important;
+      color: #ef4444 !important;
+    }}
+    div.danger-btn > div.stButton > button:hover,
+    div.danger-btn > .stButton > button:hover,
+    div.danger-row > div.stButton > button:hover,
+    div.danger-row > .stButton > button:hover {{
+      background: #1a0a0a !important;
+    }}
+
+    /* ── Inputs, selects, textareas ── */
+    .stTextInput > div > div > input,
+    .stSelectbox > div > div,
+    .stTextArea > div > textarea,
+    .stNumberInput > div > div > input {{
+      font-family: 'Inter', 'system-ui', sans-serif !important;
+      font-size:13px !important;
+      font-weight: 400 !important;
+      color: #8a9ac0 !important;
+      background: #0d1220 !important;
+      border: 0.5px solid #1a2035 !important;
+      border-radius: 4px !important;
+    }}
+    .stTextInput input::placeholder,
+    .stTextArea textarea::placeholder {{
+      color: #4a5a7a !important;
+    }}
+    .stTextInput label,
+    .stSelectbox label,
+    .stTextArea label,
+    .stNumberInput label {{
+      font-size:11px !important;
+      font-weight: 400 !important;
+      color: #2a3a5a !important;
+    }}
+
+    hr {{ border-color: #1a2035; margin: 8px 0; }}
+
+    [data-testid="stCaptionContainer"] p {{
+      font-size:11px !important;
+      color: #2a3a5a !important;
+    }}
+
+    [data-testid="stPopover"] {{ font-size:13px !important; }}
+    [data-testid="stPopover"] button {{
+      font-size:13px !important;
+      color: #4a5a7a !important;
+      font-weight: 400 !important;
+      white-space: nowrap !important;
+      letter-spacing: .01em;
+    }}
+
+    [data-testid="stToggle"] label {{
+      font-size:13px !important;
+      color: #8a9ac0 !important;
+    }}
+
+    [data-testid="stSlider"] label {{
+      font-size:11px !important;
+      color: #2a3a5a !important;
+    }}
+
+    [data-testid="stDialog"] h2 {{
+      font-size:15px !important;
+      font-weight: 500 !important;
+      color: #e2e8f8 !important;
+    }}
+    [data-testid="stDialog"] {{
+      background: #0d1220 !important;
+      border: 0.5px solid #1a2035 !important;
+    }}
+
+    [data-testid="stToast"] {{
+      font-size:14px !important;
+      font-weight: 400 !important;
+    }}
+
+    {DISPATCH_LAYOUT_RULES}
+    {PERF_OVERVIEW_CSS}
+    div.st-key-disp_perf_body [data-testid="stRadio"] > div {{
+      flex-direction: column !important;
+      gap: 1px !important;
+    }}
+    div.st-key-disp_perf_body [data-testid="stRadio"] label {{
+      padding: 7px 8px !important;
+      border-radius: 4px !important;
+      font-size:14px !important;
+      color: #8a9ac0 !important;
+    }}
+    div.st-key-disp_perf_body [data-testid="stRadio"] [aria-checked="true"] + div label,
+    div.st-key-disp_perf_body [data-testid="stRadio"] label[data-checked="true"] {{
+      color: #e2e8f8 !important;
+      font-weight: 500 !important;
+    }}
+    div.st-key-disp_perf_body h3,
+    div.st-key-disp_perf_body h4,
+    div.st-key-disp_perf_body h5 {{
+      color: #e2e8f8 !important;
+    }}
+    </style>
+    """,
+        unsafe_allow_html=True,
+    )
+    if login:
+        st.markdown(DISPATCH_LOGIN_CSS, unsafe_allow_html=True)
+
+
+_DISPATCH_QUEUE_MASK: dict[str, str] = {
+    "Daily Task": "pending",
+    "Needs Review": "open",
+    "On Hold": "on_hold",
+    "Under Investigation": "investigation",
+    "Unattended": "unattended",
+    "Resolved": "completed",
+}
+_DISP_SELECTED_KEY = "disp_selected_ticket"
+_DISP_ROW_EDIT = "disp_row_edit_ticket"
+_DISP_ROW_REASSIGN = "disp_row_reassign_ticket"
+_DISP_ROW_RECORD = "disp_row_record_ticket"
+_DISP_ROW_CLOSE = "disp_row_close_ticket"
+_DISP_ROW_RESOLVE = "disp_row_resolve_ticket"
+_DISP_ROW_PHOTOS = "disp_row_photo_ticket"
+_DISP_ASSIGN_MODE_KEY = "disp_assign_mode"
+_DISP_ASSIGN_MODE_TELEGRAM = "telegram"
+_DISP_ASSIGN_MODE_QUEUE = "queue_only"
+
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
 STATUS_RESOLVED = "Resolved"
+
+# Muted chart-fill palette — used ONLY for chart bars, never for buttons,
+# status pills, badges, or anything interactive/alert-driven.
+CHART_COLORS: dict[str, str] = {
+    "solo": "#5b7fb5",
+    "shared": "#5a9c7a",
+    "sales": "#8b7bb0",
+    "on_hold": "#b8954f",
+    "unattended": "#c06868",
+    "grid": "#1a2035",
+    "axis_text": "#4a5a7a",
+    "axis_label": "#2a3a5a",
+}
 
 # Active field queues: always visible even when outside the sidebar time range.
 _ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
@@ -349,9 +862,23 @@ def _sc_effective_status(raw: object) -> str:
     return _SC_LEGACY_STATUS_MAP.get(s, s)
 
 
+def _clean_display_value(val: object, *, default: str = "") -> str:
+    """Strip null/NaN/empty DB values so they never render as the text 'nan'."""
+    if val is None:
+        return default
+    try:
+        if pd.isna(val):
+            return default
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "null", "nat"):
+        return default
+    return s
+
+
 def _sc_row_text(val: object) -> str:
-    s = str(val or "").strip()
-    return "" if not s or s.lower() == "nan" else s
+    return _clean_display_value(val)
 
 
 def _sc_status_actions_for_queue(queue_status: str) -> tuple[tuple[str, str], ...]:
@@ -787,11 +1314,44 @@ _LEGACY_TIME_PRESET_MAP: dict[str, str] = {
 _DASH_MAIN_NAV_KEY = "_dash_main_nav"
 _DASH_TICKET_QUEUE_KEY = "_dash_ticket_queue"
 _DASH_SALES_QUEUE_KEY = "_dash_sales_queue"
+_SALES_ACTIVE_QUEUE_KEY = "active_sales_queue"
+_SALES_SELECTED_KEY = "selected_sales_case"
+_SALES_ROW_RESOLVE = "_sales_row_resolve"
+_SALES_ROW_EDIT = "_sales_row_edit"
+_SALES_ROW_ASSIGN = "_sales_row_assign"
+_SALES_ASSIGN_MODE_KEY = "sales_assign_mode"
+_SALES_ASSIGN_MODE_INTAKE = "intake"
+_SALES_ASSIGN_MODE_ASSIGN = "assign"
 _DASH_PENDING_MAIN_NAV_KEY = "_dash_pending_main_nav"
 _DASH_PENDING_TICKET_QUEUE_KEY = "_dash_pending_ticket_queue"
 _DASH_PENDING_SALES_QUEUE_KEY = "_dash_pending_sales_queue"
+_DASH_PENDING_TICKET_SELECT_KEY = "_dash_pending_ticket_select"
+_DASH_PENDING_ENGINEER_FILTER_KEY = "_dash_pending_engineer_filter"
+_DASH_PENDING_SALES_SELECT_KEY = "_dash_pending_sales_select"
+_PERF_FOCUS_ASSIGNEE_KEY = "perf_focus_assignee"
+_PERF_RANGE_PRESET_KEY = "perf_range"
+_PERF_ACTIVE_VIEW_KEY = "perf_active_view"
+_PERF_SELECTED_ENGINEER_KEY = "perf_selected_engineer"
+_PERF_RANGE_FROM_KEY = "_perf_range_from_utc"
+_PERF_RANGE_TO_KEY = "_perf_range_to_utc"
+_PERF_VIEW_OPTIONS: tuple[str, ...] = (
+    "Overview",
+    "Weekly",
+    "Sales cases",
+    "Case info",
+    "Handled",
+    "On hold",
+    "Unattended",
+)
+_DISP_ENGINEER_FILTER_KEY = "disp_engineer_filter"
 _DASH_NAV_CSM = "CSM Cases"
 _DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = (_DASH_NAV_CSM, "Sales Cases", "Log", "Performance")
+_DASH_MAIN_NAV_LABELS: dict[str, str] = {
+    _DASH_NAV_CSM: "CSM cases",
+    "Sales Cases": "Sales cases",
+    "Log": "Log",
+    "Performance": "Performance",
+}
 _CC_SESSION_TOKEN_KEY = "_ticket_dashboard_cc_bot_token_session"
 _CC_SESSION_GROUP_KEY = "cc_cmd_center_telegram_group_id"
 _CC_FE_SELECT_KEY = "cc_fe_select"
@@ -1103,6 +1663,10 @@ _AUTH_PWD_VER_KEY = "_ticket_dashboard_auth_pwd_ver"
 _AUTH_USERNAME_KEY = "_ticket_dashboard_auth_username"
 _OPERATOR_ID_KEY = "_ticket_dashboard_operator_id"
 _LOGIN_VIEW_KEY = "_ticket_dashboard_login_view"
+_LOGIN_MODE_KEY = "login_mode"
+_LOGIN_FORGOT_KEY = "show_forgot_password"
+_LOGIN_RESET_STEP_KEY = "reset_step"
+_LOGIN_RESET_USER_KEY = "reset_username_pending"
 _LOGIN_USER_WIDGET_KEY = "login_username_widget"
 _LOGIN_PWD_WIDGET_KEY = "login_password_widget"
 _LOGIN_OID_WIDGET_KEY = "login_operator_id_widget"
@@ -1240,6 +1804,7 @@ def _clear_auth_session() -> None:
         _OPERATOR_ID_KEY,
         _LOGIN_REMEMBER_BOOT_KEY,
         "_login_remember_js_ran",
+        "is_legacy_session",
     ):
         st.session_state.pop(key, None)
 
@@ -1640,18 +2205,19 @@ def _render_dashboard_team_accounts_body() -> None:
         )
 
 
+def _init_login_session_state() -> None:
+    if _LOGIN_MODE_KEY not in st.session_state:
+        st.session_state[_LOGIN_MODE_KEY] = "per_user"
+    if _LOGIN_RESET_STEP_KEY not in st.session_state:
+        st.session_state[_LOGIN_RESET_STEP_KEY] = "request"
+    if _LOGIN_FORGOT_KEY not in st.session_state:
+        st.session_state[_LOGIN_FORGOT_KEY] = False
+
+
 def _render_login_page_styles() -> None:
     st.markdown(
         """
         <style>
-        /* Login — BON brand */
-        .stApp,
-        [data-testid="stAppViewContainer"],
-        [data-testid="stHeader"],
-        [data-testid="stMain"],
-        [data-testid="stAppViewContainer"] section.main {
-            background: #000 !important;
-        }
         [data-testid="stHeader"] {
             border-bottom: none !important;
             box-shadow: none !important;
@@ -1662,155 +2228,394 @@ def _render_login_page_styles() -> None:
         }
         [data-testid="stMain"] {
             min-height: 100vh;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-        }
-        [data-testid="stAppViewContainer"] section.main {
-            width: 100%;
-            min-height: 100vh;
-            display: grid !important;
-            place-items: center !important;
-            padding: 0 !important;
-            position: relative;
-            overflow: hidden;
-        }
-        [data-testid="stAppViewContainer"] section.main::before {
-            content: "";
-            position: fixed;
-            inset: 0;
-            z-index: 0;
-            pointer-events: none;
-            background:
-                radial-gradient(ellipse 80% 50% at 20% 40%, rgba(241, 90, 41, 0.12), transparent 55%),
-                radial-gradient(ellipse 70% 45% at 80% 60%, rgba(0, 179, 198, 0.1), transparent 50%),
-                radial-gradient(ellipse 50% 40% at 50% 100%, rgba(247, 147, 30, 0.08), transparent 45%);
         }
         [data-testid="stAppViewContainer"] section.main .block-container {
-            width: min(30rem, 92vw) !important;
-            max-width: 30rem !important;
-            margin: 0 auto !important;
-            padding: 0.5rem 0.75rem 1.5rem !important;
-            position: relative;
-            z-index: 2;
+            max-width: 100% !important;
+            padding-top: 0 !important;
         }
-        div.st-key-login_panel,
-        div.st-key-login_panel > div {
-            width: min(30rem, 92vw) !important;
-            max-width: 30rem !important;
-            margin-left: auto !important;
-            margin-right: auto !important;
+        div.st-key-login_card,
+        div.st-key-login_card [data-testid="stVerticalBlockBorderWrapper"] {
+            background: #080b14 !important;
+            border: 0.5px solid #1a2035 !important;
+            border-radius: 10px !important;
+            padding: 1.25rem 1.35rem 1.1rem !important;
         }
-        div.st-key-login_shell,
-        div.st-key-login_shell [data-testid="stVerticalBlockBorderWrapper"] {
-            width: 100% !important;
-            max-width: 30rem !important;
-            margin-left: auto !important;
-            margin-right: auto !important;
-            background: rgba(0, 0, 0, 0.55) !important;
-            border: 1px solid rgba(255, 255, 255, 0.12) !important;
-            border-radius: 1rem !important;
-            backdrop-filter: blur(12px);
-            box-shadow: 0 0 40px rgba(0, 179, 198, 0.08);
+        div.st-key-login_card .stTextInput input {
+            background: #0d1220 !important;
+            color: #e2e8f8 !important;
+            border: 0.5px solid #1a2035 !important;
+            border-radius: 5px !important;
+            font-size: 13px !important;
+            min-height: 2.15rem !important;
+            -webkit-text-fill-color: #e2e8f8 !important;
+            caret-color: #e2e8f8 !important;
         }
-        [data-testid="stAppViewContainer"] section.main .block-container [data-testid="stMarkdownContainer"] {
-            width: 100% !important;
-            text-align: center !important;
+        div.st-key-login_card .stTextInput input:focus {
+            border-color: #3b82f6 !important;
+            box-shadow: 0 0 0 1px #3b82f6 !important;
         }
-        h2.bon-login-title {
-            font-size: clamp(2rem, 6vw, 2.75rem) !important;
-            font-weight: 800 !important;
-            text-align: center !important;
-            width: 100% !important;
-            margin: 0 auto 0.35rem auto !important;
-            padding: 0 !important;
-            letter-spacing: -0.02em;
+        div.st-key-login_card .stTextInput input:-webkit-autofill,
+        div.st-key-login_card .stTextInput input:-webkit-autofill:hover,
+        div.st-key-login_card .stTextInput input:-webkit-autofill:focus {
+            -webkit-box-shadow: 0 0 0 1000px #0d1220 inset !important;
+            box-shadow: 0 0 0 1000px #0d1220 inset !important;
+            -webkit-text-fill-color: #e2e8f8 !important;
         }
-        .bon-login-line {
-            display: block !important;
-        }
-        .bon-login-line-netops {
-            font-size: 125% !important;
-            line-height: 1.1 !important;
-        }
-        .bon-login-word-netops {
-            color: #FF5A1F !important;
-            -webkit-text-fill-color: #FF5A1F !important;
-        }
-        .bon-login-word-coverage,
-        .bon-login-word-eye {
-            color: #ffffff !important;
-            -webkit-text-fill-color: #ffffff !important;
-        }
-        p.bon-login-sub {
-            font-size: 0.9rem !important;
-            color: #a39e97 !important;
-            text-align: center !important;
-            width: 100% !important;
-            margin: 0 auto 0.85rem auto !important;
-        }
-        [data-testid="stAppViewContainer"] section.main .block-container [data-testid="stCaptionContainer"] {
-            text-align: center;
-        }
-        [data-testid="stAppViewContainer"] section.main [data-testid="stForm"] {
+        div.st-key-login_forgot_row button {
+            background: transparent !important;
             border: none !important;
+            color: #4a5a7a !important;
+            font-size: 11px !important;
             padding: 0 !important;
+            min-height: 0 !important;
+            box-shadow: none !important;
+            text-decoration: underline;
+            text-underline-offset: 2px;
         }
-        div.st-key-login_shell .stTextInput input,
-        [data-testid="stAppViewContainer"] section.main .stTextInput input {
-            background-color: #141414 !important;
-            color: #e8e6e3 !important;
-            border: 1px solid rgba(215, 180, 145, 0.45) !important;
-            border-radius: 8px !important;
-            -webkit-text-fill-color: #e8e6e3 !important;
-            caret-color: #e8e6e3 !important;
-        }
-        div.st-key-login_shell .stTextInput input:focus,
-        [data-testid="stAppViewContainer"] section.main .stTextInput input:focus {
-            border-color: #D7B491 !important;
-            box-shadow: 0 0 0 1px #D7B491 !important;
-        }
-        div.st-key-login_shell .stTextInput input:-webkit-autofill,
-        div.st-key-login_shell .stTextInput input:-webkit-autofill:hover,
-        div.st-key-login_shell .stTextInput input:-webkit-autofill:focus,
-        div.st-key-login_shell .stTextInput input:-webkit-autofill:active,
-        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill,
-        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill:hover,
-        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill:focus,
-        [data-testid="stAppViewContainer"] section.main .stTextInput input:-webkit-autofill:active {
-            -webkit-box-shadow: 0 0 0 1000px #141414 inset !important;
-            box-shadow: 0 0 0 1000px #141414 inset !important;
-            -webkit-text-fill-color: #e8e6e3 !important;
-            caret-color: #e8e6e3 !important;
-            border: 1px solid rgba(215, 180, 145, 0.45) !important;
-            transition: background-color 99999s ease-out 0s;
-        }
-        [data-testid="stAppViewContainer"] section.main button[kind="primary"] {
-            background: linear-gradient(90deg, #F15A29, #F7931E) !important;
-            border: 1px solid rgba(255,255,255,0.1) !important;
-        }
-        /* Login: hidden default submit (Enter) + Forgot beside Save Password */
-        div.st-key-login_enter_submit {
-            height: 0 !important;
-            max-height: 0 !important;
-            overflow: hidden !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
+        div.st-key-login_forgot_row button:hover {
+            color: #8a9ac0 !important;
+            background: transparent !important;
             border: none !important;
         }
-        div.st-key-login_shell [data-testid="stForm"] [data-testid="column"]:last-child button {
-            font-size: 0.72rem !important;
-            white-space: nowrap !important;
-            padding: 0.28rem 0.45rem !important;
-            min-height: 1.75rem !important;
-            line-height: 1.15 !important;
+        div.st-key-login_mode_toggle button {
+            font-size: 12px !important;
+            color: #4a5a7a !important;
+            border-color: #1a2035 !important;
+            background: transparent !important;
+        }
+        div.st-key-login_mode_toggle button:hover {
+            color: #8a9ac0 !important;
+            border-color: #2a3a5a !important;
+        }
+        div.st-key-login_card label[data-testid="stWidgetLabel"] {
+            display: none !important;
+        }
+        div.st-key-login_card .stCheckbox label span {
+            font-size: 12px !important;
+            color: #4a5a7a !important;
+        }
+        div.st-key-login_card [data-testid="stForm"] {
+            border: none !important;
+            padding: 0 !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _login_field_label(text: str, *, top_margin: str = "0") -> None:
+    st.markdown(
+        f'<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        f'text-transform:uppercase;letter-spacing:.06em;margin:{top_margin} 0 6px">'
+        f"{html.escape(text)}</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def _handle_per_user_login(username: str, password: str, remember: bool) -> None:
+    if not username.strip() or not password:
+        st.toast("Enter both username and password", icon="⚠️")
+        return
+    try:
+        uname = _normalize_dashboard_username(username)
+    except ValueError as ve:
+        st.toast(str(ve).replace("**", ""), icon="⚠️")
+        return
+    try:
+        payload = _rpc_dashboard_verify_login(uname, password)
+    except Exception as exc:
+        st.toast(f"Login failed: {exc}", icon="❌")
+        return
+    if not payload.get("ok"):
+        st.toast("Invalid username or password", icon="❌")
+        return
+    op = str(payload.get("operator_id") or uname).strip()
+    fp = _auth_session_fingerprint(username=uname, operator_id=op)
+    st.session_state.pop("is_legacy_session", None)
+    _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
+    st.session_state[_LOGIN_SAVE_PW_KEY] = remember
+    if remember:
+        _login_remember_persist(username=uname, password=password)
+    else:
+        _login_remember_clear()
+    st.rerun()
+
+
+def _handle_legacy_login(operator_id: str, shared_password: str, *, legacy_password: str) -> None:
+    if not operator_id.strip() or not shared_password:
+        st.toast("Enter both Operator ID and shared password", icon="⚠️")
+        return
+    if not hmac.compare_digest(shared_password, legacy_password):
+        st.toast("Incorrect shared password", icon="❌")
+        return
+    try:
+        op = _normalize_operator_id(operator_id)
+    except ValueError as ve:
+        st.toast(str(ve).replace("**", ""), icon="❌")
+        return
+    fp = _password_fingerprint(legacy_password)
+    _complete_auth_session(username=op.casefold(), operator_id=op, session_fp=fp)
+    st.session_state["is_legacy_session"] = True
+    _log_legacy_login_attendance(op)
+    st.rerun()
+
+
+def _render_per_user_login_form() -> None:
+    _login_remember_bootstrap()
+    with st.form("login_per_user_form", clear_on_submit=False):
+        _login_field_label("Username")
+        st.text_input(
+            "Username",
+            placeholder="your username",
+            label_visibility="collapsed",
+            autocomplete="username",
+            key=_LOGIN_USER_WIDGET_KEY,
+        )
+        _login_field_label("Password", top_margin="12px")
+        st.text_input(
+            "Password",
+            type="password",
+            placeholder="your password",
+            label_visibility="collapsed",
+            autocomplete="current-password",
+            key=_LOGIN_PWD_WIDGET_KEY,
+        )
+        col_remember, col_spacer = st.columns([1.4, 1], vertical_alignment="center")
+        with col_remember:
+            st.checkbox(
+                "Remember me",
+                key=_LOGIN_SAVE_PW_KEY,
+                help="Stores an encrypted login token in this browser only.",
+            )
+        st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
+        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    _, col_forgot = st.columns([1.4, 1])
+    with col_forgot:
+        with st.container(key="login_forgot_row"):
+            if st.button(
+                "Forgot password?",
+                key="login_forgot_link",
+                help="Request a password reset",
+            ):
+                st.session_state[_LOGIN_FORGOT_KEY] = True
+                st.session_state[_LOGIN_RESET_STEP_KEY] = "request"
+                st.rerun()
+
+    if submitted:
+        _handle_per_user_login(
+            str(st.session_state.get(_LOGIN_USER_WIDGET_KEY, "")),
+            str(st.session_state.get(_LOGIN_PWD_WIDGET_KEY, "")),
+            bool(st.session_state.get(_LOGIN_SAVE_PW_KEY, False)),
+        )
+
+
+def _render_legacy_login_form(*, legacy_password: str) -> None:
+    with st.form("login_legacy_form", clear_on_submit=False):
+        _login_field_label("Operator ID")
+        st.text_input(
+            "Operator ID",
+            placeholder="your display name",
+            label_visibility="collapsed",
+            key=_LOGIN_OID_WIDGET_KEY,
+        )
+        _login_field_label("Shared password", top_margin="12px")
+        st.text_input(
+            "Shared password",
+            type="password",
+            placeholder="team password",
+            label_visibility="collapsed",
+            autocomplete="current-password",
+            key=_LOGIN_PWD_WIDGET_KEY,
+        )
+        st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
+        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if submitted:
+        _handle_legacy_login(
+            str(st.session_state.get(_LOGIN_OID_WIDGET_KEY, "")),
+            str(st.session_state.get(_LOGIN_PWD_WIDGET_KEY, "")),
+            legacy_password=legacy_password,
+        )
+
+
+@st.dialog("Reset password", width="small")
+def _forgot_password_dialog() -> None:
+    step = st.session_state.get(_LOGIN_RESET_STEP_KEY, "request")
+
+    if step == "request":
+        st.markdown(
+            '<p style="font-size:13px;color:#8a9ac0;margin-bottom:14px">'
+            "Enter your username to receive a reset code.</p>",
+            unsafe_allow_html=True,
+        )
+        username = st.text_input("Username", key="reset_username")
+        st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
+        if st.button("Send reset code", key="reset_request_btn", use_container_width=True):
+            if not username.strip():
+                st.toast("Enter a username", icon="⚠️")
+            else:
+                try:
+                    uname = _normalize_dashboard_username(username)
+                except ValueError as ve:
+                    st.toast(str(ve).replace("**", ""), icon="⚠️")
+                else:
+                    try:
+                        payload = _rpc_dashboard_request_password_reset(uname)
+                    except Exception as exc:
+                        st.toast(f"Failed: {exc}", icon="❌")
+                    else:
+                        if payload.get("message") == "code_issued" and payload.get("reset_code"):
+                            st.session_state[_LOGIN_RESET_USER_KEY] = uname
+                            st.session_state["_dash_reset_code_display"] = str(
+                                payload["reset_code"]
+                            )
+                            st.session_state[_LOGIN_RESET_STEP_KEY] = "confirm"
+                            st.rerun()
+                        else:
+                            st.toast(
+                                "If that username exists, a reset code was issued.",
+                                icon="ℹ️",
+                            )
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    shown_code = st.session_state.get("_dash_reset_code_display")
+    if shown_code:
+        st.info(
+            f"Reset code for **{st.session_state.get(_LOGIN_RESET_USER_KEY, '')}**: "
+            f"`{shown_code}` (valid **15 minutes**)."
+        )
+    st.markdown(
+        '<p style="font-size:13px;color:#8a9ac0;margin-bottom:14px">'
+        "Check for your reset code. It expires in 15 minutes.</p>",
+        unsafe_allow_html=True,
+    )
+    code = st.text_input("Reset code", key="reset_code")
+    new_password = st.text_input(
+        "New password",
+        type="password",
+        key="reset_new_password",
+        help=f"Minimum {_MIN_DASHBOARD_PASSWORD_LEN} characters",
+    )
+    st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
+    if st.button("Reset password", key="reset_confirm_btn", use_container_width=True):
+        if not code.strip() or not new_password:
+            st.toast("Enter both the code and a new password", icon="⚠️")
+        elif len(new_password) < _MIN_DASHBOARD_PASSWORD_LEN:
+            st.toast(
+                f"Password must be at least {_MIN_DASHBOARD_PASSWORD_LEN} characters",
+                icon="⚠️",
+            )
+        else:
+            try:
+                payload = _rpc_dashboard_reset_password(
+                    str(st.session_state.get(_LOGIN_RESET_USER_KEY, "")),
+                    code.strip().upper(),
+                    new_password,
+                )
+            except Exception as exc:
+                st.toast(f"Failed: {exc}", icon="❌")
+            else:
+                if payload.get("ok"):
+                    st.toast(
+                        "Password reset — sign in with your new password",
+                        icon="✅",
+                    )
+                    st.session_state[_LOGIN_RESET_STEP_KEY] = "request"
+                    st.session_state[_LOGIN_FORGOT_KEY] = False
+                    st.session_state.pop(_LOGIN_RESET_USER_KEY, None)
+                    st.session_state.pop("_dash_reset_code_display", None)
+                    st.rerun()
+                else:
+                    st.toast("Invalid or expired code", icon="❌")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_login_screen(
+    *,
+    per_user: bool,
+    legacy_password: str,
+    legacy_available: bool,
+    per_user_state: bool | None,
+) -> None:
+    """Login screen matching the dispatch console design system."""
+    _init_login_session_state()
+    _render_login_page_styles()
+
+    st.markdown(
+        """
+    <div style="display:flex;flex-direction:column;align-items:center;
+      justify-content:center;padding:60px 20px 8px">
+      <div style="text-align:center;margin-bottom:32px">
+        <div style="font-size:11px;font-weight:600;color:#5b7fb5;
+          letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px">
+          NetOps</div>
+        <div style="font-size:22px;font-weight:500;color:#e2e8f8;
+          letter-spacing:-.01em">Coverage Eye</div>
+      </div>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    if per_user_state is None and legacy_password:
+        st.warning(
+            "Supabase is unreachable from this PC — using **shared password** login. "
+            "Ticket data will not load until the connection works."
+        )
+
+    _render_login_supabase_status()
+
+    col_l, col_card, col_r = st.columns([1, 1.4, 1])
+    with col_card:
+        with st.container(key="login_card"):
+            if not per_user:
+                st.session_state[_LOGIN_MODE_KEY] = "legacy"
+            login_mode = st.session_state.get(_LOGIN_MODE_KEY, "per_user")
+            if login_mode == "per_user" and per_user:
+                _render_per_user_login_form()
+            elif legacy_password:
+                _render_legacy_login_form(legacy_password=legacy_password)
+            else:
+                st.error("Per-user login is unavailable and no shared password is configured.")
+
+            if legacy_available and per_user:
+                st.markdown(
+                    """
+                <div style="display:flex;align-items:center;gap:10px;margin:18px 0">
+                  <div style="flex:1;height:0.5px;background:#1a2035"></div>
+                  <span style="font-size:11px;color:#2a3a5a">or</span>
+                  <div style="flex:1;height:0.5px;background:#1a2035"></div>
+                </div>
+                """,
+                    unsafe_allow_html=True,
+                )
+                toggle_label = (
+                    "Use shared password + Operator ID"
+                    if login_mode == "per_user"
+                    else "Use username + password"
+                )
+                with st.container(key="login_mode_toggle"):
+                    if st.button(toggle_label, key="toggle_login_mode", use_container_width=True):
+                        st.session_state[_LOGIN_MODE_KEY] = (
+                            "legacy" if login_mode == "per_user" else "per_user"
+                        )
+                        st.rerun()
+
+    st.markdown(
+        """
+    <p style="font-size:11px;color:#2a3a5a;text-align:center;margin-top:20px">
+      UTC+5 · Dashboard access requires an active account</p>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.get(_LOGIN_FORGOT_KEY):
+        _forgot_password_dialog()
 
 
 def _operator_id_allowlist() -> frozenset[str] | None:
@@ -1872,14 +2677,41 @@ def _sc_sales_attended_by_for_case(*, assigned_to: str | None = None) -> str:
 
 def _sc_perf_sales_credit_staff(row: object) -> str:
     """Performance credit: field engineer when dispatched, otherwise **Admin**."""
+    return _perf_sales_credited_person(row)
+
+
+def _perf_person_credit_key(raw: object) -> str:
+    """Normalized credit key for field engineers (not used for undispatched sales)."""
+    s = str(raw or "").strip()
+    if not s or s.lower() in ("unknown", "none", "null", "nan", "nat"):
+        return "(unknown)"
+    if s == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        return _SC_SALES_OVERVIEW_ADMIN_LABEL
+    stem = _canonical_username_stem(s)
+    if stem in _dashboard_admin_usernames():
+        return f"@{stem}"
+    return _perf_norm_member(raw)
+
+
+def _perf_sales_credited_person(row: object) -> str:
+    """
+    Sales case performance credit.
+
+    Field engineer when ``assigned_to`` is set; otherwise **Admin** (queue credit).
+    ``admin_owner`` is operational metadata only — it does not receive performance credit.
+    """
     if isinstance(row, pd.Series):
-        assigned = row.get("assigned_to")
+        data = row
     else:
-        d = row if isinstance(row, dict) else {}
-        assigned = d.get("assigned_to")
+        data = pd.Series(row if isinstance(row, dict) else {})
+    assigned = data.get("assigned_to")
     if _sc_sales_has_field_assignee(assigned):
-        return _perf_norm_member(assigned)
+        return _perf_person_credit_key(assigned)
     return _SC_SALES_OVERVIEW_ADMIN_LABEL
+
+
+def _perf_credit_keys_equal(a: object, b: object) -> bool:
+    return _perf_person_credit_key(a) == _perf_person_credit_key(b)
 
 
 def _cc_assignment_log_note(additional_info: str | None, operator_id: str) -> str | None:
@@ -1896,231 +2728,11 @@ def _read_dashboard_password() -> str:
     return _read_setting("DASHBOARD_PASSWORD")
 
 
-def _render_login_sign_in(*, per_user: bool, legacy_password: str) -> None:
-    _login_remember_bootstrap()
-    forgot_clicked = False
-    submitted = False
-
-    with st.container(border=True, key="login_shell"):
-        with st.form("login_form", clear_on_submit=False):
-            if per_user:
-                user = st.text_input(
-                    "Username",
-                    placeholder="your login name",
-                    autocomplete="username",
-                    key=_LOGIN_USER_WIDGET_KEY,
-                )
-                pwd = st.text_input(
-                    "Password",
-                    type="password",
-                    autocomplete="current-password",
-                    key=_LOGIN_PWD_WIDGET_KEY,
-                )
-                with st.container(key="login_enter_submit"):
-                    submitted_enter = st.form_submit_button(
-                        "Sign In",
-                        use_container_width=True,
-                        key="login_form_submit_enter",
-                    )
-                save_col, forgot_col = st.columns(
-                    [1.35, 1.05], vertical_alignment="center"
-                )
-                with save_col:
-                    st.checkbox(
-                        "Save Password",
-                        key=_LOGIN_SAVE_PW_KEY,
-                        help="Stores an encrypted login token in this browser only.",
-                    )
-                with forgot_col:
-                    forgot_clicked = st.form_submit_button(
-                        "Forgot Password",
-                        use_container_width=True,
-                        key="login_form_submit_forgot",
-                    )
-                submitted_main = st.form_submit_button(
-                    "Sign In",
-                    use_container_width=True,
-                    key="login_form_submit_main",
-                )
-                submitted = submitted_enter or submitted_main
-            else:
-                st.caption(
-                    "**Local / legacy login** — not your Telegram username. "
-                    "Use the shared password from `.env` → `DASHBOARD_PASSWORD`."
-                )
-                user = ""
-                pwd = st.text_input(
-                    "Password",
-                    type="password",
-                    placeholder="Value of DASHBOARD_PASSWORD in .env",
-                    autocomplete="current-password",
-                    key=_LOGIN_PWD_WIDGET_KEY,
-                )
-                oid = st.text_input(
-                    "Operator ID",
-                    placeholder="Your name, e.g. ibeyx",
-                    key=_LOGIN_OID_WIDGET_KEY,
-                )
-                forgot_clicked = False
-                submitted = st.form_submit_button(
-                    "Sign In",
-                    use_container_width=True,
-                    key="login_form_submit_legacy",
-                )
-
-    if per_user and forgot_clicked and not submitted:
-        st.session_state[_LOGIN_VIEW_KEY] = "forgot_request"
-        st.rerun()
-        return
-
-    if not submitted:
-        return
-
-    if per_user:
-        try:
-            uname = _normalize_dashboard_username(user)
-        except ValueError as ve:
-            st.error(str(ve))
-            return
-        if not pwd:
-            st.error("Enter your password.")
-            return
-        try:
-            payload = _rpc_dashboard_verify_login(uname, pwd)
-        except Exception as exc:
-            st.error(f"Could not verify login: {exc}")
-            return
-        if not payload.get("ok"):
-            st.error("Incorrect username or password.")
-            return
-        op = str(payload.get("operator_id") or uname).strip()
-        fp = _auth_session_fingerprint(username=uname, operator_id=op)
-        _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
-        if st.session_state.get(_LOGIN_SAVE_PW_KEY):
-            _login_remember_persist(username=uname, password=pwd)
-        else:
-            _login_remember_clear()
-        st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
-        st.rerun()
-        return
-
-    if not hmac.compare_digest(pwd, legacy_password):
-        st.error("Incorrect password.")
-        return
-    try:
-        op = _normalize_operator_id(oid)
-    except ValueError as ve:
-        st.error(str(ve))
-        return
-    fp = _password_fingerprint(legacy_password)
-    _complete_auth_session(username=op.casefold(), operator_id=op, session_fp=fp)
-    _log_legacy_login_attendance(op)
-    st.rerun()
-
-
-def _render_login_forgot_request() -> None:
-    with st.container(border=True, key="login_shell"):
-        st.caption("Enter your username. If the account exists, you will get a reset code.")
-        with st.form("login_forgot_request_form", clear_on_submit=False):
-            user = st.text_input("Username", placeholder="your login name")
-            nav_col, _ = st.columns([1, 2])
-            with nav_col:
-                back_clicked = st.form_submit_button("Back to sign in", use_container_width=True)
-            submitted = st.form_submit_button("Get reset code", use_container_width=True)
-
-    if back_clicked:
-        st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
-        st.rerun()
-        return
-
-    if not submitted:
-        return
-    try:
-        uname = _normalize_dashboard_username(user)
-    except ValueError as ve:
-        st.error(str(ve))
-        return
-    try:
-        payload = _rpc_dashboard_request_password_reset(uname)
-    except Exception as exc:
-        st.error(f"Could not start reset: {exc}")
-        return
-
-    if payload.get("message") == "code_issued" and payload.get("reset_code"):
-        st.session_state["_dash_reset_username"] = uname
-        st.session_state["_dash_reset_code_display"] = str(payload["reset_code"])
-        st.session_state[_LOGIN_VIEW_KEY] = "forgot_reset"
-        st.rerun()
-        return
-
-    st.info(
-        "If that username exists, a reset code can be issued. "
-        "Check the spelling or contact your admin."
-    )
-
-
-def _render_login_forgot_reset() -> None:
-    uname = str(st.session_state.get("_dash_reset_username", ""))
-    shown_code = st.session_state.get("_dash_reset_code_display")
-    with st.container(border=True, key="login_shell"):
-        if shown_code:
-            st.success(
-                f"Reset code for **{uname}**: `{shown_code}` "
-                f"(valid **15 minutes**). Enter it below with your new password."
-            )
-        with st.form("login_forgot_reset_form", clear_on_submit=False):
-            user = st.text_input("Username", value=uname or "")
-            code = st.text_input("Reset Code", placeholder="8-character code")
-            new_pw = st.text_input("New Password", type="password")
-            confirm_pw = st.text_input("Confirm New Password", type="password")
-            nav_col, _ = st.columns([1, 2])
-            with nav_col:
-                back_clicked = st.form_submit_button("Back to sign in", use_container_width=True)
-            submitted = st.form_submit_button("Set new password", use_container_width=True)
-
-    if back_clicked:
-        st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
-        st.session_state.pop("_dash_reset_username", None)
-        st.session_state.pop("_dash_reset_code_display", None)
-        st.rerun()
-        return
-
-    if not submitted:
-        return
-    try:
-        uname_norm = _normalize_dashboard_username(user)
-    except ValueError as ve:
-        st.error(str(ve))
-        return
-    if len(new_pw or "") < _MIN_DASHBOARD_PASSWORD_LEN:
-        st.error(f"Password must be at least {_MIN_DASHBOARD_PASSWORD_LEN} characters.")
-        return
-    if new_pw != confirm_pw:
-        st.error("New passwords do not match.")
-        return
-    try:
-        payload = _rpc_dashboard_reset_password(
-            uname_norm,
-            (code or "").strip().upper(),
-            new_pw,
-        )
-    except Exception as exc:
-        st.error(f"Could not reset password: {exc}")
-        return
-    if not payload.get("ok"):
-        st.error("Invalid or expired reset code. Request a new code.")
-        return
-    st.session_state.pop("_dash_reset_username", None)
-    st.session_state.pop("_dash_reset_code_display", None)
-    st.session_state[_LOGIN_VIEW_KEY] = "sign_in"
-    st.success("Password updated. Sign in with your new password.")
-    st.rerun()
-
-
 def _check_password() -> None:
     """Block until the viewer has a valid session (per-user or legacy shared password)."""
     per_user_state = _dashboard_users_configured()
-    legacy_pw = _read_dashboard_password()
+    legacy_pw_raw = _read_dashboard_password()
+    legacy_pw = legacy_pw_raw
 
     if per_user_state is None:
         # Supabase timeout — allow local shared-password login when configured.
@@ -2171,49 +2783,23 @@ def _check_password() -> None:
     ):
         uname = str(st.session_state.get(_AUTH_USERNAME_KEY, ""))
         op = str(st.session_state.get(_OPERATOR_ID_KEY, ""))
-        expected = (
-            _auth_session_fingerprint(username=uname, operator_id=op)
-            if per_user
-            else _password_fingerprint(legacy_pw)
-        )
+        is_legacy_session = bool(st.session_state.get("is_legacy_session"))
+        if is_legacy_session or not per_user:
+            expected = _password_fingerprint(legacy_pw_raw)
+        else:
+            expected = _auth_session_fingerprint(username=uname, operator_id=op)
         if hmac.compare_digest(str(session_fp), expected):
             return
 
     _clear_auth_session()
 
-    _inject_bon_theme()
-    _render_login_page_styles()
-
-    view = st.session_state.get(_LOGIN_VIEW_KEY, "sign_in")
-    if view not in ("sign_in", "forgot_request", "forgot_reset"):
-        view = "sign_in"
-
-    with st.container(key="login_panel"):
-        st.markdown(
-            '<h2 class="bon-login-title">'
-            '<span class="bon-login-line bon-login-line-netops">'
-            '<span class="bon-login-word-netops">NetOps</span></span>'
-            '<span class="bon-login-line">'
-            '<span class="bon-login-word-coverage">Coverage</span> '
-            '<span class="bon-login-word-eye">Eye</span></span></h2>',
-            unsafe_allow_html=True,
-        )
-
-        if per_user_state is None and legacy_pw:
-            st.warning(
-                "Supabase is unreachable from this PC — using **shared password** login. "
-                "Ticket data will not load until the connection works."
-            )
-
-        _render_login_supabase_status()
-
-        if view == "sign_in":
-            _render_login_sign_in(per_user=per_user, legacy_password=legacy_pw)
-        elif view == "forgot_reset":
-            _render_login_forgot_reset()
-        else:
-            _render_login_forgot_request()
-
+    apply_theme(login=True)
+    _render_login_screen(
+        per_user=per_user,
+        legacy_password=legacy_pw_raw,
+        legacy_available=bool(legacy_pw_raw),
+        per_user_state=per_user_state,
+    )
     st.stop()
 
 
@@ -2664,6 +3250,7 @@ def _persist_ticket_resolved_with_outcome(
     comment: str | None = None,
     log_action: str = "Resolved",
     log_prefix: str | None = None,
+    close_visit_outcome: str | None = "responded",
 ) -> str:
     """Set **Resolved** + ``outcome_category``; keep ``task_category`` unchanged."""
     row = _fetch_ticket_row(ticket_number)
@@ -2695,6 +3282,17 @@ def _persist_ticket_resolved_with_outcome(
         action_type=log_action,
         note=note or None,
     )
+    if close_visit_outcome:
+        field_note = str(row.get("field_response") or "").strip() or None
+        _visits_close_open(
+            client,
+            ticket_number,
+            outcome=close_visit_outcome,
+            response_note=note or field_note,
+            photo_url=str(row.get("photo_url") or "").strip() or None,
+            closed_by="dashboard",
+            visit_end=now_iso,
+        )
     _invalidate_dashboard_data_cache()
     return outcome
 
@@ -2774,6 +3372,7 @@ def _apply_admin_close_ticket(
         comment=text,
         log_action="AdminClosed",
         log_prefix=f"Admin closed from {from_label}",
+        close_visit_outcome=None,
     )
     _visits_close_open(
         client,
@@ -3992,6 +4591,7 @@ def _render_manual_field_response_editor(
     ticket_options: list[str],
     allowed_statuses: tuple[str, ...] = (STATUS_DAILY_TASK, "Open"),
     save_label: str = "Save",
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
     """Admin form: record or correct a field reply (Daily Task → Open, or update Open)."""
     keys = _manual_field_response_session_keys(edit_key_prefix)
@@ -4064,6 +4664,8 @@ def _render_manual_field_response_editor(
             st.error(str(exc))
             return
         st.session_state[keys["show"]] = False
+        for sk in clear_session_keys:
+            st.session_state.pop(sk, None)
         if status == STATUS_DAILY_TASK:
             st.success(f"{picked} → **Open** (field response saved).")
         else:
@@ -4230,9 +4832,13 @@ def _render_admin_close_form_inline(
     key_prefix: str,
     options: list[str],
     df: pd.DataFrame,
+    preset_tickets: list[str] | None = None,
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
     """Admin close — required comment + outcome category → **Resolved**."""
-    picked_list = _get_selected_queue_tickets(key_prefix, options)
+    picked_list = list(preset_tickets or []) or _get_selected_queue_tickets(
+        key_prefix, options
+    )
     if not picked_list:
         st.caption("Select ticket(s) in the table first.")
         return
@@ -4281,6 +4887,8 @@ def _render_admin_close_form_inline(
                 st.error(f"**{ticket}**: {exc}")
         if ok:
             st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            for sk in clear_session_keys:
+                st.session_state.pop(sk, None)
             _navigate_to_resolved_queue()
             st.session_state[_CC_FLASH_KEY] = (
                 f"Closed **{ok}** ticket(s) → **Resolved**."
@@ -4295,9 +4903,13 @@ def _render_mark_resolved_form_inline(
     options: list[str],
     df: pd.DataFrame,
     log_action: str = "Resolved",
+    preset_tickets: list[str] | None = None,
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
     """Mark selected ticket(s) **Resolved** with an outcome category."""
-    picked_list = _get_selected_queue_tickets(key_prefix, options)
+    picked_list = list(preset_tickets or []) or _get_selected_queue_tickets(
+        key_prefix, options
+    )
     if not picked_list:
         st.caption("Select ticket(s) in the table first.")
         return
@@ -4344,6 +4956,8 @@ def _render_mark_resolved_form_inline(
                 st.error(f"**{ticket}**: {exc}")
         if ok:
             st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            for sk in clear_session_keys:
+                st.session_state.pop(sk, None)
             _navigate_to_resolved_queue()
             st.session_state[_CC_FLASH_KEY] = (
                 f"Marked **{ok}** ticket(s) → **Resolved**."
@@ -5360,7 +5974,10 @@ def _perf_focus_people(
         names |= {str(p) for p in visits["assignee"].dropna().unique().tolist() if str(p).strip()}
     if sales_summary is not None and not sales_summary.empty and "Person" in sales_summary.columns:
         names |= {str(p) for p in sales_summary["Person"].tolist() if str(p).strip()}
-    return ["All"] + sorted(names, key=str.lower)
+    return ["All"] + sorted(
+        {_perf_norm_member(n) for n in names if str(n).strip()},
+        key=str.lower,
+    )
 
 
 def _perf_filter_visits_by_person(visits: pd.DataFrame, person: str) -> pd.DataFrame:
@@ -5444,7 +6061,7 @@ def _perf_ticket_credit_assignees(row: object) -> list[str]:
     if assignees:
         return assignees
     if "case_ref" in data.index or "case_ref" in data:
-        return [_sc_perf_sales_credit_staff(data)]
+        return [_perf_sales_credited_person(data)]
     staff = data.get("staff")
     if staff and str(staff).strip() and str(staff).strip() != "(unknown)":
         return [_perf_norm_member(staff)]
@@ -5495,8 +6112,11 @@ def _perf_prepare_credit_count_view(df: pd.DataFrame) -> pd.DataFrame:
 def _perf_row_credited_to_person(row: object, person: str) -> bool:
     if person in ("", "All"):
         return True
-    key = _perf_norm_member(person)
-    return key in _perf_ticket_credit_assignees(row)
+    key = _perf_person_credit_key(person)
+    for assignee in _perf_ticket_credit_assignees(row):
+        if _perf_person_credit_key(assignee) == key:
+            return True
+    return False
 
 
 def _perf_credited_field_tickets(
@@ -5555,43 +6175,62 @@ def _perf_overview_board_summary(
     *,
     visits_history: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Overview board rows: solo/shared on all credited field tickets + all Sales Cases."""
+    """Overview board rows: visit-cycle solo/shared fair credit + Sales Cases."""
     sales = sales_summary if sales_summary is not None else pd.DataFrame()
     people: set[str] = set()
     if not overview_table.empty and "Person" in overview_table.columns:
-        people |= {str(p) for p in overview_table["Person"].tolist() if str(p).strip()}
+        people |= {
+            _perf_norm_member(p)
+            for p in overview_table["Person"].tolist()
+            if str(p).strip()
+        }
     if not sales.empty and "Person" in sales.columns:
-        people |= {str(p) for p in sales["Person"].tolist() if str(p).strip()}
+        people |= {
+            _perf_norm_member(p)
+            for p in sales["Person"].tolist()
+            if str(p).strip()
+        }
+    if not visits_history.empty and "assignee" in visits_history.columns:
+        prepared = _perf_prepare_visits_df(visits_history)
+        if not df_all.empty and "ticket_number" in prepared.columns:
+            credited_nums = set(_perf_credited_ticket_numbers(df_all))
+            if credited_nums:
+                prepared = prepared[
+                    prepared["ticket_number"].astype(str).str.strip().isin(credited_nums)
+                ]
+        for assignee in prepared["assignee"].dropna().unique():
+            norm = _perf_norm_member(assignee)
+            if norm and norm != "(unknown)":
+                people.add(norm)
     if not people:
         return pd.DataFrame()
 
     sales_map: dict[str, int] = {}
     if not sales.empty and "Total" in sales.columns:
         for person, total in zip(sales["Person"], sales["Total"]):
-            sales_map[str(person)] = int(total)
+            sales_map[_perf_norm_member(person)] = int(total)
 
     field_map: dict[str, int] = {}
     if not overview_table.empty and "Total" in overview_table.columns:
         for person, total in zip(overview_table["Person"], overview_table["Total"]):
-            field_map[str(person)] = int(total)
+            field_map[_perf_norm_member(person)] = int(total)
 
     rows: list[dict[str, object]] = []
     for person in sorted(people, key=str.lower):
-        solo = shared = 0
-        credited = _perf_credited_field_tickets(df_all, person=person)
-        for _, row in credited.iterrows():
-            if get_credit_type(row) == "shared":
-                shared += 1
-            else:
-                solo += 1
+        norm = _perf_norm_member(person)
+        solo, shared = _perf_visit_solo_shared_counts(
+            visits_history,
+            credit_key=norm,
+            df_all=df_all,
+        )
         rows.append(
             {
-                "Person": person,
+                "Person": norm,
                 "Solo tickets": solo,
                 "Shared tickets": shared,
                 "Tickets touched": solo + shared,
-                "Field queues": int(field_map.get(person, 0)),
-                "Sales Cases": int(sales_map.get(person, 0)),
+                "Field queues": int(field_map.get(norm, 0)),
+                "Sales Cases": int(sales_map.get(norm, 0)),
             }
         )
     if not rows:
@@ -5677,6 +6316,19 @@ def _perf_solo_shared_board_summary(
     )
 
 
+def _perf_summary_row_for_person(
+    table: pd.DataFrame, person: str,
+) -> pd.Series | None:
+    """Match overview row by normalized @handle (handles Admin, casing, etc.)."""
+    if table.empty or "Person" not in table.columns or person in ("", "All"):
+        return None
+    key = _perf_norm_member(person)
+    for _, row in table.iterrows():
+        if _perf_norm_member(row.get("Person")) == key:
+            return row
+    return None
+
+
 def _perf_count_column_total(
     table: pd.DataFrame,
     column: str,
@@ -5686,9 +6338,10 @@ def _perf_count_column_total(
     if table.empty or column not in table.columns:
         return 0
     if focus not in ("", "All"):
-        key = _perf_norm_member(focus)
-        row = table.loc[table["Person"] == key]
-        return int(row[column].sum()) if not row.empty else 0
+        row = _perf_summary_row_for_person(table, focus)
+        if row is None or column not in row.index:
+            return 0
+        return int(row[column])
     return int(table[column].sum())
 
 
@@ -5771,11 +6424,10 @@ def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
     if summary.empty:
         return
     if focus != "All":
-        key = _perf_norm_member(focus)
-        row = summary.loc[summary["Person"] == key]
-        if row.empty:
+        row = _perf_summary_row_for_person(summary, focus)
+        if row is None:
             return
-        r = row.iloc[0]
+        r = row
     else:
         r = summary.sum(numeric_only=True)
     labels = (
@@ -5878,20 +6530,20 @@ def _render_perf_solo_shared_board(
         solo = int(row.get("Solo tickets", 0))
         shared = int(row.get("Shared tickets", 0))
         sales_n_person = int(row.get("Sales Cases", 0))
-        selected = focus_key and person == focus_key
+        selected = focus_key and _perf_norm_member(person) == focus_key
         row_cls = "perf-ss-row is-selected" if selected else "perf-ss-row"
         sales_seg = ""
         if sales_n_person > 0:
             sales_seg = (
                 f'<span class="perf-ss-seg sales">sales'
-                f'<span class="num">{sales_n_person}</span></span>'
+                f"{_perf_count_span(sales_n_person)}</span>"
             )
         rows_html.append(
             f'<div class="{row_cls}">'
             f'<span class="perf-ss-name">{html.escape(person)}</span>'
             f'<div class="perf-ss-pill{" has-sales" if sales_n_person else ""}">'
-            f'<span class="perf-ss-seg solo">solo<span class="num">{solo}</span></span>'
-            f'<span class="perf-ss-seg shared">shared<span class="num">{shared}</span></span>'
+            f'<span class="perf-ss-seg solo">solo{_perf_count_span(solo)}</span>'
+            f'<span class="perf-ss-seg shared">shared{_perf_count_span(shared)}</span>'
             f"{sales_seg}"
             f"</div>"
             f"</div>"
@@ -5908,8 +6560,10 @@ def _render_perf_solo_shared_board(
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<p class="perf-ss-hint">Solo / shared = <strong>assignment</strong> (one vs two engineers on '
-        "the ticket). Visit fair credit uses who responded on each visit cycle. "
+        '<p class="perf-ss-hint">Solo / shared = **visit fair credit** — each engineer who held a '
+        "visit cycle on the ticket counts (respond, reassign, etc.). "
+        "**Solo** = only one engineer ever touched that ticket; "
+        "**shared** = two or more engineers on the same ticket. "
         "<strong>Sales</strong> = all Sales Cases · "
         "Ring = field queues + Sales (excludes <strong>Unattended</strong>). "
         "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
@@ -5979,14 +6633,14 @@ def _render_perf_solo_shared_detail(
 
 
 _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
-    "#7eb8da",
-    "#D7B491",
-    "#8fd99a",
-    "#c9a0dc",
-    "#f0a080",
-    "#e8d06a",
-    "#6ecfcf",
-    "#f08098",
+    "#3b82f6",
+    "#60a5fa",
+    "#22c55e",
+    "#a78bfa",
+    "#f59e0b",
+    "#818cf8",
+    "#34d399",
+    "#ef4444",
 )
 
 
@@ -6001,11 +6655,11 @@ _PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
 _PERF_MATRIX_COMPONENT_KEY = "perf_staff_matrix"
 _PERF_MATRIX_MAX_TICKETS = 40
 _PERF_MATRIX_OUTCOME_STYLE: dict[str, tuple[str, str]] = {
-    "assigned": ("A", "#9ec5e8"),
-    "responded": ("✓", "#b8d4a8"),
-    "reassigned": ("↪", "#D7B491"),
-    "unattended": ("U", "#c97a7a"),
-    "on_hold": ("H", "#a39e97"),
+    "assigned": ("A", "#3b82f6"),
+    "responded": ("✓", "#22c55e"),
+    "reassigned": ("↪", "#60a5fa"),
+    "unattended": ("U", "#ef4444"),
+    "on_hold": ("H", "#f59e0b"),
 }
 _PERF_MATRIX_OUTCOME_LABELS: dict[str, str] = {
     "active": "Active assignment",
@@ -6528,10 +7182,10 @@ class _PerfMatrixCaseInfoBucket:
         tn = str(ticket_number or "").strip()
         if not tn:
             return
-        text_s = str(text or "").strip()
-        photo_s = str(photo_url or "").strip()
+        text_s = _clean_display_value(text)
+        photo_s = _clean_display_value(photo_url)
         at_label, sort_key = _perf_matrix_case_info_ts(at_raw)
-        author_s = str(author or "—").strip() or "—"
+        author_s = _clean_display_value(author, default="—") or "—"
         sort_s = str(sort_key)
         if text_s:
             ckey = _perf_matrix_comment_key(author_s, text_s)
@@ -6573,14 +7227,14 @@ def _perf_matrix_case_info_from_visits(
         tn = str(row.get("ticket_number") or "").strip()
         if tn not in ticket_numbers:
             continue
-        note = str(row.get("response_note") or "").strip()
-        photo = str(row.get("photo_url") or "").strip()
+        note = _clean_display_value(row.get("response_note"))
+        photo = _clean_display_value(row.get("photo_url"))
         if not note and not photo.startswith("http"):
             continue
         bucket.add(
             tn,
             at_raw=row.get("visit_end") or row.get("visit_start"),
-            author=str(row.get("assignee") or "—"),
+            author=_clean_display_value(row.get("assignee"), default="—"),
             text=note or None,
             photo_url=photo or None,
             kind="visit",
@@ -6633,8 +7287,8 @@ def _perf_matrix_case_info_from_attendance(
         if tn not in ticket_numbers:
             continue
         action = str(row.get("action_type") or "").strip()
-        note = str(row.get("note") or "").strip()
-        photo = str(row.get("photo_url") or "").strip()
+        note = _clean_display_value(row.get("note"))
+        photo = _clean_display_value(row.get("photo_url"))
         kind = _PERF_MATRIX_LOG_ACTION_KIND.get(action)
         if not kind:
             continue
@@ -6647,7 +7301,7 @@ def _perf_matrix_case_info_from_attendance(
         bucket.add(
             tn,
             at_raw=row.get("timestamp"),
-            author=str(row.get("member_username") or "—"),
+            author=_clean_display_value(row.get("member_username"), default="—"),
             text=note or None,
             photo_url=photo or None,
             kind=kind,
@@ -6665,12 +7319,14 @@ def _perf_matrix_case_info_from_tickets_snapshot(
         tn = str(row.get("ticket_number") or "").strip()
         if tn not in ticket_numbers:
             continue
-        text = str(row.get("field_response") or "").strip()
-        photo = str(row.get("photo_url") or "").strip()
+        text = _clean_display_value(row.get("field_response"))
+        photo = _clean_display_value(row.get("photo_url"))
         if not text and not photo.startswith("http"):
             continue
-        author = str(
-            row.get("field_responded_by") or row.get("assigned_to") or "—"
+        author = (
+            _clean_display_value(row.get("field_responded_by"))
+            or _clean_display_value(row.get("assigned_to"))
+            or "—"
         )
         bucket.add(
             tn,
@@ -6698,10 +7354,10 @@ def _perf_matrix_case_info_from_sales_cases(
             or row.get("last_assigned_at")
             or row.get("created_at")
         )
-        author = str(
-            row.get("admin_owner")
-            or row.get("assigned_to")
-            or row.get("attended_by")
+        author = (
+            _clean_display_value(row.get("admin_owner"))
+            or _clean_display_value(row.get("assigned_to"))
+            or _clean_display_value(row.get("attended_by"))
             or "Admin"
         )
         status_eff = _sc_effective_status(row.get("status"))
@@ -6714,14 +7370,21 @@ def _perf_matrix_case_info_from_sales_cases(
                 photo_url=None,
                 kind="admin",
             )
+        field_derived = _sales_row_derived_field_response(row.to_dict())
         for field, kind in (
             ("description", "admin"),
             ("additional_info", "admin"),
             ("close_note", "admin"),
             ("dispatch_reason", "assignment"),
         ):
-            text = str(row.get(field) or "").strip()
+            text = _clean_display_value(row.get(field))
             if not text:
+                continue
+            if (
+                field in ("additional_info", "close_note")
+                and field_derived
+                and text.casefold() == field_derived.casefold()
+            ):
                 continue
             bucket.add(
                 ref,
@@ -6730,6 +7393,28 @@ def _perf_matrix_case_info_from_sales_cases(
                 text=text,
                 photo_url=None,
                 kind=kind,
+            )
+        field_text = _clean_display_value(row.get("field_response")) or field_derived
+        field_photo = _clean_display_value(row.get("photo_url"))
+        if field_text or field_photo.startswith("http"):
+            field_author = (
+                _clean_display_value(row.get("field_responded_by"))
+                or _clean_display_value(row.get("assigned_to"))
+                or author
+            )
+            field_ts = (
+                row.get("responded_at")
+                or row.get("updated_at")
+                or row.get("last_assigned_at")
+                or row.get("created_at")
+            )
+            bucket.add(
+                ref,
+                at_raw=field_ts,
+                author=field_author,
+                text=field_text or None,
+                photo_url=field_photo or None,
+                kind="field",
             )
 
 
@@ -6781,8 +7466,13 @@ def _perf_matrix_case_info_by_ticket(
         return {}
     bucket = _PerfMatrixCaseInfoBucket()
     _perf_matrix_case_info_from_visits(visits_all, ids, bucket)
+    try:
+        logs = _fetch_attendance_for_matrix_tickets(sorted(ids))
+    except Exception:
+        logs = pd.DataFrame()
     sales_view = sales_cases if sales_cases is not None else pd.DataFrame()
     if not sales_view.empty:
+        sales_view = _perf_enrich_sales_cases_field_activity(sales_view, logs_df=logs)
         _perf_matrix_case_info_from_sales_cases(sales_view, ids, bucket)
     else:
         try:
@@ -6793,11 +7483,8 @@ def _perf_matrix_case_info_by_ticket(
             subset = all_sales[
                 all_sales["case_ref"].astype(str).str.strip().isin(ids)
             ]
+            subset = _perf_enrich_sales_cases_field_activity(subset, logs_df=logs)
             _perf_matrix_case_info_from_sales_cases(subset, ids, bucket)
-    try:
-        logs = _fetch_attendance_for_matrix_tickets(sorted(ids))
-    except Exception:
-        logs = pd.DataFrame()
     _perf_matrix_case_info_from_attendance(logs, ids, bucket)
     try:
         tickets_df = _fetch_tickets_cached()
@@ -6817,12 +7504,139 @@ def _perf_matrix_case_info_by_ticket(
             bucket.add(
                 tn,
                 at_raw=p.get("when"),
-                author=str(p.get("member") or "—"),
+                author=_clean_display_value(p.get("member"), default="—"),
                 text=None,
-                photo_url=str(p.get("url") or ""),
+                photo_url=_clean_display_value(p.get("url")),
                 kind="response",
             )
     return _perf_matrix_case_info_finalize(bucket, ids)
+
+
+def _perf_comment_kind_label(kind: object) -> str:
+    return {
+        "visit": "Visit",
+        "assignment": "Assignment",
+        "field": "Field",
+        "admin": "Admin",
+        "response": "Response",
+    }.get(str(kind or ""), "Response")
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _get_dispatch_ticket_case_activity(ticket_number: str) -> dict[str, object]:
+    """All responses, comments, and photos for one ticket (same sources as Case Info matrix)."""
+    tn = str(ticket_number or "").strip()
+    if not tn:
+        return {"comments": [], "photos": []}
+    visits_raw = _fetch_visits_for_tickets([tn])
+    visits = _perf_prepare_visits_df(visits_raw) if not visits_raw.empty else pd.DataFrame()
+    sales_df = pd.DataFrame()
+    sales_row = _fetch_sales_case_row_by_ref(tn)
+    if sales_row:
+        sales_df = pd.DataFrame([sales_row])
+    info = _perf_matrix_case_info_by_ticket(visits, [tn], sales_cases=sales_df)
+    return info.get(tn, {"comments": [], "photos": []})
+
+
+def _render_dispatch_case_activity_panel(ticket_number: str) -> None:
+    """Comments + photo gallery — mirrors Performance Case Info panel content."""
+    activity = _get_dispatch_ticket_case_activity(ticket_number)
+    comments = list(activity.get("comments") or [])
+    photos = list(activity.get("photos") or [])
+
+    if not comments and not photos:
+        st.markdown(
+            t_section_label(
+                "Responses & photos",
+                spacing=".06em",
+                margin="margin:10px 0 5px",
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<p style="font-size:11px;color:#2a3a5a;margin:0 0 12px">'
+            "No responses or comments recorded for this ticket.</p>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    if comments:
+        cards: list[str] = []
+        for item in comments:
+            author = html.escape(
+                _clean_display_value(item.get("author"), default="—") or "—"
+            )
+            kind = html.escape(_perf_comment_kind_label(item.get("kind")))
+            when = html.escape(_clean_display_value(item.get("at")))
+            text = html.escape(_clean_display_value(item.get("text")))
+            if not text and author == "—":
+                continue
+            when_row = (
+                f'<p style="font-size:11px;color:#2a3a5a;margin:2px 0 0">{when}</p>'
+                if when
+                else ""
+            )
+            text_row = (
+                f'<p style="font-size:13px;color:#8a9ac0;line-height:1.5;'
+                f'margin:6px 0 0;white-space:pre-wrap;word-break:break-word">{text}</p>'
+                if text
+                else ""
+            )
+            cards.append(
+                f'<li style="list-style:none;margin-bottom:6px">'
+                f'<div style="background:#0d1220;border:0.5px solid #1a2035;'
+                f'border-radius:4px;padding:7px 8px">'
+                f'<div style="display:flex;justify-content:space-between;gap:8px">'
+                f'<span style="font-size:13px;font-weight:500;color:#e2e8f8">'
+                f"{author}</span>"
+                f'<span style="font-size:11px;color:#2a3a5a;flex-shrink:0">{kind}</span>'
+                f"</div>{when_row}{text_row}"
+                f"</div></li>"
+            )
+        if cards:
+            with st.expander(
+                f"Responses & comments ({len(cards)})",
+                expanded=False,
+            ):
+                st.markdown(
+                    f'<ul style="margin:0;padding:0">{"".join(cards)}</ul>',
+                    unsafe_allow_html=True,
+                )
+
+    if photos:
+        photo_rows: list[str] = []
+        for idx, item in enumerate(photos):
+            url = _clean_display_value(item.get("url"))
+            if not url.startswith("http"):
+                continue
+            author = html.escape(
+                _clean_display_value(item.get("author"), default="—") or "—"
+            )
+            when = html.escape(_clean_display_value(item.get("at")))
+            label = f"Photo {idx + 1}" if len(photos) > 1 else "Photo"
+            meta = f"{author}{(' · ' + when) if when else ''}"
+            safe_url = html.escape(url)
+            photo_rows.append(
+                f'<li style="list-style:none;margin-bottom:6px">'
+                f'<a href="{safe_url}" target="_blank" rel="noopener" '
+                f'style="display:block;background:#0d1220;border:0.5px solid #1a2035;'
+                f'border-radius:4px;padding:7px 8px;text-decoration:none">'
+                f'<span style="font-size:13px;font-weight:500;color:#e2e8f8">'
+                f"{label} ↗</span>"
+                f'<span style="display:block;font-size:11px;color:#2a3a5a;margin-top:2px">'
+                f"{meta}</span></a></li>"
+            )
+        if photo_rows:
+            tn = str(ticket_number or "").strip() or "—"
+            n = len(photo_rows)
+            with st.expander(
+                f"Ticket {tn} — {n} photo(s)",
+                expanded=False,
+            ):
+                st.markdown(
+                    f'<ul style="margin:0;padding:0">{"".join(photo_rows)}</ul>',
+                    unsafe_allow_html=True,
+                )
 
 
 def _perf_build_staff_matrix_payload(
@@ -6946,7 +7760,7 @@ def _perf_visit_matrix_cell(
     if not outcome:
         return "", "", ""
     if outcome == "active":
-        return "●", eng_colors.get(assignee, "#9ec5e8"), label
+        return "●", eng_colors.get(assignee, "#3b82f6"), label
     sym, col = _PERF_MATRIX_OUTCOME_STYLE.get(outcome, ("·", "#a39e97"))
     return sym, col, label
 
@@ -7001,7 +7815,7 @@ def _render_perf_visit_staff_matrix(
     ]
     for eng in all_engineers:
         eng_short = eng if len(eng) <= 14 else eng[:11] + "…"
-        col = eng_colors.get(eng, "#9ec5e8")
+        col = eng_colors.get(eng, "#3b82f6")
         header_cells.append(
             f'<th class="perf-matrix-ticket" title="{html.escape(eng)}" '
             f'style="color:{col}">{html.escape(eng_short)}</th>'
@@ -7035,7 +7849,7 @@ def _render_perf_visit_staff_matrix(
                         if outcome == "active":
                             sym, sym_col, title = (
                                 "●",
-                                eng_colors.get(eng, "#9ec5e8"),
+                                eng_colors.get(eng, "#3b82f6"),
                                 label,
                             )
                         else:
@@ -7050,53 +7864,53 @@ def _render_perf_visit_staff_matrix(
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
     legend_bits = [
-        '<span class="perf-matrix-legend-item"><i style="color:#9ec5e8">●</i> Active</span>',
-        '<span class="perf-matrix-legend-item"><i style="color:#b8d4a8">✓</i> Responded</span>',
-        '<span class="perf-matrix-legend-item"><i style="color:#D7B491">↪</i> Reassigned</span>',
-        '<span class="perf-matrix-legend-item"><i style="color:#9ec5e8">A</i> Assigned</span>',
-        '<span class="perf-matrix-legend-item"><i style="color:#c97a7a">U</i> Unattended</span>',
-        '<span class="perf-matrix-legend-item"><i style="color:#D7B491">■</i> Shared ticket</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">●</i> Active</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#22c55e">✓</i> Responded</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#60a5fa">↪</i> Reassigned</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">A</i> Assigned</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#ef4444">U</i> Unattended</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">■</i> Shared ticket</span>',
     ]
 
     matrix_html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
 <style>
 html, body {{
-  margin: 0; padding: 0; background: #141414; color: #e8e6e3;
-  font-family: system-ui, sans-serif; font-size: 11px;
+  margin: 0; padding: 0; background: #0b0f18; color: #e2e8f8;
+  font-family: 'Inter', system-ui, sans-serif; font-size:13px;
 }}
 .perf-matrix-shell {{ padding: 6px 8px 10px; }}
 .perf-matrix-legend {{
   display: flex; flex-wrap: wrap; gap: 0.5rem 1rem;
-  margin-bottom: 8px; color: #a39e97; font-size: 10px;
+  margin-bottom: 8px; color: #2a3a5a; font-size:11px;
 }}
 .perf-matrix-legend-item {{ display: inline-flex; align-items: center; gap: 0.25rem; }}
 .perf-matrix-wrap {{
   overflow: auto; max-height: 520px;
-  border: 1px solid rgba(215,180,145,0.22); border-radius: 6px;
+  border: 0.5px solid #1a2035; border-radius: 6px;
 }}
 table.perf-matrix {{
   border-collapse: collapse; min-width: 100%;
 }}
 .perf-matrix th, .perf-matrix td {{
-  border: 1px solid rgba(215,180,145,0.12);
+  border: 0.5px solid #1a2035;
   padding: 4px 6px; text-align: center; white-space: nowrap;
 }}
 .perf-matrix th {{
-  background: #1a1a1a; color: #D7B491; font-weight: 600;
+  background: #0d1220; color: #e2e8f8; font-weight: 600;
   position: sticky; top: 0; z-index: 2;
 }}
 .perf-matrix-sticky-col {{
   position: sticky; left: 0; z-index: 3;
-  background: #141414; text-align: left !important;
+  background: #0b0f18; text-align: left !important;
   font-weight: 500; min-width: 108px;
   box-shadow: 2px 0 4px rgba(0,0,0,0.35);
 }}
-th.perf-matrix-sticky-col {{ z-index: 4; background: #1a1a1a; }}
-.perf-matrix-ticket {{ min-width: 52px; font-size: 9px; }}
-th.perf-matrix-ticket.shared-col {{ color: #e8c9a0; }}
-.perf-matrix-cell {{ font-weight: 700; font-size: 12px; }}
-.perf-matrix-empty {{ color: #3a3a3a; }}
+th.perf-matrix-sticky-col {{ z-index: 4; background: #0d1220; }}
+.perf-matrix-ticket {{ min-width: 52px; font-size:11px; }}
+th.perf-matrix-ticket.shared-col {{ color: #60a5fa; }}
+.perf-matrix-cell {{ font-weight: 700; font-size:14px; }}
+.perf-matrix-empty {{ color: #2a3a5a; }}
 </style>
 </head><body>
 <div class="perf-matrix-shell">
@@ -7242,7 +8056,7 @@ def _render_handled_visit_credit_bar(visits: pd.DataFrame) -> None:
                 alt.Tooltip("Tickets:Q", title="Unique tickets"),
                 alt.Tooltip("Visit cycles:Q", title="Visit cycles"),
             ],
-            color=alt.value("#7eb8da"),
+            color=alt.value("#3b82f6"),
         )
         .properties(height=height)
     )
@@ -7260,7 +8074,7 @@ def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> No
         return
     counts = data.groupby("assignee").size().rename("Count").reset_index()
     height = min(520, max(180, 42 * len(counts)))
-    color = "#7eb8da" if outcome == "responded" else "#D7B491"
+    color = "#22c55e" if outcome == "responded" else "#3b82f6"
     label = outcome.capitalize() if outcome else "Visits"
     chart = (
         alt.Chart(counts)
@@ -7349,6 +8163,83 @@ def _format_dash_range_caption() -> str:
     lo = start.tz_convert(LOCAL_TZ).strftime("%d %b")
     hi = end.tz_convert(LOCAL_TZ).strftime("%d %b %Y")
     return f"{lo} – {hi} • {LOCAL_TZ_LABEL}"
+
+
+def _store_perf_range(start: pd.Timestamp, end: pd.Timestamp) -> None:
+    st.session_state[_PERF_RANGE_FROM_KEY] = start.isoformat()
+    st.session_state[_PERF_RANGE_TO_KEY] = end.isoformat()
+
+
+def _get_perf_range() -> tuple[pd.Timestamp, pd.Timestamp]:
+    if _PERF_RANGE_FROM_KEY not in st.session_state:
+        start, end = _preset_range_utc("This week")
+        _store_perf_range(start, end)
+    start = pd.to_datetime(st.session_state[_PERF_RANGE_FROM_KEY], utc=True)
+    end = pd.to_datetime(st.session_state[_PERF_RANGE_TO_KEY], utc=True)
+    return start, end
+
+
+def _format_perf_range_caption() -> str:
+    if _PERF_RANGE_FROM_KEY not in st.session_state:
+        return ""
+    start, end = _get_perf_range()
+    lo = start.tz_convert(LOCAL_TZ).strftime("%d %b")
+    hi = end.tz_convert(LOCAL_TZ).strftime("%d %b %Y")
+    return f"{lo} – {hi} • {LOCAL_TZ_LABEL}"
+
+
+def _sync_perf_range_from_ui(range_val: str) -> None:
+    """Apply Performance sidebar range preset to session bounds."""
+    if range_val == "Custom":
+        from_date = st.session_state.get("perf_custom_from")
+        to_date = st.session_state.get("perf_custom_to")
+        if from_date is None or to_date is None:
+            return
+        if from_date > to_date:
+            to_date = from_date
+            st.session_state["perf_custom_to"] = to_date
+        _store_perf_range(_local_date_start(from_date), _local_date_end(to_date))
+        return
+    preset_map = {
+        "Today": "Today",
+        "This week": "This week",
+        "Last 30 days": "Last 30 days",
+    }
+    start, end = _preset_range_utc(preset_map.get(range_val, "This week"))
+    _store_perf_range(start, end)
+
+
+def _init_perf_session_state() -> None:
+    legacy_focus = st.session_state.pop("perf_focus_person", None)
+    if _PERF_FOCUS_ASSIGNEE_KEY not in st.session_state:
+        if legacy_focus in (None, "", "All"):
+            st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = "All engineers"
+        else:
+            st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = _perf_norm_member(legacy_focus)
+    if _PERF_RANGE_PRESET_KEY not in st.session_state:
+        st.session_state[_PERF_RANGE_PRESET_KEY] = "This week"
+    if _PERF_ACTIVE_VIEW_KEY not in st.session_state:
+        st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Overview"
+    if _PERF_SELECTED_ENGINEER_KEY not in st.session_state:
+        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
+    if _PERF_RANGE_FROM_KEY not in st.session_state:
+        _sync_perf_range_from_ui(str(st.session_state[_PERF_RANGE_PRESET_KEY]))
+
+
+def _perf_focus_for_filter() -> str:
+    """Map sidebar Focus assignee to ``_perf_filter_by_person`` person arg."""
+    focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    if focus == "All engineers":
+        return "All"
+    return _perf_norm_member(focus)
+
+
+def _perf_focus_assignee_handle() -> str | None:
+    """Normalized ``@handle`` for queries, or None when showing all engineers."""
+    person = _perf_focus_for_filter()
+    if person == "All":
+        return None
+    return person
 
 
 def _dash_time_preset_display(preset: str) -> str:
@@ -7466,9 +8357,9 @@ def _render_dash_time_range_pills(*, preset: str, custom_open: bool) -> None:
             f"""
             <style>
             div.st-key-{selected_pill_key} button {{
-                border-color: var(--bon-oak) !important;
-                color: var(--bon-oak) !important;
-                background: rgba(215, 180, 145, 0.12) !important;
+                border-color: #3b82f6 !important;
+                color: #3b82f6 !important;
+                background: #0d1e3a !important;
             }}
             </style>
             """,
@@ -7708,9 +8599,88 @@ def _render_app_menu_panel() -> None:
             st.rerun()
 
 
+def _render_dispatch_app_menu() -> None:
+    """Nav lives in the unified header — keep for non-shell call sites."""
+    _render_main_navigation()
+
+
+def _render_dispatch_app_shell() -> None:
+    """Unified header: brand · centered nav tabs · clock · operator · settings."""
+    op = _session_operator_id() or _session_dashboard_username() or "—"
+    op_display = html.escape(str(op).lstrip("@") or "—")
+    now = datetime.now(LOCAL_TZ)
+    now_label = now.strftime("%a %d %b") + " · " + now.strftime("%H:%M UTC+5")
+
+    with st.container(key="disp_header_shell"):
+        hl, hr = st.columns([3, 1], gap="small", vertical_alignment="center")
+        with hl:
+            with st.container(key="disp_header_left"):
+                bc, nc = st.columns([1.15, 4], gap="small", vertical_alignment="center")
+                with bc:
+                    st.markdown(
+                        '<p class="disp-brand" style="margin:0">'
+                        "NetOps · Coverage Eye"
+                        '<span class="disp-header-divider">|</span>'
+                        "</p>",
+                        unsafe_allow_html=True,
+                    )
+                with nc:
+                    with st.container(key="disp_main_nav_tabs"):
+                        _render_main_navigation()
+        with hr:
+            with st.container(key="disp_header_right"):
+                _render_dispatch_header_right(now_label, op_display)
+
+
+def _render_dispatch_header_right(now_label: str, op_display: str) -> None:
+    """Clock, operator, and settings — single tight row on the right."""
+    info, settings = st.columns([1, 1], gap="small", vertical_alignment="center")
+    with info:
+        st.markdown(
+            f'<div class="disp-header-right-cluster">'
+            f'<span class="disp-header-clock">{html.escape(now_label)}</span>'
+            f'<span class="disp-header-op">'
+            f'<span class="disp-header-op-dot"></span>'
+            f"{op_display}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with settings:
+        _render_dispatch_settings_popover()
+
+
+def _render_dispatch_settings_popover() -> None:
+    """Settings popover — refresh, date range, sign out."""
+    _init_dash_date_range_state()
+
+    def _refresh() -> None:
+        _invalidate_dashboard_data_cache()
+        st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
+        st.rerun()
+
+    def _signout() -> None:
+        _clear_auth_session()
+        st.session_state.pop(_LOGIN_VIEW_KEY, None)
+        st.rerun()
+
+    def _custom_dates() -> None:
+        _render_dash_custom_date_inputs()
+        _sync_dash_range_from_ui("Pick dates")
+
+    render_settings_popover(
+        time_preset_options=list(_DASH_TIME_PRESET_OPTIONS),
+        time_preset_key=_DASH_TIME_PRESET_KEY,
+        on_refresh=_refresh,
+        on_signout=_signout,
+        render_custom_dates=_custom_dates,
+    )
+    preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    if preset != "Pick dates":
+        _sync_dash_range_from_ui(preset)
+
+
 def _render_app_chrome() -> None:
-    _render_app_topbar()
-    _render_app_menu_controls()
+    _render_dispatch_app_shell()
 
 
 def _perf_bucket_settings(
@@ -8167,7 +9137,7 @@ def _perf_build_sales_summary(df: pd.DataFrame) -> pd.DataFrame:
         st = grp["status_eff"]
         rows.append(
             {
-                "Person": person,
+                "Person": _perf_norm_member(person),
                 "Sales Ticket": int(st.eq(SC_STATUS_SALES_TICKET).sum()),
                 "Investigation": int(
                     st.isin(_SC_INVESTIGATION_QUEUE_STATUSES).sum()
@@ -8608,8 +9578,8 @@ def _perf_build_weekly_attended_tables(
     return summary, detail
 
 
-_WEEKLY_INV_COLOR = "#E8A838"
-_WEEKLY_RESOLVED_COLOR = "#9A6B2F"
+_WEEKLY_INV_COLOR = "#f59e0b"
+_WEEKLY_RESOLVED_COLOR = "#22c55e"
 _WEEKLY_CHART_THEME = {
     "background": "transparent",
 }
@@ -8619,8 +9589,8 @@ def _weekly_altair_theme(chart: alt.Chart) -> alt.Chart:
     return (
         chart.configure(**_WEEKLY_CHART_THEME)
         .configure_view(strokeWidth=0, stroke="transparent")
-        .configure_axis(labelColor="#a39e97", titleColor="#e8e6e3", gridColor="#333333")
-        .configure_legend(labelColor="#e8e6e3", titleColor="#e8e6e3")
+        .configure_axis(labelColor="#2a3a5a", titleColor="#e2e8f8", gridColor="#1a2035")
+        .configure_legend(labelColor="#8a9ac0", titleColor="#e2e8f8")
     )
 
 
@@ -9129,7 +10099,7 @@ def _perf_build_summary(
         return pd.DataFrame()
     rows = [
         {
-            "Person": p,
+            "Person": _perf_norm_member(p),
             # Credit total — Unattended is shown separately and does not count.
             "Total": (
                 int(p_counts.get(p, 0))
@@ -9375,34 +10345,137 @@ def _render_perf_ticket_table(df: pd.DataFrame) -> None:
     )
 
 
+def _sales_row_derived_field_response(row: dict) -> str:
+    """Field outcome stored on the sales row when no CSM ticket / bot log exists."""
+    existing = _clean_display_value(row.get("field_response"))
+    if existing:
+        return existing
+    if not _sc_sales_has_field_assignee(row.get("assigned_to")):
+        return ""
+    desc = _clean_display_value(row.get("description")).casefold()
+    for field in ("additional_info", "close_note"):
+        candidate = _clean_display_value(row.get(field))
+        if not candidate:
+            continue
+        if desc and candidate.casefold() == desc:
+            continue
+        return candidate
+    return ""
+
+
 def _perf_attach_field_responses_to_sales(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``field_response`` from linked CSM tickets when missing on the sales row."""
-    if df.empty:
+    """Copy field reply columns from linked CSM tickets (``case_ref`` = ``ticket_number``)."""
+    if df.empty or "case_ref" not in df.columns:
         return df
     out = df.copy()
-    if "field_response" not in out.columns:
-        out["field_response"] = ""
-    if "case_ref" not in out.columns:
-        return out
-    missing = out["field_response"].fillna("").astype(str).str.strip().eq("")
-    if not missing.any():
-        return out
+    for col, default in (
+        ("field_response", ""),
+        ("photo_url", ""),
+        ("field_responded_by", ""),
+        ("responded_at", None),
+    ):
+        if col not in out.columns:
+            out[col] = default
     try:
         tickets = _fetch_tickets()
     except Exception:
         return out
-    if tickets.empty or "ticket_number" not in tickets.columns or "field_response" not in tickets.columns:
+    if tickets.empty or "ticket_number" not in tickets.columns:
+        return out
+    ticket_cols = [
+        c
+        for c in ("field_response", "photo_url", "field_responded_by", "responded_at")
+        if c in tickets.columns
+    ]
+    if not ticket_cols:
         return out
     lookup = (
-        tickets[["ticket_number", "field_response"]]
+        tickets[["ticket_number", *ticket_cols]]
         .dropna(subset=["ticket_number"])
         .drop_duplicates(subset=["ticket_number"], keep="last")
+        .set_index("ticket_number")
     )
-    lookup = lookup.set_index("ticket_number")["field_response"]
-    refs = out.loc[missing, "case_ref"].astype(str).str.strip()
-    out.loc[missing, "field_response"] = refs.map(
-        lambda r: str(lookup.get(r, "") or "").strip()
-    )
+    for idx in out.index:
+        ref = str(out.at[idx, "case_ref"] or "").strip()
+        if not ref or ref not in lookup.index:
+            continue
+        src = lookup.loc[ref]
+        for col in ticket_cols:
+            cur = str(out.at[idx, col] or "").strip()
+            if cur:
+                continue
+            val = src.get(col)
+            if val is not None and str(val).strip():
+                out.at[idx, col] = val
+    return out
+
+
+def _perf_enrich_sales_cases_field_activity(
+    sales_df: pd.DataFrame,
+    *,
+    logs_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Ensure sales rows carry field reply text/photo for Case Info (tickets + attendance)."""
+    out = _perf_attach_field_responses_to_sales(sales_df)
+    if out.empty or "case_ref" not in out.columns:
+        return out
+    for col, default in (
+        ("field_response", ""),
+        ("photo_url", ""),
+        ("field_responded_by", ""),
+        ("responded_at", None),
+    ):
+        if col not in out.columns:
+            out[col] = default
+    if logs_df is None or logs_df.empty:
+        return out
+    if "ticket_number" not in logs_df.columns or "action_type" not in logs_df.columns:
+        return out
+    responses = logs_df[
+        logs_df["action_type"].astype(str).str.strip().eq("Response")
+    ].copy()
+    if responses.empty:
+        return out
+    if "timestamp" in responses.columns:
+        responses = responses.sort_values("timestamp", ascending=False)
+    for idx, row in out.iterrows():
+        ref = str(row.get("case_ref") or "").strip()
+        if not ref:
+            continue
+        has_text = bool(_clean_display_value(row.get("field_response")))
+        has_photo = _clean_display_value(row.get("photo_url")).startswith("http")
+        if has_text or has_photo:
+            continue
+        sub = responses[responses["ticket_number"].astype(str).str.strip().eq(ref)]
+        if sub.empty:
+            continue
+        log = sub.iloc[0]
+        note = _clean_display_value(log.get("note"))
+        photo = _clean_display_value(log.get("photo_url"))
+        if note:
+            out.at[idx, "field_response"] = note
+        if photo.startswith("http"):
+            out.at[idx, "photo_url"] = photo
+        author = _clean_display_value(log.get("member_username"))
+        if author:
+            out.at[idx, "field_responded_by"] = author
+        if log.get("timestamp") is not None:
+            out.at[idx, "responded_at"] = log.get("timestamp")
+    for idx, row in out.iterrows():
+        has_text = bool(_clean_display_value(row.get("field_response")))
+        has_photo = _clean_display_value(row.get("photo_url")).startswith("http")
+        if has_text or has_photo:
+            continue
+        derived = _sales_row_derived_field_response(row.to_dict())
+        if not derived:
+            continue
+        out.at[idx, "field_response"] = derived
+        if not str(out.at[idx, "field_responded_by"] or "").strip():
+            out.at[idx, "field_responded_by"] = str(row.get("assigned_to") or "").strip()
+        if out.at[idx, "responded_at"] is None:
+            out.at[idx, "responded_at"] = row.get("updated_at") or row.get(
+                "last_assigned_at"
+            )
     return out
 
 
@@ -9411,7 +10484,18 @@ def _perf_sales_case_list_view(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     view = _perf_enrich_sales_cases(df)
-    view = _perf_attach_field_responses_to_sales(view)
+    refs: list[str] = []
+    if "case_ref" in view.columns:
+        refs = sorted(
+            {str(r).strip() for r in view["case_ref"].tolist() if str(r).strip()}
+        )
+    logs = pd.DataFrame()
+    if refs:
+        try:
+            logs = _fetch_attendance_for_matrix_tickets(refs)
+        except Exception:
+            logs = pd.DataFrame()
+    view = _perf_enrich_sales_cases_field_activity(view, logs_df=logs)
     view = view.sort_values("_ts", ascending=False).head(200).copy()
 
     region = (
@@ -9584,7 +10668,7 @@ def _render_perf_sales_status_bar(view: pd.DataFrame, *, title: str) -> None:
                 legend=None,
                 scale=alt.Scale(
                     domain=list(counts.keys()),
-                    range=["#9ec5e8", "#c4a882", "#D7B491", "#8fa89e"],
+                    range=["#3b82f6", "#60a5fa", "#22c55e", "#a78bfa"],
                 ),
             ),
             tooltip=[
@@ -11327,6 +12411,293 @@ def _delete_field_engineer(username: str) -> None:
     ).execute()
 
 
+def get_engineer_handles() -> list[str]:
+    """Return active engineer @handles for pickers. Excludes is_active=False."""
+    client = _get_supabase_client()
+    try:
+        rows = (
+            client.table(FIELD_ENGINEERS_TABLE)
+            .select("username")
+            .eq("is_active", True)
+            .order("username")
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            return []
+        if is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return []
+        raise
+    return [
+        f"@{r['username']}" if not str(r["username"]).startswith("@") else str(r["username"])
+        for r in rows
+        if r.get("username")
+    ]
+
+
+def get_task_categories() -> list[str]:
+    """Return task categories sorted by sort_order then name."""
+    client = _get_supabase_client()
+    try:
+        rows = (
+            client.table(TASK_CATEGORIES_TABLE)
+            .select("name, sort_order")
+            .order("sort_order")
+            .order("name")
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        if _looks_like_missing_table_error(exc):
+            return []
+        if is_transient_supabase_error(exc):
+            _note_supabase_unreachable(exc)
+            return []
+        raise
+    return [str(r["name"]) for r in rows if r.get("name")]
+
+
+def _render_engineer_manage_row(eng: dict) -> None:
+    """One row in the manage engineers dialog."""
+    handle = str(eng["username"])
+    is_active = eng.get("is_active", True)
+    initials = "".join(p[0].upper() for p in handle.split("_")[:2] if p) or "?"
+
+    col_av, col_name, col_toggle, col_del = st.columns(
+        [0.4, 2, 1, 0.4], gap="small"
+    )
+
+    with col_av:
+        st.markdown(
+            f'<div style="width:24px;height:24px;border-radius:50%;'
+            f'background:{"#0d1e3a" if is_active else "#1a2035"};'
+            f'display:flex;align-items:center;justify-content:center;'
+            f'font-size:11px;font-weight:600;'
+            f'color:{"#3b82f6" if is_active else "#2a3a5a"}">{html.escape(initials)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with col_name:
+        color = "#8a9ac0" if is_active else "#4a5a7a"
+        st.markdown(
+            f'<span style="font-size:14px;font-weight:400;color:{color}">'
+            f"@{html.escape(handle)}</span>",
+            unsafe_allow_html=True,
+        )
+
+    hkey = hashlib.sha256(handle.encode("utf-8")).hexdigest()[:16]
+    with col_toggle:
+        label = "Active" if is_active else "Inactive"
+        if st.button(label, key=f"toggle_eng_{hkey}", use_container_width=True):
+            client = _get_supabase_client()
+            client.table(FIELD_ENGINEERS_TABLE).update(
+                {"is_active": not is_active}
+            ).eq("username", handle).execute()
+            _cached_field_engineer_usernames.clear()
+            st.rerun()
+
+    with col_del:
+        if st.button(
+            "×",
+            key=f"del_eng_{hkey}",
+            help="Remove engineer",
+            use_container_width=True,
+        ):
+            _delete_field_engineer(handle)
+            _cached_field_engineer_usernames.clear()
+            st.toast(f"@{handle} deactivated", icon="✅")
+            st.rerun()
+
+
+@st.dialog("Manage engineers", width="small")
+def manage_engineers_dialog() -> None:
+    """
+    Add, deactivate, or remove field engineers.
+    Writes to dashboard_field_engineers via Supabase.
+    Changes apply immediately to all pickers on close.
+    """
+    client = _get_supabase_client()
+    engineers = (
+        client.table(FIELD_ENGINEERS_TABLE)
+        .select("username, is_active, created_at")
+        .order("is_active", desc=True)
+        .order("username")
+        .execute()
+        .data
+        or []
+    )
+
+    st.markdown(
+        '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Add engineer</p>',
+        unsafe_allow_html=True,
+    )
+    with st.form("new_eng_form", clear_on_submit=True):
+        col_inp, col_btn = st.columns([3, 1], gap="small")
+        with col_inp:
+            new_handle = st.text_input(
+                "Handle",
+                placeholder="@Hassan_m",
+                label_visibility="collapsed",
+                key="new_eng_handle",
+            )
+        with col_btn:
+            add_eng = st.form_submit_button("+ Add", use_container_width=True)
+        if add_eng:
+            handle = _normalize_engineer_dir_handle(new_handle)
+            if not handle:
+                st.toast("Enter a Telegram handle", icon="⚠️")
+            elif any(
+                str(e["username"]).lower() == handle.lower() for e in engineers
+            ):
+                st.toast(f"@{handle} already exists", icon="⚠️")
+            else:
+                client.table(FIELD_ENGINEERS_TABLE).insert(
+                    {"username": handle, "is_active": True}
+                ).execute()
+                _cached_field_engineer_usernames.clear()
+                st.toast(f"@{handle} added", icon="✅")
+                st.rerun()
+
+    st.divider()
+
+    active = [e for e in engineers if e.get("is_active", True)]
+    inactive = [e for e in engineers if not e.get("is_active", True)]
+
+    if active:
+        st.markdown(
+            '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+            'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Active</p>',
+            unsafe_allow_html=True,
+        )
+        for eng in active:
+            _render_engineer_manage_row(eng)
+
+    if inactive:
+        st.markdown(
+            '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+            'text-transform:uppercase;letter-spacing:.06em;margin:10px 0 6px">Inactive</p>',
+            unsafe_allow_html=True,
+        )
+        for eng in inactive:
+            _render_engineer_manage_row(eng)
+
+    st.divider()
+    st.caption("Changes apply immediately to assign panel pickers.")
+
+
+@st.dialog("Manage categories", width="small")
+def manage_categories_dialog() -> None:
+    """
+    Add or remove task categories.
+    Writes to dashboard_task_categories via Supabase.
+    sort_order controls picker display order.
+    """
+    client = _get_supabase_client()
+    categories = (
+        client.table(TASK_CATEGORIES_TABLE)
+        .select("name, sort_order")
+        .order("sort_order")
+        .order("name")
+        .execute()
+        .data
+        or []
+    )
+
+    st.markdown(
+        '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Add category</p>',
+        unsafe_allow_html=True,
+    )
+    with st.form("new_cat_form", clear_on_submit=True):
+        col_inp, col_btn = st.columns([3, 1], gap="small")
+        with col_inp:
+            new_cat = st.text_input(
+                "Name",
+                placeholder="e.g. Fibre splice",
+                label_visibility="collapsed",
+                key="new_cat_name",
+            )
+        with col_btn:
+            add_cat = st.form_submit_button("+ Add", use_container_width=True)
+        if add_cat:
+            name = normalize_task_category_name(new_cat)
+            if not name:
+                st.toast("Enter a category name", icon="⚠️")
+            elif any(
+                str(c["name"]).lower() == name.lower() for c in categories
+            ):
+                st.toast(f'"{name}" already exists', icon="⚠️")
+            else:
+                next_order = max(
+                    (int(c.get("sort_order") or 0) for c in categories),
+                    default=0,
+                ) + 10
+                client.table(TASK_CATEGORIES_TABLE).insert(
+                    {"name": name, "sort_order": next_order}
+                ).execute()
+                _cached_task_categories.clear()
+                st.toast(f'"{name}" added', icon="✅")
+                st.rerun()
+
+    st.divider()
+
+    st.markdown(
+        '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Categories</p>',
+        unsafe_allow_html=True,
+    )
+
+    for cat in categories:
+        cat_name = str(cat["name"])
+        cat_order = int(cat.get("sort_order") or 0)
+        ckey = hashlib.sha256(cat_name.encode("utf-8")).hexdigest()[:16]
+        col_name, col_order, col_del = st.columns([3, 1, 0.4], gap="small")
+
+        with col_name:
+            st.markdown(
+                f'<span style="font-size:14px;font-weight:400;color:#8a9ac0">'
+                f"{html.escape(cat_name)}</span>",
+                unsafe_allow_html=True,
+            )
+
+        with col_order:
+            new_order = st.number_input(
+                "Order",
+                value=cat_order,
+                min_value=0,
+                max_value=999,
+                step=10,
+                label_visibility="collapsed",
+                key=f"order_{ckey}",
+            )
+            if new_order != cat_order:
+                client.table(TASK_CATEGORIES_TABLE).update(
+                    {"sort_order": int(new_order)}
+                ).eq("name", cat_name).execute()
+                _cached_task_categories.clear()
+                st.rerun()
+
+        with col_del:
+            if st.button(
+                "×",
+                key=f"del_cat_{ckey}",
+                help="Remove category",
+                use_container_width=True,
+            ):
+                delete_task_category(client, cat_name, table=TASK_CATEGORIES_TABLE)
+                _cached_task_categories.clear()
+                st.toast(f'"{cat_name}" removed', icon="✅")
+                st.rerun()
+
+    st.divider()
+    st.caption("Sort order controls picker display sequence. Lower = first.")
+
+
 def _ensure_task_categories_synced(client) -> None:
     """Backfill ``dashboard_task_categories`` from ticket rows (once per session)."""
     if st.session_state.get(_CATEGORIES_SYNCED_ONCE_KEY):
@@ -12364,9 +13735,9 @@ def _sidebar_controls() -> None:
 def main() -> None:
     # Must be the first Streamlit command every run (login + dashboard).
     st.set_page_config(
-        page_title="NetOps Coverage Eye",
+        page_title="NetOps · Coverage Eye",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
     )
 
     _check_password()
@@ -12394,20 +13765,15 @@ def main() -> None:
             )
         return
 
-    _inject_bon_theme()
+    apply_theme()
     _init_dash_date_range_state()
-    _inject_bon_sidebar_visibility_css()
-    _inject_bon_dashboard_scripts()
-    _render_app_chrome()
-
-    _sidebar_controls()
+    _render_dispatch_app_shell()
 
     auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
     def _dashboard_body_fragment() -> None:
-        _render_global_assign_day_metrics()
         _sync_dash_range_from_ui(
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
@@ -13589,17 +14955,31 @@ _BON_THEME_CSS = """
         font-weight: 600 !important;
         box-shadow: inset 0 -2px 0 var(--bon-oak) !important;
     }
-    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child,
-    [data-testid="stMain"] div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
+    div.st-key-disp_header_shell div[data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) {
+        box-shadow: none !important;
+        border-bottom: 2px solid #3b82f6 !important;
+        font-weight: 500 !important;
+    }
+    div.st-key-disp_header_shell div[data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) span,
+    div.st-key-disp_header_shell div[data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) p {
+        color: #e2e8f8 !important;
+        font-weight: 500 !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
         display: none !important;
     }
-    /* Dashboard nav: one row (CSM Cases | Sales Cases | Log | Performance) */
+    /* Header nav tabs: keep label text visible (do not hide first-child in main) */
+    div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label [data-testid="stMarkdownContainer"] {
+        display: block !important;
+        visibility: visible !important;
+        width: auto !important;
+        height: auto !important;
+        overflow: visible !important;
+        opacity: 1 !important;
+    }
+    /* Dashboard nav body (header tabs styled in dispatch_console) */
     [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] {
         flex-direction: row !important;
-        flex-wrap: wrap !important;
-        align-items: flex-end !important;
-        gap: 1.75rem !important;
-        margin-bottom: 0.5rem !important;
     }
     /* Clickable queue metrics (replace second nav row) */
     [data-testid="stMain"] div[class*="st-key-dash_metric_nav_"] .stButton > button,
@@ -13667,11 +15047,11 @@ _BON_THEME_CSS = """
         gap: 0.65rem;
     }
     .perf-ss-row.is-selected .perf-ss-name {
-        color: var(--bon-oak);
+        color: #e2e8f8;
     }
     .perf-ss-name {
         flex: 0 0 9.5rem;
-        font-size: 0.82rem;
+        font-size: 13px;
         color: var(--bon-text);
         white-space: nowrap;
         overflow: hidden;
@@ -13696,14 +15076,14 @@ _BON_THEME_CSS = """
         justify-content: center;
         gap: 0.35rem;
         padding: 0.28rem 0.55rem;
-        font-size: 0.72rem;
+        font-size: 11px;
         line-height: 1.1;
         text-transform: lowercase;
         letter-spacing: 0.02em;
     }
     .perf-ss-seg.solo {
         border-right: 1px solid rgba(215, 180, 145, 0.22);
-        color: #9ec5e8;
+        color: #e2e8f8;
     }
     .perf-ss-seg.shared {
         color: var(--bon-oak);
@@ -13714,8 +15094,8 @@ _BON_THEME_CSS = """
     .perf-ss-seg.sales {
         color: #b8d4a8;
     }
-    .perf-ss-seg .num {
-        font-size: 0.88rem;
+    .perf-ss-seg .num, .perf-ss-seg .perf-count {
+        font-size: 14px;
         font-weight: 600;
         color: var(--bon-text);
     }
@@ -13735,28 +15115,28 @@ _BON_THEME_CSS = """
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 1.55rem;
+        font-size: 22px;
         font-weight: 600;
         color: var(--bon-text);
         background: radial-gradient(circle at 30% 30%, #1a1a1a, var(--bon-bg));
     }
     .perf-ss-total-lbl {
         margin-top: 0.25rem;
-        font-size: 0.68rem;
+        font-size: 11px;
         color: var(--bon-muted);
         text-transform: uppercase;
         letter-spacing: 0.06em;
     }
     .perf-ss-total-sub {
         margin-top: 0.15rem;
-        font-size: 0.62rem;
+        font-size:11px;
         color: var(--bon-oak);
         letter-spacing: 0.02em;
         text-align: center;
         line-height: 1.25;
     }
     .perf-ss-hint {
-        font-size: 0.72rem;
+        font-size: 11px;
         color: var(--bon-muted);
         margin: 0 0 0.5rem;
     }
@@ -13765,7 +15145,7 @@ _BON_THEME_CSS = """
         flex-wrap: wrap;
         gap: 0.4rem 0.65rem;
         margin: 0.25rem 0 0.65rem;
-        font-size: 0.78rem;
+        font-size: 11px;
     }
     .perf-queue-chip {
         padding: 0.18rem 0.55rem;
@@ -13778,6 +15158,43 @@ _BON_THEME_CSS = """
         color: var(--bon-text);
         font-weight: 600;
         margin-left: 0.2rem;
+    }
+    /* Header nav tabs — override global oak button styling */
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button,
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"],
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"],
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"],
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {
+        background: transparent !important;
+        background-color: transparent !important;
+        background-image: none !important;
+        border: none !important;
+        border-bottom: 2px solid transparent !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        color: #6b7f9e !important;
+        font-size:14px !important;
+        font-weight: 400 !important;
+        padding: 0 14px !important;
+        min-height: var(--disp-header-h) !important;
+        height: var(--disp-header-h) !important;
+    }
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"],
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"] {
+        color: #e2e8f8 !important;
+        font-weight: 500 !important;
+        border-bottom-color: #3b82f6 !important;
+    }
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"],
+    div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {
+        color: #6b7f9e !important;
+    }
+    div.st-key-disp_header_shell [data-testid="stPopover"] > button {
+        background: transparent !important;
+        border: 0.5px solid #2a3a5a !important;
+        border-radius: 999px !important;
+        color: #8a9ac0 !important;
+        box-shadow: none !important;
     }
 </style>
 """
@@ -14021,7 +15438,7 @@ def _inject_bon_dashboard_scripts() -> None:
 
 
 def _inject_bon_theme() -> None:
-    _inject_bon_theme_styles_once()
+    apply_theme()
 
 
 def _format_when(when: object) -> str:
@@ -14318,9 +15735,9 @@ def _migrate_legacy_queue_nav() -> None:
 
 
 def _render_dashboard_header(*, refreshed_at: str) -> None:
-    """Last refresh line below the metric cards."""
-    st.caption(
-        f"Updated **{refreshed_at} {LOCAL_TZ_LABEL}** · change dates in the header **Time Range**"
+    """Last refresh line below the nav."""
+    render_refresh_caption(
+        f"Updated {refreshed_at} {LOCAL_TZ_LABEL} · change dates in ☰ → Time range"
     )
 
 
@@ -14329,12 +15746,34 @@ def _apply_pending_dashboard_nav() -> None:
     pending_main = st.session_state.pop(_DASH_PENDING_MAIN_NAV_KEY, None)
     pending_ticket_queue = st.session_state.pop(_DASH_PENDING_TICKET_QUEUE_KEY, None)
     pending_sales_queue = st.session_state.pop(_DASH_PENDING_SALES_QUEUE_KEY, None)
+    pending_ticket = st.session_state.pop(_DASH_PENDING_TICKET_SELECT_KEY, None)
+    pending_engineer = st.session_state.pop(_DASH_PENDING_ENGINEER_FILTER_KEY, None)
     if pending_main is not None:
         st.session_state[_DASH_MAIN_NAV_KEY] = _normalize_dash_main_nav(pending_main)
     if pending_ticket_queue is not None:
         st.session_state[_DASH_TICKET_QUEUE_KEY] = pending_ticket_queue
+        aq_key = active_queue_key()
+        base_q = _queue_segment_base(pending_ticket_queue)
+        queue_map = {
+            STATUS_DAILY_TASK: "Daily Task",
+            "Open": "Needs Review",
+            STATUS_ON_HOLD: "On Hold",
+            STATUS_UNDER_INVESTIGATION: "Under Investigation",
+            "Unattended": "Unattended",
+            STATUS_RESOLVED: "Resolved",
+        }
+        st.session_state[aq_key] = queue_map.get(base_q, base_q)
     if pending_sales_queue is not None:
+        base = _sc_queue_segment_base(pending_sales_queue)
+        st.session_state[_SALES_ACTIVE_QUEUE_KEY] = base
         st.session_state[_DASH_SALES_QUEUE_KEY] = pending_sales_queue
+    if pending_ticket is not None:
+        st.session_state[_DISP_SELECTED_KEY] = str(pending_ticket)
+    if pending_engineer is not None:
+        st.session_state[_DISP_ENGINEER_FILTER_KEY] = _perf_norm_member(pending_engineer)
+    pending_sales_case = st.session_state.pop(_DASH_PENDING_SALES_SELECT_KEY, None)
+    if pending_sales_case is not None:
+        st.session_state[_SALES_SELECTED_KEY] = str(pending_sales_case)
 
 
 def _render_clickable_queue_metric(
@@ -14361,112 +15800,6 @@ def _render_clickable_queue_metric(
             st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
             st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = option_label
             st.rerun()
-
-
-def _render_assign_day_metrics(
-    df_all: pd.DataFrame,
-    *,
-    df_in_view: pd.DataFrame | None = None,
-    sc_all: pd.DataFrame | None = None,
-    sc_in_view: pd.DataFrame | None = None,
-) -> None:
-    """Today's assignment funnel (ops timezone, UTC+5)."""
-    today = datetime.now(OPS_TZ).date()
-    start = _local_date_start(today)
-    end = _local_date_end(today)
-    assigned_today = 0
-    responded_today = 0
-    unattended_in_view = 0
-    pending_in_view = 0
-    if not df_all.empty:
-        view = df_in_view if df_in_view is not None else df_all
-        if "last_assigned_at" in df_all.columns:
-            la = _parse_ts(df_all["last_assigned_at"])
-            assigned_today = int(((la >= start) & (la <= end)).sum())
-        if "responded_at" in df_all.columns:
-            rp = _parse_ts(df_all["responded_at"])
-            responded_today = int(((rp >= start) & (rp <= end)).sum())
-        if not view.empty and "status" in view.columns:
-            masks = _ticket_queue_count_masks(view)
-            pending_in_view = int(masks["pending"].sum())
-            unattended_in_view = int(masks["unattended"].sum())
-    if sc_all is not None and not sc_all.empty:
-        if "last_assigned_at" in sc_all.columns:
-            sc_la = _parse_ts(sc_all["last_assigned_at"])
-            sc_mask = (sc_la >= start) & (sc_la <= end)
-            if "assigned_to" in sc_all.columns:
-                sc_mask &= (
-                    sc_all["assigned_to"].fillna("").astype(str).str.strip().ne("")
-                )
-            if "status" in sc_all.columns:
-                effective = sc_all["status"].astype(str).str.strip().map(
-                    _sc_effective_status
-                )
-                sc_mask &= effective.ne(SC_STATUS_RESOLVED)
-            assigned_today += int(sc_mask.sum())
-        if "created_at" in sc_all.columns:
-            created = _parse_ts(sc_all["created_at"])
-            attended_today = (created >= start) & (created <= end)
-            if "attended_by" in sc_all.columns:
-                ab = sc_all["attended_by"].fillna("").astype(str).str.strip()
-                attended_today = attended_today & ab.ne("")
-            responded_today += int(attended_today.sum())
-        sc_view = sc_in_view if sc_in_view is not None else sc_all
-        if not sc_view.empty and "status" in sc_view.columns:
-            effective = sc_view["status"].astype(str).str.strip().map(_sc_effective_status)
-            pending_in_view += int(effective.eq(SC_STATUS_SALES_TICKET).sum())
-    if (
-        assigned_today == 0
-        and responded_today == 0
-        and pending_in_view == 0
-        and unattended_in_view == 0
-    ):
-        return
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Assigned today", assigned_today)
-    c2.metric("Responded today", responded_today)
-    c3.metric(f"{STATUS_DAILY_TASK} (in view)", pending_in_view)
-    c4.metric("Unattended (in view)", unattended_in_view)
-
-
-def _render_global_assign_day_metrics() -> None:
-    """Assign-day funnel under the page title — shown on every main nav tab."""
-    try:
-        df_all = _fetch_tickets()
-    except _TableMissingError:
-        df_all = pd.DataFrame()
-    except Exception:
-        return
-
-    sc_all: pd.DataFrame | None
-    try:
-        sc_all = _fetch_sales_cases_df()
-    except Exception:
-        sc_all = None
-    if sc_all is None:
-        sc_all = pd.DataFrame()
-
-    if df_all.empty and sc_all.empty:
-        return
-
-    range_start, range_end = _get_dash_range()
-    df_in_view: pd.DataFrame | None = None
-    if not df_all.empty and "status" in df_all.columns:
-        df_in_view, _ = _dashboard_tickets_in_view(
-            df_all, range_start=range_start, range_end=range_end
-        )
-    sc_in_view: pd.DataFrame | None = None
-    if not sc_all.empty and "status" in sc_all.columns:
-        sc_in_view, _ = _dashboard_sales_cases_in_view(
-            sc_all, range_start=range_start, range_end=range_end
-        )
-    with st.container(key="bon_dash_metrics_row"):
-        _render_assign_day_metrics(
-            df_all,
-            df_in_view=df_in_view,
-            sc_all=sc_all if not sc_all.empty else None,
-            sc_in_view=sc_in_view,
-        )
 
 
 def _render_queue_summary_metrics(
@@ -14614,16 +15947,25 @@ def _sync_dashboard_nav_state(
 
 
 def _render_main_navigation() -> str:
-    """Top row: CSM Cases | Sales Cases | Log | Performance."""
-    return str(
-        st.radio(
-            "View",
-            options=list(_DASH_MAIN_NAV_OPTIONS),
-            horizontal=True,
-            key=_DASH_MAIN_NAV_KEY,
-            label_visibility="collapsed",
-        )
+    """Top row: CSM cases | Sales cases | Log | Performance (mockup tab labels)."""
+    current = _normalize_dash_main_nav(
+        st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM)
     )
+    tab_cols = st.columns(len(_DASH_MAIN_NAV_OPTIONS), gap="small")
+    for col, opt in zip(tab_cols, _DASH_MAIN_NAV_OPTIONS, strict=True):
+        label = _DASH_MAIN_NAV_LABELS.get(str(opt), str(opt))
+        tab_key = f"_dash_nav_tab_{opt.replace(' ', '_').lower()}"
+        is_active = opt == current
+        with col:
+            if st.button(
+                label,
+                key=tab_key,
+                type="primary" if is_active else "secondary",
+                use_container_width=False,
+            ):
+                st.session_state[_DASH_MAIN_NAV_KEY] = opt
+                st.rerun()
+    return current
 
 
 def _sort_tickets_newest_first(df: pd.DataFrame) -> pd.DataFrame:
@@ -15585,429 +16927,692 @@ def _render_sales_case_toolbar(
     )
 
 
-def _render_clickable_sales_queue_metric(
-    col: object,
+def _get_sales_today_counts(df: pd.DataFrame) -> dict[str, int]:
+    """Today's sales metrics — same day framing as CSM sidebar Today block."""
+    today = datetime.now(OPS_TZ).date()
+    start = _local_date_start(today)
+    end = _local_date_end(today)
+    new_count = resolved_count = 0
+    if not df.empty:
+        if "created_at" in df.columns:
+            ca = _parse_ts(df["created_at"])
+            new_count = int(((ca >= start) & (ca <= end)).sum())
+        resolved_sub = _sc_filter_sales_df(df, (SC_STATUS_RESOLVED,))
+        if not resolved_sub.empty and "updated_at" in resolved_sub.columns:
+            ua = _parse_ts(resolved_sub["updated_at"])
+            resolved_count = int(((ua >= start) & (ua <= end)).sum())
+    investigation_count = len(_sc_filter_sales_df(df, _SC_INVESTIGATION_QUEUE_STATUSES))
+    design_count = len(_sc_filter_sales_df(df, (SC_STATUS_DESIGN,)))
+    return {
+        "new": new_count,
+        "resolved": resolved_count,
+        "investigation": investigation_count,
+        "design": design_count,
+    }
+
+
+def _get_sales_queue_counts(df: pd.DataFrame) -> dict[str, int]:
+    return {
+        SC_STATUS_SALES_TICKET: len(_sc_filter_sales_df(df, (SC_STATUS_SALES_TICKET,))),
+        SC_STATUS_INVESTIGATION: len(
+            _sc_filter_sales_df(df, _SC_INVESTIGATION_QUEUE_STATUSES)
+        ),
+        SC_STATUS_DESIGN: len(_sc_filter_sales_df(df, (SC_STATUS_DESIGN,))),
+        SC_STATUS_RESOLVED: len(_sc_filter_sales_df(df, (SC_STATUS_RESOLVED,))),
+    }
+
+
+def _sales_cases_list_for_queue(df: pd.DataFrame, status: str) -> list[dict]:
+    if status == SC_STATUS_INVESTIGATION:
+        sub = _sc_filter_sales_df(df, _SC_INVESTIGATION_QUEUE_STATUSES)
+    else:
+        sub = _sc_filter_sales_df(df, (status,))
+    if sub.empty:
+        return []
+    if "updated_at" in sub.columns:
+        sub = sub.copy()
+        sub["_sort"] = _parse_ts(sub["updated_at"])
+        sub = sub.sort_values("_sort", ascending=False, na_position="last").drop(
+            columns=["_sort"], errors="ignore"
+        )
+    return sub.to_dict("records")
+
+
+def _init_sales_active_queue() -> str:
+    if _SALES_ACTIVE_QUEUE_KEY not in st.session_state:
+        legacy = st.session_state.get(_DASH_SALES_QUEUE_KEY)
+        st.session_state[_SALES_ACTIVE_QUEUE_KEY] = (
+            _sc_queue_segment_base(legacy) if legacy else SC_STATUS_SALES_TICKET
+        )
+    cur = str(st.session_state.get(_SALES_ACTIVE_QUEUE_KEY) or SC_STATUS_SALES_TICKET)
+    if cur not in SALES_QUEUE_ORDER:
+        cur = SC_STATUS_SALES_TICKET
+        st.session_state[_SALES_ACTIVE_QUEUE_KEY] = cur
+    return cur
+
+
+def _render_sales_sidebar(
     *,
-    title: str,
-    value: int,
-    queue_name: str,
-    option_label: str,
+    df: pd.DataFrame,
+    df_tickets: pd.DataFrame,
 ) -> None:
-    main_nav = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM))
-    q_base = _sc_queue_segment_base(st.session_state.get(_DASH_SALES_QUEUE_KEY))
-    active = main_nav == "Sales Cases" and q_base == queue_name
-    label = f"{title}\n{value:,}"
-    with col:
+    """Sidebar: Today metrics (2×2), queue list, engineer list — mirrors CSM."""
+    st.markdown(t_section_label("Today"), unsafe_allow_html=True)
+    today_counts = _get_sales_today_counts(df)
+    m1, m2 = st.columns(2)
+    m3, m4 = st.columns(2)
+    with m1:
+        st.metric("New", today_counts["new"])
+    with m2:
+        st.metric("Resolved", today_counts["resolved"])
+    with m3:
+        st.metric("Investigation", today_counts["investigation"])
+    with m4:
+        st.metric("Design", today_counts["design"])
+
+    st.markdown(
+        t_section_label("Queues", margin="margin-top:16px;margin-bottom:10px"),
+        unsafe_allow_html=True,
+    )
+    queue_counts = _get_sales_queue_counts(df)
+    selected_queue = _init_sales_active_queue()
+    picked = render_queue_list(
+        selected=selected_queue,
+        counts=queue_counts,
+        session_key=_SALES_ACTIVE_QUEUE_KEY,
+        queue_order=SALES_QUEUE_ORDER,
+        queue_dots=SALES_QUEUE_DOTS,
+        button_key_prefix="sales_queue",
+    )
+    st.session_state[_SALES_ACTIVE_QUEUE_KEY] = picked
+
+    st.markdown(
+        t_section_label("Engineers", margin="margin-top:12px;margin-bottom:7px"),
+        unsafe_allow_html=True,
+    )
+    for eng in _dispatch_engineer_presence(df_tickets):
+        render_engineer_row(eng)
+
+
+def _render_sales_assign_panel() -> None:
+    """New sales case panel — same layout pattern as CSM assign (intake vs assign)."""
+    engineers = get_engineer_handles()
+    categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    unassigned = "— unassigned —"
+    mode = str(
+        st.session_state.get(_SALES_ASSIGN_MODE_KEY, _SALES_ASSIGN_MODE_INTAKE)
+    )
+    intake_only = mode == _SALES_ASSIGN_MODE_INTAKE
+
+    with st.container(key="disp_sales_assign_panel"):
+        st.markdown(
+            t_section_label("New sales case", spacing=".06em", margin="margin:0 0 4px"),
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="disp-mode-toggle sales-mode-toggle">', unsafe_allow_html=True)
+        t1, t2 = st.columns(2, gap="small")
+        with t1:
+            if st.button(
+                "☰ Intake only",
+                key="sap_mode_intake",
+                use_container_width=True,
+                type="primary" if intake_only else "secondary",
+            ):
+                st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_INTAKE
+                st.rerun()
+        with t2:
+            if st.button(
+                "✈ Assign engineer",
+                key="sap_mode_assign",
+                use_container_width=True,
+                type="primary" if not intake_only else "secondary",
+            ):
+                st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_ASSIGN
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        r1a, r1b, r1c, r1d = st.columns([1.05, 1.55, 0.75, 0.75], gap="medium")
+        with r1a:
+            _render_assign_plain_label("Case ref")
+            case_ref = st.text_input(
+                "Case ref",
+                placeholder="Ticket / case ID",
+                key="sap_ref",
+                label_visibility="collapsed",
+            )
+        with r1b:
+            _render_assign_plain_label("Account")
+            account_name = st.text_input(
+                "Account name",
+                placeholder="Resort / company",
+                key="sap_acc",
+                label_visibility="collapsed",
+            )
+        with r1c:
+            _render_assign_plain_label("Region")
+            region = st.selectbox(
+                "Region",
+                list(SALES_REGION_CODES),
+                key="sap_region",
+                label_visibility="collapsed",
+            )
+        with r1d:
+            _render_assign_plain_label("Priority")
+            priority = st.selectbox(
+                "Priority",
+                ["Standard", "High"],
+                key="sap_priority",
+                label_visibility="collapsed",
+            )
+
+        engineer = unassigned
+        if not intake_only:
+            r_eng, _r_pad = st.columns([1.18, 2.82], gap="small")
+            with r_eng:
+                _render_assign_plain_label("Engineer")
+                eng_sel, eng_mgr = st.columns(
+                    [1, 0.22], gap="small", vertical_alignment="top"
+                )
+                with eng_sel:
+                    engineer = st.selectbox(
+                        "Engineer",
+                        engineers or ["—"],
+                        key="sap_eng",
+                        label_visibility="collapsed",
+                    )
+                with eng_mgr:
+                    _render_assign_manage_icon_btn(
+                        manage_key="sap_btn_manage_eng",
+                        manage_help="Manage engineers",
+                        on_manage=manage_engineers_dialog,
+                    )
+
+        r2a, r2b, r2c = st.columns([1.2, 2.35, 1.05], gap="medium")
+        with r2a:
+            _render_assign_plain_label("Category")
+            cat_sel, cat_mgr = st.columns(
+                [1, 0.22], gap="small", vertical_alignment="top"
+            )
+            with cat_sel:
+                sales_category = st.selectbox(
+                    "Category",
+                    categories or ["—"],
+                    key="sap_category",
+                    label_visibility="collapsed",
+                )
+            with cat_mgr:
+                _render_assign_manage_icon_btn(
+                    manage_key="sap_btn_manage_cat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
+        with r2b:
+            _render_assign_plain_label("Notes")
+            notes = st.text_input(
+                "Notes",
+                placeholder="Optional intake notes…",
+                key="sap_notes",
+                label_visibility="collapsed",
+            )
+        with r2c:
+            submit_label = (
+                "Create case ↗" if intake_only else "Create + assign ↗"
+            )
+            st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
+            clicked = st.button(submit_label, key="sap_submit", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            if clicked:
+                _handle_sales_floor_submit(
+                    case_ref,
+                    account_name,
+                    region,
+                    sales_category,
+                    priority,
+                    engineer,
+                    require_engineer=not intake_only,
+                )
+
+
+def _handle_sales_floor_submit(
+    case_ref: str,
+    account_name: str,
+    region: str,
+    sales_category: str,
+    priority: str,
+    engineer: str,
+    *,
+    require_engineer: bool = False,
+) -> None:
+    if not str(case_ref or "").strip():
+        st.toast("Enter a case reference", icon="⚠️")
+        return
+    if not str(account_name or "").strip():
+        st.toast("Account name is required", icon="⚠️")
+        return
+    if not str(sales_category or "").strip() or sales_category == "—":
+        st.toast("Category is required", icon="⚠️")
+        return
+
+    operator_id = _session_operator_id() or "unknown"
+    eng = None if engineer in ("— unassigned —", "—", "") else engineer
+    if require_engineer and not eng:
+        st.toast("Select an engineer", icon="⚠️")
+        return
+    notes = str(st.session_state.get("sap_notes") or "").strip() or None
+    cat = canonical_task_category(str(sales_category).strip()) or str(sales_category).strip()
+
+    row: dict[str, object] = {
+        "case_ref": str(case_ref).strip(),
+        "account_name": str(account_name).strip(),
+        "account_region": region,
+        "sales_category": cat,
+        "sales_priority": priority,
+        "status": SC_STATUS_SALES_TICKET,
+        "attended_by": operator_id,
+        "admin_owner": operator_id,
+    }
+    if eng:
+        row["assigned_to"] = eng
+        row["last_assigned_at"] = _cc_utc_now_iso()
+    if notes:
+        row["description"] = notes
+        row["additional_info"] = notes
+
+    try:
+        _sales_cases_insert_row(row)
+        _invalidate_dashboard_data_cache()
+        st.toast(f"✓ Sales case {case_ref} created", icon="✅")
+        for k in ("sap_ref", "sap_acc", "sap_category", "sap_notes"):
+            st.session_state.pop(k, None)
+        if not require_engineer:
+            st.session_state.pop("sap_eng", None)
+        st.session_state[_SALES_ACTIVE_QUEUE_KEY] = SC_STATUS_SALES_TICKET
+        st.rerun()
+    except Exception as exc:
+        st.toast(f"Failed: {exc}", icon="❌")
+
+
+def _sales_move_destinations(status: str) -> list[tuple[str, str]]:
+    """Return (label, target_status) pairs for row Move to menu."""
+    eff = _sc_effective_status(status)
+    if eff == SC_STATUS_SALES_TICKET:
+        return [
+            ("Investigation", SC_STATUS_INVESTIGATION),
+            ("Design", SC_STATUS_DESIGN),
+            ("Resolved", SC_STATUS_RESOLVED),
+        ]
+    if eff in _SC_INVESTIGATION_QUEUE_STATUSES:
+        return [
+            ("Design", SC_STATUS_DESIGN),
+            ("Resolved", SC_STATUS_RESOLVED),
+        ]
+    if eff == SC_STATUS_DESIGN:
+        return [
+            ("Investigation", SC_STATUS_INVESTIGATION),
+            ("Resolved", SC_STATUS_RESOLVED),
+        ]
+    if eff == SC_STATUS_RESOLVED:
+        return [
+            ("Design", SC_STATUS_DESIGN),
+            ("Investigation", SC_STATUS_INVESTIGATION),
+        ]
+    return []
+
+
+def _sales_floor_move(case_ref: str, destination: str) -> None:
+    if destination == SC_STATUS_RESOLVED:
+        st.session_state[_SALES_ROW_RESOLVE] = case_ref
+        st.session_state[_SALES_SELECTED_KEY] = case_ref
+        st.rerun()
+        return
+
+    row = _fetch_sales_case_row_by_ref(case_ref)
+    if not row:
+        st.toast("Case not found", icon="⚠️")
+        return
+    row_id = str(row.get("id") or "").strip()
+    if not row_id:
+        st.toast("Case row missing id", icon="⚠️")
+        return
+    op = _session_operator_id() or "unknown"
+    err = _sc_apply_status_advance(
+        row_id,
+        r0=pd.Series(row),
+        target_status=destination,
+        op=op,
+    )
+    if err:
+        st.toast(str(err).replace("**", ""), icon="⚠️")
+        return
+    _invalidate_dashboard_data_cache()
+    st.toast(f"{case_ref} → {destination}", icon="✅")
+    st.rerun()
+
+
+def _render_sales_row_actions(case: dict, row_key: str) -> None:
+    status = str(case.get("status") or "")
+    case_ref = str(case.get("case_ref") or "")
+
+    with st.popover("⋯", use_container_width=False):
+        st.markdown(
+            '<p style="font-size:11px;color:#2a3a5a;text-transform:uppercase;'
+            'letter-spacing:.05em;margin-bottom:4px">Move to</p>',
+            unsafe_allow_html=True,
+        )
+        for label, dest in _sales_move_destinations(status):
+            if st.button(
+                label, key=f"move_sc_{dest}_{row_key}", use_container_width=True
+            ):
+                _sales_floor_move(case_ref, dest)
+
+        st.divider()
+        st.markdown(
+            '<p style="font-size:11px;color:#2a3a5a;text-transform:uppercase;'
+            'letter-spacing:.05em;margin-bottom:4px">Actions</p>',
+            unsafe_allow_html=True,
+        )
+
         if st.button(
-            label,
-            key=f"dash_sc_metric_nav_{queue_name.lower().replace(' ', '_')}",
-            type="secondary",
-            use_container_width=True,
-            disabled=active,
+            "✏ Edit details", key=f"edit_sc_{row_key}", use_container_width=True
         ):
-            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
-            st.session_state[_DASH_PENDING_SALES_QUEUE_KEY] = option_label
+            st.session_state[_SALES_ROW_EDIT] = case_ref
+            st.session_state[_SALES_SELECTED_KEY] = case_ref
             st.rerun()
 
+        if _sc_effective_status(status) != SC_STATUS_RESOLVED:
+            if st.button(
+                "↩ Assign engineer",
+                key=f"assign_eng_sc_{row_key}",
+                use_container_width=True,
+            ):
+                st.session_state[_SALES_ROW_ASSIGN] = case_ref
+                st.session_state[_SALES_SELECTED_KEY] = case_ref
+                st.rerun()
 
-def _render_sales_queue_summary_metrics(
-    *,
-    total_sales_ticket: int,
-    total_investigation: int,
-    total_design: int,
-    total_resolved: int,
-    sales_ticket_label: str,
-    investigation_label: str,
-    design_label: str,
-    resolved_label: str,
-) -> None:
-    c1, c2, c3, c4 = st.columns(4)
-    _render_clickable_sales_queue_metric(
-        c1,
-        title="Sales Ticket",
-        value=total_sales_ticket,
-        queue_name=SC_STATUS_SALES_TICKET,
-        option_label=sales_ticket_label,
-    )
-    _render_clickable_sales_queue_metric(
-        c2,
-        title="Investigation",
-        value=total_investigation,
-        queue_name=SC_STATUS_INVESTIGATION,
-        option_label=investigation_label,
-    )
-    _render_clickable_sales_queue_metric(
-        c3,
-        title="Design",
-        value=total_design,
-        queue_name=SC_STATUS_DESIGN,
-        option_label=design_label,
-    )
-    _render_clickable_sales_queue_metric(
-        c4,
-        title="Resolved",
-        value=total_resolved,
-        queue_name=SC_STATUS_RESOLVED,
-        option_label=resolved_label,
-    )
-
-
-def _sync_sales_dashboard_nav_state(
-    *,
-    total_sales_ticket: int,
-    total_investigation: int,
-    total_design: int,
-    total_resolved: int,
-) -> tuple[str, str, str, str]:
-    sales_ticket_label = _queue_segment_label(SC_STATUS_SALES_TICKET, total_sales_ticket)
-    investigation_label = _queue_segment_label(SC_STATUS_INVESTIGATION, total_investigation)
-    design_label = _queue_segment_label(SC_STATUS_DESIGN, total_design)
-    resolved_label = _queue_segment_label(SC_STATUS_RESOLVED, total_resolved)
-    sales_options = (
-        sales_ticket_label,
-        investigation_label,
-        design_label,
-        resolved_label,
-    )
-    if st.session_state.get(_DASH_MAIN_NAV_KEY) == "Sales Cases":
-        cur = st.session_state.get(_DASH_SALES_QUEUE_KEY)
-        if cur not in sales_options:
-            st.session_state[_DASH_SALES_QUEUE_KEY] = (
-                sales_ticket_label if total_sales_ticket > 0 else investigation_label
-            )
-    return (
-        sales_ticket_label,
-        investigation_label,
-        design_label,
-        resolved_label,
-    )
-
-
-def _render_sales_case_work_panel(
-    df: pd.DataFrame,
-    *,
-    key_prefix: str,
-    case_options: list[str],
-    op: str,
-    sales_cats: list[str],
-    field_cats: list[str],
-    fe_names: list[str],
-    fe_missing: bool,
-    open_tab: str = "next_step",
-) -> None:
-    """Actions for exactly one selected case (queue moves, site visit assign)."""
-    row_id, _cref, r0 = _picked_sales_case_from_selection(
-        df, key_prefix=key_prefix, case_options=case_options
-    )
-    if not row_id or r0 is None:
-        return
-
-    cur_status = _sc_effective_status(r0.get("status"))
-    if st.session_state.get("sc_action_synced_id") != row_id:
-        st.session_state["sc_action_synced_id"] = row_id
-        st.session_state["sc_action_comment"] = ""
-
-    status_actions = _sc_status_actions_for_case(cur_status)
-    show_site_visit = cur_status == SC_STATUS_REGIONAL
-    show_next_step = bool(status_actions and op)
-    if not show_next_step and not show_site_visit:
-        return
-
-    tab_names: list[str] = []
-    if show_next_step:
-        tab_names.append("Next Step")
-    if show_site_visit:
-        tab_names.append("Site Visit")
-
-    use_tabs = len(tab_names) > 1
-    if use_tabs:
-        tabs = st.tabs(tab_names)
-        tab_by_name = {name: i for i, name in enumerate(tab_names)}
-        start_idx = tab_by_name.get(
-            "Site Visit" if open_tab == "site_visit" else "Next Step",
-            0,
-        )
-        if start_idx > 0:
-            st.caption(f"Opened **{tab_names[start_idx]}** — use the tabs to switch.")
-    else:
-        tabs = [st.container()]
-
-    tab_idx = 0
-    if show_next_step:
-        with tabs[tab_idx]:
-            tab_idx += 1
-            with st.container(border=True, key=f"{key_prefix}_sc_next_box"):
-                st.markdown("**Next Step**")
-                st.caption("Move this case to another queue.")
-                status_labels = [
-                    _sc_toolbar_action_label(label, tgt) for label, tgt in status_actions
-                ]
-                label_to_target = _sc_toolbar_label_to_target(status_actions)
-                st.selectbox(
-                    "Move To",
-                    options=status_labels,
-                    key=f"{key_prefix}_panel_sc_action_sel",
-                )
-                st.text_area(
-                    "Comment (Optional)",
-                    key="sc_action_comment",
-                    height=88,
-                    placeholder="Optional note saved with the status change",
-                )
-                if st.button(
-                    "Apply Move",
-                    key=f"{key_prefix}_panel_sc_apply",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    choice = str(
-                        st.session_state.get(f"{key_prefix}_panel_sc_action_sel", "")
-                    )
-                    target = label_to_target.get(choice)
-                    if not target:
-                        return
-                    err = _sc_apply_status_advance(
-                        row_id,
-                        r0=r0,
-                        target_status=target,
-                        op=op,
-                        action_comment=str(
-                            st.session_state.get("sc_action_comment", "")
-                        ).strip()
-                        or None,
-                    )
-                    if err:
-                        st.warning(err)
-                    else:
-                        _invalidate_dashboard_data_cache()
-                        _sc_set_sales_flash(f"Case moved to **{target}**.")
-                        st.rerun()
-
-    if show_site_visit:
-        with tabs[tab_idx]:
-            region_label = str(r0.get("dispatch_region") or "—")
-            cur_assignee = str(r0.get("assigned_to") or "").strip()
-            with st.container(border=True, key=f"{key_prefix}_sc_site_box"):
-                st.markdown("**Site Visit**")
-                st.caption(f"**{region_label}** — assign the visiting engineer.")
-                if cur_assignee:
-                    st.markdown(f"Current: **{cur_assignee}**")
-                with st.form(
-                    f"sc_region_assign_engineer_form_{key_prefix}",
-                    clear_on_submit=False,
-                ):
-                    fe_key = f"sc_region_assign_fe_{key_prefix}"
-                    fe2_key = f"sc_region_assign_fe2_{key_prefix}"
-                    fe_man_key = f"sc_region_assign_fe_manual_{key_prefix}"
-                    fe2_man_key = f"sc_region_assign_fe2_manual_{key_prefix}"
-                    _render_engineer_pair_fields(
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        engineer_key=fe_key if fe_names and not fe_missing else fe_man_key,
-                        engineer2_key=fe2_key if fe_names and not fe_missing else fe2_man_key,
-                    )
-                    st.checkbox(
-                        "Post Assignment to Field Telegram",
-                        value=False,
-                        key=f"sc_region_assign_post_tg_{key_prefix}",
-                    )
-                    assign_submitted = st.form_submit_button(
-                        "Save Engineer Assignment",
-                        type="primary",
-                        use_container_width=True,
-                    )
-                if assign_submitted:
+        if _sc_effective_status(status) == SC_STATUS_RESOLVED:
+            st.divider()
+            if st.button(
+                "✕ Delete", key=f"del_sc_{row_key}", use_container_width=True
+            ):
+                row_id = str(case.get("id") or "").strip()
+                if row_id:
                     try:
-                        handle, handle2 = _resolve_engineer_pair(
-                            fe_names=fe_names,
-                            fe_missing=fe_missing,
-                            engineer_key=fe_key if fe_names and not fe_missing else fe_man_key,
-                            engineer2_key=fe2_key if fe_names and not fe_missing else fe2_man_key,
-                            required_primary=True,
+                        _sales_cases_delete_row(row_id)
+                        _invalidate_dashboard_data_cache()
+                        if st.session_state.get(_SALES_SELECTED_KEY) == case_ref:
+                            st.session_state.pop(_SALES_SELECTED_KEY, None)
+                        st.toast(f"{case_ref} deleted", icon="✅")
+                        st.rerun()
+                    except Exception as exc:
+                        st.toast(f"Delete failed: {exc}", icon="❌")
+
+
+def _render_sales_detail_panel() -> None:
+    case_ref = st.session_state.get(_SALES_SELECTED_KEY)
+    if not case_ref:
+        st.markdown(
+            """
+        <div style="height:200px;display:flex;align-items:center;
+          justify-content:center;color:#2a3a5a;font-size:14px">
+          Select a case to view details
+        </div>""",
+            unsafe_allow_html=True,
+        )
+        return
+
+    case = _fetch_sales_case_row_by_ref(str(case_ref))
+    if not case:
+        return
+
+    st.markdown(
+        f"""
+    <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
+      <div style="font-size:16px;font-weight:500;color:#e2e8f8;margin-bottom:5px">
+        {html.escape(str(case.get("case_ref") or ""))}</div>
+      {status_pill(str(case.get("status") or ""))}
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        t_section_label("Account", spacing=".06em", margin="margin:0 0 5px"),
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;margin-bottom:12px">'
+        f'{html.escape(str(case.get("account_name") or ""))} · '
+        f'{html.escape(str(case.get("account_region") or "—"))}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        t_section_label("Priority", spacing=".06em", margin="margin:0 0 5px"),
+        unsafe_allow_html=True,
+    )
+    pri = str(case.get("sales_priority") or "Standard")
+    color = "#ef4444" if pri == "High" else "#8a9ac0"
+    st.markdown(
+        f'<div style="font-size:13px;color:{color};margin-bottom:12px">'
+        f"{html.escape(pri)}</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        t_section_label("Engineer", spacing=".06em", margin="margin:0 0 5px"),
+        unsafe_allow_html=True,
+    )
+    eng = str(case.get("assigned_to") or "").strip()
+    if eng:
+        st.markdown(
+            f'<div style="font-size:13px;color:#8a9ac0;margin-bottom:12px">'
+            f"{html.escape(eng)}</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="font-size:13px;color:#4a5a7a;font-style:italic;margin-bottom:12px">'
+            "Unassigned</div>",
+            unsafe_allow_html=True,
+        )
+
+    notes = str(case.get("description") or "").strip()
+    if notes:
+        st.markdown(
+            t_section_label("Case note", spacing=".06em", margin="margin:0 0 5px"),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"""
+        <div style="font-size:13px;color:#8a9ac0;line-height:1.5;margin-bottom:12px;
+          background:#0d1220;border:0.5px solid #1a2035;border-radius:5px;padding:8px">
+          {html.escape(notes)}
+        </div>""",
+            unsafe_allow_html=True,
+        )
+
+    _render_dispatch_case_activity_panel(str(case.get("case_ref") or ""))
+
+    st.markdown(
+        t_section_label("Attended by", spacing=".06em", margin="margin:0 0 5px"),
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div style="font-size:13px;color:#8a9ac0;margin-bottom:12px">'
+        f'{html.escape(str(case.get("attended_by") or "—"))}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        t_section_label("Timeline", spacing=".06em", margin="margin:10px 0 5px"),
+        unsafe_allow_html=True,
+    )
+    logs_df = _fetch_attendance(ticket_number=str(case.get("case_ref") or ""), limit=12)
+    logs = logs_df.to_dict("records") if not logs_df.empty else []
+    if not logs:
+        st.caption("No log entries yet.")
+    for i, log in enumerate(logs):
+        render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
+
+
+def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
+    """Inline panels opened from per-row ⋯ menus."""
+    resolve_ref = st.session_state.get(_SALES_ROW_RESOLVE)
+    if resolve_ref:
+        row = _fetch_sales_case_row_by_ref(str(resolve_ref))
+        if row:
+            with st.expander(f"Resolve · {resolve_ref}", expanded=True):
+                note = st.text_area(
+                    "Close note",
+                    value=str(row.get("close_note") or ""),
+                    key=f"sales_resolve_note_{resolve_ref}",
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Cancel", key=f"sales_resolve_cancel_{resolve_ref}"):
+                        st.session_state.pop(_SALES_ROW_RESOLVE, None)
+                        st.rerun()
+                with c2:
+                    if st.button(
+                        "Mark resolved",
+                        key=f"sales_resolve_ok_{resolve_ref}",
+                        type="primary",
+                    ):
+                        row_id = str(row.get("id") or "").strip()
+                        op = _session_operator_id() or "unknown"
+                        err = _sc_apply_status_advance(
+                            row_id,
+                            r0=pd.Series(row),
+                            target_status=SC_STATUS_RESOLVED,
+                            op=op,
+                            action_comment=note.strip() or None,
                         )
-                    except ValueError as ve:
-                        st.error(str(ve))
-                    else:
+                        if err:
+                            st.error(err)
+                        else:
+                            _invalidate_dashboard_data_cache()
+                            st.session_state.pop(_SALES_ROW_RESOLVE, None)
+                            st.toast(f"{resolve_ref} resolved", icon="✅")
+                            st.rerun()
+
+    edit_ref = st.session_state.get(_SALES_ROW_EDIT)
+    if edit_ref:
+        row = _fetch_sales_case_row_by_ref(str(edit_ref))
+        if row:
+            with st.expander(f"Edit details · {edit_ref}", expanded=True):
+                acc = st.text_input(
+                    "Account name",
+                    value=str(row.get("account_name") or ""),
+                    key=f"sales_edit_acc_{edit_ref}",
+                )
+                reg = st.selectbox(
+                    "Region",
+                    list(SALES_REGION_CODES),
+                    index=list(SALES_REGION_CODES).index(
+                        str(row.get("account_region") or SALES_REGION_CODES[0])
+                    )
+                    if str(row.get("account_region") or "") in SALES_REGION_CODES
+                    else 0,
+                    key=f"sales_edit_reg_{edit_ref}",
+                )
+                cur_cat = str(row.get("sales_category") or "").strip()
+                edit_cats = list(
+                    get_task_categories() or DEFAULT_ASSIGNMENT_TASK_CATEGORIES
+                )
+                canon_cat = canonical_task_category(cur_cat) or cur_cat if cur_cat else ""
+                if canon_cat and canon_cat not in edit_cats:
+                    edit_cats = [canon_cat, *edit_cats]
+                cat_idx = edit_cats.index(canon_cat) if canon_cat in edit_cats else 0
+                cat = st.selectbox(
+                    "Category",
+                    edit_cats or ["—"],
+                    index=cat_idx,
+                    key=f"sales_edit_cat_{edit_ref}",
+                )
+                pri = st.selectbox(
+                    "Priority",
+                    ["Standard", "High"],
+                    index=0 if str(row.get("sales_priority") or "") != "High" else 1,
+                    key=f"sales_edit_pri_{edit_ref}",
+                )
+                desc = st.text_area(
+                    "Notes",
+                    value=str(row.get("description") or row.get("additional_info") or ""),
+                    key=f"sales_edit_desc_{edit_ref}",
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Cancel", key=f"sales_edit_cancel_{edit_ref}"):
+                        st.session_state.pop(_SALES_ROW_EDIT, None)
+                        st.rerun()
+                with c2:
+                    if st.button("Save", key=f"sales_edit_save_{edit_ref}", type="primary"):
+                        row_id = str(row.get("id") or "").strip()
                         patch: dict[str, object] = {
-                            "assigned_to": handle,
-                            "assigned_to_2": handle2,
+                            "account_name": acc.strip(),
+                            "account_region": reg,
+                            "sales_category": canonical_task_category(cat.strip())
+                            or cat.strip(),
+                            "sales_priority": pri,
                         }
-                        _sc_stamp_last_assigned_at(patch)
-                        post_tg = bool(
-                            st.session_state.get(f"sc_region_assign_post_tg_{key_prefix}")
-                        )
-                        tg_ok = False
-                        if post_tg:
-                            token = (
-                                _read_setting("TG_BOT_TOKEN").strip()
-                                or _read_setting("TELEGRAM_BOT_TOKEN").strip()
-                                or _read_setting("TELEGRAM_TOKEN").strip()
-                            )
-                            chat_raw = _read_telegram_group_chat_raw()
-                            chat_id, _w = _parse_telegram_group_chat_id(chat_raw)
-                            fcat = str(r0.get("field_task_category") or "").strip()
-                            if not fcat:
-                                st.warning(
-                                    "Set **Field task category** on dispatch first."
-                                )
-                            elif not token or chat_id is None:
-                                st.warning(
-                                    "Engineer saved. Telegram skipped — set token + group id."
-                                )
-                            else:
-                                cref = str(r0.get("case_ref") or "").strip()
-                                tg_info = _coassignee_telegram_note(
-                                    handle2,
-                                    str(r0.get("description") or "").strip() or None,
-                                )
-                                try:
-                                    asyncio.run(
-                                        notify_telegram_group(
-                                            handle.lstrip("@"),
-                                            cref or row_id[:8],
-                                            fcat,
-                                            additional_info=tg_info,
-                                            assigned_by=op,
-                                            api_id=_read_setting("TG_API_ID")
-                                            or _read_setting("TELEGRAM_API_ID")
-                                            or None,
-                                            api_hash=_read_setting("TG_API_HASH")
-                                            or _read_setting("TELEGRAM_API_HASH")
-                                            or None,
-                                            bot_token=token or None,
-                                            group_id=chat_id,
-                                        )
-                                    )
-                                    tg_ok = True
-                                except Exception as tg_exc:
-                                    st.warning(
-                                        f"Engineer saved; Telegram post failed: {tg_exc}"
-                                    )
+                        if desc.strip():
+                            patch["description"] = desc.strip()
+                            patch["additional_info"] = desc.strip()
                         try:
                             _sales_cases_update_row(row_id, patch)
                             _invalidate_dashboard_data_cache()
-                            msg = f"Engineer **{handle}** assigned for **{region_label}**."
-                            if handle2:
-                                msg += f" Co-assignee: **{handle2}**."
-                            if post_tg and tg_ok:
-                                msg += " Telegram posted."
-                            _sc_set_sales_flash(msg)
+                            st.session_state.pop(_SALES_ROW_EDIT, None)
+                            st.toast("Details saved", icon="✅")
                             st.rerun()
                         except Exception as exc:
-                            st.error(f"Could not assign engineer: {exc}")
+                            st.error(str(exc))
 
-def _render_sales_queue_segment(
-    df: pd.DataFrame,
-    *,
-    queue_status: str,
-    queue_statuses: tuple[str, ...] | None = None,
-    key_prefix: str,
-    title: str,
-    empty_msg: str,
-    caption: str,
-    table_cols: tuple[str, ...] = _SC_QUEUE_TABLE_COLS,
-    toolbar_caption: str | None = None,
-    show_work_panel: bool = True,
-    allow_delete: bool = True,
-    allow_edit_assignment: bool = False,
-    allow_reassign: bool = False,
-    op: str = "",
-    sales_cats: list[str] | None = None,
-    field_cats: list[str] | None = None,
-    fe_names: list[str] | None = None,
-    fe_missing: bool = False,
-) -> None:
-    st.markdown(f"##### {title}")
-    statuses = queue_statuses if queue_statuses else (queue_status,)
-    sub = _sc_filter_sales_df(df, statuses)
-    if sub.empty:
-        st.info(empty_msg)
-        return
-    if caption:
-        st.caption(caption)
-    options = _sc_case_options_for_admin(sub)
-    status_actions = _sc_status_actions_for_queue(queue_status)
-    _maybe_apply_pending_sales_case_selection_clear(key_prefix)
-    with st.container(key=f"{key_prefix}_queue_block"):
-        _render_selectable_sales_case_table(sub, key_prefix=key_prefix, cols=table_cols)
-        if options:
-            _get_selected_queue_sales_cases(key_prefix, options)
-            _render_sales_case_toolbar(
-                sub,
-                key_prefix=key_prefix,
-                caption=toolbar_caption,
-                status_actions=status_actions if op else (),
-                op=op,
-                allow_delete=allow_delete,
-                allow_edit_assignment=allow_edit_assignment,
-                allow_reassign=allow_reassign,
-            )
-
-    reassign_open = bool(
-        op
-        and allow_reassign
-        and st.session_state.get(_reassign_session_keys(key_prefix)["show"])
-    )
-    edit_open = bool(
-        op
-        and allow_edit_assignment
-        and st.session_state.get(_assignment_edit_session_keys(key_prefix)["show"])
-    )
-
-    if edit_open:
-        with st.container(border=True, key=f"{key_prefix}_edit_panel"):
-            _render_sales_assignment_editor(
-                key_prefix=key_prefix,
-                edit_key_prefix=key_prefix,
-                field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
-                fe_names=fe_names or [],
-                fe_missing=fe_missing,
-                case_options=options,
-                df=sub,
-            )
-
-    if reassign_open:
-        with st.container(border=True, key=f"{key_prefix}_reassign_panel"):
-            _render_sales_reassign_editor(
-                key_prefix=key_prefix,
-                edit_key_prefix=key_prefix,
-                field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
-                fe_names=fe_names or [],
-                fe_missing=fe_missing,
-                case_options=options,
-                df=sub,
-            )
-
-    if (
-        show_work_panel
-        and queue_status != SC_STATUS_RESOLVED
-        and not reassign_open
-        and not edit_open
-    ):
-        selected = _get_selected_queue_sales_cases(key_prefix, options)
-        if len(selected) == 1:
-            with st.container(border=True, key=f"{key_prefix}_work_panel"):
-                _render_sales_case_work_panel(
-                    sub,
-                    key_prefix=key_prefix,
-                    case_options=options,
-                    op=op,
-                    sales_cats=sales_cats or _sales_category_options(),
-                    field_cats=field_cats or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
-                    fe_names=fe_names or [],
-                    fe_missing=fe_missing,
+    assign_ref = st.session_state.get(_SALES_ROW_ASSIGN)
+    if assign_ref:
+        row = _fetch_sales_case_row_by_ref(str(assign_ref))
+        if row:
+            engineers = get_engineer_handles()
+            unassigned = "— unassigned —"
+            cur = str(row.get("assigned_to") or "").strip()
+            opts = [unassigned] + engineers
+            default_idx = opts.index(cur) if cur in opts else 0
+            with st.expander(f"Assign engineer · {assign_ref}", expanded=True):
+                eng = st.selectbox(
+                    "Engineer",
+                    opts,
+                    index=default_idx,
+                    key=f"sales_assign_eng_{assign_ref}",
                 )
-        elif len(selected) > 1:
-            st.warning("Select **exactly one** case to open the work panel.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Cancel", key=f"sales_assign_cancel_{assign_ref}"):
+                        st.session_state.pop(_SALES_ROW_ASSIGN, None)
+                        st.rerun()
+                with c2:
+                    if st.button(
+                        "Save", key=f"sales_assign_save_{assign_ref}", type="primary"
+                    ):
+                        row_id = str(row.get("id") or "").strip()
+                        patch: dict[str, object] = {}
+                        if eng == unassigned:
+                            patch["assigned_to"] = None
+                        else:
+                            patch["assigned_to"] = eng
+                            _sc_stamp_last_assigned_at(patch)
+                        try:
+                            _sales_cases_update_row(row_id, patch)
+                            _invalidate_dashboard_data_cache()
+                            st.session_state.pop(_SALES_ROW_ASSIGN, None)
+                            st.toast("Engineer updated", icon="✅")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
 
 
 def _render_sales_cases_dashboard() -> None:
-    """Separate UI for sales-priority cases (not field ``tickets_active``)."""
+    """Three-column sales floor — same layout pattern as CSM dispatch."""
     _sc_show_sales_flash()
-    st.markdown("##### Sales Cases")
-    st.caption(
-        "New cases: sidebar **SALES**. Open a queue with the metrics above."
-    )
 
     try:
         df = _fetch_sales_cases_df()
@@ -16023,108 +17628,1019 @@ def _render_sales_cases_dashboard() -> None:
         )
         return
 
-    op = _session_operator_id()
-    if not op:
+    if not _session_operator_id():
         st.error("Sign in again — **Operator ID** is required.")
         return
 
-    cat_names, _cat_miss = _try_fetch_task_categories()
-    field_cats = (
-        cat_names if cat_names else list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    )
-    sales_cats = _sales_category_options(cat_names)
-    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+    try:
+        df_tickets = _fetch_tickets()
+    except Exception:
+        df_tickets = pd.DataFrame()
 
-    total_sales_ticket = len(_sc_filter_sales_df(df, (SC_STATUS_SALES_TICKET,)))
-    total_investigation = len(
-        _sc_filter_sales_df(df, _SC_INVESTIGATION_QUEUE_STATUSES)
-    )
-    total_design = len(_sc_filter_sales_df(df, (SC_STATUS_DESIGN,)))
-    total_resolved = len(_sc_filter_sales_df(df, (SC_STATUS_RESOLVED,)))
-    (
-        sales_ticket_label,
-        investigation_label,
-        design_label,
-        resolved_label,
-    ) = _sync_sales_dashboard_nav_state(
-        total_sales_ticket=total_sales_ticket,
-        total_investigation=total_investigation,
-        total_design=total_design,
-        total_resolved=total_resolved,
-    )
-    _render_sales_queue_summary_metrics(
-        total_sales_ticket=total_sales_ticket,
-        total_investigation=total_investigation,
-        total_design=total_design,
-        total_resolved=total_resolved,
-        sales_ticket_label=sales_ticket_label,
-        investigation_label=investigation_label,
-        design_label=design_label,
-        resolved_label=resolved_label,
+    selected_queue = _init_sales_active_queue()
+
+    with st.container(key="disp_csm_body"):
+        sb, main, dp = st.columns([1.55, 5.05, 2.3], gap="medium")
+
+        with sb:
+            _render_sales_sidebar(df=df, df_tickets=df_tickets)
+
+        with main:
+            _render_sales_assign_panel()
+            cases = _sales_cases_list_for_queue(df, selected_queue)
+
+            col_title, col_search = st.columns([3, 1])
+            with col_title:
+                n = len(cases)
+                count_label = f"{n} case{'s' if n != 1 else ''}"
+                st.markdown(
+                    f"{t_heading(html.escape(selected_queue))} "
+                    f"{t_queue_sub(count_label)}",
+                    unsafe_allow_html=True,
+                )
+            with col_search:
+                search_ref = st.text_input(
+                    "Search",
+                    placeholder="Search ref",
+                    label_visibility="collapsed",
+                    key="sales_search",
+                )
+            if search_ref.strip():
+                q = search_ref.strip().lower()
+                cases = [
+                    c for c in cases if q in str(c.get("case_ref") or "").lower()
+                ]
+
+            sel = st.session_state.get(_SALES_SELECTED_KEY)
+            render_sales_case_table(
+                cases,
+                selected=sel,
+                selected_key=_SALES_SELECTED_KEY,
+                row_actions_fn=_render_sales_row_actions,
+            )
+            _render_sales_floor_modals(df=df)
+
+        with dp:
+            with st.container(key="disp_detail_panel"):
+                _render_sales_detail_panel()
+
+
+def _dispatch_today_metrics(
+    df_all: pd.DataFrame,
+    *,
+    df_in_view: pd.DataFrame,
+) -> tuple[int, int, int, int]:
+    today = datetime.now(OPS_TZ).date()
+    start = _local_date_start(today)
+    end = _local_date_end(today)
+    assigned_today = responded_today = 0
+    if not df_all.empty:
+        if "last_assigned_at" in df_all.columns:
+            la = _parse_ts(df_all["last_assigned_at"])
+            assigned_today = int(((la >= start) & (la <= end)).sum())
+        if "responded_at" in df_all.columns:
+            rp = _parse_ts(df_all["responded_at"])
+            responded_today = int(((rp >= start) & (rp <= end)).sum())
+    masks = _ticket_queue_count_masks(df_in_view)
+    daily_task_count = int(masks["pending"].sum())
+    unattended_count = int(masks["unattended"].sum())
+    return assigned_today, responded_today, daily_task_count, unattended_count
+
+
+def _dispatch_engineer_presence(df: pd.DataFrame) -> list[dict[str, object]]:
+    names, _missing = _try_fetch_field_engineer_usernames()
+    active_counts: dict[str, int] = {}
+    if not df.empty and "assigned_to" in df.columns:
+        for col in ("assigned_to", "assigned_to_2"):
+            if col not in df.columns:
+                continue
+            for raw in df[col].dropna().astype(str):
+                h = str(raw).strip()
+                if h:
+                    active_counts[h.lower()] = active_counts.get(h.lower(), 0) + 1
+    rows: list[dict[str, object]] = []
+    for uname in names:
+        handle = uname if str(uname).startswith("@") else f"@{uname}"
+        n = active_counts.get(str(uname).lower(), 0) + active_counts.get(handle.lower(), 0)
+        rows.append(
+            {
+                "username": handle,
+                "active_tickets": n,
+                "online": n > 0,
+            }
+        )
+    return rows
+
+
+def _dispatch_row_dict(row: pd.Series) -> dict[str, object]:
+    d = row.to_dict()
+    for col in ("last_assigned_at", "responded_at", "updated_at", "created_at"):
+        if col in d and pd.notna(d[col]):
+            try:
+                d[col] = pd.Timestamp(d[col]).to_pydatetime()
+            except Exception:
+                pass
+    return d
+
+
+def _dispatch_effective_action_status(ticket: dict, *, queue_name: str) -> str:
+    """Map DB status + queue context to action-matrix labels."""
+    if queue_name == "Unattended":
+        return "Unattended"
+    marked = ticket.get("marked_unattended_at")
+    if marked is not None and not (isinstance(marked, float) and pd.isna(marked)):
+        try:
+            if pd.notna(marked):
+                return "Unattended"
+        except Exception:
+            pass
+    raw = str(ticket.get("status") or "")
+    if raw == "Open":
+        return "Needs Review"
+    return raw
+
+
+def _dispatch_prepare_row_selection(ticket_number: str) -> None:
+    tn = str(ticket_number)
+    st.session_state[_DISP_SELECTED_KEY] = tn
+    for prefix in ("disp_row", "disp_row_close", "disp_row_resolve"):
+        st.session_state[_ticket_selection_session_key(prefix)] = [tn]
+
+
+def _dispatch_row_modal_df(queue_df: pd.DataFrame, ticket_number: str) -> pd.DataFrame:
+    """Ensure modal forms can read category/assignment even after table search filters."""
+    tn = str(ticket_number).strip()
+    if not tn:
+        return queue_df
+    if (
+        not queue_df.empty
+        and "ticket_number" in queue_df.columns
+        and tn in queue_df["ticket_number"].astype(str).values
+    ):
+        return queue_df
+    row = _fetch_ticket_row(tn)
+    if row:
+        return pd.DataFrame([row])
+    return queue_df
+
+
+def _dispatch_row_modal_open(ticket_number: str | None, *, ticket_nums: list[str]) -> bool:
+    tn = str(ticket_number or "").strip()
+    if not tn:
+        return False
+    if tn in ticket_nums:
+        return True
+    return _fetch_ticket_row(tn) is not None
+
+
+def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
+    """Map destination label → status string and update ticket."""
+    status_map = {
+        "Investigation": STATUS_UNDER_INVESTIGATION,
+        "Resolve": STATUS_RESOLVED,
+        "On hold": STATUS_ON_HOLD,
+        "Daily task (reopen)": STATUS_DAILY_TASK,
+    }
+    new_status = status_map.get(destination)
+    if not new_status:
+        return
+
+    if new_status == STATUS_RESOLVED:
+        _dispatch_prepare_row_selection(ticket_number)
+        st.session_state[_DISP_ROW_RESOLVE] = ticket_number
+        st.rerun()
+        return
+
+    op = _session_operator_id()
+    actor = f"@{op.lstrip('@')}" if op else "@dashboard-admin"
+    try:
+        if destination == "Investigation":
+            if not op:
+                st.toast("Sign in again", icon="⚠️")
+                return
+            _move_to_investigation(ticket_number, follow_up=False, operator_id=op)
+        elif destination == "On hold":
+            if not op:
+                st.toast("Sign in again", icon="⚠️")
+                return
+            _move_to_on_hold(ticket_number, operator_id=op)
+        elif destination == "Daily task (reopen)":
+            _set_ticket_status(
+                ticket_number,
+                new_status=STATUS_DAILY_TASK,
+                log_action="ReopenedFromUnattended",
+                actor=actor,
+            )
+        st.toast(f"Moved → {destination}", icon="✅")
+        _invalidate_dashboard_data_cache()
+        st.rerun()
+    except Exception as exc:
+        st.toast(f"Move failed: {exc}", icon="❌")
+
+
+def _dispatch_ticket_move_to_sales(ticket_number: str) -> None:
+    op = _session_operator_id()
+    if not op:
+        st.toast("Sign in again", icon="⚠️")
+        return
+    try:
+        _cc_transfer_ticket_to_sales_case(
+            ticket_number,
+            operator_id=op,
+            account_region=SALES_REGION_CENTRAL,
+        )
+        st.toast(f"Ticket {ticket_number} moved to Sales", icon="✅")
+        _invalidate_dashboard_data_cache()
+        st.rerun()
+    except Exception as exc:
+        st.toast(f"Move to Sales failed: {exc}", icon="❌")
+
+
+def _render_dispatch_row_actions(
+    ticket: dict,
+    is_admin: bool,
+    row_key: str,
+    *,
+    queue_name: str,
+) -> None:
+    """Per-row ⋯ popover with status-aware actions."""
+    status = _dispatch_effective_action_status(ticket, queue_name=queue_name)
+    tnum = str(ticket.get("ticket_number") or row_key)
+
+    with st.popover("⋯", use_container_width=False):
+        move_options: list[str] = []
+        if status in ("Daily Task", "Needs Review", "On Hold"):
+            move_options.append("Investigation")
+        if status in ("Needs Review", "Under Investigation"):
+            move_options.append("Resolve")
+        if status == "Unattended":
+            move_options.append("Daily task (reopen)")
+        if is_admin and status in ("Daily Task", "Needs Review", "Under Investigation"):
+            move_options.append("On hold")
+
+        if move_options:
+            st.markdown(
+                '<p style="font-size:11px;font-weight:400;color:#2a3a5a;'
+                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">'
+                "Move to</p>",
+                unsafe_allow_html=True,
+            )
+            for opt in move_options:
+                if st.button(opt, key=f"move_{opt}_{row_key}", use_container_width=True):
+                    _dispatch_ticket_move(tnum, opt)
+            st.divider()
+
+        st.markdown(
+            '<p style="font-size:11px;font-weight:400;color:#2a3a5a;'
+            'text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">'
+            "Actions</p>",
+            unsafe_allow_html=True,
+        )
+
+        if status not in ("Resolved", "Unattended"):
+            if st.button("✏ Edit assignment", key=f"edit_{row_key}", use_container_width=True):
+                _dispatch_prepare_row_selection(tnum)
+                st.session_state[_DISP_ROW_EDIT] = tnum
+                st.rerun()
+
+        can_reassign = (
+            is_admin
+            if status in ("Daily Task", "On Hold")
+            else status in ("Needs Review", "Under Investigation")
+        )
+        if can_reassign:
+            if st.button("↩ Reassign", key=f"reassign_{row_key}", use_container_width=True):
+                _dispatch_prepare_row_selection(tnum)
+                st.session_state[_DISP_ROW_REASSIGN] = tnum
+                st.rerun()
+
+        if is_admin and status in ("Daily Task", "Needs Review", "On Hold"):
+            if st.button("📋 Record response", key=f"record_{row_key}", use_container_width=True):
+                _dispatch_prepare_row_selection(tnum)
+                st.session_state[_DISP_ROW_RECORD] = tnum
+                st.rerun()
+
+        if status in ("Needs Review", "Under Investigation", "Unattended"):
+            if st.button("📷 View photos", key=f"photos_{row_key}", use_container_width=True):
+                _dispatch_prepare_row_selection(tnum)
+                st.session_state[_DISP_ROW_PHOTOS] = tnum
+                st.rerun()
+
+        if status not in ("Resolved", "Unattended"):
+            if st.button("↗ Move to Sales", key=f"sales_{row_key}", use_container_width=True):
+                _dispatch_ticket_move_to_sales(tnum)
+
+        if is_admin:
+            st.divider()
+            st.markdown('<div class="danger-row">', unsafe_allow_html=True)
+            if st.button("✕ Admin close", key=f"close_{row_key}", use_container_width=True):
+                _dispatch_prepare_row_selection(tnum)
+                st.session_state[_DISP_ROW_CLOSE] = tnum
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_assign_manage_icon_btn(
+    *,
+    manage_key: str,
+    manage_help: str,
+    on_manage: Callable[[], None],
+) -> None:
+    st.markdown('<div class="disp-manage-icon">', unsafe_allow_html=True)
+    if st.button(
+        "⋯",
+        key=manage_key,
+        help=manage_help,
+        use_container_width=False,
+    ):
+        on_manage()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_assign_plain_label(label: str) -> None:
+    st.markdown(
+        f'<p class="disp-field-label">{html.escape(label)}</p>',
+        unsafe_allow_html=True,
     )
 
-    queue_view = _sc_queue_segment_base(st.session_state.get(_DASH_SALES_QUEUE_KEY))
-    work_kw = dict(
-        op=op,
-        sales_cats=sales_cats,
-        field_cats=field_cats,
+
+def render_assign_panel(
+    *,
+    on_submit: Callable[[str, str, str, str, str], None],
+) -> None:
+    """NEW TICKET panel — Assign + Telegram or Queue only (mockup layout)."""
+    engineers = get_engineer_handles()
+    categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+    none_label = "- none -"
+    mode = str(
+        st.session_state.get(_DISP_ASSIGN_MODE_KEY, _DISP_ASSIGN_MODE_TELEGRAM)
+    )
+    queue_only = mode == _DISP_ASSIGN_MODE_QUEUE
+
+    with st.container(key="disp_assign_panel"):
+        st.markdown(
+            t_section_label("New ticket", spacing=".06em", margin="margin:0 0 4px"),
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="disp-mode-toggle sales-mode-toggle">', unsafe_allow_html=True)
+        t1, t2 = st.columns(2, gap="small")
+        with t1:
+            if st.button(
+                "☰ Queue only",
+                key="disp_mode_queue",
+                use_container_width=True,
+                type="primary" if queue_only else "secondary",
+            ):
+                st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_QUEUE
+                st.rerun()
+        with t2:
+            if st.button(
+                "✈ Assign + Telegram",
+                key="disp_mode_telegram",
+                use_container_width=True,
+                type="primary" if not queue_only else "secondary",
+            ):
+                st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_TELEGRAM
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if queue_only:
+            r1a, = st.columns([1], gap="small")
+            with r1a:
+                _render_assign_plain_label("Ticket #")
+                ticket_num = st.text_input(
+                    "Ticket #",
+                    placeholder="9 or 16 digits",
+                    key="qa_ticket_num",
+                    label_visibility="collapsed",
+                )
+            engineer = engineer2 = "—"
+        else:
+            st.markdown('<div class="disp-assign-fields-spacer"></div>', unsafe_allow_html=True)
+            r1a, r1b, r1c = st.columns([1.35, 1.5, 1.5], gap="medium")
+            with r1a:
+                _render_assign_plain_label("Ticket #")
+                ticket_num = st.text_input(
+                    "Ticket #",
+                    placeholder="9 or 16 digits",
+                    key="qa_ticket_num",
+                    label_visibility="collapsed",
+                )
+            with r1b:
+                _render_assign_plain_label("Engineer")
+                eng_sel, eng_mgr = st.columns(
+                    [1, 0.22], gap="small", vertical_alignment="top"
+                )
+                with eng_sel:
+                    engineer = st.selectbox(
+                        "Engineer",
+                        engineers or ["—"],
+                        key="ap_engineer",
+                        label_visibility="collapsed",
+                    )
+                with eng_mgr:
+                    _render_assign_manage_icon_btn(
+                        manage_key="btn_manage_eng",
+                        manage_help="Manage engineers",
+                        on_manage=manage_engineers_dialog,
+                    )
+            with r1c:
+                _render_assign_plain_label("Eng 2")
+                engineer2 = st.selectbox(
+                    "Engineer 2",
+                    [none_label] + list(engineers),
+                    key="qa_engineer2",
+                    label_visibility="collapsed",
+                )
+
+        r2a, r2b, r2c = st.columns([1.2, 2.35, 1.05], gap="medium")
+        with r2a:
+            _render_assign_plain_label("Category")
+            cat_sel, cat_mgr = st.columns(
+                [1, 0.22], gap="small", vertical_alignment="top"
+            )
+            with cat_sel:
+                category = st.selectbox(
+                    "Category",
+                    categories or ["—"],
+                    key="ap_category",
+                    label_visibility="collapsed",
+                )
+            with cat_mgr:
+                _render_assign_manage_icon_btn(
+                    manage_key="btn_manage_cat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
+        with r2b:
+            _render_assign_plain_label("Notes")
+            notes = st.text_input(
+                "Notes",
+                placeholder="Optional notes…",
+                key="qa_notes",
+                label_visibility="collapsed",
+            )
+        with r2c:
+            submit_label = "Add to queue ↗" if queue_only else "Assign + Telegram ↗"
+            st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
+            if st.button(submit_label, key="qa_submit", use_container_width=True):
+                if queue_only:
+                    _handle_dispatch_queue_only_submit(
+                        ticket_num, category, notes
+                    )
+                else:
+                    on_submit(ticket_num, engineer, engineer2, category, notes)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _handle_dispatch_queue_only_submit(
+    ticket_num: str,
+    category: str,
+    notes: str,
+) -> None:
+    """Queue a ticket in Daily Task with no engineer and no Telegram."""
+    tid = (ticket_num or "").strip()
+    if not tid:
+        st.toast("Enter a ticket number", icon="⚠️")
+        return
+    if not re.fullmatch(r"\d{9}|\d{16}", tid):
+        st.toast("Ticket # must be 9 or 16 digits", icon="⚠️")
+        return
+    if not category or category == "—":
+        st.toast("Category is required", icon="⚠️")
+        return
+    op = _session_operator_id()
+    if not op:
+        st.toast("Sign in again", icon="⚠️")
+        return
+    cat = canonical_task_category(category.strip()) or category.strip()
+    try:
+        summary = _cc_queue_pending_unassigned(
+            tid,
+            cat,
+            additional_info=(notes or "").strip() or None,
+            operator_id=op,
+        )
+        _invalidate_dashboard_data_cache()
+        for k in ("qa_ticket_num", "qa_notes", "ap_category"):
+            st.session_state.pop(k, None)
+        st.toast(summary.replace("**", ""), icon="✅")
+        st.rerun()
+    except ValueError as exc:
+        st.toast(str(exc).replace("**", ""), icon="⚠️")
+    except Exception as exc:
+        st.toast(f"Queue failed: {exc}", icon="❌")
+
+
+def _handle_dispatch_quick_assign_bar(
+    ticket_num: str,
+    engineer: str,
+    engineer2: str,
+    category: str,
+    notes: str,
+    *,
+    fe_names: list[str],
+    fe_missing: bool,
+) -> None:
+    tid = (ticket_num or "").strip()
+    if not tid:
+        st.toast("Enter a ticket number", icon="⚠️")
+        return
+    if not re.fullmatch(r"\d{9}|\d{16}", tid):
+        st.toast("Ticket # must be 9 or 16 digits", icon="⚠️")
+        return
+    if not engineer or engineer == "—" or not category or category == "—":
+        st.toast("Engineer and category are required", icon="⚠️")
+        return
+    handle2 = None if engineer2 in ("—", "- none -") else engineer2
+    _dispatch_quick_assign_submit(
+        ticket_num=tid,
+        engineer=engineer,
+        engineer2=handle2,
+        category=category,
+        notes=(notes or "").strip(),
         fe_names=fe_names,
         fe_missing=fe_missing,
     )
 
-    if queue_view == SC_STATUS_SALES_TICKET:
-        _render_sales_queue_segment(
-            df,
-            queue_status=SC_STATUS_SALES_TICKET,
-            key_prefix="sc_sales_ticket",
-            title="Sales Ticket — New Intake",
-            empty_msg="No cases in **Sales Ticket**. Create one in sidebar **SALES**.",
-            caption=None,
-            toolbar_caption=None,
-            allow_edit_assignment=True,
-            allow_reassign=True,
-            **work_kw,
+
+def _render_dispatch_row_modals(
+    *,
+    queue_df: pd.DataFrame,
+    ticket_nums: list[str],
+    is_admin: bool,
+    fe_names: list[str],
+    fe_missing: bool,
+    cat_names: list[str],
+) -> None:
+    """Inline editors opened from per-row action menus."""
+    edit_t = st.session_state.get(_DISP_ROW_EDIT)
+    if _dispatch_row_modal_open(edit_t, ticket_nums=ticket_nums):
+        row = _fetch_ticket_row(str(edit_t))
+        if row:
+            req = _normalize_ticket_status_value(row.get("status"))
+            if req in (STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD, STATUS_UNDER_INVESTIGATION):
+                with st.expander(f"Edit assignment · {edit_t}", expanded=True):
+                    _render_assignment_editor(
+                        required_status=req,
+                        key_prefix="disp_row",
+                        edit_key_prefix="disp_row_edit",
+                        cat_names=cat_names,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        ticket_options=[str(edit_t)],
+                    )
+                    if st.button("Done", key="disp_row_edit_done"):
+                        st.session_state.pop(_DISP_ROW_EDIT, None)
+                        st.rerun()
+
+    reassign_t = st.session_state.get(_DISP_ROW_REASSIGN)
+    if _dispatch_row_modal_open(reassign_t, ticket_nums=ticket_nums):
+        row = _fetch_ticket_row(str(reassign_t))
+        if row:
+            from_st = _normalize_ticket_status_value(row.get("status"))
+            with st.expander(f"Reassign · {reassign_t}", expanded=True):
+                _render_reassign_editor(
+                    from_status=from_st or STATUS_DAILY_TASK,
+                    key_prefix="disp_row",
+                    edit_key_prefix="disp_row_reassign",
+                    cat_names=cat_names,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
+                    ticket_options=[str(reassign_t)],
+                )
+                if st.button("Done", key="disp_row_reassign_done"):
+                    st.session_state.pop(_DISP_ROW_REASSIGN, None)
+                    st.rerun()
+
+    record_t = st.session_state.get(_DISP_ROW_RECORD)
+    if is_admin and _dispatch_row_modal_open(record_t, ticket_nums=ticket_nums):
+        with st.expander(f"Record response · {record_t}", expanded=True):
+            st.session_state[_manual_field_response_session_keys("disp_row")["show"]] = True
+            _render_manual_field_response_editor(
+                key_prefix="disp_row",
+                edit_key_prefix="disp_row",
+                ticket_options=[str(record_t)],
+                allowed_statuses=(STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD),
+                save_label="Save response",
+                clear_session_keys=(_DISP_ROW_RECORD,),
+            )
+            if st.button("Done", key="disp_row_record_done"):
+                st.session_state.pop(_DISP_ROW_RECORD, None)
+                st.session_state.pop(_manual_field_response_session_keys("disp_row")["show"], None)
+                st.rerun()
+
+    close_t = st.session_state.get(_DISP_ROW_CLOSE)
+    if is_admin and _dispatch_row_modal_open(close_t, ticket_nums=ticket_nums):
+        modal_df = _dispatch_row_modal_df(queue_df, str(close_t))
+        with st.expander(f"Admin close · {close_t}", expanded=True):
+            _render_admin_close_form_inline(
+                key_prefix="disp_row_close",
+                options=[str(close_t)],
+                df=modal_df,
+                preset_tickets=[str(close_t)],
+                clear_session_keys=(_DISP_ROW_CLOSE,),
+            )
+            if st.button("Done", key="disp_row_close_done"):
+                st.session_state.pop(_DISP_ROW_CLOSE, None)
+                st.rerun()
+
+    resolve_t = st.session_state.get(_DISP_ROW_RESOLVE)
+    if _dispatch_row_modal_open(resolve_t, ticket_nums=ticket_nums):
+        modal_df = _dispatch_row_modal_df(queue_df, str(resolve_t))
+        with st.expander(f"Resolve · {resolve_t}", expanded=True):
+            _render_mark_resolved_form_inline(
+                key_prefix="disp_row_resolve",
+                options=[str(resolve_t)],
+                df=modal_df,
+                preset_tickets=[str(resolve_t)],
+                clear_session_keys=(_DISP_ROW_RESOLVE,),
+            )
+            if st.button("Done", key="disp_row_resolve_done"):
+                st.session_state.pop(_DISP_ROW_RESOLVE, None)
+                st.rerun()
+
+    photo_t = st.session_state.get(_DISP_ROW_PHOTOS)
+    if _dispatch_row_modal_open(photo_t, ticket_nums=ticket_nums):
+        row = _fetch_ticket_row(str(photo_t))
+        with st.expander(f"Site photos · {photo_t}", expanded=True):
+            if row:
+                photo = str(row.get("photo_url") or row.get("field_photo_url") or "").strip()
+                if photo.startswith("http"):
+                    st.markdown(
+                        f'<a href="{html.escape(photo)}" target="_blank" rel="noopener" '
+                        f'style="font-size:13px;color:#3b82f6">Open site photo ↗</a>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.caption("No photo on file for this ticket.")
+            if st.button("Close", key="disp_row_photos_done"):
+                st.session_state.pop(_DISP_ROW_PHOTOS, None)
+                st.rerun()
+
+
+def _dispatch_quick_assign_submit(
+    *,
+    ticket_num: str,
+    engineer: str,
+    engineer2: str | None,
+    category: str,
+    notes: str,
+    fe_names: list[str],
+    fe_missing: bool,
+) -> None:
+    tid = (ticket_num or "").strip()
+    if not tid:
+        st.error("Ticket # is required.")
+        return
+    if not category:
+        st.error("Category is required.")
+        return
+    op = _session_operator_id()
+    if not op:
+        st.error("Sign in again — operator session is missing.")
+        return
+    if not engineer or engineer == "—":
+        st.error("Engineer is required.")
+        return
+    try:
+        handle = engineer if engineer.startswith("@") else f"@{engineer.lstrip('@')}"
+        handle2 = None
+        if engineer2 and engineer2 != "—":
+            handle2 = (
+                engineer2 if engineer2.startswith("@") else f"@{engineer2.lstrip('@')}"
+            )
+        additional = _coassignee_telegram_note(handle2, notes or None)
+        token = (
+            _read_setting("TG_BOT_TOKEN").strip()
+            or _read_setting("TELEGRAM_BOT_TOKEN").strip()
+            or _read_setting("TELEGRAM_TOKEN").strip()
         )
-    elif queue_view == SC_STATUS_INVESTIGATION:
-        _render_sales_queue_segment(
-            df,
-            queue_status=SC_STATUS_INVESTIGATION,
-            queue_statuses=_SC_INVESTIGATION_QUEUE_STATUSES,
-            key_prefix="sc_investigation",
-            title="Investigation — Admin Review & Site Visit",
-            empty_msg="No cases in **Investigation**.",
-            caption=None,
-            table_cols=_SC_QUEUE_TABLE_COLS + ("dispatch_type",),
-            allow_edit_assignment=True,
-            allow_reassign=True,
-            **work_kw,
+        chat_raw = _read_telegram_group_chat_raw()
+        chat_id, chat_err = (
+            _parse_telegram_group_chat_id(chat_raw) if chat_raw else (None, None)
         )
-    elif queue_view == SC_STATUS_DESIGN:
-        _render_sales_queue_segment(
-            df,
-            queue_status=SC_STATUS_DESIGN,
-            key_prefix="sc_design",
-            title="Design — Post-Visit Solution",
-            empty_msg="No cases in **Design**.",
-            caption=None,
-            allow_edit_assignment=True,
-            allow_reassign=True,
-            **work_kw,
+        if chat_err:
+            st.warning(chat_err)
+        if not token or chat_id is None:
+            st.error(
+                "Telegram is not configured — set TELEGRAM_TOKEN and "
+                "TELEGRAM_GROUP_CHAT_ID in Secrets."
+            )
+            return
+        summary = _cc_upsert_assignment(
+            handle,
+            tid,
+            category,
+            additional_info=additional,
+            operator_id=op,
+            assigned_to_2=handle2,
         )
-    elif queue_view == SC_STATUS_RESOLVED:
-        _render_sales_queue_segment(
-            df,
-            queue_status=SC_STATUS_RESOLVED,
-            key_prefix="sc_resolved",
-            title="Resolved",
-            empty_msg="No **Resolved** Sales Cases yet.",
-            caption=None,
-            table_cols=_SC_QUEUE_TABLE_COLS + ("close_note", "status"),
-            show_work_panel=False,
-            allow_delete=True,
-            allow_edit_assignment=False,
-            **work_kw,
-        )
+        try:
+            tg_ref = asyncio.run(
+                notify_telegram_group(
+                    handle,
+                    tid,
+                    category,
+                    additional_info=additional,
+                    assigned_by=op,
+                    api_id=_read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None,
+                    api_hash=_read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None,
+                    bot_token=token or None,
+                    group_id=chat_id,
+                )
+            )
+            _cc_save_assignment_telegram_ref(_get_supabase_client(), tid, tg_ref)
+        except Exception as exc:
+            st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
+            _invalidate_dashboard_data_cache()
+            st.rerun()
+            return
+        _invalidate_dashboard_data_cache()
+        for k in ("qa_ticket_num", "qa_engineer2", "qa_notes", "ap_engineer", "ap_category"):
+            st.session_state.pop(k, None)
+        st.success(f"{summary} Posted to Telegram.")
+        st.rerun()
+    except Exception as exc:
+        st.error(f"Assign failed: {exc}")
+
+
+def _dispatch_run_action(
+    *,
+    action: str,
+    ticket: str,
+    is_admin: bool,
+) -> None:
+    if not ticket:
+        st.toast("Select a ticket first", icon="⚠")
+        return
+    op = _session_operator_id()
+    try:
+        if action == "hold":
+            if not is_admin:
+                st.toast("Admin only", icon="🔒")
+                return
+            if not op:
+                st.error("Sign in again.")
+                return
+            _move_to_on_hold(ticket, operator_id=op)
+            st.success(f"{ticket} → On Hold")
+            st.rerun()
+        elif action == "invest":
+            if not op:
+                st.error("Sign in again.")
+                return
+            _move_to_investigation(ticket, follow_up=False, operator_id=op)
+            st.success(f"{ticket} → Under Investigation")
+            st.rerun()
+        elif action == "resolve":
+            _dispatch_prepare_row_selection(ticket)
+            st.session_state[_DISP_ROW_RESOLVE] = ticket
+            st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
+    except Exception as exc:
+        st.error(str(exc))
+
+
+def _render_dispatch_csm_dashboard(
+    *,
+    df: pd.DataFrame,
+    df_all: pd.DataFrame,
+    masks: dict[str, pd.Series],
+    lookback_days: int,
+) -> None:
+    """Three-column dispatch console for field ticket queues."""
+    aq_key = active_queue_key()
+    if aq_key not in st.session_state:
+        st.session_state[aq_key] = "Daily Task"
+
+    assigned_today, responded_today, daily_task_count, unattended_count = (
+        _dispatch_today_metrics(df_all, df_in_view=df)
+    )
+    queue_counts = {
+        "Daily Task": int(masks["pending"].sum()),
+        "Needs Review": int(masks["open"].sum()),
+        "On Hold": int(masks["on_hold"].sum()),
+        "Under Investigation": int(masks["investigation"].sum()),
+        "Unattended": int(masks["unattended"].sum()),
+        "Resolved": int(masks["completed"].sum()),
+    }
+
+    with st.container(key="disp_csm_body"):
+        sb, main, dp = st.columns([1.55, 5.05, 2.3], gap="medium")
+
+
+        with sb:
+            st.markdown(t_section_label("Today"), unsafe_allow_html=True)
+            m1, m2 = st.columns(2)
+            m3, m4 = st.columns(2)
+            with st.container(key="disp_metric_assigned"):
+                m1.metric("Assigned", assigned_today)
+            with st.container(key="disp_metric_responded"):
+                m2.metric("Responded", responded_today)
+            with st.container(key="disp_metric_daily"):
+                m3.metric("Daily task", daily_task_count)
+            with st.container(key="disp_metric_unattended"):
+                m4.metric("Unattended", unattended_count)
+
+            st.markdown(
+                t_section_label(
+                    "Queues", margin="margin-top:16px;margin-bottom:10px"
+                ),
+                unsafe_allow_html=True,
+            )
+            queue_options = list(QUEUE_ORDER)
+            cur = st.session_state.get(aq_key, "Daily Task")
+            if cur not in queue_options:
+                cur = "Daily Task"
+            with st.container(key="disp_sidebar_queues_wrap"):
+                selected_queue = render_queue_list(
+                    selected=cur,
+                    counts=queue_counts,
+                    session_key=aq_key,
+                )
+            st.session_state[aq_key] = selected_queue
+
+            st.markdown(
+                t_section_label(
+                    "Engineers", margin="margin-top:12px;margin-bottom:7px"
+                ),
+                unsafe_allow_html=True,
+            )
+            for eng in _dispatch_engineer_presence(df):
+                render_engineer_row(eng)
+
+        mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
+        queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
+        eng_filter = st.session_state.get(_DISP_ENGINEER_FILTER_KEY)
+        if eng_filter and not queue_df.empty:
+            queue_df = queue_df.loc[
+                queue_df.apply(
+                    lambda r: _perf_row_credited_to_person(r, str(eng_filter)),
+                    axis=1,
+                )
+            ].copy()
+        ticket_rows = [_dispatch_row_dict(r) for _, r in queue_df.iterrows()]
+        picked: str | None = st.session_state.get(_DISP_SELECTED_KEY)
+        is_admin = _is_dashboard_admin()
+        fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+        cat_names = get_task_categories() or _try_fetch_task_categories()[0]
+
+        with main:
+            render_assign_panel(
+                on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
+                    tn, eng, eng2, cat, notes,
+                    fe_names=fe_names, fe_missing=fe_missing,
+                ),
+            )
+
+            col_title, col_search = st.columns([3, 1])
+            with col_title:
+                n = len(ticket_rows)
+                qtitle = (
+                    selected_queue.lower()
+                    if selected_queue == "Daily Task"
+                    else selected_queue
+                )
+                count_label = f"{n} ticket{'s' if n != 1 else ''}"
+                st.markdown(
+                    f"{t_heading(html.escape(qtitle))} {t_queue_sub(count_label)}",
+                    unsafe_allow_html=True,
+                )
+                if eng_filter:
+                    st.markdown(
+                        f'<div style="font-size:11px;color:#e2e8f8;background:#0d1e3a;'
+                        f'border:0.5px solid #1a3460;padding:2px 6px;border-radius:3px;'
+                        f'display:inline-block;margin-top:4px">● Engineer: {html.escape(str(eng_filter))}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+            with col_search:
+                search_num = st.text_input(
+                    "Search",
+                    placeholder="Search #",
+                    label_visibility="collapsed",
+                    key="disp_ticket_search",
+                )
+            if search_num.strip():
+                q = search_num.strip()
+                ticket_rows = [
+                    t for t in ticket_rows if q in str(t.get("ticket_number") or "")
+                ]
+
+            if selected_queue == "Daily Task":
+                render_nudge_banner(ticket_rows)
+
+            sel = st.session_state.get(_DISP_SELECTED_KEY)
+            render_ticket_table(
+                ticket_rows,
+                selected=sel,
+                selected_key=_DISP_SELECTED_KEY,
+                row_actions_fn=lambda t, rk: _render_dispatch_row_actions(
+                    t, is_admin, rk, queue_name=selected_queue
+                ),
+            )
+
+            ticket_nums = [
+                str(t.get("ticket_number") or "") for t in ticket_rows if t.get("ticket_number")
+            ]
+            picked = sel if sel and sel in ticket_nums else None
+
+            _render_dispatch_row_modals(
+                queue_df=queue_df,
+                ticket_nums=ticket_nums,
+                is_admin=is_admin,
+                fe_names=fe_names,
+                fe_missing=fe_missing,
+                cat_names=cat_names,
+            )
+
+        with dp:
+            with st.container(key="disp_detail_panel"):
+                ticket = None
+                if picked:
+                    match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
+                    if not match.empty:
+                        ticket = _dispatch_row_dict(match.iloc[0])
+
+                if not ticket:
+                    st.markdown(
+                        """
+                    <div style="height:200px;display:flex;align-items:center;
+                      justify-content:center;color:#2a3a5a;font-size:13px;font-weight:400">
+                      Select a ticket to view details
+                    </div>""",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    t = ticket
+                    st.markdown(
+                        f"""
+                    <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
+                      {t_detail_id(str(t.get('ticket_number') or ''))}
+                      <div style="display:flex;align-items:center;gap:7px;margin-top:4px">
+                        {status_pill(str(t.get('status') or ''))}
+                        {t_caption(str(t.get('task_category') or ''))}
+                      </div>
+                    </div>
+                    """,
+                        unsafe_allow_html=True,
+                    )
+                    eng = str(t.get("assigned_to") or "—")
+                    eng2 = str(t.get("assigned_to_2") or "").strip()
+                    share = "· shared" if eng2 else "· solo"
+                    st.markdown(
+                        t_section_label(
+                            "Engineer",
+                            spacing=".06em",
+                            margin="margin:10px 0 5px",
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        f'<span style="font-size:13px;font-weight:400;color:#8a9ac0;'
+                        f'line-height:1.5">'
+                        f'{html.escape(eng)}{(" + " + html.escape(eng2)) if eng2 else ""} '
+                        f'{share}</span>',
+                        unsafe_allow_html=True,
+                    )
+                    if t.get("additional_info"):
+                        st.markdown(
+                            t_section_label(
+                                "Notes",
+                                spacing=".06em",
+                                margin="margin:10px 0 5px",
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f"""
+                        <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
+                          background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
+                          {html.escape(str(t.get('additional_info') or ''))}
+                        </div>""",
+                            unsafe_allow_html=True,
+                        )
+                    _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
+                    st.markdown(
+                        t_section_label(
+                            "Timeline",
+                            spacing=".06em",
+                            margin="margin:10px 0 5px",
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    logs_df = _fetch_attendance(
+                        ticket_number=str(t.get("ticket_number") or ""),
+                        limit=6,
+                    )
+                    logs = logs_df.to_dict("records") if not logs_df.empty else []
+                    if not logs:
+                        st.caption("No log entries yet.")
+                    for i, log in enumerate(logs):
+                        render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
 
 
 def _render_dashboard(
@@ -16142,8 +18658,11 @@ def _render_dashboard(
     elif nav_intent != st.session_state.get(_DASH_MAIN_NAV_KEY):
         st.session_state[_DASH_MAIN_NAV_KEY] = nav_intent
 
-    _render_dashboard_header(refreshed_at=refreshed_at)
-    main_nav = _render_main_navigation()
+    main_nav = _normalize_dash_main_nav(
+        st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM)
+    )
+    if main_nav != _DASH_NAV_CSM:
+        _render_dashboard_header(refreshed_at=refreshed_at)
 
     if main_nav == "Log":
         _render_attendance_tab(lookback_days=lookback_days)
@@ -16252,6 +18771,15 @@ def _render_dashboard(
             f"**{total_other}** ticket(s) use a status not shown in the queue tabs: {detail}. "
             "Run migration `20260625_rename_no_answer_to_on_hold.sql` or move them manually."
         )
+
+    _render_dispatch_csm_dashboard(
+        df=df,
+        df_all=df_all,
+        masks=masks,
+        lookback_days=lookback_days,
+    )
+    return
+
     (
         pending_label,
         open_label,
@@ -16747,97 +19275,1097 @@ def _render_field_photos_section(done: pd.DataFrame) -> None:
             _render_photo_grid(photos, cols_per_row=3)
 
 
-def _render_field_performance_tab(*, lookback_days: int) -> None:
-    """Field ticket outcomes per person in the sidebar window."""
-    range_caption = _format_dash_range_caption() or "sidebar time range"
-    st.caption(f"{range_caption} · {LOCAL_TZ_LABEL}")
-
-    range_start, range_end = _get_dash_range()
-    bucket_fmt, x_title, axis_format = _perf_bucket_settings(range_start, range_end)
-
-    st.markdown("##### Field tickets")
-    try:
-        df_all = _fetch_tickets()
-    except Exception as exc:
-        st.error(f"Could not load tickets: {exc}")
-        df_all = pd.DataFrame()
-
-    field_has_data = (
-        not df_all.empty and "status" in df_all.columns
+def _get_performance_snapshot_counts(
+    *,
+    slices: dict[str, pd.DataFrame],
+    sales_all: pd.DataFrame,
+    focus: str,
+) -> dict[str, int]:
+    """Queue snapshot counts — ignore date range, respect Focus assignee."""
+    pending_f = _perf_filter_by_person(slices["pending"], focus)
+    open_f = _perf_filter_by_person(slices["open"], focus)
+    on_hold_f = _perf_filter_by_person(slices["on_hold"], focus)
+    completed_f = _perf_filter_by_person(slices["completed"], focus)
+    investigation_f = _perf_filter_by_person(slices["investigation"], focus)
+    unattended_f = _perf_filter_by_person(slices["unattended"], focus)
+    sales_enriched = (
+        _perf_enrich_sales_cases(sales_all) if not sales_all.empty else pd.DataFrame()
     )
-    if not field_has_data:
-        st.info("No field ticket data to analyze.")
-        in_view = pending = open_df = completed = investigation = on_hold = unattended = (
-            pd.DataFrame()
-        )
-        handled_completed = handled_investigation = pd.DataFrame()
+    if focus == "All":
+        total = len(slices["in_view"])
+        sales_n = len(sales_all)
     else:
-        slices = _perf_prepare_snapshot_slices(df_all)
-        in_view = slices["in_view"]
-        pending = slices["pending"]
-        open_df = slices["open"]
-        completed = slices["completed"]
-        investigation = slices["investigation"]
-        on_hold = slices["on_hold"]
-        unattended = slices["unattended"]
-
-    n_total_all = len(in_view)
-    n_pending = len(pending)
-    n_open = len(open_df)
-    n_done = len(completed)
-    n_inv = len(investigation)
-    n_hold = len(on_hold)
-    n_unatt = len(unattended)
-    if not in_view.empty:
-        _qm = _ticket_queue_count_masks(in_view)
-        n_tab_union = int(
-            (
-                _qm["pending"]
-                | _qm["on_hold"]
-                | _qm["open"]
-                | _qm["investigation"]
-                | _qm["completed"]
-                | _qm["unattended"]
-                | _qm["other"]
-            ).sum()
+        total = (
+            len(pending_f)
+            + len(open_f)
+            + len(on_hold_f)
+            + len(completed_f)
+            + len(investigation_f)
+            + len(unattended_f)
         )
-        n_other_status = int(_qm["other"].sum())
+        sales_n = (
+            int(sales_enriched.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1).sum())
+            if not sales_enriched.empty
+            else 0
+        )
+
+    return {
+        "total": total,
+        "daily_task": len(pending_f),
+        "review": len(open_f),
+        "on_hold": len(on_hold_f),
+        "resolved": len(completed_f),
+        "investigation": len(investigation_f),
+        "unattended": len(unattended_f),
+        "sales": sales_n,
+    }
+
+
+def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
+    """Two rows of four metric cards for the Performance main column."""
+    row1 = st.columns(4)
+    row2 = st.columns(4)
+    metrics_row1 = [
+        ("TOTAL", counts["total"], "#8a9ac0"),
+        ("DAILY TASK", counts["daily_task"], "#8a9ac0"),
+        ("REVIEW", counts["review"], "#8a9ac0"),
+        ("ON HOLD", counts["on_hold"], "#8a9ac0"),
+    ]
+    metrics_row2 = [
+        ("RESOLVED", counts["resolved"], "#8a9ac0"),
+        ("INVESTIGATION", counts["investigation"], "#8a9ac0"),
+        (
+            "UNATTENDED",
+            counts["unattended"],
+            "#ef4444" if counts["unattended"] > 0 else "#8a9ac0",
+        ),
+        ("SALES", counts["sales"], "#8a9ac0"),
+    ]
+    for col, (label, val, color) in zip(row1, metrics_row1):
+        with col:
+            st.markdown(
+                f"""
+            <div style="background:#0d1220;border:0.5px solid #1a2035;
+              border-radius:5px;padding:8px 9px">
+              <div style="font-size:22px;font-weight:600;color:{color};
+                font-variant-numeric:tabular-nums">{val}</div>
+              <div style="font-size:11px;color:#2a3a5a;margin-top:2px">{label}</div>
+            </div>
+            """,
+                unsafe_allow_html=True,
+            )
+    for col, (label, val, color) in zip(row2, metrics_row2):
+        with col:
+            st.markdown(
+                f"""
+            <div style="background:#0d1220;border:0.5px solid #1a2035;
+              border-radius:5px;padding:8px 9px">
+              <div style="font-size:22px;font-weight:600;color:{color};
+                font-variant-numeric:tabular-nums">{val}</div>
+              <div style="font-size:11px;color:#2a3a5a;margin-top:2px">{label}</div>
+            </div>
+            """,
+                unsafe_allow_html=True,
+            )
+
+
+def _perf_load_overview_visits_history(df_all: pd.DataFrame) -> pd.DataFrame:
+    """All visit cycles for tickets in credited field queues (Overview fair credit)."""
+    if df_all.empty:
+        return pd.DataFrame()
+    tnums = _perf_credited_ticket_numbers(df_all)
+    if not tnums:
+        return pd.DataFrame()
+    return _fetch_visits_for_snapshot_cached("\n".join(tnums))
+
+
+def _perf_visit_solo_shared_counts(
+    visits: pd.DataFrame,
+    *,
+    credit_key: str,
+    df_all: pd.DataFrame | None = None,
+) -> tuple[int, int]:
+    """
+    Solo vs shared from **visit cycles** — fair credit to every assignee who touched the ticket.
+
+    Example: A responds → reassign B → reassign C — all three count on the same ticket;
+    classified **shared** when 2+ engineers appear in that ticket's visit history.
+
+    Falls back to assignment snapshot when visit data is unavailable.
+    """
+    if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+        return 0, 0
+    if visits.empty:
+        if df_all is not None and not df_all.empty:
+            return _perf_assignment_solo_shared_counts(df_all, credit_key=credit_key)
+        return 0, 0
+
+    prepared = _perf_prepare_visits_df(visits)
+    if df_all is not None and not df_all.empty:
+        credited_nums = set(_perf_credited_ticket_numbers(df_all))
+        if credited_nums and "ticket_number" in prepared.columns:
+            prepared = prepared[
+                prepared["ticket_number"].astype(str).str.strip().isin(credited_nums)
+            ]
+    if prepared.empty:
+        return 0, 0
+
+    key = _perf_norm_member(credit_key)
+    detail = _perf_ticket_detail_rows(prepared, person=key)
+    if detail.empty:
+        return 0, 0
+    solo = int((detail["Type"] == "Solo").sum())
+    shared = int((detail["Type"] == "Shared").sum())
+    return solo, shared
+
+
+def _perf_assignment_solo_shared_counts(
+    df_all: pd.DataFrame,
+    *,
+    credit_key: str,
+) -> tuple[int, int]:
+    """
+    Solo vs shared on **assignment** — current queue snapshot (legacy Overview rule).
+
+    - **Solo**: ticket credited to this person with only ``assigned_to`` set.
+    - **Shared**: ticket credited to this person with ``assigned_to_2`` also set.
+    - Uses credited field queues (Daily Task, Review, On Hold, Investigation, Resolved).
+      Excludes Unattended. Not filtered by sidebar date range.
+    """
+    if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+        return 0, 0
+    credited = _perf_credited_field_tickets(df_all, person=credit_key)
+    solo = shared = 0
+    for _, row in credited.iterrows():
+        if get_credit_type(row) == "shared":
+            shared += 1
+        else:
+            solo += 1
+    return solo, shared
+
+
+def _perf_overview_people(
+    *,
+    focus: str,
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    visits_history: pd.DataFrame | None = None,
+) -> list[str]:
+    """Field engineers (incl. visit history assignees) + Admin sales bucket."""
+    if focus not in ("", "All"):
+        return [_perf_person_credit_key(focus)]
+
+    people: set[str] = set()
+    people.add(_SC_SALES_OVERVIEW_ADMIN_LABEL)
+    for handle in get_engineer_handles():
+        key = _perf_person_credit_key(handle)
+        if key not in ("", "(unknown)"):
+            people.add(key)
+
+    if not sales_all.empty:
+        for _, row in sales_all.iterrows():
+            credited = _perf_sales_credited_person(row)
+            if credited not in ("", "(unknown)"):
+                people.add(credited)
+
+    credited_field = _perf_credited_field_tickets(df_all)
+    if not credited_field.empty:
+        for _, row in credited_field.iterrows():
+            for assignee in _perf_ticket_credit_assignees(row):
+                if assignee not in ("", "(unknown)"):
+                    people.add(_perf_person_credit_key(assignee))
+
+    if visits_history is not None and not visits_history.empty:
+        prepared = _perf_prepare_visits_df(visits_history)
+        if not df_all.empty and "ticket_number" in prepared.columns:
+            credited_nums = set(_perf_credited_ticket_numbers(df_all))
+            if credited_nums:
+                prepared = prepared[
+                    prepared["ticket_number"].astype(str).str.strip().isin(credited_nums)
+                ]
+        if "assignee" in prepared.columns:
+            for assignee in prepared["assignee"].dropna().unique():
+                key = _perf_person_credit_key(assignee)
+                if key not in ("", "(unknown)"):
+                    people.add(key)
+
+    return sorted(people, key=str.lower)
+
+
+def _perf_overview_row_label(credit_key: str) -> str:
+    if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        return "Admin"
+    if credit_key.startswith("@"):
+        return credit_key
+    return f"@{credit_key}"
+
+
+def _perf_overview_button_key(credit_key: str) -> str:
+    if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        return "__admin_queue__"
+    return credit_key.lstrip("@").lower()
+
+
+def _perf_resolve_overview_credit_key(selected: object) -> str:
+    """Map detail-panel selection back to a performance credit key."""
+    raw = str(selected or "").strip()
+    if not raw:
+        return ""
+    if raw in (_SC_SALES_OVERVIEW_ADMIN_LABEL, "__admin_queue__", "admin-queue"):
+        return _SC_SALES_OVERVIEW_ADMIN_LABEL
+    return _perf_person_credit_key(raw)
+
+
+def _perf_overview_sales_count(
+    sales_all: pd.DataFrame,
+    *,
+    credit_key: str,
+    focus: str,
+) -> int:
+    """Snapshot sales-case count credited to ``credit_key``."""
+    if sales_all.empty:
+        return 0
+    n = 0
+    for _, row in sales_all.iterrows():
+        if _perf_sales_credited_person(row) != credit_key:
+            continue
+        if focus not in ("", "All") and not _perf_sales_matches_focus(row, focus):
+            continue
+        n += 1
+    return n
+
+
+def _get_solo_shared_data(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    """Visit-cycle solo/shared (fair credit) + sales snapshot per credited person."""
+    del range_start, range_end  # Overview solo/shared ignore sidebar range
+
+    visits_history = _perf_load_overview_visits_history(df_all)
+
+    engineers = _perf_overview_people(
+        focus=focus,
+        df_all=df_all,
+        sales_all=sales_all,
+        visits_history=visits_history,
+    )
+
+    results: list[dict[str, object]] = []
+    for credit_key in engineers:
+        if credit_key in ("", "(unknown)"):
+            continue
+        solo, shared = _perf_visit_solo_shared_counts(
+            visits_history,
+            credit_key=credit_key,
+            df_all=df_all,
+        )
+        sales = _perf_overview_sales_count(
+            sales_all, credit_key=credit_key, focus=focus
+        )
+        if solo > 0 or shared > 0 or sales > 0:
+            btn_key = _perf_overview_button_key(credit_key)
+            is_admin_credit = (
+                credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL
+                and solo == 0
+                and shared == 0
+                and sales > 0
+            )
+            results.append(
+                {
+                    "credit_key": credit_key,
+                    "engineer": btn_key,
+                    "label": _perf_overview_row_label(credit_key),
+                    "solo": solo,
+                    "shared": shared,
+                    "sales": sales,
+                    "is_admin_credit": is_admin_credit,
+                }
+            )
+    return results
+
+
+def _render_perf_solo_shared_chart(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Clickable solo vs shared bars — selecting a row opens the detail panel."""
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
+        'margin:6px 0 8px">Solo vs shared</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+    <div style="display:flex;gap:14px;font-size:11px;color:#4a5a7a;margin-bottom:8px">
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:{CHART_COLORS['solo']};display:inline-block;margin-right:4px"></span>Solo</span>
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:{CHART_COLORS['shared']};display:inline-block;margin-right:4px"></span>Shared</span>
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:{CHART_COLORS['sales']};display:inline-block;margin-right:4px"></span>Sales</span>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    data = _get_solo_shared_data(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    if not data:
+        st.markdown(
+            '<div style="padding:24px;text-align:center;color:#2a3a5a;font-size:14px">'
+            "No field or sales activity for this filter</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    for row in data:
+        btn_id = str(row["engineer"])
+        label = str(row.get("label") or f"@{btn_id}")
+        if row.get("is_admin_credit"):
+            label = f"🔒 {label.lstrip('🔒 ')}"
+        solo = int(row["solo"])
+        shared = int(row["shared"])
+        sales = int(row.get("sales", 0))
+        field_total = solo + shared
+        bar_total = field_total + sales or 1
+        solo_pct = (solo / bar_total) * 100
+        shared_pct = (shared / bar_total) * 100
+        sales_pct = (sales / bar_total) * 100
+        col_btn, col_bar = st.columns([1, 4])
+        with col_btn:
+            if st.button(label, key=f"ss_row_{btn_id}", use_container_width=True):
+                st.session_state[_PERF_SELECTED_ENGINEER_KEY] = btn_id
+                st.rerun()
+        with col_bar:
+            segs = ""
+            if solo_pct > 0:
+                segs += f'<div style="background:{CHART_COLORS["solo"]};width:{solo_pct}%"></div>'
+            if shared_pct > 0:
+                segs += f'<div style="background:{CHART_COLORS["shared"]};width:{shared_pct}%"></div>'
+            if sales_pct > 0:
+                segs += f'<div style="background:{CHART_COLORS["sales"]};width:{sales_pct}%"></div>'
+            if not segs:
+                segs = f'<div style="background:{CHART_COLORS["grid"]};width:100%"></div>'
+            st.markdown(
+                f"""
+            <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
+              background:{CHART_COLORS['grid']};margin-top:4px">{segs}</div>
+            """,
+                unsafe_allow_html=True,
+            )
+            parts = []
+            if field_total:
+                parts.append(f"{solo} solo / {shared} shared")
+            if sales:
+                parts.append(f"{sales} sales")
+            st.caption(" · ".join(parts) if parts else "0")
+    st.caption(
+        "Solo / shared = **visit fair credit** — every engineer with a visit cycle on the ticket "
+        "counts (not only whoever holds it now). Reassign chains (A → B → C) credit all staff "
+        "who touched the case. **Sales** = all sales cases in queue; undispatched cases credit "
+        "**Admin**."
+    )
+
+
+def _get_engineer_performance_detail(
+    engineer: str,
+    *,
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    visits_all: pd.DataFrame,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, object]:
+    """Breakdown for one engineer in the Performance detail panel."""
+    credit_key = _perf_resolve_overview_credit_key(engineer)
+    sales_count = _perf_overview_sales_count(
+        sales_all, credit_key=credit_key, focus="All"
+    )
+
+    solo, shared = _perf_visit_solo_shared_counts(
+        _perf_load_overview_visits_history(df_all),
+        credit_key=credit_key,
+        df_all=df_all,
+    )
+
+    in_range = pd.DataFrame()
+    if not df_all.empty and credit_key != _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        if "updated_at" in df_all.columns:
+            ref = _parse_ts(df_all["updated_at"])
+        else:
+            ref = _perf_reference_ts(df_all)
+        in_range = df_all.loc[
+            ref.notna() & (ref >= range_start) & (ref <= range_end)
+        ].copy()
+        in_range = in_range.loc[
+            in_range.apply(lambda r: _perf_row_credited_to_person(r, credit_key), axis=1)
+        ]
+
+    resolved = unattended = 0
+    credited = in_range
+    if not credited.empty and "status" in credited.columns:
+        status_col = credited["status"].astype(str)
+        resolved = int(status_col.eq(STATUS_RESOLVED).sum())
+        unattended = int(status_col.eq("Unattended").sum())
+
+    recent = credited.copy()
+    if not recent.empty and "updated_at" in recent.columns:
+        recent["_sort_ts"] = _parse_ts(recent["updated_at"])
+        recent = recent.sort_values("_sort_ts", ascending=False).head(5)
+    elif not recent.empty:
+        recent = recent.head(5)
     else:
-        n_tab_union = 0
-        n_other_status = 0
+        recent = pd.DataFrame()
+    recent_tickets: list[dict[str, str]] = []
+    if not recent.empty:
+        for _, row in recent.iterrows():
+            recent_tickets.append(
+                {
+                    "ticket_number": str(row.get("ticket_number") or ""),
+                    "task_category": str(row.get("task_category") or "(uncategorized)"),
+                }
+            )
 
-    if field_has_data and n_total_all == 0:
-        st.info("No field tickets in the system.")
+    avg_response = "—"
+    if not visits_all.empty and "assignee" in visits_all.columns:
+        outcome_col = (
+            visits_all["outcome"].astype(str)
+            if "outcome" in visits_all.columns
+            else pd.Series("", index=visits_all.index)
+        )
+        responded = visits_all[
+            visits_all["assignee"].apply(
+                lambda a: _perf_person_credit_key(a) == credit_key
+            )
+            & outcome_col.eq("responded")
+        ]
+        durations: list[float] = []
+        for _, v in responded.iterrows():
+            start_raw = v.get("visit_start")
+            end_raw = v.get("visit_end")
+            if pd.notna(start_raw) and pd.notna(end_raw):
+                start = pd.Timestamp(start_raw)
+                end = pd.Timestamp(end_raw)
+                if start.tzinfo is None:
+                    start = start.tz_localize("UTC")
+                if end.tzinfo is None:
+                    end = end.tz_localize("UTC")
+                durations.append((end - start).total_seconds())
+        if durations:
+            avg_seconds = sum(durations) / len(durations)
+            h, rem = divmod(int(avg_seconds) // 60, 60)
+            avg_response = f"{h}h {rem:02d}m"
 
-    sales_all = pd.DataFrame()
-    try:
-        raw_sales = _fetch_sales_cases_cached()
-        sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
-    except Exception as exc:
-        st.warning(f"Could not load Sales Cases for Performance: {exc}")
-    sales_summary = _perf_build_sales_summary(sales_all)
-    n_sales = len(sales_all)
+    recent_sales: list[dict[str, str]] = []
+    if not sales_all.empty and credit_key:
+        sales_rows = [
+            row
+            for _, row in sales_all.iterrows()
+            if _perf_sales_credited_person(row) == credit_key
+        ]
+        sales_rows.sort(
+            key=lambda r: str(r.get("updated_at") or r.get("created_at") or ""),
+            reverse=True,
+        )
+        for row in sales_rows[:5]:
+            recent_sales.append(
+                {
+                    "case_ref": str(row.get("case_ref") or ""),
+                    "account_name": str(row.get("account_name") or "(uncategorized)"),
+                }
+            )
 
+    return {
+        "total": solo + shared + sales_count,
+        "solo": solo,
+        "shared": shared,
+        "sales": sales_count,
+        "resolved": resolved,
+        "unattended": unattended,
+        "avg_response": avg_response,
+        "recent_tickets": recent_tickets,
+        "recent_sales": recent_sales,
+    }
+
+
+def _render_performance_detail_panel(
+    *,
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    visits_all: pd.DataFrame,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Right detail panel — engineer breakdown when a chart/table row is selected."""
+    selected = st.session_state.get(_PERF_SELECTED_ENGINEER_KEY)
+    if not selected:
+        st.markdown(
+            """
+        <div style="height:200px;display:flex;align-items:center;
+          justify-content:center;color:#2a3a5a;font-size:14px;
+          text-align:center;padding:0 20px;line-height:1.5">
+          Click an engineer row or chart bar to see ticket-level detail here
+        </div>""",
+            unsafe_allow_html=True,
+        )
+        return
+
+    detail = _get_engineer_performance_detail(
+        str(selected),
+        df_all=df_all,
+        sales_all=sales_all,
+        visits_all=visits_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    credit_key = _perf_resolve_overview_credit_key(selected)
+    display_name = _perf_overview_row_label(credit_key) if credit_key else f"@{selected}"
+    range_label = str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week"))
+    st.markdown(
+        f"""
+    <div style="padding-bottom:11px;border-bottom:0.5px solid #1a2035;margin-bottom:11px">
+      <div style="font-size:16px;font-weight:500;color:#e2e8f8">{html.escape(display_name)}</div>
+      <span style="font-size:11px;color:#2a3a5a">
+        {html.escape(range_label)} · {detail['total']} items</span>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        t_section_label("Breakdown", spacing=".06em", margin="margin:10px 0 5px"),
+        unsafe_allow_html=True,
+    )
+    rows = [
+        ("Solo tickets", detail["solo"], "#8a9ac0"),
+        ("Shared tickets", detail["shared"], "#8a9ac0"),
+        ("Sales cases", detail["sales"], "#a78bfa"),
+        ("Resolved", detail["resolved"], "#8a9ac0"),
+        ("Avg response time", detail["avg_response"], "#8a9ac0"),
+        (
+            "Unattended",
+            detail["unattended"],
+            "#ef4444" if int(detail["unattended"]) > 0 else "#22c55e",
+        ),
+    ]
+    for label, val, color in rows:
+        st.markdown(
+            f"""
+        <div style="display:flex;justify-content:space-between;padding:5px 0;
+          border-bottom:0.5px solid #131927;font-size:13px">
+          <span style="color:#4a5a7a">{html.escape(str(label))}</span>
+          <span style="color:{color};font-variant-numeric:tabular-nums">{val}</span>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        t_section_label("Recent tickets", spacing=".06em", margin="margin:14px 0 5px"),
+        unsafe_allow_html=True,
+    )
+    for t in detail["recent_tickets"]:
+        tn = str(t.get("ticket_number") or "")
+        if not tn:
+            continue
+        if st.button(
+            f"{tn} · {t.get('task_category', '')}",
+            key=f"perf_ticket_{tn}",
+            use_container_width=True,
+        ):
+            _perf_jump_to_csm_ticket(tn)
+    if not detail["recent_tickets"]:
+        st.caption("No field tickets in this range.")
+
+    recent_sales = detail.get("recent_sales") or []
+    if recent_sales:
+        st.markdown(
+            t_section_label("Recent sales", spacing=".06em", margin="margin:14px 0 5px"),
+            unsafe_allow_html=True,
+        )
+        for c in recent_sales:
+            ref = str(c.get("case_ref") or "")
+            if not ref:
+                continue
+            if st.button(
+                f"{ref} · {c.get('account_name', '')}",
+                key=f"perf_sales_{ref}",
+                use_container_width=True,
+            ):
+                _perf_jump_to_sales_case(ref)
+
+
+def _perf_jump_to_csm_ticket(ticket_number: str) -> None:
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+    st.session_state[_DASH_PENDING_TICKET_SELECT_KEY] = str(ticket_number)
+    st.rerun()
+
+
+def _perf_jump_to_sales_case(case_ref: str) -> None:
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
+    st.session_state[_DASH_PENDING_SALES_SELECT_KEY] = str(case_ref)
+    st.rerun()
+
+
+def _perf_rows_in_updated_range(
+    df: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if "updated_at" in df.columns:
+        ref = _parse_ts(df["updated_at"])
+    else:
+        ref = _perf_reference_ts(df)
+    return df.loc[ref.notna() & (ref >= range_start) & (ref <= range_end)].copy()
+
+
+def _perf_sales_activity_in_range(
+    row: pd.Series,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> bool:
+    for col in ("updated_at", "last_assigned_at", "created_at"):
+        if col not in row.index:
+            continue
+        raw = row.get(col)
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            continue
+        ts = pd.to_datetime(raw, utc=True, errors="coerce")
+        if pd.isna(ts):
+            continue
+        if range_start <= ts <= range_end:
+            return True
+    return False
+
+
+def _perf_sales_matches_focus(row: pd.Series, focus: str) -> bool:
+    if focus in ("", "All"):
+        return True
+    return _perf_sales_credited_person(row) == _perf_person_credit_key(focus)
+
+
+def _get_sales_status_counts_perf(
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, int]:
+    view = _perf_rows_in_updated_range(
+        sales_all, range_start=range_start, range_end=range_end
+    )
+    if view.empty:
+        return {s: 0 for s in ("Sales ticket", "Investigation", "Design", "Resolved")}
+    if focus not in ("", "All"):
+        view = view.loc[view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
+    if "status" in view.columns:
+        st_col = view["status"].map(_sc_effective_status)
+    else:
+        st_col = pd.Series("", index=view.index)
+    return {
+        "Sales ticket": int(st_col.eq(SC_STATUS_SALES_TICKET).sum()),
+        "Investigation": int(st_col.eq(SC_STATUS_INVESTIGATION).sum()),
+        "Design": int(st_col.eq(SC_STATUS_DESIGN).sum()),
+        "Resolved": int(st_col.eq(SC_STATUS_RESOLVED).sum()),
+    }
+
+
+def _get_sales_cases_by_engineer_perf(
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    view = _perf_rows_in_updated_range(
+        sales_all, range_start=range_start, range_end=range_end
+    )
+    if view.empty or "assigned_to" not in view.columns:
+        return []
+    dispatched = view.loc[view["assigned_to"].apply(_sc_sales_has_field_assignee)]
+    if focus not in ("", "All"):
+        key = _perf_norm_member(focus)
+        dispatched = dispatched.loc[
+            dispatched["assigned_to"].map(_perf_norm_member).eq(key)
+        ]
+    if dispatched.empty:
+        return []
+    counts = (
+        dispatched["assigned_to"]
+        .map(_perf_norm_member)
+        .value_counts()
+        .sort_values(ascending=False)
+    )
+    return [
+        {"engineer": eng.lstrip("@").lower(), "count": int(c)}
+        for eng, c in counts.items()
+        if eng not in ("", "(unknown)")
+    ]
+
+
+def _get_sales_cases_in_range_perf(
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    view = _perf_rows_in_updated_range(
+        sales_all, range_start=range_start, range_end=range_end
+    )
+    if view.empty:
+        return []
+    if focus not in ("", "All"):
+        view = view.loc[view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
+    if view.empty:
+        return []
+    sort_ts = _parse_ts(view["updated_at"]) if "updated_at" in view.columns else view.index
+    view = view.assign(_sort=sort_ts).sort_values("_sort", ascending=False)
+    rows: list[dict[str, object]] = []
+    for _, row in view.head(15).iterrows():
+        rows.append(
+            {
+                "case_ref": str(row.get("case_ref") or ""),
+                "account_name": str(row.get("account_name") or "—"),
+                "status": str(row.get("status") or "—"),
+            }
+        )
+    return rows
+
+
+def _render_perf_sales_performance_tab(
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Sales-only Performance tab — status cards, engineer bars, case list."""
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
+        "Cases by status</p>",
+        unsafe_allow_html=True,
+    )
+    status_counts = _get_sales_status_counts_perf(
+        sales_all, focus=focus, range_start=range_start, range_end=range_end
+    )
+    cols = st.columns(4)
+    sales_status_colors = {
+        "Sales ticket": "#a78bfa",
+        "Investigation": "#8a9ac0",
+        "Design": "#8a9ac0",
+        "Resolved": "#4a5a7a",
+    }
+    for col, (status, color) in zip(cols, sales_status_colors.items()):
+        with col:
+            st.markdown(
+                f"""
+            <div style="background:#0d1220;border:0.5px solid #1a2035;
+              border-radius:5px;padding:8px 9px">
+              <div style="font-size:22px;font-weight:600;color:{color};
+                font-variant-numeric:tabular-nums">{status_counts.get(status, 0)}</div>
+              <div style="font-size:11px;color:#2a3a5a;margin-top:2px">{status.upper()}</div>
+            </div>
+            """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:14px 0 8px">'
+        "Cases by engineer</p>",
+        unsafe_allow_html=True,
+    )
+    staff_data = _get_sales_cases_by_engineer_perf(
+        sales_all, focus=focus, range_start=range_start, range_end=range_end
+    )
+    if not staff_data:
+        st.markdown(
+            '<div style="padding:24px;text-align:center;color:#2a3a5a;font-size:14px">'
+            "No dispatched sales cases in this range</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        max_count = max(int(r["count"]) for r in staff_data)
+        for row in staff_data:
+            eng = str(row["engineer"])
+            col_btn, col_bar = st.columns([1, 4])
+            with col_btn:
+                if st.button(f"@{eng}", key=f"sp_eng_{eng}", use_container_width=True):
+                    st.session_state[_PERF_SELECTED_ENGINEER_KEY] = eng
+                    st.rerun()
+            with col_bar:
+                pct = (int(row["count"]) / max_count * 100) if max_count else 0
+                st.markdown(
+                    f"""
+                <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
+                  background:{CHART_COLORS['grid']};margin-top:4px">
+                  <div style="background:{CHART_COLORS['sales']};width:{pct}%"></div>
+                </div>
+                """,
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"{row['count']} cases")
+
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:14px 0 8px">'
+        "Case list</p>",
+        unsafe_allow_html=True,
+    )
+    cases = _get_sales_cases_in_range_perf(
+        sales_all, focus=focus, range_start=range_start, range_end=range_end
+    )
+    if not cases:
+        st.caption("No sales cases in this range.")
+        return
+    for c in cases:
+        col_ref, col_acc, col_status, col_btn = st.columns([1, 2, 1.2, 0.8])
+        with col_ref:
+            st.markdown(
+                f'<span style="font-size:13px;color:#8a9ac0;font-variant-numeric:tabular-nums">'
+                f'{html.escape(str(c["case_ref"]))}</span>',
+                unsafe_allow_html=True,
+            )
+        with col_acc:
+            st.markdown(
+                f'<span style="font-size:13px;color:#4a5a7a">'
+                f'{html.escape(str(c["account_name"]))}</span>',
+                unsafe_allow_html=True,
+            )
+        with col_status:
+            st.markdown(
+                f'<span style="font-size:11px;color:#2a3a5a">'
+                f'{html.escape(str(c["status"]))}</span>',
+                unsafe_allow_html=True,
+            )
+        with col_btn:
+            ref = str(c["case_ref"])
+            if st.button("View →", key=f"sp_case_{ref}", use_container_width=True):
+                _perf_jump_to_sales_case(ref)
+
+
+def _get_case_info_rows(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+
+    tickets = _perf_rows_in_updated_range(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if focus not in ("", "All"):
+        tickets = _perf_filter_by_person(tickets, focus)
+    for _, t in tickets.iterrows():
+        staff = str(t.get("assigned_to") or "—")
+        if _sc_sales_has_field_assignee(t.get("assigned_to_2")):
+            staff += f" + {t.get('assigned_to_2')}"
+        rows.append(
+            {
+                "type": "csm",
+                "ref": str(t.get("ticket_number") or ""),
+                "title": str(t.get("task_category") or "—"),
+                "staff": staff,
+                "status": str(t.get("status") or "—"),
+                "sort_key": str(t.get("ticket_number") or ""),
+            }
+        )
+
+    sales = _perf_rows_in_updated_range(
+        sales_all, range_start=range_start, range_end=range_end
+    )
+    if focus not in ("", "All"):
+        sales = sales.loc[sales.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
+    for _, c in sales.iterrows():
+        if _sc_sales_has_field_assignee(c.get("assigned_to")):
+            staff = str(_perf_norm_member(c.get("assigned_to")))
+        else:
+            admin = str(c.get("admin_owner") or "—").strip()
+            staff = f"{_perf_norm_member(admin)} (admin)" if admin and admin != "—" else "—"
+        rows.append(
+            {
+                "type": "sales",
+                "ref": str(c.get("case_ref") or ""),
+                "title": str(c.get("account_name") or "—"),
+                "staff": staff,
+                "status": str(c.get("status") or "—"),
+                "sort_key": str(c.get("case_ref") or ""),
+            }
+        )
+
+    return sorted(rows, key=lambda r: str(r["sort_key"]), reverse=True)
+
+
+def _render_perf_case_info_list_tab(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Combined CSM + Sales activity list for the Case Info view."""
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 4px">'
+        "Case info — all activity in range</p>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Field tickets and sales cases combined — staff involvement and notes")
+
+    rows = _get_case_info_rows(
+        df_all, sales_all, focus=focus, range_start=range_start, range_end=range_end
+    )
+    if not rows:
+        st.markdown(
+            '<div style="padding:30px;text-align:center;color:#2a3a5a;font-size:14px">'
+            "No activity in this range</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    h1, h2, h3, h4, h5, h6 = st.columns([0.7, 1.25, 1.85, 1.15, 1.05, 0.95], gap="small")
+    for col, label in zip(
+        [h1, h2, h3, h4, h5, h6],
+        ["Type", "Ref", "Title / Account", "Staff", "Status", ""],
+    ):
+        with col:
+            st.markdown(t_col_header(label), unsafe_allow_html=True)
+    st.markdown("<div style='margin:4px 0 6px;border-bottom:0.5px solid #1a2035'></div>",
+                  unsafe_allow_html=True)
+
+    for row in rows:
+        c1, c2, c3, c4, c5, c6 = st.columns([0.7, 1.25, 1.85, 1.15, 1.05, 0.95], gap="small")
+        icon = "🔧" if row["type"] == "csm" else "🏢"
+        with c1:
+            st.markdown(f'<span style="font-size:14px">{icon}</span>', unsafe_allow_html=True)
+        with c2:
+            st.markdown(
+                f'<span style="font-size:13px;color:#8a9ac0">{html.escape(str(row["ref"]))}</span>',
+                unsafe_allow_html=True,
+            )
+        with c3:
+            st.markdown(
+                f'<span style="font-size:13px;color:#4a5a7a">{html.escape(str(row["title"]))}</span>',
+                unsafe_allow_html=True,
+            )
+        with c4:
+            st.markdown(
+                f'<span style="font-size:11px;color:#8a9ac0">{html.escape(str(row["staff"]))}</span>',
+                unsafe_allow_html=True,
+            )
+        with c5:
+            st.markdown(
+                f'<span style="font-size:11px;color:#2a3a5a">{html.escape(str(row["status"]))}</span>',
+                unsafe_allow_html=True,
+            )
+        with c6:
+            ref = str(row["ref"])
+            rtype = str(row["type"])
+            if st.button("View →", key=f"ci_{rtype}_{ref}", use_container_width=True):
+                if rtype == "csm":
+                    _perf_jump_to_csm_ticket(ref)
+                else:
+                    _perf_jump_to_sales_case(ref)
+
+
+def _get_handled_field_tickets_perf(
+    df_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    if df_all.empty or "status" not in df_all.columns:
+        return []
+    view = df_all.loc[
+        df_all["status"].astype(str).isin([STATUS_RESOLVED, STATUS_UNDER_INVESTIGATION])
+    ].copy()
+    view = _perf_rows_in_updated_range(view, range_start=range_start, range_end=range_end)
+    if focus not in ("", "All"):
+        view = _perf_filter_by_person(view, focus)
+    return [
+        {
+            "ticket_number": str(r.get("ticket_number") or ""),
+            "task_category": str(r.get("task_category") or "—"),
+            "assigned_to": str(r.get("assigned_to") or "—"),
+        }
+        for _, r in view.iterrows()
+    ]
+
+
+def _get_handled_sales_cases_perf(
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    if sales_all.empty or "status" not in sales_all.columns:
+        return []
+    view = sales_all.loc[
+        sales_all["status"]
+        .astype(str)
+        .map(_sc_effective_status)
+        .isin([SC_STATUS_INVESTIGATION, SC_STATUS_REGIONAL, SC_STATUS_RESOLVED])
+    ].copy()
+    view = view.loc[
+        view.apply(
+            lambda r: _perf_sales_activity_in_range(
+                r, range_start=range_start, range_end=range_end
+            ),
+            axis=1,
+        )
+    ]
+    if focus not in ("", "All"):
+        view = view.loc[view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
+    rows: list[dict[str, object]] = []
+    for _, r in view.iterrows():
+        rows.append(
+            {
+                "case_ref": str(r.get("case_ref") or ""),
+                "account_name": str(r.get("account_name") or "—"),
+                "assigned_to": r.get("assigned_to"),
+                "admin_owner": r.get("admin_owner"),
+            }
+        )
+    return rows
+
+
+def _perf_handled_tab_context(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    visits_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, object]:
+    """Metrics + views for Performance → Handled (field + sales, date-range scoped)."""
+    field_has_data = not df_all.empty and "status" in df_all.columns
     handled_completed = handled_investigation = pd.DataFrame()
     n_assigned_in_range = 0
-    visits_history = pd.DataFrame()
 
-    # Performance tabs — Weekly attended is always in the tab row.
-    if field_has_data or not sales_all.empty or not df_all.empty:
-        if field_has_data and "ticket_number" in df_all.columns:
-            tnums = _perf_credited_ticket_numbers(df_all)
-            if tnums:
-                try:
-                    visits_history = _fetch_visits_for_snapshot_cached("\n".join(tnums))
-                except Exception:
-                    visits_history = pd.DataFrame()
-
-        visits_all = pd.DataFrame()
-        try:
-            visits_all = _fetch_visits_in_range(range_start, range_end)
-        except Exception:
-            pass
-
+    if field_has_data or not sales_all.empty:
         assigned_ids = _perf_assigned_ticket_ids_in_range(
             visits_all,
             df_all,
@@ -16852,357 +20380,665 @@ def _render_field_performance_tab(*, lookback_days: int) -> None:
                 range_end,
                 visits=visits_all,
             )
-        sales_handled = _perf_prepare_sales_handled_in_range(
-            sales_all,
-            range_start,
-            range_end,
-        )
 
-        summary = _perf_build_summary(
-            pending,
-            open_df,
-            completed,
-            investigation,
-            on_hold,
-            unattended,
-            handled_completed=handled_completed,
-            handled_investigation=handled_investigation,
-            handled_sales=sales_handled,
-        )
-        visit_summary = _perf_build_visit_summary(visits_all)
-        overview_table = _perf_merge_field_and_visit_summaries(summary, visit_summary)
-        overview_table = _perf_attach_sales_to_overview(overview_table, sales_summary)
-        people = _perf_focus_people(summary, visits_all, sales_summary)
-        focus = st.selectbox(
-            "Focus Assignee (Field)",
-            options=people,
-            key="perf_focus_person",
-            help=(
-                "Filter Performance tabs to one engineer, or **All**. "
-                "Includes field queues, visit cycles, and Sales Cases staff."
-            ),
-        )
-        pending_f = _perf_filter_by_person(pending, focus)
-        open_f = _perf_filter_by_person(open_df, focus)
-        completed_f = _perf_filter_by_person(completed, focus)
-        investigation_f = _perf_filter_by_person(investigation, focus)
-        on_hold_f = _perf_filter_by_person(on_hold, focus)
-        unattended_f = _perf_filter_by_person(unattended, focus)
-        sales_f = _perf_filter_by_person(
-            _perf_enrich_sales_cases(sales_all), focus,
-        )
-        sales_handled_f = _perf_filter_by_person(
-            _perf_enrich_sales_cases(sales_handled), focus,
-        )
-        work_view = _perf_prepare_handled_work_view(
-            _perf_filter_by_person(handled_completed, focus),
-            _perf_filter_by_person(handled_investigation, focus),
-            sales_handled_f,
-        )
-        n_work = len(work_view)
-        n_work_field = (
-            int((work_view["track"] == "Field").sum())
-            if not work_view.empty and "track" in work_view.columns
-            else 0
-        )
-        n_work_sales = n_work - n_work_field
-        n_handled_resolved = (
-            int((work_view["_outcome"] == STATUS_RESOLVED).sum())
-            if not work_view.empty
-            else 0
-        )
-        n_handled_investigation = n_work - n_handled_resolved
-        responded_in_view = pd.DataFrame()
-        if not visits_all.empty and "outcome" in visits_all.columns:
-            responded_in_view = visits_all[
-                visits_all["outcome"].astype(str).eq("responded")
-            ].copy()
-        n_handled_visit_tickets = (
-            int(responded_in_view["ticket_number"].astype(str).nunique())
-            if not responded_in_view.empty and "ticket_number" in responded_in_view.columns
-            else 0
-        )
-        n_filtered = (
-            len(pending_f)
-            + len(open_f)
-            + len(on_hold_f)
-            + len(completed_f)
-            + len(investigation_f)
-            + len(unattended_f)
-        )
+    sales_handled = _perf_prepare_sales_handled_in_range(
+        sales_all,
+        range_start,
+        range_end,
+    )
+    sales_handled_f = _perf_filter_by_person(
+        _perf_enrich_sales_cases(sales_handled),
+        focus,
+    )
+    work_view = _perf_prepare_handled_work_view(
+        _perf_filter_by_person(handled_completed, focus),
+        _perf_filter_by_person(handled_investigation, focus),
+        sales_handled_f,
+    )
+    n_work = len(work_view)
+    n_work_field = (
+        int((work_view["track"] == "Field").sum())
+        if not work_view.empty and "track" in work_view.columns
+        else 0
+    )
+    n_work_sales = n_work - n_work_field
+    n_handled_resolved = (
+        int((work_view["_outcome"] == STATUS_RESOLVED).sum())
+        if not work_view.empty and "_outcome" in work_view.columns
+        else 0
+    )
+    n_handled_investigation = n_work - n_handled_resolved
+    responded_in_view = pd.DataFrame()
+    if not visits_all.empty and "outcome" in visits_all.columns:
+        responded_in_view = visits_all[
+            visits_all["outcome"].astype(str).eq("responded")
+        ].copy()
+    n_handled_visit_tickets = (
+        int(responded_in_view["ticket_number"].astype(str).nunique())
+        if not responded_in_view.empty and "ticket_number" in responded_in_view.columns
+        else 0
+    )
+    range_caption = _format_perf_range_caption() or "selected range"
+    bucket_fmt, x_title, axis_format = _perf_bucket_settings(range_start, range_end)
+    visits_f = _perf_filter_visits_by_person(visits_all, focus)
 
-        if n_sales > 0:
-            m0, m1, m2, m3, m4, m5, m6, m7 = st.columns(8)
-        else:
-            m0, m1, m2, m3, m4, m5, m6 = st.columns(7)
-            m7 = None
-        m0.metric(
-            "Total",
-            n_total_all if focus == "All" else n_filtered,
-            help="All field tickets in tickets_active (not filtered by time range).",
-        )
-        m1.metric(STATUS_DAILY_TASK, len(pending_f))
-        m2.metric("Needs Review", len(open_f))
-        m3.metric("On Hold", len(on_hold_f))
-        m4.metric(STATUS_RESOLVED, len(completed_f))
-        m5.metric("Investigation", len(investigation_f))
-        m6.metric("Unattended", len(unattended_f))
-        if m7 is not None:
-            m7.metric(
-                "Sales Cases",
-                n_sales if focus == "All" else len(sales_f),
-                help="All sales cases (not filtered by time range).",
-            )
-        visits_f = _perf_filter_visits_by_person(visits_all, focus)
-        sales_case_info = _perf_sales_cases_for_case_info(
-            sales_all,
-            range_start=range_start,
-            range_end=range_end,
-        )
-        n_case_info = _perf_case_info_ticket_ids(
-            visits_f,
-            sales_case_info,
-            focus=focus,
-        )
+    return {
+        "work_view": work_view,
+        "visits_f": visits_f,
+        "range_caption": range_caption,
+        "bucket_fmt": bucket_fmt,
+        "x_title": x_title,
+        "axis_format": axis_format,
+        "n_assigned_in_range": n_assigned_in_range,
+        "n_work": n_work,
+        "n_work_field": n_work_field,
+        "n_work_sales": n_work_sales,
+        "n_handled_resolved": n_handled_resolved,
+        "n_handled_investigation": n_handled_investigation,
+        "n_handled_visit_tickets": n_handled_visit_tickets,
+    }
 
-        st.caption(
-            f"**{range_caption}** · {LOCAL_TZ_LABEL} — "
-            "**Queue metrics & Overview** = all tickets (current snapshot). "
-            "**Handled**, **Case Info**, and **Visit** tabs use the selected date range."
-        )
-        if focus == "All" and n_tab_union != n_total_all:
-            if n_other_status:
-                raw_other = (
-                    in_view.loc[_qm["other"], "status"]
-                    .astype(str)
-                    .str.strip()
-                    .value_counts()
-                    .head(5)
-                    if not in_view.empty and "status" in in_view.columns
-                    else pd.Series(dtype=int)
+
+def _render_perf_handled_list_tab(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Handled tab — field tickets and qualifying sales cases in separate sections."""
+    field_handled = _get_handled_field_tickets_perf(
+        df_all, focus=focus, range_start=range_start, range_end=range_end
+    )
+    sales_handled = _get_handled_sales_cases_perf(
+        sales_all, focus=focus, range_start=range_start, range_end=range_end
+    )
+    total = len(field_handled) + len(sales_handled)
+
+    st.markdown(
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 4px">'
+        f"Handled this range — {total} total</p>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"{len(field_handled)} field · {len(sales_handled)} sales")
+
+    st.markdown(
+        '<p style="font-size:13px;font-weight:500;color:#8a9ac0;margin:12px 0 6px">'
+        "Field tickets</p>",
+        unsafe_allow_html=True,
+    )
+    if field_handled:
+        for t in field_handled:
+            col_ref, col_cat, col_eng, col_btn = st.columns([1, 1.3, 1.2, 0.8])
+            tn = str(t["ticket_number"])
+            with col_ref:
+                st.markdown(
+                    f'<span style="font-size:13px;color:#8a9ac0">{html.escape(tn)}</span>',
+                    unsafe_allow_html=True,
                 )
-                detail = ", ".join(f"**{k}** ({v})" for k, v in raw_other.items())
-                st.warning(
-                    f"**{n_other_status}** in-view ticket(s) use a status not mapped to a "
-                    f"queue tab ({detail}). **{n_tab_union}** tabbed vs **{n_total_all}** total."
+            with col_cat:
+                st.markdown(
+                    f'<span style="font-size:13px;color:#4a5a7a">'
+                    f'{html.escape(str(t.get("task_category", "—")))}</span>',
+                    unsafe_allow_html=True,
                 )
+            with col_eng:
+                st.markdown(
+                    f'<span style="font-size:11px;color:#2a3a5a">'
+                    f'{html.escape(str(t.get("assigned_to", "—")))}</span>',
+                    unsafe_allow_html=True,
+                )
+            with col_btn:
+                if st.button("View →", key=f"hd_field_{tn}", use_container_width=True):
+                    _perf_jump_to_csm_ticket(tn)
+    else:
+        st.caption("No field tickets handled in this range")
+
+    st.markdown(
+        '<p style="font-size:13px;font-weight:500;color:#8a9ac0;margin:12px 0 6px">'
+        "Sales cases</p>",
+        unsafe_allow_html=True,
+    )
+    if sales_handled:
+        for c in sales_handled:
+            col_ref, col_acc, col_eng, col_btn = st.columns([1, 1.3, 1.2, 0.8])
+            ref = str(c["case_ref"])
+            if _sc_sales_has_field_assignee(c.get("assigned_to")):
+                credited = str(_perf_norm_member(c.get("assigned_to")))
             else:
-                st.warning(
-                    f"**{n_tab_union}** ticket(s) in queue tabs vs **{n_total_all}** total — "
-                    "some rows may have a blank or unmappable status."
+                credited = _SC_SALES_OVERVIEW_ADMIN_LABEL
+            with col_ref:
+                st.markdown(
+                    f'<span style="font-size:13px;color:#8a9ac0">{html.escape(ref)}</span>',
+                    unsafe_allow_html=True,
                 )
+            with col_acc:
+                st.markdown(
+                    f'<span style="font-size:13px;color:#4a5a7a">'
+                    f'{html.escape(str(c.get("account_name", "—")))}</span>',
+                    unsafe_allow_html=True,
+                )
+            with col_eng:
+                st.markdown(
+                    f'<span style="font-size:11px;color:#2a3a5a">{html.escape(credited)}</span>',
+                    unsafe_allow_html=True,
+                )
+            with col_btn:
+                if st.button("View →", key=f"hd_sales_{ref}", use_container_width=True):
+                    _perf_jump_to_sales_case(ref)
+    else:
+        st.caption("No sales cases handled in this range")
 
-        n_sales_tab = len(sales_f) if focus not in ("", "All") else n_sales
 
-        _wk_start, _wk_end, _, _ = _perf_calendar_week_range_utc(week_offset=0)
-        weekly_this_week = _perf_weekly_attended_bundle(
-            df_all,
-            sales_all,
-            range_start=_wk_start,
-            range_end=_wk_end,
+def _get_weekly_attended_by_engineer(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    week_start: pd.Timestamp,
+    week_end: pd.Timestamp,
+    focus: str,
+) -> list[dict[str, object]]:
+    """
+    Combined field + sales handled counts per credited person for calendar week.
+    Sales credit: field engineer when dispatched, otherwise **Admin**.
+    """
+    bundle = _perf_weekly_attended_bundle(
+        df_all,
+        sales_all,
+        range_start=week_start,
+        range_end=week_end,
+    )
+    summary = bundle["summary"]
+    if summary.empty or "Attended by" not in summary.columns:
+        return []
+
+    rows: list[dict[str, object]] = []
+    for _, row in summary.iterrows():
+        credit_key = _perf_person_credit_key(row["Attended by"])
+        field_count = int(row.get("CSM total", 0) or 0)
+        sales_count = int(row.get("Sales total", 0) or 0)
+        if focus != "All" and not _perf_credit_keys_equal(credit_key, focus):
+            continue
+        total = field_count + sales_count
+        if total <= 0:
+            continue
+        is_admin_credit = (
+            credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL
+            and field_count == 0
+            and sales_count > 0
         )
-        n_weekly = int(weekly_this_week["total"])
-
-        tab_overview, tab_weekly, tab_sales, tab_case_info, tab_work, tab_hold, tab_unatt = st.tabs(
-            [
-                "Overview",
-                f"Weekly ({n_weekly})",
-                f"Sales Cases ({n_sales_tab})",
-                f"Case Info ({n_case_info})",
-                f"Handled ({n_work})",
-                f"On Hold ({len(on_hold_f)})",
-                f"Unattended ({len(unattended_f)})",
-            ]
+        rows.append(
+            {
+                "engineer": _perf_overview_button_key(credit_key),
+                "label": _perf_overview_row_label(credit_key),
+                "is_admin_credit": is_admin_credit,
+                "field_count": field_count,
+                "sales_count": sales_count,
+                "total": total,
+            }
         )
+    return sorted(rows, key=lambda r: int(r["total"]), reverse=True)
 
-        with tab_weekly:
-            _render_perf_weekly_attended_report(
-                df_all, sales_all, this_week_bundle=weekly_this_week
+
+def _render_perf_weekly_tab(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> None:
+    """Executive weekly report with KPI cards, Altair charts, and staff breakdown."""
+    del focus  # full report; use sidebar Focus assignee on other views
+    _render_perf_weekly_attended_report(df_all, sales_all)
+
+
+def _get_on_hold_by_assignee(on_hold: pd.DataFrame, *, focus: str) -> list[dict[str, object]]:
+    if on_hold.empty:
+        return []
+    view = _perf_filter_by_person(on_hold, focus)
+    if view.empty or "assigned_to" not in view.columns:
+        return []
+    counts = (
+        view["assigned_to"]
+        .map(_perf_norm_member)
+        .value_counts()
+        .sort_values(ascending=False)
+    )
+    return [
+        {"assigned_to": eng.lstrip("@").lower(), "count": int(c)}
+        for eng, c in counts.items()
+        if eng not in ("", "(unknown)")
+    ]
+
+
+def _render_perf_on_hold_tab(on_hold: pd.DataFrame, *, focus: str) -> None:
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
+        "On hold by assignee</p>",
+        unsafe_allow_html=True,
+    )
+    data = _get_on_hold_by_assignee(on_hold, focus=focus)
+    if not data:
+        st.markdown(
+            '<div style="padding:30px;text-align:center;color:#2a3a5a;font-size:14px">'
+            "No tickets currently on hold</div>",
+            unsafe_allow_html=True,
+        )
+        return
+    for row in data:
+        eng = str(row["assigned_to"])
+        col_btn, col_count = st.columns([3, 1])
+        with col_btn:
+            if st.button(f"@{eng}", key=f"oh_{eng}", use_container_width=True):
+                st.session_state[_PERF_SELECTED_ENGINEER_KEY] = eng
+                st.rerun()
+        with col_count:
+            st.markdown(
+                f'<span style="font-size:16px;font-weight:600;color:#f59e0b;'
+                f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
+                unsafe_allow_html=True,
             )
 
-        with tab_overview:
-            _render_perf_solo_shared_board(
-                visits_all,
-                focus=focus,
-                overview_table=overview_table,
-                sales_summary=sales_summary,
-                df_all=df_all,
-                visits_history=visits_history,
-            )
-            if not overview_table.empty:
-                _render_perf_queue_strip(overview_table, focus=focus)
-            _render_perf_solo_shared_detail(
-                visits_all, focus=focus, sales_cases=sales_all,
-            )
 
-        with tab_sales:
-            _render_perf_sales_cases_tab(
-                sales_f,
-                focus=focus,
+def _get_unattended_by_assignee(
+    unattended: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    if unattended.empty:
+        return []
+    view = _perf_filter_by_person(unattended, focus)
+    if view.empty:
+        return []
+    if "marked_unattended_at" in view.columns:
+        ref = _parse_ts(view["marked_unattended_at"])
+        view = view.loc[ref.notna() & (ref >= range_start) & (ref <= range_end)]
+    elif "_ts" in view.columns:
+        view = view.loc[
+            view["_ts"].notna()
+            & (view["_ts"] >= range_start)
+            & (view["_ts"] <= range_end)
+        ]
+    if view.empty or "assigned_to" not in view.columns:
+        return []
+    counts = (
+        view["assigned_to"]
+        .map(_perf_norm_member)
+        .value_counts()
+        .sort_values(ascending=False)
+    )
+    return [
+        {"assigned_to": eng.lstrip("@").lower(), "count": int(c)}
+        for eng, c in counts.items()
+        if eng not in ("", "(unknown)")
+    ]
+
+
+def _render_perf_unattended_tab(
+    unattended: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
+        "Unattended by engineer</p>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Excluded from Overview credit, Handled, and Weekly — accountability only"
+    )
+    data = _get_unattended_by_assignee(
+        unattended, focus=focus, range_start=range_start, range_end=range_end
+    )
+    if not data:
+        st.markdown(
+            '<div style="padding:30px;text-align:center;color:#2a3a5a;font-size:14px">'
+            "No unattended tickets in this range</div>",
+            unsafe_allow_html=True,
+        )
+        return
+    for row in data:
+        eng = str(row["assigned_to"])
+        col_btn, col_count, col_jump = st.columns([2.2, 0.8, 1.4])
+        with col_btn:
+            st.markdown(
+                f'<span style="font-size:13px;color:#8a9ac0">@{html.escape(eng)}</span>',
+                unsafe_allow_html=True,
+            )
+        with col_count:
+            st.markdown(
+                f'<span style="font-size:16px;font-weight:600;color:#ef4444;'
+                f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
+                unsafe_allow_html=True,
+            )
+        with col_jump:
+            if st.button(
+                "View tickets →",
+                key=f"un_jump_{eng}",
+                use_container_width=True,
+            ):
+                st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+                st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = "Unattended"
+                st.session_state[_DASH_PENDING_ENGINEER_FILTER_KEY] = eng
+                st.rerun()
+
+
+def _render_performance_sidebar() -> None:
+    """Focus assignee, range, and vertical view navigation."""
+    st.markdown(
+        t_section_label("Focus assignee"),
+        unsafe_allow_html=True,
+    )
+    engineers = get_engineer_handles()
+    options = ["All engineers"] + engineers
+    cur_focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    focus = st.selectbox(
+        "Focus assignee",
+        options,
+        index=options.index(cur_focus) if cur_focus in options else 0,
+        label_visibility="collapsed",
+        key="perf_focus_select",
+    )
+    st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = focus
+
+    if focus != "All engineers":
+        st.markdown(
+            f'<div style="font-size:11px;color:#e2e8f8;background:#0d1e3a;'
+            f'border:0.5px solid #1a3460;padding:2px 6px;border-radius:3px;'
+            f'display:inline-block;margin-bottom:14px">● Filtering: {html.escape(focus)}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown('<div style="margin-bottom:14px"></div>', unsafe_allow_html=True)
+
+    st.markdown(t_section_label("Range"), unsafe_allow_html=True)
+    range_options = ["Today", "This week", "Last 30 days", "Custom"]
+    cur_range = str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week"))
+    range_val = st.selectbox(
+        "Range",
+        range_options,
+        index=range_options.index(cur_range) if cur_range in range_options else 1,
+        label_visibility="collapsed",
+        key="perf_range_select",
+    )
+    prev_range = st.session_state.get("_perf_prev_range")
+    st.session_state[_PERF_RANGE_PRESET_KEY] = range_val
+    if range_val == "Custom":
+        st.date_input("From", key="perf_custom_from")
+        st.date_input("To", key="perf_custom_to")
+    if range_val != prev_range or prev_range is None:
+        st.session_state["_perf_prev_range"] = range_val
+        _sync_perf_range_from_ui(range_val)
+    elif range_val == "Custom":
+        _sync_perf_range_from_ui(range_val)
+
+    st.markdown(
+        t_section_label("View", margin="margin:18px 0 7px"),
+        unsafe_allow_html=True,
+    )
+    views = list(_PERF_VIEW_OPTIONS)
+    cur_view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+    if cur_view not in views:
+        cur_view = "Overview"
+    active_view = st.radio(
+        "View",
+        views,
+        index=views.index(cur_view),
+        label_visibility="collapsed",
+        key="perf_view_radio",
+    )
+    if active_view != st.session_state.get(_PERF_ACTIVE_VIEW_KEY):
+        st.session_state[_PERF_ACTIVE_VIEW_KEY] = active_view
+        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
+        st.rerun()
+
+
+def _render_perf_handled_tab(
+    *,
+    work_view: pd.DataFrame,
+    visits_f: pd.DataFrame,
+    range_caption: str,
+    bucket_fmt: str,
+    x_title: str,
+    axis_format: str,
+    n_assigned_in_range: int,
+    n_work: int,
+    n_work_field: int,
+    n_work_sales: int,
+    n_handled_resolved: int,
+    n_handled_investigation: int,
+    n_handled_visit_tickets: int,
+) -> None:
+    sales_part = f" + <strong>{n_work_sales}</strong> Sales" if n_work_sales else ""
+    st.markdown(
+        t_heading("Handled"),
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<p style="font-size:11px;color:#2a3a5a;line-height:1.5;margin:4px 0 10px">'
+        f"<strong>Assigned / reassigned in range:</strong> {n_assigned_in_range} field ticket(s) · "
+        f"<strong>Handled ({n_work})</strong> = <strong>{n_work_field}</strong> Field{sales_part} · "
+        f"<strong>{n_handled_resolved}</strong> {html.escape(STATUS_RESOLVED)} + "
+        f"<strong>{n_handled_investigation}</strong> Investigation with activity in "
+        f"<strong>{html.escape(range_caption)}</strong> "
+        f"(resolve, reassign, admin action, or sales update). "
+        f"<strong>Visit fair credit:</strong> {n_handled_visit_tickets} responded ticket(s).</p>",
+        unsafe_allow_html=True,
+    )
+    if work_view.empty and visits_f.empty:
+        st.info("No handled field/sales cases or visits for this filter.")
+        return
+    view = work_view
+    c_chart, c_table = st.columns([3, 2])
+    with c_chart:
+        if not visits_f.empty:
+            responded_visits = visits_f[visits_f["outcome"].astype(str).eq("responded")]
+            if responded_visits.empty:
+                st.caption("No responded visits in this time range.")
+            else:
+                st.markdown(
+                    t_section_label(
+                        "Handled by visit assignee (fair credit)",
+                        spacing=".06em",
+                        margin="margin:0 0 6px",
+                    ),
+                    unsafe_allow_html=True,
+                )
+                _render_handled_visit_credit_bar(responded_visits)
+        elif not view.empty:
+            _render_perf_person_bar(
+                view,
+                title=f"Handled by assignee ({range_caption})",
+                value_name="Handled",
+            )
+    with c_table:
+        if view.empty:
+            st.caption("No handled cases in this time range.")
+        else:
+            st.markdown(
+                t_section_label(
+                    f"Split ({range_caption})",
+                    spacing=".06em",
+                    margin="margin:0 0 6px",
+                ),
+                unsafe_allow_html=True,
+            )
+            group_cols = ["track", "_outcome", "category"]
+            group_cols = [c for c in group_cols if c in view.columns]
+            split = (
+                view.groupby(group_cols, as_index=False)
+                .size()
+                .rename(columns={"size": "Cases"})
+                .sort_values(
+                    ["Cases"] + group_cols,
+                    ascending=[False] + [True] * len(group_cols),
+                )
+            )
+            split = split.rename(
+                columns={
+                    "track": "Track",
+                    "_outcome": "Outcome",
+                    "category": "Category",
+                }
+            )
+            st.dataframe(split, use_container_width=True, hide_index=True)
+            field_view = (
+                view.loc[view["track"].eq("Field")]
+                if "track" in view.columns
+                else view
+            )
+            if "assigned_category" in field_view.columns and not field_view.empty:
+                assign_split = (
+                    field_view.groupby(["_outcome", "assigned_category"], as_index=False)
+                    .size()
+                    .rename(
+                        columns={
+                            "size": "Tickets",
+                            "_outcome": "Outcome",
+                            "assigned_category": "Assigned category",
+                        }
+                    )
+                    .sort_values(
+                        ["Tickets", "Outcome", "Assigned category"],
+                        ascending=[False, True, True],
+                    )
+                )
+                st.markdown(
+                    t_section_label(
+                        "Field: assigned vs outcome (mismatch check)",
+                        spacing=".06em",
+                        margin="margin:10px 0 6px",
+                    ),
+                    unsafe_allow_html=True,
+                )
+                st.dataframe(assign_split, use_container_width=True, hide_index=True)
+    if not view.empty:
+        with st.expander("Trend & case list", expanded=False):
+            _render_perf_outcome_trend(
+                view,
                 bucket_fmt=bucket_fmt,
                 x_title=x_title,
                 axis_format=axis_format,
             )
+            _render_perf_handled_work_table(view)
+    elif not visits_f.empty:
+        with st.expander("Visit detail list", expanded=False):
+            _render_visit_detail_table(visits_f)
 
-        with tab_case_info:
-            _render_perf_case_info_tab(
-                visits_all,
-                focus=focus,
+
+def _render_performance_tab(*, lookback_days: int) -> None:
+    """Three-column Performance floor: sidebar / main / detail panel."""
+    _init_perf_session_state()
+
+    with st.container(key="disp_perf_body"):
+        col_sb, col_main, col_dp = st.columns([1.5, 4.3, 2.4], gap="small")
+
+        with col_sb:
+            _render_performance_sidebar()
+
+        _sync_perf_range_from_ui(str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week")))
+        range_start, range_end = _get_perf_range()
+        focus = _perf_focus_for_filter()
+
+        try:
+            df_all = _fetch_tickets()
+        except Exception as exc:
+            st.error(f"Could not load tickets: {exc}")
+            df_all = pd.DataFrame()
+
+        field_has_data = not df_all.empty and "status" in df_all.columns
+        if field_has_data:
+            slices = _perf_prepare_snapshot_slices(df_all)
+        else:
+            slices = _perf_prepare_snapshot_slices(pd.DataFrame())
+
+        sales_all = pd.DataFrame()
+        try:
+            raw_sales = _fetch_sales_cases_cached()
+            sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
+        except Exception as exc:
+            st.warning(f"Could not load Sales Cases for Performance: {exc}")
+
+        counts = _get_performance_snapshot_counts(
+            slices=slices, sales_all=sales_all, focus=focus
+        )
+
+        visits_all = pd.DataFrame()
+        try:
+            visits_all = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            pass
+
+        visits_f = _perf_filter_visits_by_person(visits_all, focus)
+
+        with col_main:
+            _render_performance_metric_strip(counts=counts)
+            st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+
+            view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+            if view == "Overview":
+                _render_perf_solo_shared_chart(
+                    df_all,
+                    sales_all,
+                    focus=focus,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
+            elif view == "Weekly":
+                _render_perf_weekly_tab(df_all, sales_all, focus=focus)
+            elif view == "Sales cases":
+                _render_perf_sales_performance_tab(
+                    sales_all,
+                    focus=focus,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
+            elif view == "Case info":
+                _render_perf_case_info_tab(
+                    visits_all,
+                    focus=focus,
+                    sales_all=sales_all,
+                    tickets_all=df_all,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
+            elif view == "Handled":
+                ctx = _perf_handled_tab_context(
+                    df_all,
+                    sales_all,
+                    visits_all,
+                    focus=focus,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
+                _render_perf_handled_tab(**ctx)
+            elif view == "On hold":
+                _render_perf_on_hold_tab(slices["on_hold"], focus=focus)
+            elif view == "Unattended":
+                _render_perf_unattended_tab(
+                    slices["unattended"],
+                    focus=focus,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
+
+        with col_dp:
+            _render_performance_detail_panel(
+                df_all=df_all,
                 sales_all=sales_all,
-                tickets_all=df_all,
+                visits_all=visits_f,
                 range_start=range_start,
                 range_end=range_end,
             )
 
-        with tab_work:
-            sales_part = (
-                f" + **{n_work_sales}** Sales"
-                if n_work_sales
-                else ""
-            )
-            st.caption(
-                f"**Assigned / reassigned in range:** {n_assigned_in_range} field ticket(s) · "
-                f"**Handled ({n_work})** = **{n_work_field}** Field{sales_part} · "
-                f"**{n_handled_resolved}** {STATUS_RESOLVED} + "
-                f"**{n_handled_investigation}** Investigation with activity in "
-                f"**{range_caption}** (resolve, reassign, admin action, or sales update). "
-                f"**Visit fair credit:** {n_handled_visit_tickets} responded ticket(s)."
-            )
-            if work_view.empty and visits_f.empty:
-                st.info("No handled field/sales cases or visits for this filter.")
-            else:
-                view = work_view
-                c_chart, c_table = st.columns([3, 2])
-                with c_chart:
-                    if not visits_f.empty:
-                        responded_visits = visits_f[
-                            visits_f["outcome"].astype(str).eq("responded")
-                        ]
-                        if responded_visits.empty:
-                            st.caption("No responded visits in this time range.")
-                        else:
-                            st.markdown("**Handled by visit assignee (fair credit)**")
-                            _render_handled_visit_credit_bar(responded_visits)
-                    elif not view.empty:
-                        _render_perf_person_bar(
-                            view,
-                            title=f"Handled by assignee ({range_caption})",
-                            value_name="Handled",
-                        )
-                with c_table:
-                    if view.empty:
-                        st.caption("No handled cases in this time range.")
-                    else:
-                        st.markdown(f"**Split ({range_caption})**")
-                        group_cols = ["track", "_outcome", "category"]
-                        group_cols = [c for c in group_cols if c in view.columns]
-                        split = (
-                            view.groupby(group_cols, as_index=False)
-                            .size()
-                            .rename(columns={"size": "Cases"})
-                            .sort_values(
-                                ["Cases"] + group_cols,
-                                ascending=[False] + [True] * len(group_cols),
-                            )
-                        )
-                        split = split.rename(
-                            columns={
-                                "track": "Track",
-                                "_outcome": "Outcome",
-                                "category": "Category",
-                            }
-                        )
-                        st.dataframe(split, use_container_width=True, hide_index=True)
-                        field_view = (
-                            view.loc[view["track"].eq("Field")]
-                            if "track" in view.columns
-                            else view
-                        )
-                        if "assigned_category" in field_view.columns and not field_view.empty:
-                            assign_split = (
-                                field_view.groupby(
-                                    ["_outcome", "assigned_category"], as_index=False
-                                )
-                                .size()
-                                .rename(
-                                    columns={
-                                        "size": "Tickets",
-                                        "_outcome": "Outcome",
-                                        "assigned_category": "Assigned category",
-                                    }
-                                )
-                                .sort_values(
-                                    ["Tickets", "Outcome", "Assigned category"],
-                                    ascending=[False, True, True],
-                                )
-                            )
-                            st.markdown("**Field: assigned vs outcome (mismatch check)**")
-                            st.dataframe(
-                                assign_split,
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-                if not view.empty:
-                    with st.expander("Trend & case list", expanded=False):
-                        _render_perf_outcome_trend(
-                            view,
-                            bucket_fmt=bucket_fmt,
-                            x_title=x_title,
-                            axis_format=axis_format,
-                        )
-                        _render_perf_handled_work_table(view)
-                elif not visits_f.empty:
-                    with st.expander("Visit detail list", expanded=False):
-                        _render_visit_detail_table(visits_f)
 
-        with tab_hold:
-            st.caption(
-                "Tickets moved to **On Hold** by an admin in this window — chase queue per assignee."
-            )
-            if on_hold_f.empty:
-                st.info("No on-hold tickets for this filter.")
-            else:
-                hold_view = _perf_enrich_tickets(on_hold_f)
-                _render_perf_person_bar(
-                    hold_view,
-                    title="On Hold by assignee",
-                    value_name="On Hold",
-                )
-                with st.expander("Trend over time", expanded=False):
-                    _render_perf_stacked_staff_chart(
-                        hold_view,
-                        y_title="On Hold",
-                        bucket_fmt=bucket_fmt,
-                        x_title=x_title,
-                        axis_format=axis_format,
-                    )
-                with st.expander("Ticket list", expanded=len(on_hold_f) <= 8):
-                    _render_perf_ticket_table(hold_view)
-
-        with tab_unatt:
-            st.caption(
-                "No same-day field response before assign-day cutoff — listed for "
-                "accountability only; **does not count** toward Overview credit, "
-                "Handled, or Weekly attended."
-            )
-            if unattended_f.empty:
-                st.info("No unattended tickets for this filter.")
-            else:
-                _render_perf_person_bar(
-                    unattended_f,
-                    title="Unattended by assignee",
-                    value_name="Unattended",
-                )
-                with st.expander("Trend over time", expanded=False):
-                    _render_perf_stacked_staff_chart(
-                        unattended_f,
-                        y_title="Unattended",
-                        bucket_fmt=bucket_fmt,
-                        x_title=x_title,
-                        axis_format=axis_format,
-                    )
-                with st.expander("Ticket list", expanded=len(unattended_f) <= 8):
-                    _render_perf_ticket_table(unattended_f)
+def _render_field_performance_tab(*, lookback_days: int) -> None:
+    """Performance tab — three-column layout with sidebar filters and detail panel."""
+    _render_performance_tab(lookback_days=lookback_days)
 
 
 def _render_missing_table_help(table: str) -> None:

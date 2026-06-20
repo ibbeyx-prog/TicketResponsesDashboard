@@ -17,7 +17,7 @@ export function MatrixFilterBar({
   onChange,
 }: MatrixFilterBarProps) {
   const selectClass =
-    "w-full rounded border border-dashboard-border bg-[#1a1a1a] px-2.5 py-2 text-xs text-dashboard-text outline-none focus:border-dashboard-accent/50";
+    "w-full rounded border border-dashboard-border bg-[#1a1a1a] px-2.5 py-2 text-[13px] text-dashboard-text outline-none focus:border-dashboard-accent/50";
 
   return (
     <div className="flex flex-wrap items-center gap-3 border-b border-dashboard-border bg-[#161616] px-4 py-3">
@@ -32,7 +32,7 @@ export function MatrixFilterBar({
         />
       </label>
 
-      <label className="min-w-[120px] flex-1 text-[10px] text-dashboard-muted">
+      <label className="min-w-[120px] flex-1 text-[11px] text-dashboard-muted">
         <span className="mb-1 block">Staff</span>
         <select
           value={filters.staff}
@@ -48,7 +48,7 @@ export function MatrixFilterBar({
         </select>
       </label>
 
-      <label className="min-w-[100px] flex-1 text-[10px] text-dashboard-muted">
+      <label className="min-w-[100px] flex-1 text-[11px] text-dashboard-muted">
         <span className="mb-1 block">Priority</span>
         <select
           value={filters.priority}
@@ -63,7 +63,7 @@ export function MatrixFilterBar({
         </select>
       </label>
 
-      <label className="min-w-[110px] flex-1 text-[10px] text-dashboard-muted">
+      <label className="min-w-[110px] flex-1 text-[11px] text-dashboard-muted">
         <span className="mb-1 block">Status</span>
         <select
           value={filters.status}

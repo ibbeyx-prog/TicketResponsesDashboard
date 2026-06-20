@@ -3,7 +3,7 @@
 **Database:** Supabase (PostgreSQL 15+)  
 **Extensions:** `pgcrypto` (password hashing)  
 **Storage:** Supabase Storage bucket `ticket-photos`  
-**Last reviewed:** Against migrations through `20260716`
+**Last reviewed:** Migrations through `20260716_assigned_to_second_engineer.sql` (56 files in `supabase/migrations/`)
 
 ---
 
@@ -11,8 +11,8 @@
 
 ```mermaid
 erDiagram
-  tickets_active ||--o{ ticket_visits : "ticket_number"
-  tickets_active ||--o{ ticket_attendance_logs : "ticket_number"
+  tickets_active ||--o{ ticket_visits : "ticket_number FK CASCADE"
+  tickets_active ||--o{ ticket_attendance_logs : "ticket_number logical"
   dashboard_sales_cases ||--o{ ticket_attendance_logs : "case_ref as ticket_number"
   dashboard_field_engineers ||--o{ tickets_active : "assigned_to handle"
   dashboard_task_categories ||--o{ tickets_active : "task_category"
@@ -22,6 +22,7 @@ erDiagram
     text ticket_number PK
     text status
     text assigned_to
+    text assigned_to_2
     text task_category
     text outcome_category
     timestamptz last_assigned_at
@@ -48,10 +49,11 @@ erDiagram
 
   dashboard_sales_cases {
     uuid id PK
-    text case_ref UK
+    text case_ref
     text status
     text account_name
     text assigned_to
+    text attended_by
     timestamptz updated_at
   }
 
@@ -64,15 +66,22 @@ erDiagram
 
   dashboard_field_engineers {
     text username PK
+    boolean is_active
   }
 
   dashboard_task_categories {
     text name PK
     int sort_order
   }
+
+  bot_sessions {
+    bigint telegram_user_id PK
+    bigint chat_id
+    text active_ticket
+  }
 ```
 
-**Note:** `ticket_attendance_logs.ticket_number` has **no FK** (dropped in migration `20260513`) so logs survive ticket deletes and can reference sales `case_ref` values.
+**Important:** `ticket_attendance_logs.ticket_number` has **no FK** — logs survive ticket deletes and store sales `case_ref` values in the same column.
 
 ---
 
@@ -86,9 +95,10 @@ erDiagram
 | `TICKET_VISITS_TABLE` | `ticket_visits` | `public.ticket_visits` |
 | `FIELD_ENGINEERS_TABLE` | `dashboard_field_engineers` | `public.dashboard_field_engineers` |
 | `TASK_CATEGORIES_TABLE` | `dashboard_task_categories` | `public.dashboard_task_categories` |
-| `BOT_SESSIONS_TABLE` | `bot_sessions` | `public.bot_sessions` *(no migration in repo)* |
+| `BOT_SESSIONS_TABLE` | `bot_sessions` | `public.bot_sessions` |
 | `TICKET_PHOTOS_BUCKET` | `ticket-photos` | `storage.buckets` |
-| — | `dashboard_users` | Hardcoded table name (no env override) |
+| — | (hardcoded) | `public.dashboard_users` |
+| — | (hardcoded) | `public.ticket_responses` (legacy) |
 
 ---
 
@@ -124,7 +134,9 @@ Primary store for **field complaint tickets**. Renamed from `public.tickets` (`2
 | `created_at` | `timestamptz` | YES | `now()` | |
 | `updated_at` | `timestamptz` | YES | `now()` | Auto-updated by trigger |
 
-**Status values (current):** `Daily Task`, `Open`, `On Hold`, `Under Investigation`, `Resolved`, `Unattended`
+**Status CHECK values:** `Daily Task`, `Open`, `On Hold`, `Under Investigation`, `Resolved`, `Unattended`
+
+**UI mapping:** `Open` → **Needs Review**; legacy aliases normalized in app code.
 
 **Indexes:**
 
@@ -134,13 +146,9 @@ CREATE INDEX tickets_active_outcome_category_idx
   WHERE outcome_category IS NOT NULL;
 ```
 
-**Triggers:**
+**Triggers:** `trg_tickets_set_updated_at` → `set_updated_at()`
 
-| Trigger | Event | Function |
-|---------|-------|----------|
-| `trg_tickets_set_updated_at` | BEFORE UPDATE | `public.set_updated_at()` |
-
-**RLS:** Enabled — `anon` SELECT, INSERT, UPDATE, DELETE
+**RLS:** Enabled — anon SELECT, INSERT, UPDATE, DELETE
 
 ---
 
@@ -151,48 +159,36 @@ Visit cycles for field ticket accountability and Performance matrix.
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `bigserial` | NO | auto | **Primary key** |
-| `ticket_number` | `text` | NO | — | FK → `tickets_active(ticket_number)` ON DELETE CASCADE |
+| `ticket_number` | `text` | NO | — | FK → `tickets_active` ON DELETE CASCADE |
 | `assignee` | `text` | NO | — | Canonical `@lowercase` handle |
 | `visit_start` | `timestamptz` | NO | `now()` | Cycle start |
 | `visit_end` | `timestamptz` | YES | — | NULL = open cycle |
-| `outcome` | `text` | NO | `'assigned'` | CHECK: `assigned`, `responded`, `reassigned`, `unattended`, `on_hold` |
+| `outcome` | `text` | NO | `'assigned'` | CHECK below |
 | `response_note` | `text` | YES | — | Field reply text |
 | `photo_url` | `text` | YES | — | Field photo URL |
-| `closed_by` | `text` | NO | `'system'` | Who closed cycle |
+| `closed_by` | `text` | NO | `'system'` | `bot`, `dashboard`, `system` |
 | `is_active` | `boolean` | NO | `true` | One active row per ticket |
 
-**Indexes:**
+**Outcome CHECK:** `assigned`, `responded`, `reassigned`, `unattended`, `on_hold`
 
-| Index | Columns |
-|-------|---------|
-| `ticket_visits_ticket_idx` | `(ticket_number)` |
-| `ticket_visits_assignee_idx` | `(assignee)` |
-| `ticket_visits_open_idx` | `(ticket_number) WHERE visit_end IS NULL` |
-| `ticket_visits_start_idx` | `(visit_start)` |
-| `idx_visit_assignee_active` | `(assignee, is_active)` |
-| `idx_visit_assignee_outcome_start` | `(assignee, outcome, visit_start DESC)` |
-| `idx_visit_ticket_active` | `(ticket_number) WHERE is_active = true` |
+**Indexes:** `(ticket_number)`, `(assignee)`, partial open/active indexes, `(visit_start)`, composite assignee/outcome
 
-**Triggers:**
+**Triggers:** `trg_reassign_ticket` → `handle_ticket_reassignment()`
 
-| Trigger | Event | Function |
-|---------|-------|----------|
-| `trg_reassign_ticket` | BEFORE INSERT | `public.handle_ticket_reassignment()` |
-
-**RLS:** Enabled — `anon` SELECT, INSERT, UPDATE, DELETE
+**RLS:** anon SELECT, INSERT, UPDATE, DELETE
 
 ---
 
 ### 3.3 `public.ticket_attendance_logs`
 
-Append-only audit trail for assignments, responses, and admin actions.
+Append-only audit trail. Polymorphic: field tickets and sales cases share this table.
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `bigint` | NO | identity | **Primary key** |
-| `ticket_number` | `text` | YES | — | Ticket # or sales `case_ref` |
-| `member_username` | `text` | NO | — | Actor handle |
-| `action_type` | `text` | NO | — | Event type (see below) |
+| `ticket_number` | `text` | YES | — | Ticket # **or** sales `case_ref` |
+| `member_username` | `text` | NO | — | Actor handle or Operator ID |
+| `action_type` | `text` | NO | — | Event type |
 | `note` | `text` | YES | — | Free text |
 | `photo_url` | `text` | YES | — | Photo URL |
 | `timestamp` | `timestamptz` | NO | `now()` | Event time |
@@ -201,21 +197,25 @@ Append-only audit trail for assignments, responses, and admin actions.
 
 **Common `action_type` values:**
 
-`Assignment`, `Response`, `Nudge`, `AutoUnattended`, `OnHold`, `Resolved`, `TicketQueued`, `AssignmentUpdated`, `TransferredFromSales`, `TransferredToSales`, `ReassignedFromOpen`, `ReassignedFromInvestigation`, `ReassignedFromOnHold`, `ReassignedFromPending`, `Deleted`, `LegacyLogin`, `NoAnswer`
-
-`LegacyLogin` — dashboard sign-in via shared `DASHBOARD_PASSWORD`; `member_username` is the self-declared Operator ID (identity not verified).
-
-**Indexes:**
-
-| Index | Columns |
+| Value | Meaning |
 |-------|---------|
-| `idx_attendance_logs_ticket` | `(ticket_number)` |
-| `idx_attendance_logs_member_lower` | `(lower(member_username))` |
-| `idx_attendance_logs_ts` | `(timestamp DESC)` |
-| `ticket_attendance_logs_ticket_number_idx` | `(ticket_number)` |
-| `ticket_attendance_logs_telegram_msg_idx` | `(telegram_chat_id, telegram_message_id) WHERE telegram_message_id IS NOT NULL` |
+| `Assignment` | New assignment |
+| `AssignmentUpdated` | Assignment changed |
+| `Response` | Field reply |
+| `ResponseUndone` | Telegram undo |
+| `Resolved` | Ticket/case resolved |
+| `OnHold` | Moved to On Hold |
+| `Nudge` | 6h unattended nudge |
+| `AutoUnattended` | End-of-day auto-close |
+| `TicketQueued` | Queued without Telegram |
+| `TransferredFromSales` / `TransferredToSales` | Cross-pipeline transfer |
+| `ReassignedFromOpen` / `ReassignedFromInvestigation` / `ReassignedFromOnHold` / `ReassignedFromPending` | Reassign audit |
+| `Deleted` | Row deleted |
+| `LegacyLogin` | Shared-password dashboard login |
+| `AdminClosed` | Admin close without field completion |
+| `NoAnswer` | Legacy (renamed OnHold) |
 
-**RLS:** Enabled — `anon` SELECT, INSERT only (no UPDATE/DELETE)
+**RLS:** anon SELECT, INSERT only (no UPDATE/DELETE)
 
 ---
 
@@ -226,79 +226,74 @@ Sales pipeline cases (separate from field tickets).
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `uuid` | NO | `gen_random_uuid()` | **Primary key** |
-| `case_ref` | `text` | NO | — | External case/ticket ID |
+| `case_ref` | `text` | NO | — | External case/ticket ID (lookup key) |
 | `account_name` | `text` | NO | — | Customer/resort name |
-| `attended_by` | `text` | NO | `'Mular_s'` | Sales queue owner |
-| `sales_priority` | `text` | NO | `'Standard'` | Priority label |
+| `attended_by` | `text` | NO | `'Admin'` | Queue owner; app stores **`Admin`** for undispatched |
+| `sales_priority` | `text` | NO | `'Standard'` | Strategic, High, Urgent, Standard |
 | `account_region` | `text` | NO | — | SOC, EOC, KOC, LOC, AOC, GOC, CENTRAL |
 | `sales_category` | `text` | NO | — | Intent/category |
 | `description` | `text` | YES | — | Intake description |
 | `status` | `text` | NO | `'Sales ticket'` | Queue driver |
-| `admin_owner` | `text` | YES | — | Last admin operator |
+| `admin_owner` | `text` | YES | — | Last operator (operational — not Performance credit) |
 | `dispatch_type` | `text` | YES | — | Site visit dispatch type |
 | `dispatch_region` | `text` | YES | — | Dispatch region |
 | `assigned_to` | `text` | YES | — | Field engineer |
-| `assigned_to_2` | `text` | YES | — | Second engineer |
+| `assigned_to_2` | `text` | YES | — | Second engineer (`20260716`) |
 | `field_task_category` | `text` | YES | — | Field category on dispatch |
 | `dispatch_reason` | `text` | YES | — | Reason for site visit |
-| `additional_info` | `text` | YES | — | Work panel notes |
+| `additional_info` | `text` | YES | — | Work notes |
 | `close_note` | `text` | YES | — | Note on resolve |
 | `last_assigned_at` | `timestamptz` | YES | — | Last field assignment |
 | `created_at` | `timestamptz` | NO | `now()` | |
-| `updated_at` | `timestamptz` | NO | `now()` | Last status/field change |
+| `updated_at` | `timestamptz` | NO | `now()` | |
 
-**Status values:** `Sales ticket`, `Investigation`, `Regional for site visit`, `Design`, `Resolved`
+**Status CHECK:** `Sales ticket`, `Investigation`, `Regional for site visit`, `Design`, `Resolved`
 
-**Indexes:**
+**Performance credit:** Field engineer when `assigned_to` set; else **Admin** bucket. `admin_owner` does not receive credit.
 
-| Index | Columns |
-|-------|---------|
-| `dashboard_sales_cases_status_idx` | `(status)` |
-| `dashboard_sales_cases_updated_idx` | `(updated_at DESC)` |
-| `dashboard_sales_cases_last_assigned_idx` | `(last_assigned_at DESC) WHERE last_assigned_at IS NOT NULL` |
+**Indexes:** `(status)`, `(updated_at DESC)`, partial `(last_assigned_at DESC)`
 
-**RLS:** Enabled — `anon` SELECT, INSERT, UPDATE, DELETE
+**RLS:** anon SELECT, INSERT, UPDATE, DELETE
 
 ---
 
 ### 3.5 `public.dashboard_users`
 
-Dashboard login accounts (not field engineers).
+Dashboard login accounts.
 
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| `username` | `text` | NO | — | **Primary key**; must be lowercase |
-| `operator_id` | `text` | NO | — | Display name for assignments/logs |
-| `password_hash` | `text` | NO | — | bcrypt hash |
-| `is_active` | `boolean` | NO | `true` | Disabled users cannot login |
-| `reset_token_hash` | `text` | YES | — | Password reset token |
-| `reset_token_expires_at` | `timestamptz` | YES | — | Reset expiry (15 min) |
-| `created_at` | `timestamptz` | NO | `now()` | |
-| `updated_at` | `timestamptz` | NO | `now()` | |
+| Column | Type | Nullable | Default |
+|--------|------|----------|---------|
+| `username` | `text` | NO | — |
+| `operator_id` | `text` | NO | — |
+| `password_hash` | `text` | NO | — |
+| `is_active` | `boolean` | NO | `true` |
+| `reset_token_hash` | `text` | YES | — |
+| `reset_token_expires_at` | `timestamptz` | YES | — |
+| `created_at` | `timestamptz` | NO | `now()` |
+| `updated_at` | `timestamptz` | NO | `now()` |
 
-**Indexes:**
+**PK:** `username` (lowercase enforced in RPC)  
+**Unique:** `lower(operator_id)`  
+**RLS:** No anon policies — SECURITY DEFINER RPCs only
 
-```sql
-CREATE UNIQUE INDEX dashboard_users_operator_id_lower_idx
-  ON public.dashboard_users (lower(operator_id));
-```
-
-**RLS:** Enabled — **no anon policies**; access via SECURITY DEFINER RPCs only
+**Seed (migration):** `admin`, `ibeyx` with temporary password `ChangeMeNow!`
 
 ---
 
 ### 3.6 `public.dashboard_field_engineers`
 
-Allowed field engineer Telegram handles for Command Center pickers.
+Field engineer roster for assign pickers and Telegram attribution.
 
 | Column | Type | Nullable | Default |
 |--------|------|----------|---------|
 | `username` | `text` | NO | — |
+| `is_active` | `boolean` | NO | `true` |
 | `created_at` | `timestamptz` | NO | `now()` |
 
 **PK:** `username`  
-**Unique index:** `dashboard_field_engineers_username_lower_idx` on `lower(username)`  
-**RLS:** `anon` SELECT, INSERT, DELETE
+**Soft delete:** `is_active = false` (`20260620_field_engineers_soft_delete.sql`)  
+**Unique index:** `lower(username)` on all rows; partial active index for pickers  
+**RLS:** anon SELECT, INSERT, UPDATE, DELETE
 
 ---
 
@@ -313,14 +308,13 @@ Task category picklist for CSM assignments.
 | `created_at` | `timestamptz` | NO | `now()` |
 
 **PK:** `name`  
-**Unique index:** `dashboard_task_categories_name_lower_idx` on `lower(name)`  
-**RLS:** `anon` SELECT, INSERT, DELETE
+**Seeded examples:** Coverage Check, Femto Installation, Repeater Installation, Femto Recover, Femto Fault, Repeater Fault (+ extended list in app defaults)
 
 ---
 
-### 3.8 `public.bot_sessions` *(referenced in code, no migration)*
+### 3.8 `public.bot_sessions`
 
-Telegram bot session state for `/respond` continuity.
+Telegram `/respond` session state (`20260620_bot_sessions.sql`).
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -331,15 +325,17 @@ Telegram bot session state for `/respond` continuity.
 
 ---
 
-### 3.9 `public.ticket_responses` *(legacy)*
+### 3.9 `public.ticket_responses` (legacy)
 
-Append-only log used by older `/respond` path. No migration DDL in repo.
+Older `/respond` append log (`20260620_ticket_responses.sql`). Primary path is `tickets_active` + attendance log.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `ticket_id` | `text` | Ticket number |
-| `user_handle` | `text` | Replier |
-| `response_data` | `text` | Response payload |
+| Column | Type |
+|--------|------|
+| `id` | bigint identity PK |
+| `ticket_id` | text |
+| `user_handle` | text |
+| `response_data` | text |
+| `created_at` | timestamptz |
 
 ---
 
@@ -347,33 +343,25 @@ Append-only log used by older `/respond` path. No migration DDL in repo.
 
 ### `public.engineer_visit_summary`
 
-Aggregates visit counts per assignee and outcome.
-
-| Column | Source |
-|--------|--------|
-| `assignee` | `ticket_visits.assignee` |
-| `outcome` | `ticket_visits.outcome` |
-| `visit_count` | COUNT(*) |
-| `first_visit_at` | MIN(visit_start) |
-| `last_visit_at` | MAX(visit_start) |
+Aggregates `ticket_visits` by `assignee`, `outcome`: `visit_count`, `first_visit_at`, `last_visit_at`.
 
 ---
 
 ## 5. Functions & RPCs
 
-| Function | Type | Purpose |
-|----------|------|---------|
-| `set_updated_at()` | Trigger | Sets `NEW.updated_at = now()` |
-| `handle_ticket_reassignment()` | Trigger | Closes prior active visit on new insert |
-| `close_ticket_visit_responded(...)` | Callable | Close active visit as responded |
-| `current_ticket_assignee(text)` | Callable | Returns active visit assignee |
-| `dashboard_users_configured()` | SECURITY DEFINER | Returns whether any active users exist |
-| `dashboard_verify_login(text, text)` | SECURITY DEFINER | Username/password login |
-| `dashboard_request_password_reset(text)` | SECURITY DEFINER | Issue reset code |
-| `dashboard_reset_password(text, text, text)` | SECURITY DEFINER | Complete reset |
-| `dashboard_admin_list_users(text, text)` | SECURITY DEFINER | List users (admin auth) |
-| `dashboard_admin_create_user(...)` | SECURITY DEFINER | Create user |
-| `dashboard_admin_set_user_active(...)` | SECURITY DEFINER | Enable/disable user |
+| Function | Purpose |
+|----------|---------|
+| `set_updated_at()` | Trigger: sets `NEW.updated_at = now()` |
+| `handle_ticket_reassignment()` | Closes prior active visit on new insert |
+| `close_ticket_visit_responded(...)` | Close active visit as responded |
+| `current_ticket_assignee(text)` | Active visit assignee for ticket |
+| `dashboard_users_configured()` | Whether any active users exist |
+| `dashboard_verify_login(text, text)` | Username/password login |
+| `dashboard_request_password_reset(text)` | Issue reset code |
+| `dashboard_reset_password(text, text, text)` | Complete reset |
+| `dashboard_admin_list_users(text, text)` | List users (admin auth) |
+| `dashboard_admin_create_user(...)` | Create user |
+| `dashboard_admin_set_user_active(...)` | Enable/disable user |
 
 ---
 
@@ -384,34 +372,26 @@ Aggregates visit counts per assignee and outcome.
 | Property | Value |
 |----------|-------|
 | Public | Yes |
-| Used by | Bot photo upload, dashboard photo gallery |
+| Used by | Bot photo upload, dashboard gallery |
 
-**RLS on `storage.objects` (anon):**
-
-| Policy | Command |
-|--------|---------|
-| `ticket_photos_anon_insert` | INSERT where `bucket_id = 'ticket-photos'` |
-| `ticket_photos_anon_select` | SELECT where `bucket_id = 'ticket-photos'` |
-| `ticket_photos_anon_update` | UPDATE where `bucket_id = 'ticket-photos'` |
-
-No DELETE policy — photos retained for audit.
+**RLS (anon):** INSERT, SELECT, UPDATE on `bucket_id = 'ticket-photos'` — no DELETE policy (audit retention)
 
 ---
 
 ## 7. RLS Summary
 
-| Table | RLS | anon SELECT | anon INSERT | anon UPDATE | anon DELETE |
-|-------|:---:|:-----------:|:-----------:|:-----------:|:-----------:|
-| `tickets_active` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `ticket_visits` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `ticket_attendance_logs` | ✓ | ✓ | ✓ | — | — |
-| `dashboard_sales_cases` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `dashboard_users` | ✓ | — | — | — | — |
-| `dashboard_field_engineers` | ✓ | ✓ | ✓ | — | ✓ |
-| `dashboard_task_categories` | ✓ | ✓ | ✓ | — | ✓ |
-| `storage.objects` (ticket-photos) | ✓ | ✓ | ✓ | ✓ | — |
+| Table | anon SELECT | anon INSERT | anon UPDATE | anon DELETE |
+|-------|:-----------:|:-----------:|:-----------:|:-----------:|
+| `tickets_active` | ✓ | ✓ | ✓ | ✓ |
+| `ticket_visits` | ✓ | ✓ | ✓ | ✓ |
+| `ticket_attendance_logs` | ✓ | ✓ | — | — |
+| `dashboard_sales_cases` | ✓ | ✓ | ✓ | ✓ |
+| `dashboard_users` | — | — | — | — |
+| `dashboard_field_engineers` | ✓ | ✓ | ✓ | ✓ |
+| `dashboard_task_categories` | ✓ | ✓ | — | ✓ |
+| `storage.objects` (ticket-photos) | ✓ | ✓ | ✓ | — |
 
-**Security note:** Production should use Supabase service role for server-side bot; dashboard uses anon key with RLS. Consider tightening RLS for production beyond `anon` full access.
+**Production note:** Consider service role for bot server-side; tighten anon policies beyond current open RLS where possible.
 
 ---
 
@@ -419,44 +399,73 @@ No DELETE policy — photos retained for audit.
 
 | Relationship | Enforcement |
 |--------------|-------------|
-| `ticket_visits.ticket_number` → `tickets_active.ticket_number` | FK ON DELETE CASCADE |
+| `ticket_visits.ticket_number` → `tickets_active` | FK ON DELETE CASCADE |
 | `ticket_attendance_logs.ticket_number` → tickets | **No FK** (intentional) |
-| Sales `case_ref` → attendance logs | Logical only (same column name) |
+| Sales `case_ref` → attendance logs | Logical (same column) |
+| Field handles → engineers table | Application-level |
 
 ---
 
-## 9. Migration Order
+## 9. Enumerations (Application Layer)
 
-Apply all files in `supabase/migrations/` sorted by filename (ISO date prefix). Key schema-defining migrations:
+### Ticket status (DB + UI)
+
+| DB value | UI label |
+|----------|----------|
+| `Daily Task` | Daily Task |
+| `Open` | Needs Review |
+| `On Hold` | On Hold |
+| `Under Investigation` | Under Investigation |
+| `Resolved` | Resolved |
+| `Unattended` | Unattended |
+
+### Sales status
+
+| DB value | UI queue |
+|----------|----------|
+| `Sales ticket` | Sales ticket |
+| `Investigation` | Investigation |
+| `Regional for site visit` | Investigation (merged in UI) |
+| `Design` | Design |
+| `Resolved` | Resolved |
+
+### Sales priority
+
+`Strategic`, `High`, `Urgent`, `Standard`
+
+### Sales region
+
+`SOC`, `EOC`, `KOC`, `LOC`, `AOC`, `GOC`, `CENTRAL`
+
+---
+
+## 10. Migration Order
+
+Apply all files in `supabase/migrations/` sorted by filename. Key milestones:
 
 | Migration | Change |
 |-----------|--------|
-| `20260512_history_and_rename` | Rename tickets → tickets_active; attendance logs |
-| `20260515` | Field engineers table |
-| `20260520` | Dashboard users + pgcrypto |
-| `20260521` | Task categories |
-| `20260620` | Sales cases table |
-| `20260621` | Sales close_note |
+| `20260512_*` | tickets_active, attendance logs, storage |
+| `20260515` | Field engineers |
+| `20260520` | Dashboard users, bot_sessions, ticket_responses, status constraints |
+| `20260521` | Task categories, admin RPCs |
+| `20260620` | Sales cases, field engineer soft delete |
 | `20260629` | Sales attended_by |
-| `20260630` | Sales last_assigned_at |
 | `20260702`–`20260706` | Ticket visits + accountability |
 | `20260708` | outcome_category |
 | `20260715` | marked_unattended_at |
-| `20260716` | assigned_to_2 on tickets + sales |
+| `20260716` | assigned_to_2 |
 
-After applying: `NOTIFY pgrst, 'reload schema';` (included in migrations)
+After applying: `NOTIFY pgrst, 'reload schema';`
 
 ---
 
-## 10. Sample Queries
+## 11. Sample Queries
 
-**Active tickets by queue:**
+**Queue counts:**
 
 ```sql
-SELECT status, count(*)
-FROM public.tickets_active
-GROUP BY status
-ORDER BY count(*) DESC;
+SELECT status, count(*) FROM public.tickets_active GROUP BY status ORDER BY 2 DESC;
 ```
 
 **Visit fair credit (responded in range):**
@@ -465,23 +474,22 @@ ORDER BY count(*) DESC;
 SELECT assignee, count(DISTINCT ticket_number) AS tickets_handled
 FROM public.ticket_visits
 WHERE outcome = 'responded'
-  AND visit_start >= '2026-06-07'::timestamptz
-  AND visit_start <  '2026-06-14'::timestamptz
+  AND visit_start >= timestamptz '2026-06-01 00:00:00+05'
+  AND visit_start <  timestamptz '2026-06-08 00:00:00+05'
 GROUP BY assignee;
 ```
 
-**Sales cases in range:**
+**Undispatched sales (Admin credit bucket):**
 
 ```sql
-SELECT case_ref, status, updated_at, assigned_to
+SELECT case_ref, status, account_name
 FROM public.dashboard_sales_cases
-WHERE updated_at >= '2026-06-07'::timestamptz
-  AND updated_at <= '2026-06-13 23:59:59+05'::timestamptz;
+WHERE assigned_to IS NULL AND status != 'Resolved';
 ```
 
 ---
 
-## 11. Related Documents
+## 12. Related Documents
 
-- [DEVELOPER_REQUIREMENTS.md](./DEVELOPER_REQUIREMENTS.md) — screens, workflows, business rules
+- [DEVELOPER_REQUIREMENTS.md](./DEVELOPER_REQUIREMENTS.md) — screens, workflows, business rules  
 - [USER_STORIES.md](./USER_STORIES.md) — role-based user stories
