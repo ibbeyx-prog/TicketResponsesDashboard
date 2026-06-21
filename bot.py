@@ -840,7 +840,8 @@ def _db_get_sales_case_by_ref(case_ref: str) -> dict[str, Any] | None:
     res = (
         supabase.table(SALES_CASES_TABLE)
         .select(
-            "case_ref, assigned_to, assigned_to_2, status, description, additional_info"
+            "case_ref, assigned_to, assigned_to_2, status, description, "
+            "additional_info, field_response, photo_url, field_responded_by, responded_at"
         )
         .eq("case_ref", case_ref)
         .limit(1)
@@ -1240,6 +1241,7 @@ def _storage_upload_ticket_photo(ticket_number: str, image_bytes: bytes, content
 
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
+_SALES_MISSING_COLUMNS: set[str] = set()
 
 
 def _strip_missing_ticket_columns(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1362,6 +1364,41 @@ def _execute_ticket_update(
                 "for `public.%s` to surface this column in the dashboard.",
                 col,
                 TICKETS_TABLE,
+            )
+            attempt = {k: v for k, v in attempt.items() if k != col}
+            last_err = exc
+    if last_err is not None:
+        raise last_err
+
+
+def _strip_missing_sales_columns(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _SALES_MISSING_COLUMNS:
+        return payload
+    return {k: v for k, v in payload.items() if k not in _SALES_MISSING_COLUMNS}
+
+
+def _execute_sales_update(payload: dict[str, Any], case_ref: str) -> None:
+    """Run an UPDATE on sales cases, retrying if optional columns are missing."""
+    attempt = _strip_missing_sales_columns(payload)
+    last_err: Exception | None = None
+    for _ in range(4):
+        try:
+            supabase.table(SALES_CASES_TABLE).update(attempt).eq(
+                "case_ref", case_ref
+            ).execute()
+            return
+        except Exception as exc:
+            text = str(exc)
+            col = _parse_missing_column(text)
+            if not col or col not in attempt:
+                last_err = exc
+                break
+            _SALES_MISSING_COLUMNS.add(col)
+            log.warning(
+                "sales table is missing column %r; dropping it from updates "
+                "for the rest of this process. Apply migration "
+                "`20260717_sales_case_field_response.sql` if needed.",
+                col,
             )
             attempt = {k: v for k, v in attempt.items() if k != col}
             last_err = exc
@@ -1709,12 +1746,24 @@ def _db_complete_ticket_field_response(
                 f"ticket {ticket_number} not found in {TICKETS_TABLE!r} "
                 f"or {SALES_CASES_TABLE!r}"
             )
-        payload: dict[str, Any] = {"updated_at": responded_at}
-        if field_response:
-            payload["additional_info"] = field_response
-        supabase.table(SALES_CASES_TABLE).update(payload).eq(
-            "case_ref", ticket_number
-        ).execute()
+        existing_fr = str(sales_row.get("field_response") or "").strip()
+        existing_photo = str(sales_row.get("photo_url") or "").strip()
+        if existing_fr and existing_photo.startswith("http"):
+            log.info(
+                "field reply ignored — sales case %s already has response+photo",
+                ticket_number,
+            )
+            return
+        payload: dict[str, Any] = {
+            "updated_at": responded_at,
+            "responded_at": responded_at,
+            "field_response": field_response,
+        }
+        if update_photo_url:
+            payload["photo_url"] = photo_url
+        if field_responded_by:
+            payload["field_responded_by"] = field_responded_by
+        _execute_sales_update(payload, ticket_number)
         row = sales_row
         log.info(
             "field response saved sales case=%s photo=%s",
@@ -1829,6 +1878,63 @@ def _db_insert_assignment(
         note=additional_info,
     )
     _bot_visits_open_new(ticket_number, assigned_to, visit_start=now_iso)
+
+
+def _db_record_sales_assignment_from_telegram(
+    case_ref: str,
+    assigned_to: str,
+    task_category: str,
+    *,
+    additional_info: str | None = None,
+    assignment_telegram_chat_id: int | None = None,
+    assignment_telegram_message_id: int | None = None,
+) -> None:
+    """Record coordinator Telegram assignment for a sales-only case (no CSM ticket row)."""
+    sales_row = _db_get_sales_case_by_ref(case_ref)
+    if not sales_row:
+        raise RuntimeError(
+            f"sales case {case_ref} not found in {SALES_CASES_TABLE!r}"
+        )
+    now_iso = _utc_now_iso()
+    prev_assignee = str(sales_row.get("assigned_to") or "").strip()
+    same_assignee = bool(
+        prev_assignee
+        and _normalize_username(prev_assignee) == _normalize_username(assigned_to)
+    )
+    payload: dict[str, Any] = {
+        "assigned_to": assigned_to,
+        "field_task_category": task_category,
+        "updated_at": now_iso,
+    }
+    if additional_info:
+        payload["additional_info"] = additional_info
+    if not same_assignee:
+        payload["last_assigned_at"] = now_iso
+        payload["field_response"] = None
+        payload["photo_url"] = None
+        payload["field_responded_by"] = None
+        payload["responded_at"] = None
+    if assignment_telegram_chat_id is not None:
+        payload["assignment_telegram_chat_id"] = int(assignment_telegram_chat_id)
+    if assignment_telegram_message_id is not None:
+        payload["assignment_telegram_message_id"] = int(assignment_telegram_message_id)
+    _execute_sales_update(payload, case_ref)
+    _db_insert_attendance_log(
+        ticket_number=case_ref,
+        member_username=assigned_to,
+        action_type="Assignment",
+        note=additional_info,
+        telegram_chat_id=assignment_telegram_chat_id,
+        telegram_message_id=assignment_telegram_message_id,
+    )
+    if not same_assignee:
+        _bot_visits_open_new(case_ref, assigned_to, visit_start=now_iso)
+    log.info(
+        "sales assignment recorded case=%s assignee=%s same=%s",
+        case_ref,
+        assigned_to,
+        same_assignee,
+    )
 
 
 def _db_reassign_ticket(
@@ -2832,15 +2938,32 @@ async def handle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         try:
             existing = _db_get_ticket(ticket_number)
+            sales_row = None
+            if existing is None:
+                sales_row = _db_get_sales_case_by_ref(ticket_number)
         except Exception as exc:
-            log.exception("tickets lookup failed for %s: %s", ticket_number, exc)
+            log.exception("lookup failed for %s: %s", ticket_number, exc)
             lines.append(f"• Lookup failed for ticket {ticket_number}.")
             continue
 
         info_suffix = " (with extra info)" if additional_info else ""
 
         try:
-            if existing is None:
+            if existing is None and sales_row is not None:
+                _db_record_sales_assignment_from_telegram(
+                    ticket_number,
+                    assigned_to,
+                    task_category,
+                    additional_info=additional_info,
+                    assignment_telegram_chat_id=tg_chat_id,
+                    assignment_telegram_message_id=tg_msg_id,
+                )
+                lines.append(
+                    f"• Assigned sales case {ticket_number} ({task_category}) "
+                    f"to {assigned_to}{info_suffix}."
+                )
+                await _group_assignment_ack(update, context, ticket_number, assigned_to)
+            elif existing is None:
                 try:
                     _db_insert_assignment(
                         ticket_number,
