@@ -396,9 +396,64 @@ div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="co
 div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {{
   border-left: 0.5px solid var(--disp-border) !important;
   padding-left: 10px !important;
-  min-width: 200px !important;
-  max-width: 260px !important;
-  flex: 0 0 24% !important;
+  min-width: 280px !important;
+  max-width: 320px !important;
+  flex: 0 0 300px !important;
+}}
+div.st-key-disp_right_rail {{
+  background: #080b14 !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
+  min-height: calc(100vh - var(--disp-header-h) - 20px) !important;
+}}
+div.st-key-disp_right_rail [data-testid="stVerticalBlockBorderWrapper"] {{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}}
+div.st-key-disp_right_rail [data-testid="stTabs"] {{
+  margin: 0 !important;
+}}
+div.st-key-disp_right_rail .stTabs [data-baseweb="tab-list"] {{
+  gap: 0 !important;
+  padding: 0 10px !important;
+  border-bottom: 0.5px solid var(--disp-border) !important;
+  background: #080b14 !important;
+}}
+div.st-key-disp_right_rail .stTabs [data-baseweb="tab"] {{
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  color: #4a5a7a !important;
+  padding: 10px 14px 8px !important;
+  background: transparent !important;
+  border-bottom: 2px solid transparent !important;
+}}
+div.st-key-disp_right_rail .stTabs [aria-selected="true"] {{
+  color: #e2e8f8 !important;
+  font-weight: 500 !important;
+  border-bottom-color: #3b82f6 !important;
+}}
+div.st-key-disp_right_rail [data-testid="stTabContent"] {{
+  padding: 0 !important;
+}}
+div.st-key-disp_right_rail div.st-key-disp_assign_panel,
+div.st-key-disp_right_rail div.st-key-disp_sales_assign_panel {{
+  margin-bottom: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 10px 12px 14px !important;
+}}
+div.st-key-disp_right_rail div.st-key-disp_detail_panel {{
+  padding: 10px 12px 14px !important;
+  min-height: 280px !important;
+}}
+div.st-key-disp_assign_panel.disp-assign-rail .disp-mode-caption {{
+  font-size: 11px !important;
+  color: #4a5a7a !important;
+  margin: 0 0 10px 0 !important;
+  line-height: 1.4 !important;
 }}
 div.st-key-disp_sidebar_inner {{
   padding: 0 2px 0 0 !important;
@@ -1197,6 +1252,307 @@ div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radio
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label {{
   gap: 0 !important;
 }}
+"""
+
+# Global dark styling for Streamlit widgets outside the dispatch 3-column shell.
+DISPATCH_FULL_DARK_CSS = """
+/* ── Typography & links ── */
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] span,
+.stMarkdown p,
+.stMarkdown li {
+  color: var(--disp-muted) !important;
+}
+[data-testid="stMarkdownContainer"] strong,
+.stMarkdown strong {
+  color: var(--disp-text) !important;
+}
+.stMarkdown a,
+[data-testid="stMarkdownContainer"] a {
+  color: var(--disp-accent) !important;
+}
+.stMarkdown code,
+[data-testid="stMarkdownContainer"] code {
+  background: var(--disp-card) !important;
+  color: var(--disp-text) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 3px !important;
+  padding: 0 4px !important;
+}
+
+/* ── Alerts ── */
+[data-testid="stAlert"],
+div[data-testid="stNotification"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  color: var(--disp-muted) !important;
+}
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p,
+div[data-testid="stNotification"] p {
+  color: var(--disp-muted) !important;
+}
+[data-testid="stAlertIcon"] {
+  color: var(--disp-muted) !important;
+}
+
+/* ── Expanders ── */
+[data-testid="stExpander"] {
+  margin: 6px 0 !important;
+  border: none !important;
+  background: transparent !important;
+}
+[data-testid="stExpander"] details {
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  background: var(--disp-card) !important;
+  overflow: hidden;
+}
+[data-testid="stExpander"] summary {
+  color: var(--disp-muted) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  padding: 8px 10px !important;
+  background: transparent !important;
+}
+[data-testid="stExpander"] summary:hover {
+  color: var(--disp-text) !important;
+  background: #121a2a !important;
+}
+[data-testid="stExpander"] details[open] > div,
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+  padding: 8px 10px 10px !important;
+  border-top: 0.5px solid var(--disp-border) !important;
+  background: var(--disp-panel) !important;
+}
+
+/* ── Bordered containers ── */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+}
+
+/* ── Checkbox & radio (outside header) ── */
+[data-testid="stCheckbox"] label,
+[data-testid="stCheckbox"] label span,
+[data-testid="stCheckbox"] label p {
+  color: var(--disp-muted) !important;
+  font-size: 13px !important;
+}
+[data-testid="stRadio"] label span,
+[data-testid="stRadio"] label p {
+  color: var(--disp-muted) !important;
+}
+
+/* ── Date input ── */
+.stDateInput > div > div,
+.stDateInput input {
+  background: var(--disp-card) !important;
+  color: var(--disp-text) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 4px !important;
+}
+.stDateInput label {
+  color: var(--disp-dim) !important;
+  font-size: 11px !important;
+}
+
+/* ── Multi-select ── */
+.stMultiSelect [data-baseweb="select"] > div {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+
+/* ── Select / dropdown menus (Baseweb portal) ── */
+div[data-baseweb="popover"],
+div[data-baseweb="menu"],
+ul[role="listbox"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+ul[role="listbox"] li,
+div[data-baseweb="menu"] li {
+  background: var(--disp-card) !important;
+  color: var(--disp-muted) !important;
+}
+ul[role="listbox"] li:hover,
+div[data-baseweb="menu"] li:hover {
+  background: #121a2a !important;
+  color: var(--disp-text) !important;
+}
+
+/* ── Popover panels ── */
+[data-testid="stPopoverBody"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  color: var(--disp-muted) !important;
+  min-width: 13rem !important;
+  max-width: 16rem !important;
+  padding: 8px 10px !important;
+}
+[data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {
+  gap: 4px !important;
+}
+[data-testid="stPopoverBody"] .stButton > button {
+  font-size: 13px !important;
+  min-height: 32px !important;
+  text-align: left !important;
+}
+[data-testid="stPopoverBody"] [data-testid="stExpander"] details {
+  border-color: var(--disp-border) !important;
+}
+[data-testid="stPopoverBody"] hr {
+  border-color: var(--disp-border) !important;
+  margin: 6px 0 !important;
+}
+
+/* ── Data frames & editors ── */
+[data-testid="stDataFrame"],
+[data-testid="stDataEditor"] {
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
+  background: var(--disp-card) !important;
+}
+[data-testid="stDataFrame"] div,
+[data-testid="stDataEditor"] div {
+  background: var(--disp-card) !important;
+}
+[data-testid="stDataFrame"] [data-testid="glideDataEditor"],
+[data-testid="stDataEditor"] [data-testid="glideDataEditor"] {
+  --gdg-bg-cell: #0d1220;
+  --gdg-bg-header: #080b14;
+  --gdg-bg-header-has-focus: #121a2a;
+  --gdg-bg-header-hovered: #121a2a;
+  --gdg-text-dark: #e2e8f8;
+  --gdg-text-medium: #8a9ac0;
+  --gdg-text-light: #4a5a7a;
+  --gdg-text-header: #8a9ac0;
+  --gdg-border-color: #1a2035;
+  --gdg-accent-color: #3b82f6;
+  --gdg-accent-light: rgba(59, 130, 246, 0.15);
+  --gdg-accent-fg: #e2e8f8;
+  --gdg-bg-cell-medium: #0d1220;
+  --gdg-bg-search-cell: #121a2a;
+}
+
+/* ── Code blocks ── */
+.stCode,
+pre,
+code block {
+  background: var(--disp-panel) !important;
+  color: var(--disp-muted) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 4px !important;
+}
+
+/* ── Primary / secondary buttons (Streamlit defaults) ── */
+.stButton > button[kind="primary"],
+button[data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"] {
+  background: #0d2a50 !important;
+  border-color: #1a4a80 !important;
+  color: #3b82f6 !important;
+}
+.stButton > button[kind="primary"]:hover,
+button[data-testid="stBaseButton-primary"]:hover {
+  background: #102f5a !important;
+  border-color: #2563eb !important;
+  color: #60a5fa !important;
+}
+.stButton > button[kind="secondary"],
+button[data-testid="stBaseButton-secondary"] {
+  background: transparent !important;
+  border-color: var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+.stButton > button[kind="secondary"]:hover,
+button[data-testid="stBaseButton-secondary"]:hover {
+  background: var(--disp-card) !important;
+  border-color: #2a3a5a !important;
+  color: var(--disp-text) !important;
+}
+
+/* ── Download button ── */
+.stDownloadButton > button {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+
+/* ── Spinner ── */
+[data-testid="stSpinner"] {
+  color: var(--disp-accent) !important;
+}
+
+/* ── Segmented control ── */
+div[data-baseweb="segmented-control"] {
+  background: var(--disp-panel) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  gap: 4px !important;
+}
+div[data-baseweb="segmented-control"] button {
+  color: var(--disp-dim) !important;
+  background: transparent !important;
+}
+div[data-baseweb="segmented-control"] button[aria-selected="true"] {
+  background: var(--disp-accent-bg) !important;
+  color: var(--disp-text) !important;
+}
+
+/* ── Toolbar rows (queue actions) ── */
+div[class*="st-key-"][class*="_ctx_toolbar"],
+div[class*="st-key-"][class*="_sc_toolbar"] {
+  padding: 4px 0 !important;
+}
+div[class*="st-key-"][class*="_ctx_toolbar"] .stMarkdown p,
+div[class*="st-key-"][class*="_sc_toolbar"] .stMarkdown p {
+  color: var(--disp-muted) !important;
+  margin: 0 !important;
+}
+
+/* ── Log / attendance tab body ── */
+div.st-key-disp_log_body,
+div.st-key-disp_log_body [data-testid="stVerticalBlockBorderWrapper"] {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* ── Performance weekly panels (dispatch palette) ── */
+.weekly-exec-title,
+.weekly-kpi-value,
+.weekly-panel h4 {
+  color: var(--disp-text) !important;
+}
+.weekly-exec-sub,
+.weekly-kpi-label,
+.weekly-exec-badge {
+  color: var(--disp-dim) !important;
+}
+.weekly-exec-badge,
+.weekly-kpi-card,
+.weekly-panel {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+}
+.weekly-exec-header {
+  border-bottom-color: var(--disp-border) !important;
+}
+.weekly-date-range,
+.weekly-kpi-sub {
+  color: var(--disp-accent) !important;
+}
+.weekly-date-wrap [data-testid="stDateInput"] > div {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+}
 """
 
 # Legacy alias — layout is merged into app.apply_theme()

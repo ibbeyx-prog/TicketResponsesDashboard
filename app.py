@@ -108,6 +108,7 @@ from task_categories import (
     upsert_task_category,
 )
 from dispatch_console import (
+    DISPATCH_FULL_DARK_CSS,
     DISPATCH_LAYOUT_RULES,
     DISPATCH_LOGIN_CSS,
     QUEUE_DOTS,
@@ -567,6 +568,7 @@ def apply_theme(*, login: bool = False) -> None:
     }}
 
     {DISPATCH_LAYOUT_RULES}
+    {DISPATCH_FULL_DARK_CSS}
     {PERF_OVERVIEW_CSS}
     div.st-key-disp_perf_body [data-testid="stRadio"] > div {{
       flex-direction: column !important;
@@ -9915,38 +9917,38 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
 .weekly-exec-header {
   display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
   gap: 12px; margin-bottom: 1rem; padding-bottom: 0.75rem;
-  border-bottom: 1px solid rgba(215, 180, 145, 0.35);
+  border-bottom: 0.5px solid #1a2035;
 }
-.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e8e6e3; margin: 0; }
-.weekly-exec-sub { font-size: 0.85rem; color: #a39e97; margin: 0.15rem 0 0; }
+.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e2e8f8; margin: 0; }
+.weekly-exec-sub { font-size: 0.85rem; color: #2a3a5a; margin: 0.15rem 0 0; }
 .weekly-exec-badge {
-  font-size: 0.85rem; color: #a39e97; padding: 0.45rem 0.85rem;
-  border: 1px solid #374151; border-radius: 8px; background: #141414;
+  font-size: 0.85rem; color: #8a9ac0; padding: 0.45rem 0.85rem;
+  border: 0.5px solid #1a2035; border-radius: 6px; background: #0d1220;
 }
 .weekly-date-wrap [data-testid="stDateInput"] label {
-  font-size: 0.85rem !important; color: #a39e97 !important;
+  font-size: 0.85rem !important; color: #2a3a5a !important;
 }
 .weekly-date-wrap [data-testid="stDateInput"] > div {
-  background: #141414 !important;
-  border: 1px solid #374151 !important;
-  border-radius: 8px !important;
+  background: #0d1220 !important;
+  border: 0.5px solid #1a2035 !important;
+  border-radius: 6px !important;
 }
 .weekly-date-range {
-  font-size: 0.78rem; color: #D7B491; margin: 0.25rem 0 0; text-align: right;
+  font-size: 0.78rem; color: #3b82f6; margin: 0.25rem 0 0; text-align: right;
 }
 .weekly-kpi-card {
-  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
-  border-radius: 10px; padding: 1rem 1.1rem; min-height: 88px;
+  background: #0d1220; border: 0.5px solid #1a2035;
+  border-radius: 6px; padding: 1rem 1.1rem; min-height: 88px;
 }
-.weekly-kpi-label { font-size: 0.78rem; color: #a39e97; margin: 0 0 0.35rem; }
-.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e8e6e3; margin: 0; line-height: 1.2; }
-.weekly-kpi-sub { font-size: 0.75rem; color: #D7B491; margin: 0.35rem 0 0; }
+.weekly-kpi-label { font-size: 0.78rem; color: #2a3a5a; margin: 0 0 0.35rem; }
+.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e2e8f8; margin: 0; line-height: 1.2; }
+.weekly-kpi-sub { font-size: 0.75rem; color: #3b82f6; margin: 0.35rem 0 0; }
 .weekly-panel {
-  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
-  border-radius: 10px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
+  background: #0d1220; border: 0.5px solid #1a2035;
+  border-radius: 6px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
 }
 .weekly-panel h4 {
-  font-size: 0.95rem; font-weight: 600; color: #e8e6e3; margin: 0 0 0.65rem;
+  font-size: 0.95rem; font-weight: 600; color: #e2e8f8; margin: 0 0 0.65rem;
 }
 </style>
         """,
@@ -17287,16 +17289,20 @@ def _render_sales_sidebar(
         )
         st.session_state[_SALES_ACTIVE_QUEUE_KEY] = picked
 
-        st.markdown(
-            t_section_label("Engineers", margin="margin-top:12px;margin-bottom:7px"),
-            unsafe_allow_html=True,
-        )
-        for eng in _dispatch_engineer_presence(df_tickets):
-            render_engineer_row(eng)
+
+def _render_sales_right_rail() -> None:
+    """Right column — New case | Case info tabs."""
+    with st.container(key="disp_right_rail"):
+        tab_new, tab_info = st.tabs(["New case", "Case info"])
+        with tab_new:
+            _render_sales_assign_panel(layout="rail")
+        with tab_info:
+            with st.container(key="disp_detail_panel"):
+                _render_sales_detail_panel()
 
 
-def _render_sales_assign_panel() -> None:
-    """New sales case panel — same layout pattern as CSM assign (intake vs assign)."""
+def _render_sales_assign_panel(*, layout: str = "bar") -> None:
+    """New sales case panel — ``bar`` = horizontal, ``rail`` = right sidebar stack."""
     engineers = get_engineer_handles()
     categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     unassigned = "— unassigned —"
@@ -17304,27 +17310,20 @@ def _render_sales_assign_panel() -> None:
         st.session_state.get(_SALES_ASSIGN_MODE_KEY, _SALES_ASSIGN_MODE_INTAKE)
     )
     intake_only = mode == _SALES_ASSIGN_MODE_INTAKE
+    rail = layout == "rail"
 
     if st.session_state.pop(_DISP_CLEAR_SALES_ASSIGN_KEY, False):
         _reset_dispatch_sales_assign_form()
 
     with st.container(key="disp_sales_assign_panel"):
-        st.markdown(
-            t_section_label("New sales case", spacing=".06em", margin="margin:0 0 4px"),
-            unsafe_allow_html=True,
-        )
+        if not rail:
+            st.markdown(
+                t_section_label("New sales case", spacing=".06em", margin="margin:0 0 4px"),
+                unsafe_allow_html=True,
+            )
         st.markdown('<div class="disp-mode-toggle sales-mode-toggle">', unsafe_allow_html=True)
         t1, t2 = st.columns(2, gap="small")
         with t1:
-            if st.button(
-                "☰ Intake only",
-                key="sap_mode_intake",
-                use_container_width=True,
-                type="primary" if intake_only else "secondary",
-            ):
-                st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_INTAKE
-                st.rerun()
-        with t2:
             if st.button(
                 "✈ Assign engineer",
                 key="sap_mode_assign",
@@ -17333,8 +17332,131 @@ def _render_sales_assign_panel() -> None:
             ):
                 st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_ASSIGN
                 st.rerun()
+        with t2:
+            if st.button(
+                "☰ Intake only",
+                key="sap_mode_intake",
+                use_container_width=True,
+                type="primary" if intake_only else "secondary",
+            ):
+                st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_INTAKE
+                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            hint = (
+                "Creates case record only — assign engineer later."
+                if intake_only
+                else "Creates case and assigns engineer immediately."
+            )
+            st.markdown(
+                f'<p class="disp-mode-caption">{html.escape(hint)}</p>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            _render_assign_plain_label("Case ref")
+            case_ref = st.text_input(
+                "Case ref",
+                placeholder="Ticket / case ID",
+                key="sap_ref",
+                label_visibility="collapsed",
+            )
+            _render_assign_plain_label("Account")
+            account_name = st.text_input(
+                "Account name",
+                placeholder="Resort / company",
+                key="sap_acc",
+                label_visibility="collapsed",
+            )
+            r1, r2 = st.columns(2, gap="small")
+            with r1:
+                _render_assign_plain_label("Region")
+                region = st.selectbox(
+                    "Region",
+                    list(SALES_REGION_CODES),
+                    key="sap_region",
+                    label_visibility="collapsed",
+                )
+            with r2:
+                _render_assign_plain_label("Priority")
+                priority = st.selectbox(
+                    "Priority",
+                    ["Standard", "High"],
+                    key="sap_priority",
+                    label_visibility="collapsed",
+                )
+            engineer = unassigned
+            if not intake_only:
+                eng_row, eng_mgr = st.columns([1, 0.18], gap="small", vertical_alignment="top")
+                with eng_row:
+                    _render_assign_plain_label("Engineer")
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="sap_eng",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="sap_eng",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
+                with eng_mgr:
+                    st.markdown('<div style="margin-top:18px"></div>', unsafe_allow_html=True)
+                    _render_assign_manage_icon_btn(
+                        manage_key="sap_btn_manage_eng",
+                        manage_help="Manage engineers",
+                        on_manage=manage_engineers_dialog,
+                    )
+            cat_row, cat_mgr = st.columns([1, 0.18], gap="small", vertical_alignment="top")
+            with cat_row:
+                _render_assign_plain_label("Category")
+                _render_category_selectbox(
+                    "Category",
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
+                    key="sap_category",
+                    label_visibility="collapsed",
+                )
+                sales_category = st.session_state.get("sap_category")
+            with cat_mgr:
+                st.markdown('<div style="margin-top:18px"></div>', unsafe_allow_html=True)
+                _render_assign_manage_icon_btn(
+                    manage_key="sap_btn_manage_cat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
+            _render_assign_plain_label("Notes")
+            notes = st.text_area(
+                "Notes",
+                placeholder="Optional intake notes…",
+                key="sap_notes",
+                height=72,
+                label_visibility="collapsed",
+            )
+            submit_label = "Create case ↗" if intake_only else "Create + assign ↗"
+            st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
+            clicked = st.button(submit_label, key="sap_submit", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            if clicked:
+                _handle_sales_floor_submit(
+                    case_ref,
+                    account_name,
+                    region,
+                    sales_category,
+                    priority,
+                    engineer,
+                    require_engineer=not intake_only,
+                )
+            return
 
         r1a, r1b, r1c, r1d = st.columns([1.05, 1.55, 0.75, 0.75], gap="medium")
         with r1a:
@@ -17920,13 +18042,12 @@ def _render_sales_cases_dashboard() -> None:
     selected_queue = _init_sales_active_queue()
 
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns([1.35, 5.45, 2.2], gap="small")
+        sb, main, dp = st.columns([1.15, 5.35, 2.5], gap="small")
 
         with sb:
             _render_sales_sidebar(df=df, df_tickets=df_tickets)
 
         with main:
-            _render_sales_assign_panel()
             cases = _sales_cases_list_for_queue(df, selected_queue)
 
             col_title, col_search = st.columns([3, 1])
@@ -17941,7 +18062,7 @@ def _render_sales_cases_dashboard() -> None:
             with col_search:
                 search_ref = st.text_input(
                     "Search",
-                    placeholder="Search ref",
+                    placeholder="Search case ref",
                     label_visibility="collapsed",
                     key="sales_search",
                 )
@@ -17961,8 +18082,7 @@ def _render_sales_cases_dashboard() -> None:
             _render_sales_floor_modals(df=df)
 
         with dp:
-            with st.container(key="disp_detail_panel"):
-                _render_sales_detail_panel()
+            _render_sales_right_rail()
 
 
 def _dispatch_today_metrics(
@@ -18269,11 +18389,117 @@ def _schedule_dispatch_sales_assign_form_clear() -> None:
     st.session_state[_DISP_CLEAR_SALES_ASSIGN_KEY] = True
 
 
+def _render_dispatch_case_info_panel(
+    ticket: dict | None,
+) -> None:
+    """Right-rail Case info tab — selected ticket detail + timeline."""
+    with st.container(key="disp_detail_panel"):
+        if not ticket:
+            st.markdown(
+                """
+            <div style="height:180px;display:flex;align-items:center;
+              justify-content:center;color:#2a3a5a;font-size:13px;font-weight:400;
+              text-align:center;padding:0 12px">
+              Select a ticket in the table to view case info
+            </div>""",
+                unsafe_allow_html=True,
+            )
+            return
+        t = ticket
+        st.markdown(
+            f"""
+        <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
+          {t_detail_id(str(t.get('ticket_number') or ''))}
+          <div style="display:flex;align-items:center;gap:7px;margin-top:4px;flex-wrap:wrap">
+            {status_pill(str(t.get('status') or ''))}
+            {t_caption(str(t.get('task_category') or ''))}
+          </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+        eng = str(t.get("assigned_to") or "—")
+        eng2 = str(t.get("assigned_to_2") or "").strip()
+        share = "· shared" if eng2 else "· solo"
+        st.markdown(
+            t_section_label(
+                "Engineer",
+                spacing=".06em",
+                margin="margin:10px 0 5px",
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<span style="font-size:13px;font-weight:400;color:#8a9ac0;'
+            f'line-height:1.5">'
+            f'{html.escape(eng)}{(" + " + html.escape(eng2)) if eng2 else ""} '
+            f'{share}</span>',
+            unsafe_allow_html=True,
+        )
+        if t.get("additional_info"):
+            st.markdown(
+                t_section_label(
+                    "Notes",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""
+            <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
+              background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
+              {html.escape(str(t.get('additional_info') or ''))}
+            </div>""",
+                unsafe_allow_html=True,
+            )
+        _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
+        st.markdown(
+            t_section_label(
+                "Timeline",
+                spacing=".06em",
+                margin="margin:10px 0 5px",
+            ),
+            unsafe_allow_html=True,
+        )
+        logs_df = _fetch_attendance(
+            ticket_number=str(t.get("ticket_number") or ""),
+            limit=6,
+        )
+        logs = logs_df.to_dict("records") if not logs_df.empty else []
+        if not logs:
+            st.caption("No log entries yet.")
+        for i, log in enumerate(logs):
+            render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
+
+
+def _render_dispatch_right_rail(
+    *,
+    queue_df: pd.DataFrame,
+    picked: str | None,
+    on_submit: Callable[[str, str, str, str, str], None],
+) -> None:
+    """Right column — Ticket assign | Case info tabs (mockup layout)."""
+    ticket = None
+    if picked:
+        match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
+        if not match.empty:
+            ticket = _dispatch_row_dict(match.iloc[0])
+
+    with st.container(key="disp_right_rail"):
+        tab_assign, tab_info = st.tabs(["Ticket assign", "Case info"])
+        with tab_assign:
+            render_assign_panel(on_submit=on_submit, layout="rail")
+        with tab_info:
+            _render_dispatch_case_info_panel(ticket)
+
+
 def render_assign_panel(
     *,
     on_submit: Callable[[str, str, str, str, str], None],
+    layout: str = "bar",
 ) -> None:
-    """NEW TICKET panel — Assign + Telegram or Queue only (mockup layout)."""
+    """Assign panel — ``bar`` = horizontal (legacy), ``rail`` = right sidebar stack."""
     engineers = get_engineer_handles()
     categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     none_label = "- none -"
@@ -18281,27 +18507,20 @@ def render_assign_panel(
         st.session_state.get(_DISP_ASSIGN_MODE_KEY, _DISP_ASSIGN_MODE_TELEGRAM)
     )
     queue_only = mode == _DISP_ASSIGN_MODE_QUEUE
+    rail = layout == "rail"
 
     if st.session_state.pop(_DISP_CLEAR_ASSIGN_KEY, False):
         _reset_dispatch_assign_form()
 
     with st.container(key="disp_assign_panel"):
-        st.markdown(
-            t_section_label("New ticket", spacing=".06em", margin="margin:0 0 4px"),
-            unsafe_allow_html=True,
-        )
+        if not rail:
+            st.markdown(
+                t_section_label("New ticket", spacing=".06em", margin="margin:0 0 4px"),
+                unsafe_allow_html=True,
+            )
         st.markdown('<div class="disp-mode-toggle sales-mode-toggle">', unsafe_allow_html=True)
         t1, t2 = st.columns(2, gap="small")
         with t1:
-            if st.button(
-                "☰ Queue only",
-                key="disp_mode_queue",
-                use_container_width=True,
-                type="primary" if queue_only else "secondary",
-            ):
-                st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_QUEUE
-                st.rerun()
-        with t2:
             if st.button(
                 "✈ Assign + Telegram",
                 key="disp_mode_telegram",
@@ -18310,8 +18529,108 @@ def render_assign_panel(
             ):
                 st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_TELEGRAM
                 st.rerun()
+        with t2:
+            if st.button(
+                "☰ Queue only",
+                key="disp_mode_queue",
+                use_container_width=True,
+                type="primary" if queue_only else "secondary",
+            ):
+                st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_QUEUE
+                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            hint = (
+                "Adds ticket to Daily Task — no engineer, no Telegram."
+                if queue_only
+                else "Creates ticket, assigns engineer, posts Telegram immediately."
+            )
+            st.markdown(
+                f'<p class="disp-mode-caption">{html.escape(hint)}</p>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            _render_assign_plain_label("Ticket #")
+            ticket_num = st.text_input(
+                "Ticket #",
+                placeholder="9 or 16 digits",
+                key="qa_ticket_num",
+                label_visibility="collapsed",
+            )
+            engineer = engineer2 = "—"
+            if not queue_only:
+                eng_row, eng_mgr = st.columns([1, 0.18], gap="small", vertical_alignment="top")
+                with eng_row:
+                    _render_assign_plain_label("Engineer")
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="ap_engineer",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="ap_engineer",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
+                with eng_mgr:
+                    st.markdown('<div style="margin-top:18px"></div>', unsafe_allow_html=True)
+                    _render_assign_manage_icon_btn(
+                        manage_key="btn_manage_eng",
+                        manage_help="Manage engineers",
+                        on_manage=manage_engineers_dialog,
+                    )
+                _render_assign_plain_label("Engineer 2 (optional)")
+                engineer2 = st.selectbox(
+                    "Engineer 2",
+                    [none_label] + list(engineers),
+                    key="qa_engineer2",
+                    label_visibility="collapsed",
+                )
+            cat_row, cat_mgr = st.columns([1, 0.18], gap="small", vertical_alignment="top")
+            with cat_row:
+                _render_assign_plain_label("Category")
+                _render_category_selectbox(
+                    "Category",
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
+                    key="ap_category",
+                    label_visibility="collapsed",
+                )
+                category = st.session_state.get("ap_category")
+            with cat_mgr:
+                st.markdown('<div style="margin-top:18px"></div>', unsafe_allow_html=True)
+                _render_assign_manage_icon_btn(
+                    manage_key="btn_manage_cat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
+            _render_assign_plain_label("Notes")
+            notes = st.text_area(
+                "Notes",
+                placeholder="Optional notes…",
+                key="qa_notes",
+                height=72,
+                label_visibility="collapsed",
+            )
+            submit_label = "Add to queue ↗" if queue_only else "Assign + Telegram ↗"
+            st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
+            if st.button(submit_label, key="qa_submit", use_container_width=True):
+                if queue_only:
+                    _handle_dispatch_queue_only_submit(ticket_num, category, notes)
+                else:
+                    on_submit(ticket_num, engineer, engineer2, category, notes)
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
 
         if queue_only:
             r1a, = st.columns([1], gap="small")
@@ -18751,7 +19070,7 @@ def _render_dispatch_csm_dashboard(
     }
 
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns([1.35, 5.45, 2.2], gap="small")
+        sb, main, dp = st.columns([1.15, 5.35, 2.5], gap="small")
 
         with sb:
             with st.container(key="disp_sidebar_inner"):
@@ -18782,15 +19101,6 @@ def _render_dispatch_csm_dashboard(
                 )
                 st.session_state[aq_key] = selected_queue
 
-                st.markdown(
-                    t_section_label(
-                        "Engineers", margin="margin-top:12px;margin-bottom:7px"
-                    ),
-                    unsafe_allow_html=True,
-                )
-                for eng in _dispatch_engineer_presence(df):
-                    render_engineer_row(eng)
-
         mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
         queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
         eng_filter = st.session_state.get(_DISP_ENGINEER_FILTER_KEY)
@@ -18808,13 +19118,6 @@ def _render_dispatch_csm_dashboard(
         cat_names = get_task_categories() or _try_fetch_task_categories()[0]
 
         with main:
-            render_assign_panel(
-                on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
-                    tn, eng, eng2, cat, notes,
-                    fe_names=fe_names, fe_missing=fe_missing,
-                ),
-            )
-
             col_title, col_search = st.columns([3, 1])
             with col_title:
                 n = len(ticket_rows)
@@ -18839,7 +19142,7 @@ def _render_dispatch_csm_dashboard(
             with col_search:
                 search_num = st.text_input(
                     "Search",
-                    placeholder="Search #",
+                    placeholder="Search ticket #",
                     label_visibility="collapsed",
                     key="disp_ticket_search",
                 )
@@ -18877,89 +19180,14 @@ def _render_dispatch_csm_dashboard(
             )
 
         with dp:
-            with st.container(key="disp_detail_panel"):
-                ticket = None
-                if picked:
-                    match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
-                    if not match.empty:
-                        ticket = _dispatch_row_dict(match.iloc[0])
-
-                if not ticket:
-                    st.markdown(
-                        """
-                    <div style="height:200px;display:flex;align-items:center;
-                      justify-content:center;color:#2a3a5a;font-size:13px;font-weight:400">
-                      Select a ticket to view details
-                    </div>""",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    t = ticket
-                    st.markdown(
-                        f"""
-                    <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
-                      {t_detail_id(str(t.get('ticket_number') or ''))}
-                      <div style="display:flex;align-items:center;gap:7px;margin-top:4px">
-                        {status_pill(str(t.get('status') or ''))}
-                        {t_caption(str(t.get('task_category') or ''))}
-                      </div>
-                    </div>
-                    """,
-                        unsafe_allow_html=True,
-                    )
-                    eng = str(t.get("assigned_to") or "—")
-                    eng2 = str(t.get("assigned_to_2") or "").strip()
-                    share = "· shared" if eng2 else "· solo"
-                    st.markdown(
-                        t_section_label(
-                            "Engineer",
-                            spacing=".06em",
-                            margin="margin:10px 0 5px",
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f'<span style="font-size:13px;font-weight:400;color:#8a9ac0;'
-                        f'line-height:1.5">'
-                        f'{html.escape(eng)}{(" + " + html.escape(eng2)) if eng2 else ""} '
-                        f'{share}</span>',
-                        unsafe_allow_html=True,
-                    )
-                    if t.get("additional_info"):
-                        st.markdown(
-                            t_section_label(
-                                "Notes",
-                                spacing=".06em",
-                                margin="margin:10px 0 5px",
-                            ),
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f"""
-                        <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
-                          background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
-                          {html.escape(str(t.get('additional_info') or ''))}
-                        </div>""",
-                            unsafe_allow_html=True,
-                        )
-                    _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
-                    st.markdown(
-                        t_section_label(
-                            "Timeline",
-                            spacing=".06em",
-                            margin="margin:10px 0 5px",
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                    logs_df = _fetch_attendance(
-                        ticket_number=str(t.get("ticket_number") or ""),
-                        limit=6,
-                    )
-                    logs = logs_df.to_dict("records") if not logs_df.empty else []
-                    if not logs:
-                        st.caption("No log entries yet.")
-                    for i, log in enumerate(logs):
-                        render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
+            _render_dispatch_right_rail(
+                queue_df=queue_df,
+                picked=picked,
+                on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
+                    tn, eng, eng2, cat, notes,
+                    fe_names=fe_names, fe_missing=fe_missing,
+                ),
+            )
 
 
 def _render_dashboard(
@@ -21407,89 +21635,90 @@ def _render_missing_table_help(table: str) -> None:
 
 def _render_attendance_tab(*, lookback_days: int) -> None:
     """Attendance log table; optional filters; timeline in expander."""
-    range_start, range_end = _get_dash_range()
-    st.caption(
-        f"Attendance history · {_format_dash_range_caption() or 'sidebar time range'}"
-    )
-
-    f1, f2 = st.columns(2)
-    ticket_clean = f1.text_input(
-        "Ticket #",
-        placeholder="optional",
-        key="att_ticket_q",
-    ).strip()
-    member_clean = f2.text_input(
-        "Member",
-        placeholder="@username",
-        key="att_member_q",
-    ).strip()
-
-    try:
-        logs = _fetch_attendance(
-            ticket_number=ticket_clean if ticket_clean else None,
-            member_query=member_clean if member_clean else None,
-            since_utc=range_start,
-            until_utc=range_end,
-            limit=2000,
+    with st.container(key="disp_log_body"):
+        range_start, range_end = _get_dash_range()
+        st.caption(
+            f"Attendance history · {_format_dash_range_caption() or 'sidebar time range'}"
         )
-    except _TableMissingError as missing:
-        _render_missing_table_help(missing.table)
-        return
 
-    if logs.empty:
-        st.info("No log entries for this time window. Widen **Time range** or clear filters.")
-        return
+        f1, f2 = st.columns(2)
+        ticket_clean = f1.text_input(
+            "Ticket #",
+            placeholder="optional",
+            key="att_ticket_q",
+        ).strip()
+        member_clean = f2.text_input(
+            "Member",
+            placeholder="@username",
+            key="att_member_q",
+        ).strip()
 
-    show_cols = [
-        c
-        for c in (
-            "timestamp",
-            "ticket_number",
-            "member_username",
-            "action_type",
-            "note",
-            "photo_url",
+        try:
+            logs = _fetch_attendance(
+                ticket_number=ticket_clean if ticket_clean else None,
+                member_query=member_clean if member_clean else None,
+                since_utc=range_start,
+                until_utc=range_end,
+                limit=2000,
+            )
+        except _TableMissingError as missing:
+            _render_missing_table_help(missing.table)
+            return
+
+        if logs.empty:
+            st.info("No log entries for this time window. Widen **Time range** or clear filters.")
+            return
+
+        show_cols = [
+            c
+            for c in (
+                "timestamp",
+                "ticket_number",
+                "member_username",
+                "action_type",
+                "note",
+                "photo_url",
+            )
+            if c in logs.columns
+        ]
+        table = _format_local(logs[show_cols])
+        st.dataframe(
+            table,
+            use_container_width=True,
+            hide_index=True,
+            column_config=_dataframe_column_config(table),
         )
-        if c in logs.columns
-    ]
-    table = _format_local(logs[show_cols])
-    st.dataframe(
-        table,
-        use_container_width=True,
-        hide_index=True,
-        column_config=_dataframe_column_config(table),
-    )
 
-    with st.expander("Timeline (detail cards)", expanded=False):
-        for _, row in logs.iterrows():
-            member = row.get("member_username") or "unknown"
-            action = row.get("action_type") or "?"
-            tid = row.get("ticket_number") or "—"
-            when_local = ""
-            ts_raw = row.get("timestamp")
-            if pd.notna(ts_raw):
-                try:
-                    when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                except Exception:
-                    when_local = str(ts_raw)
-
-            with st.container(border=True):
-                st.markdown(
-                    f"**{member}** · `{action}` · ticket `{tid}` · "
-                    f"{when_local} {LOCAL_TZ_LABEL}"
-                )
-                note = row.get("note")
-                if isinstance(note, str) and note.strip():
-                    st.write(note)
-                photo = row.get("photo_url")
-                if isinstance(photo, str) and photo.startswith("http"):
+        with st.expander("Timeline (detail cards)", expanded=False):
+            for _, row in logs.iterrows():
+                member = row.get("member_username") or "unknown"
+                action = row.get("action_type") or "?"
+                tid = row.get("ticket_number") or "—"
+                when_local = ""
+                ts_raw = row.get("timestamp")
+                if pd.notna(ts_raw):
                     try:
-                        st.image(photo, width=PHOTO_THUMB_WIDTH)
-                    except Exception as exc:
-                        st.warning(f"Could not load image: {exc}")
-                    st.markdown(f"[Open photo in a new tab]({photo})")
+                        when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                    except Exception:
+                        when_local = str(ts_raw)
+
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{member}** · `{action}` · ticket `{tid}` · "
+                        f"{when_local} {LOCAL_TZ_LABEL}"
+                    )
+                    note = row.get("note")
+                    if isinstance(note, str) and note.strip():
+                        st.write(note)
+                    photo = row.get("photo_url")
+                    if isinstance(photo, str) and photo.startswith("http"):
+                        try:
+                            st.image(photo, width=PHOTO_THUMB_WIDTH)
+                        except Exception as exc:
+                            st.warning(f"Could not load image: {exc}")
+                        st.markdown(f"[Open photo in a new tab]({photo})")
 
 
 # Streamlit executes this file as the app script; do not hide ``main()`` behind
