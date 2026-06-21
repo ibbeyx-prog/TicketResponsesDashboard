@@ -382,32 +382,63 @@ div.st-key-disp_csm_body [data-testid="stVerticalBlockBorderWrapper"] {{
 
 div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {{
   border-right: 0.5px solid var(--disp-border) !important;
-  padding-right: 12px !important;
-  min-width: 248px !important;
-  max-width: 280px !important;
-  flex: 0 0 248px !important;
+  padding-right: 10px !important;
+  min-width: 196px !important;
+  max-width: 220px !important;
+  flex: 0 0 200px !important;
 }}
 div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
-  padding-left: 6px !important;
-  padding-right: 6px !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
   flex: 1 1 auto !important;
   min-width: 0 !important;
 }}
 div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {{
   border-left: 0.5px solid var(--disp-border) !important;
-  padding-left: 12px !important;
-  min-width: 220px !important;
-  flex: 0 0 22% !important;
+  padding-left: 10px !important;
+  min-width: 200px !important;
+  max-width: 260px !important;
+  flex: 0 0 24% !important;
 }}
-div.st-key-disp_csm_body [data-testid="column"]:first-child [data-testid="stHorizontalBlock"] {{
-  gap: 0.4rem !important;
-}}
-div.st-key-disp_csm_body [data-testid="column"]:first-child [data-testid="stMetric"] {{
-  min-width: 0 !important;
+div.st-key-disp_sidebar_inner {{
+  padding: 0 2px 0 0 !important;
 }}
 div.st-key-disp_sidebar_queues {{
-  margin-top: 4px !important;
-  margin-bottom: 6px !important;
+  margin-top: 2px !important;
+  margin-bottom: 4px !important;
+}}
+div.st-key-disp_sidebar_queues [data-testid="stVerticalBlock"] {{
+  gap: 3px !important;
+}}
+div.st-key-disp_sidebar_queues .stButton {{
+  margin: 0 !important;
+  width: 100% !important;
+}}
+.disp-today-grid {{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 8px;
+  margin: 0 0 2px 0;
+  padding: 0;
+}}
+.disp-today-cell {{
+  min-width: 0;
+}}
+.disp-today-label {{
+  font-size: 11px;
+  font-weight: 400;
+  color: #2a3a5a;
+  line-height: 1.2;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.disp-today-value {{
+  font-size: 20px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
 }}
 
 div.st-key-disp_perf_body {{
@@ -672,16 +703,27 @@ div.st-key-disp_header_right [data-testid="stMarkdownContainer"] span {{
 }}
 [class*="st-key-disp_queue_"] .stButton > button,
 [class*="st-key-sales_queue_"] .stButton > button {{
-  font-size:13px !important;
+  font-size: 12px !important;
   font-weight: 400 !important;
   text-align: left !important;
   display: flex !important;
   align-items: center !important;
-  justify-content: space-between !important;
-  padding: 6px 10px !important;
-  min-height: 32px !important;
+  justify-content: flex-start !important;
+  padding: 5px 8px !important;
+  min-height: 30px !important;
+  height: 30px !important;
   white-space: nowrap !important;
   overflow: hidden !important;
+  border-radius: 5px !important;
+  width: 100% !important;
+}}
+[class*="st-key-disp_queue_"] .stButton > button::before,
+[class*="st-key-sales_queue_"] .stButton > button::before {{
+  content: "●" !important;
+  font-size: 7px !important;
+  line-height: 1 !important;
+  flex: 0 0 auto !important;
+  margin-right: 7px !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button::after,
 [class*="st-key-sales_queue_"] .stButton > button::after {{
@@ -690,29 +732,24 @@ div.st-key-disp_header_right [data-testid="stMarkdownContainer"] span {{
   color: #8a9ac0 !important;
   font-variant-numeric: tabular-nums !important;
   flex: 0 0 auto !important;
-  margin-left: 10px !important;
+  margin-left: auto !important;
+  padding-left: 8px !important;
   line-height: 1 !important;
 }}
-[class*="st-key-disp_queue_"] [data-testid="column"]:nth-child(2),
-[class*="st-key-sales_queue_"] [data-testid="column"]:nth-child(2) {{
-  min-width: 0 !important;
-  flex: 1 1 auto !important;
+[class*="st-key-disp_queue_"].disp-queue-active .stButton > button,
+[class*="st-key-sales_queue_"].disp-queue-active .stButton > button {{
+  background: #0d1e3a !important;
+  border-color: #1a3460 !important;
+  color: #e2e8f8 !important;
 }}
-[class*="st-key-disp_queue_"] [data-testid="column"]:first-child,
-[class*="st-key-sales_queue_"] [data-testid="column"]:first-child {{
-  flex: 0 0 14px !important;
-  min-width: 14px !important;
-  max-width: 14px !important;
+[class*="st-key-disp_queue_"] .stButton > button[kind="primary"],
+[class*="st-key-disp_queue_"] .stButton > button[data-testid="stBaseButton-primary"],
+[class*="st-key-sales_queue_"] .stButton > button[kind="primary"],
+[class*="st-key-sales_queue_"] .stButton > button[data-testid="stBaseButton-primary"] {{
+  background: #0d1e3a !important;
+  border-color: #1a3460 !important;
+  color: #e2e8f8 !important;
 }}
-.disp-queue-dot {{
-  font-size: 10px !important;
-  line-height: 1 !important;
-  margin: 10px 0 0 !important;
-}}
-div.st-key-disp_metric_assigned [data-testid="stMetricValue"] {{ color: #3b82f6 !important; }}
-div.st-key-disp_metric_responded [data-testid="stMetricValue"] {{ color: #22c55e !important; }}
-div.st-key-disp_metric_daily [data-testid="stMetricValue"] {{ color: #3b82f6 !important; }}
-div.st-key-disp_metric_unattended [data-testid="stMetricValue"] {{ color: #ef4444 !important; }}
 
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"],
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] {{
@@ -1313,6 +1350,24 @@ def render_topbar(*, operator_id: str, now_label: str, section: str = "CSM Cases
     )
 
 
+def render_sidebar_today_grid(
+    items: tuple[tuple[str, int | str, str], ...],
+) -> None:
+    """Compact 2×2 today stats — aligned with queue buttons below."""
+    cells: list[str] = []
+    for label, value, colour in items:
+        cells.append(
+            f'<div class="disp-today-cell">'
+            f'<div class="disp-today-label">{html.escape(str(label))}</div>'
+            f'<div class="disp-today-value" style="color:{html.escape(colour)}">'
+            f"{html.escape(str(value))}</div></div>"
+        )
+    st.markdown(
+        f'<div class="disp-today-grid">{"".join(cells)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_queue_list(
     *,
     selected: str,
@@ -1322,7 +1377,7 @@ def render_queue_list(
     queue_dots: dict[str, str] | None = None,
     button_key_prefix: str = "disp_queue",
 ) -> str:
-    """Sidebar queue picker with colored status dots."""
+    """Sidebar queue picker — dot inside button, count on the right."""
     order = queue_order or QUEUE_ORDER
     dots = queue_dots or QUEUE_DOTS
     picked = selected
@@ -1333,35 +1388,25 @@ def render_queue_list(
             is_active = q == selected
             row_key = q.replace(" ", "_")
             btn_key = f"{button_key_prefix}_{row_key}"
-            c_dot, c_btn = st.columns([0.14, 1], gap="small")
-            with c_dot:
-                st.markdown(
-                    f'<p class="disp-queue-dot" style="color:{dot}">●</p>',
-                    unsafe_allow_html=True,
-                )
-            with c_btn:
-                st.markdown(
-                    f"<style>div.st-key-{btn_key} .stButton > button::after {{"
-                    f'content: "{cnt}";}}</style>',
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    q,
-                    key=btn_key,
-                    use_container_width=True,
-                    type="primary" if is_active else "secondary",
-                ):
-                    st.session_state[session_key] = q
-                    st.rerun()
-            if is_active:
-                st.markdown(
-                    f'<style>div.st-key-{btn_key} button {{'
-                    f"background:#0d1e3a !important;border-color:#1a3460 !important;"
-                    f"color:#e2e8f8 !important;}}"
-                    f"div.st-key-{btn_key} button::after {{"
-                    f"color:#8a9ac0 !important;}}</style>",
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                f"<style>"
+                f"div.st-key-{btn_key} .stButton > button::before {{"
+                f"color: {dot} !important;"
+                f"}}"
+                f"div.st-key-{btn_key} .stButton > button::after {{"
+                f'content: "{cnt}";'
+                f"}}"
+                f"</style>",
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                q,
+                key=btn_key,
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state[session_key] = q
+                st.rerun()
     return str(st.session_state.get(session_key, picked))
 
 

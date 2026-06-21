@@ -123,6 +123,7 @@ from dispatch_console import (
     render_refresh_caption,
     render_sales_case_table,
     render_settings_popover,
+    render_sidebar_today_grid,
     render_ticket_table,
     render_timeline_entry,
     render_topbar,
@@ -1509,10 +1510,18 @@ def _render_category_selectbox(
     *,
     key: str,
     help: str | None = None,
+    label_visibility: str = "visible",
 ) -> None:
     """Category picker — empty on first open (no auto-selected first option)."""
     if not options:
-        st.selectbox(label, options=["—"], key=key, disabled=True, help=help)
+        st.selectbox(
+            label,
+            options=["—"],
+            key=key,
+            disabled=True,
+            help=help,
+            label_visibility=label_visibility,
+        )
         return
     st.selectbox(
         label,
@@ -1521,6 +1530,7 @@ def _render_category_selectbox(
         placeholder="Select category",
         key=key,
         help=help,
+        label_visibility=label_visibility,
     )
 
 
@@ -17249,41 +17259,40 @@ def _render_sales_sidebar(
     df_tickets: pd.DataFrame,
 ) -> None:
     """Sidebar: Today metrics (2×2), queue list, engineer list — mirrors CSM."""
-    st.markdown(t_section_label("Today"), unsafe_allow_html=True)
-    today_counts = _get_sales_today_counts(df)
-    m1, m2 = st.columns(2)
-    m3, m4 = st.columns(2)
-    with m1:
-        st.metric("New", today_counts["new"])
-    with m2:
-        st.metric("Resolved", today_counts["resolved"])
-    with m3:
-        st.metric("Investigation", today_counts["investigation"])
-    with m4:
-        st.metric("Design", today_counts["design"])
+    with st.container(key="disp_sidebar_inner"):
+        st.markdown(t_section_label("Today"), unsafe_allow_html=True)
+        today_counts = _get_sales_today_counts(df)
+        render_sidebar_today_grid(
+            (
+                ("New", today_counts["new"], "#3b82f6"),
+                ("Resolved", today_counts["resolved"], "#22c55e"),
+                ("Investigation", today_counts["investigation"], "#a78bfa"),
+                ("Design", today_counts["design"], "#f59e0b"),
+            )
+        )
 
-    st.markdown(
-        t_section_label("Queues", margin="margin-top:16px;margin-bottom:10px"),
-        unsafe_allow_html=True,
-    )
-    queue_counts = _get_sales_queue_counts(df)
-    selected_queue = _init_sales_active_queue()
-    picked = render_queue_list(
-        selected=selected_queue,
-        counts=queue_counts,
-        session_key=_SALES_ACTIVE_QUEUE_KEY,
-        queue_order=SALES_QUEUE_ORDER,
-        queue_dots=SALES_QUEUE_DOTS,
-        button_key_prefix="sales_queue",
-    )
-    st.session_state[_SALES_ACTIVE_QUEUE_KEY] = picked
+        st.markdown(
+            t_section_label("Queues", margin="margin-top:14px;margin-bottom:8px"),
+            unsafe_allow_html=True,
+        )
+        queue_counts = _get_sales_queue_counts(df)
+        selected_queue = _init_sales_active_queue()
+        picked = render_queue_list(
+            selected=selected_queue,
+            counts=queue_counts,
+            session_key=_SALES_ACTIVE_QUEUE_KEY,
+            queue_order=SALES_QUEUE_ORDER,
+            queue_dots=SALES_QUEUE_DOTS,
+            button_key_prefix="sales_queue",
+        )
+        st.session_state[_SALES_ACTIVE_QUEUE_KEY] = picked
 
-    st.markdown(
-        t_section_label("Engineers", margin="margin-top:12px;margin-bottom:7px"),
-        unsafe_allow_html=True,
-    )
-    for eng in _dispatch_engineer_presence(df_tickets):
-        render_engineer_row(eng)
+        st.markdown(
+            t_section_label("Engineers", margin="margin-top:12px;margin-bottom:7px"),
+            unsafe_allow_html=True,
+        )
+        for eng in _dispatch_engineer_presence(df_tickets):
+            render_engineer_row(eng)
 
 
 def _render_sales_assign_panel() -> None:
@@ -17370,12 +17379,23 @@ def _render_sales_assign_panel() -> None:
                     [1, 0.22], gap="small", vertical_alignment="top"
                 )
                 with eng_sel:
-                    engineer = st.selectbox(
-                        "Engineer",
-                        engineers or ["—"],
-                        key="sap_eng",
-                        label_visibility="collapsed",
-                    )
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="sap_eng",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="sap_eng",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
                 with eng_mgr:
                     _render_assign_manage_icon_btn(
                         manage_key="sap_btn_manage_eng",
@@ -17390,12 +17410,13 @@ def _render_sales_assign_panel() -> None:
                 [1, 0.22], gap="small", vertical_alignment="top"
             )
             with cat_sel:
-                sales_category = st.selectbox(
+                _render_category_selectbox(
                     "Category",
-                    categories or ["—"],
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
                     key="sap_category",
                     label_visibility="collapsed",
                 )
+                sales_category = st.session_state.get("sap_category")
             with cat_mgr:
                 _render_assign_manage_icon_btn(
                     manage_key="sap_btn_manage_cat",
@@ -17450,7 +17471,7 @@ def _handle_sales_floor_submit(
         return
 
     operator_id = _session_operator_id() or "unknown"
-    eng = None if engineer in ("— unassigned —", "—", "") else engineer
+    eng = None if not engineer or engineer in ("— unassigned —", "—", "") else engineer
     if require_engineer and not eng:
         st.toast("Select an engineer", icon="⚠️")
         return
@@ -17899,7 +17920,7 @@ def _render_sales_cases_dashboard() -> None:
     selected_queue = _init_sales_active_queue()
 
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns([1.55, 5.05, 2.3], gap="medium")
+        sb, main, dp = st.columns([1.35, 5.45, 2.2], gap="small")
 
         with sb:
             _render_sales_sidebar(df=df, df_tickets=df_tickets)
@@ -18320,12 +18341,23 @@ def render_assign_panel(
                     [1, 0.22], gap="small", vertical_alignment="top"
                 )
                 with eng_sel:
-                    engineer = st.selectbox(
-                        "Engineer",
-                        engineers or ["—"],
-                        key="ap_engineer",
-                        label_visibility="collapsed",
-                    )
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="ap_engineer",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="ap_engineer",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
                 with eng_mgr:
                     _render_assign_manage_icon_btn(
                         manage_key="btn_manage_eng",
@@ -18348,12 +18380,13 @@ def render_assign_panel(
                 [1, 0.22], gap="small", vertical_alignment="top"
             )
             with cat_sel:
-                category = st.selectbox(
+                _render_category_selectbox(
                     "Category",
-                    categories or ["—"],
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
                     key="ap_category",
                     label_visibility="collapsed",
                 )
+                category = st.session_state.get("ap_category")
             with cat_mgr:
                 _render_assign_manage_icon_btn(
                     manage_key="btn_manage_cat",
@@ -18436,7 +18469,7 @@ def _handle_dispatch_quick_assign_bar(
     if not re.fullmatch(r"\d{9}|\d{16}", tid):
         st.toast("Ticket # must be 9 or 16 digits", icon="⚠️")
         return
-    if not engineer or engineer == "—" or not category or category == "—":
+    if not engineer or engineer in ("—", "- none -") or not category or category == "—":
         st.toast("Engineer and category are required", icon="⚠️")
         return
     handle2 = None if engineer2 in ("—", "- none -") else engineer2
@@ -18718,48 +18751,45 @@ def _render_dispatch_csm_dashboard(
     }
 
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns([1.55, 5.05, 2.3], gap="medium")
-
+        sb, main, dp = st.columns([1.35, 5.45, 2.2], gap="small")
 
         with sb:
-            st.markdown(t_section_label("Today"), unsafe_allow_html=True)
-            m1, m2 = st.columns(2)
-            m3, m4 = st.columns(2)
-            with st.container(key="disp_metric_assigned"):
-                m1.metric("Assigned", assigned_today)
-            with st.container(key="disp_metric_responded"):
-                m2.metric("Responded", responded_today)
-            with st.container(key="disp_metric_daily"):
-                m3.metric("Daily task", daily_task_count)
-            with st.container(key="disp_metric_unattended"):
-                m4.metric("Unattended", unattended_count)
+            with st.container(key="disp_sidebar_inner"):
+                st.markdown(t_section_label("Today"), unsafe_allow_html=True)
+                render_sidebar_today_grid(
+                    (
+                        ("Assigned", assigned_today, "#3b82f6"),
+                        ("Responded", responded_today, "#22c55e"),
+                        ("Daily task", daily_task_count, "#3b82f6"),
+                        ("Unattended", unattended_count, "#ef4444"),
+                    )
+                )
 
-            st.markdown(
-                t_section_label(
-                    "Queues", margin="margin-top:16px;margin-bottom:10px"
-                ),
-                unsafe_allow_html=True,
-            )
-            queue_options = list(QUEUE_ORDER)
-            cur = st.session_state.get(aq_key, "Daily Task")
-            if cur not in queue_options:
-                cur = "Daily Task"
-            with st.container(key="disp_sidebar_queues_wrap"):
+                st.markdown(
+                    t_section_label(
+                        "Queues", margin="margin-top:14px;margin-bottom:8px"
+                    ),
+                    unsafe_allow_html=True,
+                )
+                queue_options = list(QUEUE_ORDER)
+                cur = st.session_state.get(aq_key, "Daily Task")
+                if cur not in queue_options:
+                    cur = "Daily Task"
                 selected_queue = render_queue_list(
                     selected=cur,
                     counts=queue_counts,
                     session_key=aq_key,
                 )
-            st.session_state[aq_key] = selected_queue
+                st.session_state[aq_key] = selected_queue
 
-            st.markdown(
-                t_section_label(
-                    "Engineers", margin="margin-top:12px;margin-bottom:7px"
-                ),
-                unsafe_allow_html=True,
-            )
-            for eng in _dispatch_engineer_presence(df):
-                render_engineer_row(eng)
+                st.markdown(
+                    t_section_label(
+                        "Engineers", margin="margin-top:12px;margin-bottom:7px"
+                    ),
+                    unsafe_allow_html=True,
+                )
+                for eng in _dispatch_engineer_presence(df):
+                    render_engineer_row(eng)
 
         mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
         queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
