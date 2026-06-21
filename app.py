@@ -613,6 +613,8 @@ _DISP_ROW_PHOTOS = "disp_row_photo_ticket"
 _DISP_ASSIGN_MODE_KEY = "disp_assign_mode"
 _DISP_ASSIGN_MODE_TELEGRAM = "telegram"
 _DISP_ASSIGN_MODE_QUEUE = "queue_only"
+_DISP_CLEAR_ASSIGN_KEY = "_disp_clear_assign_form"
+_DISP_CLEAR_SALES_ASSIGN_KEY = "_disp_clear_sales_assign_form"
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
@@ -1096,7 +1098,8 @@ def _sc_apply_status_to_selected_cases(
             ok += 1
     if ok:
         _invalidate_dashboard_data_cache()
-        st.session_state[_sc_case_selection_session_key(key_prefix)] = []
+        st.session_state[_sc_clear_select_flag_key(key_prefix)] = True
+        _clear_sales_action_picker(key_prefix)
         _sc_set_sales_flash(f"**{ok}** case(s) moved to **{target_status}**.")
         st.rerun()
     return ok
@@ -3760,6 +3763,78 @@ def _maybe_apply_pending_sales_case_selection_clear(key_prefix: str) -> None:
         _clear_sales_case_queue_selection(key_prefix)
 
 
+_DEFERRED_WIDGET_CLEARS_KEY = "_deferred_widget_clears"
+
+
+def _schedule_deferred_widget_clears(*keys: str) -> None:
+    """Pop widget session keys on the **next** run, before those widgets render."""
+    pending = st.session_state.setdefault(_DEFERRED_WIDGET_CLEARS_KEY, [])
+    for k in keys:
+        if k and k not in pending:
+            pending.append(k)
+
+
+def _apply_deferred_widget_clears() -> None:
+    pending = st.session_state.pop(_DEFERRED_WIDGET_CLEARS_KEY, None)
+    if not pending:
+        return
+    for k in pending:
+        if k:
+            st.session_state.pop(k, None)
+
+
+def _reset_assignment_edit_form_state(edit_key_prefix: str) -> None:
+    keys = _assignment_edit_session_keys(edit_key_prefix)
+    _schedule_deferred_widget_clears(
+        keys["engineer"],
+        keys["engineer_2"],
+        keys["category"],
+        keys["notes"],
+        keys["synced_ticket"],
+    )
+
+
+def _reset_reassign_form_state(edit_key_prefix: str) -> None:
+    keys = _reassign_session_keys(edit_key_prefix)
+    _schedule_deferred_widget_clears(
+        keys["engineer"],
+        keys["engineer_2"],
+        keys["category"],
+        keys["notes"],
+        keys["synced_ticket"],
+    )
+
+
+def _clear_ticket_action_picker(key_prefix: str) -> None:
+    _schedule_deferred_widget_clears(f"{key_prefix}_action_sel")
+
+
+def _clear_sales_action_picker(key_prefix: str) -> None:
+    _schedule_deferred_widget_clears(
+        f"{key_prefix}_sc_action_sel",
+        "sc_action_comment",
+    )
+
+
+def _clear_sales_floor_edit_widgets(case_ref: str) -> None:
+    cref = str(case_ref)
+    _schedule_deferred_widget_clears(
+        f"sales_edit_acc_{cref}",
+        f"sales_edit_reg_{cref}",
+        f"sales_edit_cat_{cref}",
+        f"sales_edit_pri_{cref}",
+        f"sales_edit_desc_{cref}",
+    )
+
+
+def _clear_sales_floor_assign_widgets(case_ref: str) -> None:
+    _schedule_deferred_widget_clears(f"sales_assign_eng_{str(case_ref)}")
+
+
+def _clear_sales_floor_resolve_widgets(case_ref: str) -> None:
+    _schedule_deferred_widget_clears(f"sales_resolve_note_{str(case_ref)}")
+
+
 def _apply_data_editor_editing_state(
     df: pd.DataFrame, state: dict[str, object]
 ) -> pd.DataFrame:
@@ -4663,6 +4738,9 @@ def _render_manual_field_response_editor(
         st.session_state[keys["show"]] = False
         for sk in clear_session_keys:
             st.session_state.pop(sk, None)
+        _schedule_deferred_widget_clears(
+            keys["text"], keys["responded_by"], keys["synced_ticket"]
+        )
         if status == STATUS_DAILY_TASK:
             st.success(f"{picked} → **Open** (field response saved).")
         else:
@@ -4724,7 +4802,8 @@ def _render_ticket_status_action_popover(
                         ok += 1
                 if ok:
                     st.success(f"**{ok}** ticket(s) updated → **{choice}**.")
-                    st.session_state[_ticket_selection_session_key(key_prefix)] = []
+                    st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+                    _clear_ticket_action_picker(key_prefix)
                     st.rerun()
 
 
@@ -4770,7 +4849,8 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
             except Exception as exc:
                 st.error(f"Could not mark follow-up: {exc}")
                 return
-            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+            _schedule_deferred_widget_clears(f"{key_prefix}_follow_up_note")
             st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
             st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
             st.session_state[_CC_FLASH_KEY] = (
@@ -4820,7 +4900,8 @@ def _apply_ticket_status_batch(
             ok += 1
     if ok:
         st.success(f"**{ok}** ticket(s) updated → **{choice_label}**.")
-        st.session_state[_ticket_selection_session_key(key_prefix)] = []
+        st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+        _clear_ticket_action_picker(key_prefix)
         st.rerun()
 
 
@@ -4883,9 +4964,13 @@ def _render_admin_close_form_inline(
             except Exception as exc:
                 st.error(f"**{ticket}**: {exc}")
         if ok:
-            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
             for sk in clear_session_keys:
                 st.session_state.pop(sk, None)
+            _schedule_deferred_widget_clears(
+                f"{key_prefix}_admin_close_comment",
+                f"{key_prefix}_admin_close_outcome",
+            )
             _navigate_to_resolved_queue()
             st.session_state[_CC_FLASH_KEY] = (
                 f"Closed **{ok}** ticket(s) → **Resolved**."
@@ -4952,9 +5037,13 @@ def _render_mark_resolved_form_inline(
             except Exception as exc:
                 st.error(f"**{ticket}**: {exc}")
         if ok:
-            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
             for sk in clear_session_keys:
                 st.session_state.pop(sk, None)
+            _schedule_deferred_widget_clears(
+                f"{key_prefix}_mark_resolved_outcome",
+                f"{key_prefix}_mark_resolved_note",
+            )
             _navigate_to_resolved_queue()
             st.session_state[_CC_FLASH_KEY] = (
                 f"Marked **{ok}** ticket(s) → **Resolved**."
@@ -4996,7 +5085,8 @@ def _render_follow_up_form_inline(*, key_prefix: str, options: list[str]) -> Non
         except Exception as exc:
             st.error(f"Could not mark follow-up: {exc}")
             return
-        st.session_state[_ticket_selection_session_key(key_prefix)] = []
+        st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+        _schedule_deferred_widget_clears(f"{key_prefix}_follow_up_note")
         st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
         st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
         st.session_state[_CC_FLASH_KEY] = (
@@ -5377,6 +5467,7 @@ def _render_ticket_queue_actions_row(
     **toolbar_kwargs: object,
 ) -> None:
     """Selection summary + Actions popover above the table."""
+    _apply_deferred_widget_clears()
     options = options_override or _ticket_options_for_admin(df)
     if not options:
         return
@@ -11604,6 +11695,7 @@ def _render_assignment_editor(
     fe_names: list[str],
     fe_missing: bool,
     ticket_options: list[str],
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
     """Edit assignment fields + optional Telegram sync (Daily Task or Open)."""
     if not ticket_options:
@@ -11744,6 +11836,9 @@ def _render_assignment_editor(
                 tg_note = ""
 
     st.session_state[keys["show"]] = False
+    for sk in clear_session_keys:
+        st.session_state.pop(sk, None)
+    _reset_assignment_edit_form_state(edit_key_prefix)
     st.session_state[_CC_FLASH_KEY] = (
         f"Updated **{required_status}** assignment **{picked}**."
         + (f" {tg_note}" if tg_note else "")
@@ -11760,6 +11855,7 @@ def _render_reassign_editor(
     fe_names: list[str],
     fe_missing: bool,
     ticket_options: list[str],
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
     """Reassign a Daily Task or Open ticket: fresh Daily Task row, optional new Telegram post."""
     if not ticket_options:
@@ -11907,6 +12003,9 @@ def _render_reassign_editor(
                 st.warning(f"Reassigned in dashboard. Telegram post failed: {exc}")
 
     st.session_state[keys["show"]] = False
+    for sk in clear_session_keys:
+        st.session_state.pop(sk, None)
+    _reset_reassign_form_state(edit_key_prefix)
     st.session_state[_CC_FLASH_KEY] = (
         f"**{picked}** reassigned → **Daily Task** ({handle}, {cat})."
         + (f" {tg_note}" if tg_note else "")
@@ -17010,6 +17109,7 @@ def _render_sales_case_queue_actions_row(
     **toolbar_kwargs: object,
 ) -> None:
     """Selection summary + Actions popover above the sales case table."""
+    _apply_deferred_widget_clears()
     options = _sc_case_options_for_admin(df)
     if not options:
         return
@@ -17196,6 +17296,9 @@ def _render_sales_assign_panel() -> None:
     )
     intake_only = mode == _SALES_ASSIGN_MODE_INTAKE
 
+    if st.session_state.pop(_DISP_CLEAR_SALES_ASSIGN_KEY, False):
+        _reset_dispatch_sales_assign_form()
+
     with st.container(key="disp_sales_assign_panel"):
         st.markdown(
             t_section_label("New sales case", spacing=".06em", margin="margin:0 0 4px"),
@@ -17375,10 +17478,7 @@ def _handle_sales_floor_submit(
         _sales_cases_insert_row(row)
         _invalidate_dashboard_data_cache()
         st.toast(f"✓ Sales case {case_ref} created", icon="✅")
-        for k in ("sap_ref", "sap_acc", "sap_category", "sap_notes"):
-            st.session_state.pop(k, None)
-        if not require_engineer:
-            st.session_state.pop("sap_eng", None)
+        _schedule_dispatch_sales_assign_form_clear()
         st.session_state[_SALES_ACTIVE_QUEUE_KEY] = SC_STATUS_SALES_TICKET
         st.rerun()
     except Exception as exc:
@@ -17610,6 +17710,7 @@ def _render_sales_detail_panel() -> None:
 
 def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
     """Inline panels opened from per-row ⋯ menus."""
+    _apply_deferred_widget_clears()
     resolve_ref = st.session_state.get(_SALES_ROW_RESOLVE)
     if resolve_ref:
         row = _fetch_sales_case_row_by_ref(str(resolve_ref))
@@ -17623,6 +17724,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.button("Cancel", key=f"sales_resolve_cancel_{resolve_ref}"):
+                        _clear_sales_floor_resolve_widgets(resolve_ref)
                         st.session_state.pop(_SALES_ROW_RESOLVE, None)
                         st.rerun()
                 with c2:
@@ -17644,6 +17746,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                             st.error(err)
                         else:
                             _invalidate_dashboard_data_cache()
+                            _clear_sales_floor_resolve_widgets(resolve_ref)
                             st.session_state.pop(_SALES_ROW_RESOLVE, None)
                             st.toast(f"{resolve_ref} resolved", icon="✅")
                             st.rerun()
@@ -17696,6 +17799,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.button("Cancel", key=f"sales_edit_cancel_{edit_ref}"):
+                        _clear_sales_floor_edit_widgets(edit_ref)
                         st.session_state.pop(_SALES_ROW_EDIT, None)
                         st.rerun()
                 with c2:
@@ -17714,6 +17818,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                         try:
                             _sales_cases_update_row(row_id, patch)
                             _invalidate_dashboard_data_cache()
+                            _clear_sales_floor_edit_widgets(edit_ref)
                             st.session_state.pop(_SALES_ROW_EDIT, None)
                             st.toast("Details saved", icon="✅")
                             st.rerun()
@@ -17739,6 +17844,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.button("Cancel", key=f"sales_assign_cancel_{assign_ref}"):
+                        _clear_sales_floor_assign_widgets(assign_ref)
                         st.session_state.pop(_SALES_ROW_ASSIGN, None)
                         st.rerun()
                 with c2:
@@ -17755,6 +17861,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                         try:
                             _sales_cases_update_row(row_id, patch)
                             _invalidate_dashboard_data_cache()
+                            _clear_sales_floor_assign_widgets(assign_ref)
                             st.session_state.pop(_SALES_ROW_ASSIGN, None)
                             st.toast("Engineer updated", icon="✅")
                             st.rerun()
@@ -18116,6 +18223,31 @@ def _render_assign_plain_label(label: str) -> None:
     )
 
 
+def _reset_dispatch_assign_form() -> None:
+    """Clear dispatch New ticket fields — call only **before** those widgets render."""
+    st.session_state["qa_ticket_num"] = ""
+    st.session_state["qa_notes"] = ""
+    for k in ("qa_engineer2", "ap_engineer", "ap_category"):
+        st.session_state.pop(k, None)
+
+
+def _schedule_dispatch_assign_form_clear() -> None:
+    st.session_state[_DISP_CLEAR_ASSIGN_KEY] = True
+
+
+def _reset_dispatch_sales_assign_form() -> None:
+    """Clear dispatch New sales case fields — call only **before** those widgets render."""
+    st.session_state["sap_ref"] = ""
+    st.session_state["sap_acc"] = ""
+    st.session_state["sap_notes"] = ""
+    for k in ("sap_eng", "sap_category", "sap_region", "sap_priority"):
+        st.session_state.pop(k, None)
+
+
+def _schedule_dispatch_sales_assign_form_clear() -> None:
+    st.session_state[_DISP_CLEAR_SALES_ASSIGN_KEY] = True
+
+
 def render_assign_panel(
     *,
     on_submit: Callable[[str, str, str, str, str], None],
@@ -18128,6 +18260,9 @@ def render_assign_panel(
         st.session_state.get(_DISP_ASSIGN_MODE_KEY, _DISP_ASSIGN_MODE_TELEGRAM)
     )
     queue_only = mode == _DISP_ASSIGN_MODE_QUEUE
+
+    if st.session_state.pop(_DISP_CLEAR_ASSIGN_KEY, False):
+        _reset_dispatch_assign_form()
 
     with st.container(key="disp_assign_panel"):
         st.markdown(
@@ -18275,8 +18410,7 @@ def _handle_dispatch_queue_only_submit(
             operator_id=op,
         )
         _invalidate_dashboard_data_cache()
-        for k in ("qa_ticket_num", "qa_notes", "ap_category"):
-            st.session_state.pop(k, None)
+        _schedule_dispatch_assign_form_clear()
         st.toast(summary.replace("**", ""), icon="✅")
         st.rerun()
     except ValueError as exc:
@@ -18327,6 +18461,7 @@ def _render_dispatch_row_modals(
     cat_names: list[str],
 ) -> None:
     """Inline editors opened from per-row action menus."""
+    _apply_deferred_widget_clears()
     edit_t = st.session_state.get(_DISP_ROW_EDIT)
     if _dispatch_row_modal_open(edit_t, ticket_nums=ticket_nums):
         row = _fetch_ticket_row(str(edit_t))
@@ -18342,6 +18477,7 @@ def _render_dispatch_row_modals(
                         fe_names=fe_names,
                         fe_missing=fe_missing,
                         ticket_options=[str(edit_t)],
+                        clear_session_keys=(_DISP_ROW_EDIT,),
                     )
                     if st.button("Done", key="disp_row_edit_done"):
                         st.session_state.pop(_DISP_ROW_EDIT, None)
@@ -18361,6 +18497,7 @@ def _render_dispatch_row_modals(
                     fe_names=fe_names,
                     fe_missing=fe_missing,
                     ticket_options=[str(reassign_t)],
+                    clear_session_keys=(_DISP_ROW_REASSIGN,),
                 )
                 if st.button("Done", key="disp_row_reassign_done"):
                     st.session_state.pop(_DISP_ROW_REASSIGN, None)
@@ -18507,11 +18644,11 @@ def _dispatch_quick_assign_submit(
         except Exception as exc:
             st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
             _invalidate_dashboard_data_cache()
+            _schedule_dispatch_assign_form_clear()
             st.rerun()
             return
         _invalidate_dashboard_data_cache()
-        for k in ("qa_ticket_num", "qa_engineer2", "qa_notes", "ap_engineer", "ap_category"):
-            st.session_state.pop(k, None)
+        _schedule_dispatch_assign_form_clear()
         st.success(f"{summary} Posted to Telegram.")
         st.rerun()
     except Exception as exc:
