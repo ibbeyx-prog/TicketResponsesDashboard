@@ -831,6 +831,7 @@ _SC_ATTENDED_STATUSES: frozenset[str] = frozenset(
 )
 _PERF_WEEKLY_DATE_KEY = "perf_weekly_pick_date"
 _PERF_WEEKLY_WEEK_KEY = _PERF_WEEKLY_DATE_KEY  # legacy alias (old selectbox key name)
+_PERF_WEEKLY_SIDEBAR_SIG_KEY = "_perf_weekly_sidebar_sig"
 # CSM rows counted in Weekly attended (excludes Daily Task / Open / Unattended).
 _CSM_WEEKLY_ATTENDED_KEYS: tuple[str, ...] = (
     "on_hold",
@@ -1707,9 +1708,6 @@ def _decode_remembered_login(token: str) -> tuple[str, str] | None:
 
 def _login_remember_bootstrap() -> None:
     """Load saved credentials from browser localStorage (encrypted token)."""
-    if st.session_state.get(_LOGIN_REMEMBER_BOOT_KEY):
-        return
-
     qp = st.query_params
     if qp.get("_lr") == "1":
         token = str(qp.get("_lt") or "")
@@ -1727,10 +1725,11 @@ def _login_remember_bootstrap() -> None:
             pass
         return
 
-    if st.session_state.get("_login_remember_js_ran"):
-        st.session_state[_LOGIN_REMEMBER_BOOT_KEY] = True
+    if st.session_state.get(_LOGIN_REMEMBER_BOOT_KEY):
         return
-    st.session_state["_login_remember_js_ran"] = True
+
+    # One inject per Streamlit session — avoids a second Sign-in click on first submit.
+    st.session_state[_LOGIN_REMEMBER_BOOT_KEY] = True
 
     components.html(
         """
@@ -1802,8 +1801,6 @@ def _clear_auth_session() -> None:
         _AUTH_PWD_VER_KEY,
         _AUTH_USERNAME_KEY,
         _OPERATOR_ID_KEY,
-        _LOGIN_REMEMBER_BOOT_KEY,
-        "_login_remember_js_ran",
         "is_legacy_session",
     ):
         st.session_state.pop(key, None)
@@ -2298,6 +2295,19 @@ def _render_login_page_styles() -> None:
             border: none !important;
             padding: 0 !important;
         }
+        div.st-key-login_card [data-testid="stForm"] button[kind="secondaryFormSubmit"],
+        div.st-key-login_card [data-testid="stForm"] button[kind="primaryFormSubmit"],
+        div.st-key-login_card [data-testid="stForm"] .stFormSubmitButton button {
+            font-weight: 500 !important;
+            background: #0d2a50 !important;
+            border-color: #1a4a80 !important;
+            color: #3b82f6 !important;
+        }
+        div.st-key-login_card [data-testid="stForm"] button[kind="secondaryFormSubmit"]:hover,
+        div.st-key-login_card [data-testid="stForm"] button[kind="primaryFormSubmit"]:hover,
+        div.st-key-login_card [data-testid="stForm"] .stFormSubmitButton button:hover {
+            background: #102f5a !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2334,7 +2344,6 @@ def _handle_per_user_login(username: str, password: str, remember: bool) -> None
     fp = _auth_session_fingerprint(username=uname, operator_id=op)
     st.session_state.pop("is_legacy_session", None)
     _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
-    st.session_state[_LOGIN_SAVE_PW_KEY] = remember
     if remember:
         _login_remember_persist(username=uname, password=password)
     else:
@@ -2365,7 +2374,7 @@ def _render_per_user_login_form() -> None:
     _login_remember_bootstrap()
     with st.form("login_per_user_form", clear_on_submit=False):
         _login_field_label("Username")
-        st.text_input(
+        username = st.text_input(
             "Username",
             placeholder="your username",
             label_visibility="collapsed",
@@ -2373,7 +2382,7 @@ def _render_per_user_login_form() -> None:
             key=_LOGIN_USER_WIDGET_KEY,
         )
         _login_field_label("Password", top_margin="12px")
-        st.text_input(
+        password = st.text_input(
             "Password",
             type="password",
             placeholder="your password",
@@ -2381,16 +2390,14 @@ def _render_per_user_login_form() -> None:
             autocomplete="current-password",
             key=_LOGIN_PWD_WIDGET_KEY,
         )
-        col_remember, col_spacer = st.columns([1.4, 1], vertical_alignment="center")
+        col_remember, _col_spacer = st.columns([1.4, 1], vertical_alignment="center")
         with col_remember:
-            st.checkbox(
+            remember = st.checkbox(
                 "Remember me",
                 key=_LOGIN_SAVE_PW_KEY,
                 help="Stores an encrypted login token in this browser only.",
             )
-        st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
         submitted = st.form_submit_button("Sign in", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
     _, col_forgot = st.columns([1.4, 1])
     with col_forgot:
@@ -2405,24 +2412,20 @@ def _render_per_user_login_form() -> None:
                 st.rerun()
 
     if submitted:
-        _handle_per_user_login(
-            str(st.session_state.get(_LOGIN_USER_WIDGET_KEY, "")),
-            str(st.session_state.get(_LOGIN_PWD_WIDGET_KEY, "")),
-            bool(st.session_state.get(_LOGIN_SAVE_PW_KEY, False)),
-        )
+        _handle_per_user_login(username, password, remember)
 
 
 def _render_legacy_login_form(*, legacy_password: str) -> None:
     with st.form("login_legacy_form", clear_on_submit=False):
         _login_field_label("Operator ID")
-        st.text_input(
+        operator_id = st.text_input(
             "Operator ID",
             placeholder="your display name",
             label_visibility="collapsed",
             key=_LOGIN_OID_WIDGET_KEY,
         )
         _login_field_label("Shared password", top_margin="12px")
-        st.text_input(
+        shared_password = st.text_input(
             "Shared password",
             type="password",
             placeholder="team password",
@@ -2430,16 +2433,10 @@ def _render_legacy_login_form(*, legacy_password: str) -> None:
             autocomplete="current-password",
             key=_LOGIN_PWD_WIDGET_KEY,
         )
-        st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
         submitted = st.form_submit_button("Sign in", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
     if submitted:
-        _handle_legacy_login(
-            str(st.session_state.get(_LOGIN_OID_WIDGET_KEY, "")),
-            str(st.session_state.get(_LOGIN_PWD_WIDGET_KEY, "")),
-            legacy_password=legacy_password,
-        )
+        _handle_legacy_login(operator_id, shared_password, legacy_password=legacy_password)
 
 
 @st.dialog("Reset password", width="small")
@@ -8191,6 +8188,7 @@ def _format_perf_range_caption() -> str:
 def _sync_perf_range_from_ui(range_val: str) -> None:
     """Apply Performance sidebar range preset to session bounds."""
     if range_val == "Custom":
+        _ensure_perf_custom_range_widgets()
         from_date = st.session_state.get("perf_custom_from")
         to_date = st.session_state.get("perf_custom_to")
         if from_date is None or to_date is None:
@@ -8209,6 +8207,27 @@ def _sync_perf_range_from_ui(range_val: str) -> None:
     _store_perf_range(start, end)
 
 
+def _ensure_perf_custom_range_widgets() -> None:
+    """Seed custom From/To before widgets mount (Streamlit forbids late key writes)."""
+    if "perf_custom_from" in st.session_state and "perf_custom_to" in st.session_state:
+        return
+    start, end = _get_perf_range()
+    st.session_state["perf_custom_from"] = start.tz_convert(LOCAL_TZ).date()
+    st.session_state["perf_custom_to"] = end.tz_convert(LOCAL_TZ).date()
+
+
+def _sync_perf_weekly_pick_from_sidebar(
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Keep Weekly date picker aligned with the Performance sidebar range."""
+    sig = f"{range_start.isoformat()}|{range_end.isoformat()}"
+    if st.session_state.get(_PERF_WEEKLY_SIDEBAR_SIG_KEY) == sig:
+        return
+    st.session_state[_PERF_WEEKLY_SIDEBAR_SIG_KEY] = sig
+    st.session_state[_PERF_WEEKLY_DATE_KEY] = range_start.tz_convert(LOCAL_TZ).date()
+
+
 def _init_perf_session_state() -> None:
     legacy_focus = st.session_state.pop("perf_focus_person", None)
     if _PERF_FOCUS_ASSIGNEE_KEY not in st.session_state:
@@ -8224,6 +8243,7 @@ def _init_perf_session_state() -> None:
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
     if _PERF_RANGE_FROM_KEY not in st.session_state:
         _sync_perf_range_from_ui(str(st.session_state[_PERF_RANGE_PRESET_KEY]))
+    _ensure_perf_custom_range_widgets()
 
 
 def _perf_focus_for_filter() -> str:
@@ -9252,6 +9272,50 @@ def _perf_week_offset_for_date(any_date: date) -> int:
     return (pick_start - this_start).days // 7
 
 
+def _perf_weekly_attended_ts(df: pd.DataFrame) -> pd.Series:
+    """When a row entered its attended status — used for Weekly Sun–Sat windows."""
+    u = (
+        _parse_ts(df["updated_at"])
+        if "updated_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    r = (
+        _parse_ts(df["responded_at"])
+        if "responded_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    fu = (
+        _parse_ts(df["follow_up_at"])
+        if "follow_up_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    if "_attended_status" in df.columns:
+        st_col = df["_attended_status"].astype(str).str.strip().str.casefold()
+    elif "status" in df.columns:
+        st_col = df["status"].astype(str).str.strip().str.casefold()
+    else:
+        return _perf_reference_ts(df)
+
+    resolved_keys = {
+        STATUS_RESOLVED.casefold(),
+        SC_STATUS_RESOLVED.casefold(),
+    }
+    inv_keys = {
+        STATUS_UNDER_INVESTIGATION.casefold(),
+        SC_STATUS_INVESTIGATION.casefold(),
+    }
+    on_hold_keys = {STATUS_ON_HOLD.casefold()}
+    resolved = st_col.isin(resolved_keys)
+    inv = st_col.isin(inv_keys)
+    on_hold = st_col.isin(on_hold_keys)
+
+    ts = u.copy()
+    ts = ts.where(~resolved, pd.concat([r, u], axis=1).max(axis=1, skipna=True))
+    ts = ts.where(~inv, fu.where(fu.notna(), u))
+    ts = ts.where(~on_hold, u)
+    return ts
+
+
 def _apply_weekly_time_range(
     df: pd.DataFrame,
     *,
@@ -9262,6 +9326,20 @@ def _apply_weekly_time_range(
     if df.empty:
         return df
     ref = _perf_reference_ts(df)
+    mask = ref.isna() | ((ref >= range_start) & (ref <= range_end))
+    return df.loc[mask].copy()
+
+
+def _apply_weekly_attended_range(
+    df: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Weekly window — when the row entered its attended status."""
+    if df.empty:
+        return df
+    ref = _perf_weekly_attended_ts(df)
     mask = ref.notna() & (ref >= range_start) & (ref <= range_end)
     return df.loc[mask].copy()
 
@@ -9276,21 +9354,16 @@ def _perf_csm_attended_in_week(
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
     blocked = _perf_unattended_ticket_numbers(df_all)
-    in_range = _apply_weekly_time_range(
-        df_all, range_start=range_start, range_end=range_end
-    )
-    if in_range.empty:
-        return pd.DataFrame()
-    in_range = _perf_drop_unattended_tickets(in_range, blocked)
-    if in_range.empty:
-        return pd.DataFrame()
-    masks = _ticket_queue_count_masks(in_range)
-    attended_mask = pd.Series(False, index=in_range.index)
+    masks = _ticket_queue_count_masks(df_all)
+    attended_mask = pd.Series(False, index=df_all.index)
     for key in _CSM_WEEKLY_ATTENDED_KEYS:
         attended_mask |= masks[key]
-    part = in_range.loc[attended_mask].copy()
+    part = df_all.loc[attended_mask].copy()
     if part.empty:
-        return part
+        return pd.DataFrame()
+    part = _perf_drop_unattended_tickets(part, blocked)
+    if part.empty:
+        return pd.DataFrame()
     norm = _normalized_status_series(part)
     label_map = {
         STATUS_ON_HOLD.casefold(): STATUS_ON_HOLD,
@@ -9298,8 +9371,13 @@ def _perf_csm_attended_in_week(
         STATUS_UNDER_INVESTIGATION.casefold(): STATUS_UNDER_INVESTIGATION,
     }
     part["_attended_status"] = norm.str.casefold().map(label_map).fillna(norm)
+    part = _apply_weekly_attended_range(
+        part, range_start=range_start, range_end=range_end
+    )
+    if part.empty:
+        return part
     part["track"] = "CSM"
-    part["_ts"] = _perf_reference_ts(part)
+    part["_ts"] = _perf_weekly_attended_ts(part)
     return part
 
 
@@ -9333,19 +9411,19 @@ def _perf_sales_attended_in_week(
     """Sales cases in Investigation / Regional / Resolved with activity in the week."""
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
-    in_range = _apply_weekly_time_range(
-        df_all, range_start=range_start, range_end=range_end
-    )
-    if in_range.empty:
-        return pd.DataFrame()
-    effective = in_range["status"].astype(str).str.strip().map(_sc_effective_status)
+    effective = df_all["status"].astype(str).str.strip().map(_sc_effective_status)
     mask = effective.isin(_SC_ATTENDED_STATUSES)
-    part = in_range.loc[mask].copy()
+    part = df_all.loc[mask].copy()
+    if part.empty:
+        return pd.DataFrame()
+    part["_attended_status"] = effective.loc[mask].values
+    part = _apply_weekly_attended_range(
+        part, range_start=range_start, range_end=range_end
+    )
     if part.empty:
         return part
-    part["_attended_status"] = effective.loc[mask].values
     part["track"] = "Sales"
-    part["_ts"] = _perf_reference_ts(part)
+    part["_ts"] = _perf_weekly_attended_ts(part)
     return part
 
 
@@ -9923,10 +10001,19 @@ def _render_perf_weekly_attended_report(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
     *,
+    sidebar_range_start: pd.Timestamp | None = None,
+    sidebar_range_end: pd.Timestamp | None = None,
     this_week_bundle: dict[str, object] | None = None,
 ) -> None:
     """Sun–Sat weekly attended counts — CSM (assignee) + Sales (attended_by)."""
-    _, _, default_week_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+    if sidebar_range_start is not None:
+        _sync_perf_weekly_pick_from_sidebar(
+            sidebar_range_start,
+            sidebar_range_end or sidebar_range_start,
+        )
+    elif _PERF_WEEKLY_DATE_KEY not in st.session_state:
+        _, _, default_week_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+        st.session_state[_PERF_WEEKLY_DATE_KEY] = default_week_start
 
     st.markdown(
         """
@@ -9967,9 +10054,9 @@ def _render_perf_weekly_attended_report(
         st.markdown('<div class="weekly-date-wrap">', unsafe_allow_html=True)
         picked = st.date_input(
             "Weekly Operational Report",
-            value=default_week_start,
             key=_PERF_WEEKLY_DATE_KEY,
-            help=f"Pick any date in the week — report uses Sun–Sat ({LOCAL_TZ_LABEL}).",
+            help=f"Pick any date in the week — report uses Sun–Sat ({LOCAL_TZ_LABEL}). "
+            "Week defaults from the Performance **Range** sidebar.",
         )
         range_start, range_end, d0, d1 = _perf_calendar_week_for_date(picked)
         week_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
@@ -11828,6 +11915,31 @@ def _render_reassign_editor(
     st.rerun()
 
 
+def _sc_log_sales_assignment_activity(
+    *,
+    case_ref: str,
+    assignee: str,
+    operator_id: str,
+    note: str | None = None,
+) -> None:
+    """Mirror CSM ``_cc_insert_assignment`` attendance + visit for sales-only cases."""
+    cref = str(case_ref or "").strip()
+    handle = str(assignee or "").strip()
+    if not cref or not handle:
+        return
+    if not handle.startswith("@"):
+        handle = f"@{handle.lstrip('@')}"
+    client = _get_supabase_client()
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=cref,
+        member_username=handle,
+        action_type="Assignment",
+        note=_cc_assignment_log_note(note, operator_id),
+    )
+    _visits_open_new(client, cref, handle, visit_start=_cc_utc_now_iso())
+
+
 def _sc_patch_assignment_fields(
     row_id: str,
     *,
@@ -11847,6 +11959,9 @@ def _sc_patch_assignment_fields(
         raise ValueError("Cannot edit assignment on a **Resolved** sales case.")
 
     prev_handle = str(row.get("assigned_to") or "").strip()
+    new_handle = str(assigned_to or "").strip()
+    prev_key = prev_handle.lstrip("@").casefold() if prev_handle else ""
+    new_key = new_handle.lstrip("@").casefold() if new_handle else ""
     patch: dict[str, object] = {
         "assigned_to": assigned_to,
         "assigned_to_2": assigned_to_2,
@@ -11854,6 +11969,15 @@ def _sc_patch_assignment_fields(
         "additional_info": additional_info,
         "admin_owner": operator_id,
     }
+    if new_key and prev_key and new_key != prev_key:
+        patch.update(
+            {
+                "field_response": None,
+                "photo_url": None,
+                "field_responded_by": None,
+                "responded_at": None,
+            }
+        )
     an = (account_name or "").strip()
     if an:
         patch["account_name"] = an
@@ -12099,6 +12223,14 @@ def _render_sales_assignment_editor(
         st.error(f"Could not save: {exc}")
         return
 
+    if handle:
+        _sc_log_sales_assignment_activity(
+            case_ref=cref,
+            assignee=handle,
+            operator_id=op,
+            note=notes,
+        )
+
     tg_note = ""
     if handle and st.session_state.get(keys["sync_tg"]):
         token, chat_id = _cc_resolve_telegram_credentials()
@@ -12155,6 +12287,10 @@ def _sc_dashboard_reassign_case(
         "assigned_to_2": assigned_to_2,
         "field_task_category": field_task_category,
         "admin_owner": operator_id,
+        "field_response": None,
+        "photo_url": None,
+        "field_responded_by": None,
+        "responded_at": None,
     }
     if additional_info is not None:
         patch["additional_info"] = additional_info
@@ -12283,6 +12419,14 @@ def _render_sales_reassign_editor(
     except Exception as exc:
         st.error(f"Could not reassign: {exc}")
         return
+
+    if handle:
+        _sc_log_sales_assignment_activity(
+            case_ref=cref,
+            assignee=handle,
+            operator_id=op,
+            note=notes,
+        )
 
     tg_note = ""
     if st.session_state.get(keys["sync_tg"]):
@@ -13142,6 +13286,14 @@ def _sc_insert_intake_case(
         _sc_set_sales_flash(f"Could not create case: {exc}", level="error")
         st.rerun()
         return
+
+    if assigned_to:
+        _sc_log_sales_assignment_activity(
+            case_ref=case_ref,
+            assignee=assigned_to,
+            operator_id=operator_id or attended_by,
+            note=description,
+        )
 
     flash = f"Case created — see **{status}** under **Sales Cases**."
     level = "success"
@@ -20586,10 +20738,23 @@ def _render_perf_weekly_tab(
     sales_all: pd.DataFrame,
     *,
     focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
 ) -> None:
     """Executive weekly report with KPI cards, Altair charts, and staff breakdown."""
     del focus  # full report; use sidebar Focus assignee on other views
-    _render_perf_weekly_attended_report(df_all, sales_all)
+    range_caption = _format_perf_range_caption()
+    if range_caption:
+        st.caption(
+            f"Sidebar range: **{range_caption}** — week picker below selects Sun–Sat "
+            "within that window (defaults to range start)."
+        )
+    _render_perf_weekly_attended_report(
+        df_all,
+        sales_all,
+        sidebar_range_start=range_start,
+        sidebar_range_end=range_end,
+    )
 
 
 def _get_on_hold_by_assignee(on_hold: pd.DataFrame, *, focus: str) -> list[dict[str, object]]:
@@ -20768,6 +20933,7 @@ def _render_performance_sidebar() -> None:
     prev_range = st.session_state.get("_perf_prev_range")
     st.session_state[_PERF_RANGE_PRESET_KEY] = range_val
     if range_val == "Custom":
+        _ensure_perf_custom_range_widgets()
         st.date_input("From", key="perf_custom_from")
         st.date_input("To", key="perf_custom_to")
     if range_val != prev_range or prev_range is None:
@@ -20989,7 +21155,13 @@ def _render_performance_tab(*, lookback_days: int) -> None:
                     range_end=range_end,
                 )
             elif view == "Weekly":
-                _render_perf_weekly_tab(df_all, sales_all, focus=focus)
+                _render_perf_weekly_tab(
+                    df_all,
+                    sales_all,
+                    focus=focus,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
             elif view == "Sales cases":
                 _render_perf_sales_performance_tab(
                     sales_all,
