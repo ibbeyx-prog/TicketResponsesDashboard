@@ -112,6 +112,26 @@ def should_send_nudge(row: dict, *, now: datetime | None = None) -> bool:
     return (now - assigned_at) >= timedelta(hours=UNATTENDED_NUDGE_HOURS)
 
 
+def should_show_dashboard_cutoff_warning(row: dict, *, now: datetime | None = None) -> bool:
+    """Dashboard banner: Daily Task, no response since assign, same assign day, past nudge lead time."""
+    if not is_daily_task_status(row.get("status")):
+        return False
+    if has_field_response_since_assign(row):
+        return False
+    if should_close_as_unattended(row, now=now):
+        return False
+    assigned_at = _parse_ts(row.get("last_assigned_at"))
+    if not assigned_at:
+        return False
+    now = now or datetime.now(timezone.utc)
+    assign_local = to_ops_local(assigned_at)
+    now_local = to_ops_local(now)
+    if assign_local.date() != now_local.date():
+        return False
+    hours = (now - assigned_at).total_seconds() / 3600
+    return hours >= max(0.0, UNATTENDED_NUDGE_HOURS - 0.5)
+
+
 def nudge_message(*, assigned_to: str, ticket_number: str, task_category: str) -> str:
     handle = assigned_to if str(assigned_to).startswith("@") else f"@{assigned_to}"
     cat = (task_category or "").strip() or "—"
