@@ -108,6 +108,7 @@ from task_categories import (
     upsert_task_category,
 )
 from dispatch_console import (
+    DISPATCH_FULL_DARK_CSS,
     DISPATCH_LAYOUT_RULES,
     DISPATCH_LOGIN_CSS,
     QUEUE_DOTS,
@@ -123,6 +124,7 @@ from dispatch_console import (
     render_refresh_caption,
     render_sales_case_table,
     render_settings_popover,
+    render_sidebar_today_grid,
     render_ticket_table,
     render_timeline_entry,
     render_topbar,
@@ -566,6 +568,7 @@ def apply_theme(*, login: bool = False) -> None:
     }}
 
     {DISPATCH_LAYOUT_RULES}
+    {DISPATCH_FULL_DARK_CSS}
     {PERF_OVERVIEW_CSS}
     div.st-key-disp_perf_body [data-testid="stRadio"] > div {{
       flex-direction: column !important;
@@ -613,6 +616,8 @@ _DISP_ROW_PHOTOS = "disp_row_photo_ticket"
 _DISP_ASSIGN_MODE_KEY = "disp_assign_mode"
 _DISP_ASSIGN_MODE_TELEGRAM = "telegram"
 _DISP_ASSIGN_MODE_QUEUE = "queue_only"
+_DISP_CLEAR_ASSIGN_KEY = "_disp_clear_assign_form"
+_DISP_CLEAR_SALES_ASSIGN_KEY = "_disp_clear_sales_assign_form"
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
@@ -1096,7 +1101,8 @@ def _sc_apply_status_to_selected_cases(
             ok += 1
     if ok:
         _invalidate_dashboard_data_cache()
-        st.session_state[_sc_case_selection_session_key(key_prefix)] = []
+        st.session_state[_sc_clear_select_flag_key(key_prefix)] = True
+        _clear_sales_action_picker(key_prefix)
         _sc_set_sales_flash(f"**{ok}** case(s) moved to **{target_status}**.")
         st.rerun()
     return ok
@@ -1319,7 +1325,7 @@ _SALES_ACTIVE_QUEUE_KEY = "active_sales_queue"
 _SALES_SELECTED_KEY = "selected_sales_case"
 _SALES_ROW_RESOLVE = "_sales_row_resolve"
 _SALES_ROW_EDIT = "_sales_row_edit"
-_SALES_ROW_ASSIGN = "_sales_row_assign"
+_SALES_ROW_REASSIGN = "_sales_row_reassign_case"
 _SALES_ASSIGN_MODE_KEY = "sales_assign_mode"
 _SALES_ASSIGN_MODE_INTAKE = "intake"
 _SALES_ASSIGN_MODE_ASSIGN = "assign"
@@ -1506,10 +1512,18 @@ def _render_category_selectbox(
     *,
     key: str,
     help: str | None = None,
+    label_visibility: str = "visible",
 ) -> None:
     """Category picker — empty on first open (no auto-selected first option)."""
     if not options:
-        st.selectbox(label, options=["—"], key=key, disabled=True, help=help)
+        st.selectbox(
+            label,
+            options=["—"],
+            key=key,
+            disabled=True,
+            help=help,
+            label_visibility=label_visibility,
+        )
         return
     st.selectbox(
         label,
@@ -1518,6 +1532,7 @@ def _render_category_selectbox(
         placeholder="Select category",
         key=key,
         help=help,
+        label_visibility=label_visibility,
     )
 
 
@@ -2047,6 +2062,35 @@ def _dashboard_admin_error_message(err: str) -> str:
         "not_found": "User not found.",
     }
     return messages.get(err, f"Could not complete action ({err or 'unknown'}).")
+
+
+def _render_dashboard_admin_setup_hint() -> None:
+    st.warning(
+        "Per-user login is not enabled on this database yet. "
+        "In Supabase → **SQL Editor**, run these migrations in order:\n\n"
+        "1. `supabase/migrations/20260520_dashboard_users.sql`\n"
+        "2. `supabase/migrations/20260521_dashboard_admin_users.sql`\n\n"
+        "Then reload the dashboard. Default logins: **admin** / **ibeyx** "
+        "with password `ChangeMeNow!` (change after first sign-in)."
+    )
+
+
+def _render_dispatch_settings_admin() -> None:
+    """Admin block inside ⚙ Settings — team accounts or migration hint."""
+    if not _is_dashboard_admin():
+        return
+    configured = _dashboard_users_configured()
+    if configured is True:
+        _render_dashboard_team_accounts_body()
+    elif configured is False:
+        _render_dashboard_admin_setup_hint()
+    else:
+        st.caption(
+            "Could not verify `dashboard_users` (Supabase timeout). "
+            "If per-user login is not set up, apply migrations "
+            "`20260520_dashboard_users.sql` and "
+            "`20260521_dashboard_admin_users.sql` in the SQL editor."
+        )
 
 
 def _render_dashboard_team_accounts_body() -> None:
@@ -2809,7 +2853,33 @@ _DASH_ATTENDANCE_POLL_SEC = max(
     15, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "30") or "30"))
 )
 _DASH_DATA_CACHE_TTL_SEC = max(
-    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "20") or "20"))
+    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "45") or "45"))
+)
+
+_TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
+    "ticket_number",
+    "status",
+    "assigned_to",
+    "assigned_to_2",
+    "task_category",
+    "outcome_category",
+    "additional_info",
+    "field_response",
+    "field_responded_by",
+    "photo_url",
+    "responded_at",
+    "last_assigned_at",
+    "created_at",
+    "updated_at",
+    "marked_unattended_at",
+    "unattended_nudge_sent_at",
+    "assignment_telegram_chat_id",
+    "assignment_telegram_message_id",
+    "dashboard_assigned_by",
+    "follow_up_at",
+    "follow_up_note",
+    "dispatch_region",
+    "close_note",
 )
 
 
@@ -3176,6 +3246,7 @@ def _navigate_to_on_hold_queue() -> None:
 def _navigate_to_resolved_queue() -> None:
     st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
     st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_RESOLVED
+    _clear_dispatch_row_modal_keys()
 
 
 def _outcome_category_options() -> list[str]:
@@ -3475,19 +3546,30 @@ def _fetch_tickets_cached() -> pd.DataFrame:
         return pd.DataFrame()
     client = _get_supabase_client()
     order_col = _get_order_column()
-    try:
-        res = client.table(TICKETS_TABLE).select("*").order(order_col, desc=True).execute()
-    except Exception as exc:
-        if _looks_like_missing_table_error(exc):
-            raise _TableMissingError(TICKETS_TABLE, exc) from exc
-        if is_transient_supabase_error(exc):
-            _note_supabase_unreachable(exc)
-            return pd.DataFrame()
-        raise
-    rows = res.data or []
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows)
+    select_cols = ",".join(_TICKETS_DASHBOARD_SELECT)
+    last_exc: Exception | None = None
+    for select_arg in (select_cols, "*"):
+        try:
+            res = (
+                client.table(TICKETS_TABLE)
+                .select(select_arg)
+                .order(order_col, desc=True)
+                .execute()
+            )
+            rows = res.data or []
+            return pd.DataFrame(rows) if rows else pd.DataFrame()
+        except Exception as exc:
+            last_exc = exc
+            if select_arg == "*":
+                if _looks_like_missing_table_error(exc):
+                    raise _TableMissingError(TICKETS_TABLE, exc) from exc
+                if is_transient_supabase_error(exc):
+                    _note_supabase_unreachable(exc)
+                    return pd.DataFrame()
+                raise
+    if last_exc is not None:
+        raise last_exc
+    return pd.DataFrame()
 
 
 def _fetch_tickets() -> pd.DataFrame:
@@ -3758,6 +3840,74 @@ def _maybe_apply_pending_ticket_selection_clear(key_prefix: str) -> None:
 def _maybe_apply_pending_sales_case_selection_clear(key_prefix: str) -> None:
     if st.session_state.pop(_sc_clear_select_flag_key(key_prefix), False):
         _clear_sales_case_queue_selection(key_prefix)
+
+
+_DEFERRED_WIDGET_CLEARS_KEY = "_deferred_widget_clears"
+
+
+def _schedule_deferred_widget_clears(*keys: str) -> None:
+    """Pop widget session keys on the **next** run, before those widgets render."""
+    pending = st.session_state.setdefault(_DEFERRED_WIDGET_CLEARS_KEY, [])
+    for k in keys:
+        if k and k not in pending:
+            pending.append(k)
+
+
+def _apply_deferred_widget_clears() -> None:
+    pending = st.session_state.pop(_DEFERRED_WIDGET_CLEARS_KEY, None)
+    if not pending:
+        return
+    for k in pending:
+        if k:
+            st.session_state.pop(k, None)
+
+
+def _reset_assignment_edit_form_state(edit_key_prefix: str) -> None:
+    keys = _assignment_edit_session_keys(edit_key_prefix)
+    _schedule_deferred_widget_clears(
+        keys["engineer"],
+        keys["engineer_2"],
+        keys["category"],
+        keys["notes"],
+        keys["synced_ticket"],
+    )
+
+
+def _reset_reassign_form_state(edit_key_prefix: str) -> None:
+    keys = _reassign_session_keys(edit_key_prefix)
+    _schedule_deferred_widget_clears(
+        keys["engineer"],
+        keys["engineer_2"],
+        keys["category"],
+        keys["notes"],
+        keys["synced_ticket"],
+    )
+
+
+def _clear_ticket_action_picker(key_prefix: str) -> None:
+    _schedule_deferred_widget_clears(f"{key_prefix}_action_sel")
+
+
+def _clear_sales_action_picker(key_prefix: str) -> None:
+    _schedule_deferred_widget_clears(
+        f"{key_prefix}_sc_action_sel",
+        "sc_action_comment",
+    )
+
+
+def _clear_sales_floor_edit_widgets(case_ref: str) -> None:
+    cref = str(case_ref)
+    _schedule_deferred_widget_clears(
+        f"sales_edit_acc_{cref}",
+        f"sales_edit_reg_{cref}",
+        f"sales_edit_cat_{cref}",
+        f"sales_edit_pri_{cref}",
+        f"sales_edit_desc_{cref}",
+    )
+
+
+def _clear_sales_floor_resolve_widgets(case_ref: str) -> None:
+    _schedule_deferred_widget_clears(f"sales_resolve_note_{str(case_ref)}")
 
 
 def _apply_data_editor_editing_state(
@@ -4663,6 +4813,9 @@ def _render_manual_field_response_editor(
         st.session_state[keys["show"]] = False
         for sk in clear_session_keys:
             st.session_state.pop(sk, None)
+        _schedule_deferred_widget_clears(
+            keys["text"], keys["responded_by"], keys["synced_ticket"]
+        )
         if status == STATUS_DAILY_TASK:
             st.success(f"{picked} → **Open** (field response saved).")
         else:
@@ -4724,7 +4877,8 @@ def _render_ticket_status_action_popover(
                         ok += 1
                 if ok:
                     st.success(f"**{ok}** ticket(s) updated → **{choice}**.")
-                    st.session_state[_ticket_selection_session_key(key_prefix)] = []
+                    st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+                    _clear_ticket_action_picker(key_prefix)
                     st.rerun()
 
 
@@ -4770,7 +4924,8 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
             except Exception as exc:
                 st.error(f"Could not mark follow-up: {exc}")
                 return
-            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+            _schedule_deferred_widget_clears(f"{key_prefix}_follow_up_note")
             st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
             st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
             st.session_state[_CC_FLASH_KEY] = (
@@ -4820,7 +4975,8 @@ def _apply_ticket_status_batch(
             ok += 1
     if ok:
         st.success(f"**{ok}** ticket(s) updated → **{choice_label}**.")
-        st.session_state[_ticket_selection_session_key(key_prefix)] = []
+        st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+        _clear_ticket_action_picker(key_prefix)
         st.rerun()
 
 
@@ -4883,9 +5039,13 @@ def _render_admin_close_form_inline(
             except Exception as exc:
                 st.error(f"**{ticket}**: {exc}")
         if ok:
-            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
             for sk in clear_session_keys:
                 st.session_state.pop(sk, None)
+            _schedule_deferred_widget_clears(
+                f"{key_prefix}_admin_close_comment",
+                f"{key_prefix}_admin_close_outcome",
+            )
             _navigate_to_resolved_queue()
             st.session_state[_CC_FLASH_KEY] = (
                 f"Closed **{ok}** ticket(s) → **Resolved**."
@@ -4952,9 +5112,13 @@ def _render_mark_resolved_form_inline(
             except Exception as exc:
                 st.error(f"**{ticket}**: {exc}")
         if ok:
-            st.session_state[_ticket_selection_session_key(key_prefix)] = []
+            st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
             for sk in clear_session_keys:
                 st.session_state.pop(sk, None)
+            _schedule_deferred_widget_clears(
+                f"{key_prefix}_mark_resolved_outcome",
+                f"{key_prefix}_mark_resolved_note",
+            )
             _navigate_to_resolved_queue()
             st.session_state[_CC_FLASH_KEY] = (
                 f"Marked **{ok}** ticket(s) → **Resolved**."
@@ -4996,7 +5160,8 @@ def _render_follow_up_form_inline(*, key_prefix: str, options: list[str]) -> Non
         except Exception as exc:
             st.error(f"Could not mark follow-up: {exc}")
             return
-        st.session_state[_ticket_selection_session_key(key_prefix)] = []
+        st.session_state[_ticket_clear_select_flag_key(key_prefix)] = True
+        _schedule_deferred_widget_clears(f"{key_prefix}_follow_up_note")
         st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
         st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_UNDER_INVESTIGATION
         st.session_state[_CC_FLASH_KEY] = (
@@ -5023,7 +5188,7 @@ def _render_ticket_overflow_menu(
     reassign_keys = _reassign_session_keys(key_prefix)
     picked = _get_selected_queue_tickets(key_prefix, options)
 
-    with st.popover("⋯", use_container_width=False):
+    with st.popover("⋮", use_container_width=False):
         if allow_reassign:
             if st.button(
                 "Reassign",
@@ -5377,6 +5542,7 @@ def _render_ticket_queue_actions_row(
     **toolbar_kwargs: object,
 ) -> None:
     """Selection summary + Actions popover above the table."""
+    _apply_deferred_widget_clears()
     options = options_override or _ticket_options_for_admin(df)
     if not options:
         return
@@ -8693,6 +8859,9 @@ def _render_dispatch_settings_popover() -> None:
         on_refresh=_refresh,
         on_signout=_signout,
         render_custom_dates=_custom_dates,
+        render_admin=(
+            _render_dispatch_settings_admin if _is_dashboard_admin() else None
+        ),
     )
     preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
     if preset != "Pick dates":
@@ -9814,38 +9983,38 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
 .weekly-exec-header {
   display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
   gap: 12px; margin-bottom: 1rem; padding-bottom: 0.75rem;
-  border-bottom: 1px solid rgba(215, 180, 145, 0.35);
+  border-bottom: 0.5px solid #1a2035;
 }
-.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e8e6e3; margin: 0; }
-.weekly-exec-sub { font-size: 0.85rem; color: #a39e97; margin: 0.15rem 0 0; }
+.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e2e8f8; margin: 0; }
+.weekly-exec-sub { font-size: 0.85rem; color: #2a3a5a; margin: 0.15rem 0 0; }
 .weekly-exec-badge {
-  font-size: 0.85rem; color: #a39e97; padding: 0.45rem 0.85rem;
-  border: 1px solid #374151; border-radius: 8px; background: #141414;
+  font-size: 0.85rem; color: #8a9ac0; padding: 0.45rem 0.85rem;
+  border: 0.5px solid #1a2035; border-radius: 6px; background: #0d1220;
 }
 .weekly-date-wrap [data-testid="stDateInput"] label {
-  font-size: 0.85rem !important; color: #a39e97 !important;
+  font-size: 0.85rem !important; color: #2a3a5a !important;
 }
 .weekly-date-wrap [data-testid="stDateInput"] > div {
-  background: #141414 !important;
-  border: 1px solid #374151 !important;
-  border-radius: 8px !important;
+  background: #0d1220 !important;
+  border: 0.5px solid #1a2035 !important;
+  border-radius: 6px !important;
 }
 .weekly-date-range {
-  font-size: 0.78rem; color: #D7B491; margin: 0.25rem 0 0; text-align: right;
+  font-size: 0.78rem; color: #3b82f6; margin: 0.25rem 0 0; text-align: right;
 }
 .weekly-kpi-card {
-  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
-  border-radius: 10px; padding: 1rem 1.1rem; min-height: 88px;
+  background: #0d1220; border: 0.5px solid #1a2035;
+  border-radius: 6px; padding: 1rem 1.1rem; min-height: 88px;
 }
-.weekly-kpi-label { font-size: 0.78rem; color: #a39e97; margin: 0 0 0.35rem; }
-.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e8e6e3; margin: 0; line-height: 1.2; }
-.weekly-kpi-sub { font-size: 0.75rem; color: #D7B491; margin: 0.35rem 0 0; }
+.weekly-kpi-label { font-size: 0.78rem; color: #2a3a5a; margin: 0 0 0.35rem; }
+.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e2e8f8; margin: 0; line-height: 1.2; }
+.weekly-kpi-sub { font-size: 0.75rem; color: #3b82f6; margin: 0.35rem 0 0; }
 .weekly-panel {
-  background: #141414; border: 1px solid rgba(215, 180, 145, 0.28);
-  border-radius: 10px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
+  background: #0d1220; border: 0.5px solid #1a2035;
+  border-radius: 6px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
 }
 .weekly-panel h4 {
-  font-size: 0.95rem; font-weight: 600; color: #e8e6e3; margin: 0 0 0.65rem;
+  font-size: 0.95rem; font-weight: 600; color: #e2e8f8; margin: 0 0 0.65rem;
 }
 </style>
         """,
@@ -11432,9 +11601,15 @@ def _cc_patch_assignment_fields(
         "dashboard_assigned_by": operator_id,
         "updated_at": now_iso,
     }
+
+    def _handle_key(v: object) -> str:
+        return str(v or "").strip().lstrip("@").casefold()
+
     first_assignee = bool(assigned_to and not prev_handle)
-    if first_assignee:
+    assignee_changed = bool(_handle_key(assigned_to) and _handle_key(assigned_to) != _handle_key(prev_handle))
+    if first_assignee or assignee_changed:
         updates["last_assigned_at"] = now_iso
+        updates["unattended_nudge_sent_at"] = None
     _cc_execute_ticket_update(client, updates, ticket_number)
     _cc_insert_attendance_log(
         client,
@@ -11445,6 +11620,8 @@ def _cc_patch_assignment_fields(
     )
     if first_assignee:
         _visits_open_new(client, ticket_number, assigned_to, visit_start=now_iso)
+    elif assignee_changed:
+        _visits_reassign(client, ticket_number, assigned_to, now_iso=now_iso)
     updated = _fetch_ticket_row(ticket_number)
     return updated or row
 
@@ -11604,6 +11781,7 @@ def _render_assignment_editor(
     fe_names: list[str],
     fe_missing: bool,
     ticket_options: list[str],
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
     """Edit assignment fields + optional Telegram sync (Daily Task or Open)."""
     if not ticket_options:
@@ -11744,6 +11922,9 @@ def _render_assignment_editor(
                 tg_note = ""
 
     st.session_state[keys["show"]] = False
+    for sk in clear_session_keys:
+        st.session_state.pop(sk, None)
+    _reset_assignment_edit_form_state(edit_key_prefix)
     st.session_state[_CC_FLASH_KEY] = (
         f"Updated **{required_status}** assignment **{picked}**."
         + (f" {tg_note}" if tg_note else "")
@@ -11760,6 +11941,7 @@ def _render_reassign_editor(
     fe_names: list[str],
     fe_missing: bool,
     ticket_options: list[str],
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
     """Reassign a Daily Task or Open ticket: fresh Daily Task row, optional new Telegram post."""
     if not ticket_options:
@@ -11907,6 +12089,9 @@ def _render_reassign_editor(
                 st.warning(f"Reassigned in dashboard. Telegram post failed: {exc}")
 
     st.session_state[keys["show"]] = False
+    for sk in clear_session_keys:
+        st.session_state.pop(sk, None)
+    _reset_reassign_form_state(edit_key_prefix)
     st.session_state[_CC_FLASH_KEY] = (
         f"**{picked}** reassigned → **Daily Task** ({handle}, {cat})."
         + (f" {tg_note}" if tg_note else "")
@@ -12297,6 +12482,20 @@ def _sc_dashboard_reassign_case(
     _sc_stamp_last_assigned_at(patch)
     _sales_cases_update_row(row_id, patch)
     updated = _fetch_sales_case_row_by_id(row_id)
+    cref = str(row.get("case_ref") or "").strip()
+    handle = str(assigned_to or "").strip()
+    if handle and not handle.startswith("@"):
+        handle = f"@{handle.lstrip('@')}"
+    if cref and handle:
+        client = _get_supabase_client()
+        _cc_insert_attendance_log(
+            client,
+            ticket_number=cref,
+            member_username=handle,
+            action_type="Assignment",
+            note=_cc_assignment_log_note(additional_info, operator_id),
+        )
+        _visits_reassign(client, cref, handle)
     return updated or row
 
 
@@ -12309,8 +12508,9 @@ def _render_sales_reassign_editor(
     fe_missing: bool,
     case_options: list[str],
     df: pd.DataFrame,
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
-    """Reassign field engineer on a sales case; optional new Telegram post."""
+    """Reassign a sales case — same form and Telegram flow as CSM reassign."""
     if not case_options:
         return
 
@@ -12331,8 +12531,9 @@ def _render_sales_reassign_editor(
         return
 
     st.caption(
-        f"Reassign **{cref}** to a different field engineer. "
-        "Posts a **new** assignment line in Telegram when enabled below."
+        f"Reassign **{cref}** for next-day field work. "
+        "Clears the previous field response and photo. "
+        "Posts a **new** assignment line in Telegram (when enabled below)."
     )
 
     current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
@@ -12420,14 +12621,6 @@ def _render_sales_reassign_editor(
         st.error(f"Could not reassign: {exc}")
         return
 
-    if handle:
-        _sc_log_sales_assignment_activity(
-            case_ref=cref,
-            assignee=handle,
-            operator_id=op,
-            note=notes,
-        )
-
     tg_note = ""
     if st.session_state.get(keys["sync_tg"]):
         token, chat_id = _cc_resolve_telegram_credentials()
@@ -12438,9 +12631,9 @@ def _render_sales_reassign_editor(
             )
         else:
             try:
-                asyncio.run(
+                ref = asyncio.run(
                     notify_telegram_group(
-                        handle.lstrip("@"),
+                        handle,
                         cref,
                         cat,
                         additional_info=notes,
@@ -12455,6 +12648,10 @@ def _render_sales_reassign_editor(
                         group_id=chat_id,
                     )
                 )
+                if _fetch_ticket_row(cref):
+                    _cc_save_assignment_telegram_ref(
+                        _get_supabase_client(), cref, ref
+                    )
                 tg_note = (
                     "Posted a **new** assignment message in the group — "
                     "field must swipe-reply to that line."
@@ -12463,10 +12660,13 @@ def _render_sales_reassign_editor(
                 st.warning(f"Reassigned in dashboard. Telegram post failed: {exc}")
 
     st.session_state[keys["show"]] = False
-    flash = f"**{cref}** reassigned to **{handle}** ({cat})."
-    if tg_note:
-        flash += f" {tg_note}"
-    _sc_set_sales_flash(flash)
+    for sk in clear_session_keys:
+        st.session_state.pop(sk, None)
+    _reset_reassign_form_state(edit_key_prefix)
+    _sc_set_sales_flash(
+        f"**{cref}** reassigned to **{handle}** ({cat})."
+        + (f" {tg_note}" if tg_note else "")
+    )
     _invalidate_dashboard_data_cache()
     st.rerun()
 
@@ -12584,25 +12784,8 @@ def get_engineer_handles() -> list[str]:
 
 def get_task_categories() -> list[str]:
     """Return task categories sorted by sort_order then name."""
-    client = _get_supabase_client()
-    try:
-        rows = (
-            client.table(TASK_CATEGORIES_TABLE)
-            .select("name, sort_order")
-            .order("sort_order")
-            .order("name")
-            .execute()
-            .data
-            or []
-        )
-    except Exception as exc:
-        if _looks_like_missing_table_error(exc):
-            return []
-        if is_transient_supabase_error(exc):
-            _note_supabase_unreachable(exc)
-            return []
-        raise
-    return [str(r["name"]) for r in rows if r.get("name")]
+    names, _missing = _try_fetch_task_categories()
+    return names
 
 
 def _render_engineer_manage_row(eng: dict) -> None:
@@ -13917,15 +14100,15 @@ def main() -> None:
             )
         return
 
-    apply_theme()
     _init_dash_date_range_state()
-    _render_dispatch_app_shell()
 
     auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
     def _dashboard_body_fragment() -> None:
+        apply_theme()
+        _render_dispatch_app_shell()
         _sync_dash_range_from_ui(
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
@@ -15889,7 +16072,7 @@ def _migrate_legacy_queue_nav() -> None:
 def _render_dashboard_header(*, refreshed_at: str) -> None:
     """Last refresh line below the nav."""
     render_refresh_caption(
-        f"Updated {refreshed_at} {LOCAL_TZ_LABEL} · change dates in ☰ → Time range"
+        f"Updated {refreshed_at} {LOCAL_TZ_LABEL} · change dates in ⚙ settings"
     )
 
 
@@ -15915,6 +16098,7 @@ def _apply_pending_dashboard_nav() -> None:
             STATUS_RESOLVED: "Resolved",
         }
         st.session_state[aq_key] = queue_map.get(base_q, base_q)
+        _clear_dispatch_row_modal_keys()
     if pending_sales_queue is not None:
         base = _sc_queue_segment_base(pending_sales_queue)
         st.session_state[_SALES_ACTIVE_QUEUE_KEY] = base
@@ -16043,6 +16227,55 @@ _TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
 )
 
 
+def _dispatch_label_for_sidebar_queue(
+    sidebar_queue: str,
+    *,
+    pending_label: str,
+    open_label: str,
+    on_hold_label: str,
+    investigation_label: str,
+    unattended_label: str,
+    completed_label: str,
+) -> str:
+    """Map sidebar queue name → counted metric label for legacy session keys."""
+    return {
+        "Daily Task": pending_label,
+        "Needs Review": open_label,
+        "On Hold": on_hold_label,
+        "Under Investigation": investigation_label,
+        "Unattended": unattended_label,
+        "Resolved": completed_label,
+    }.get(sidebar_queue, pending_label)
+
+
+def _clear_dispatch_row_modal_keys() -> None:
+    for k in (
+        _DISP_ROW_EDIT,
+        _DISP_ROW_REASSIGN,
+        _DISP_ROW_RECORD,
+        _DISP_ROW_CLOSE,
+        _DISP_ROW_RESOLVE,
+        _DISP_ROW_PHOTOS,
+    ):
+        st.session_state.pop(k, None)
+
+
+def _sync_dispatch_queue_view_state(
+    *,
+    selected_queue: str,
+    ticket_nums: list[str],
+) -> None:
+    """Drop stale row modals/selection when the operator changes queue."""
+    prev = st.session_state.get("_disp_active_queue_prev")
+    if prev != selected_queue:
+        _clear_dispatch_row_modal_keys()
+        st.session_state.pop(_DISP_SELECTED_KEY, None)
+        st.session_state["_disp_active_queue_prev"] = selected_queue
+    sel = st.session_state.get(_DISP_SELECTED_KEY)
+    if sel and sel not in ticket_nums:
+        st.session_state.pop(_DISP_SELECTED_KEY, None)
+
+
 def _sync_dashboard_nav_state(
     *,
     total_pending: int,
@@ -16074,9 +16307,30 @@ def _sync_dashboard_nav_state(
         unattended_label,
     )
 
-    cur_q = st.session_state.get(_DASH_TICKET_QUEUE_KEY)
-    if cur_q and _queue_segment_base(cur_q) == STATUS_RESOLVED:
-        st.session_state[_DASH_TICKET_QUEUE_KEY] = completed_label
+    aq_key = active_queue_key()
+    queue_map = {
+        STATUS_DAILY_TASK: "Daily Task",
+        "Open": "Needs Review",
+        STATUS_ON_HOLD: "On Hold",
+        STATUS_UNDER_INVESTIGATION: "Under Investigation",
+        "Unattended": "Unattended",
+        STATUS_RESOLVED: "Resolved",
+    }
+
+    cur_active = str(st.session_state.get(aq_key) or "Daily Task")
+    if cur_active not in queue_map.values():
+        cur_active = "Daily Task"
+        st.session_state[aq_key] = cur_active
+
+    st.session_state[_DASH_TICKET_QUEUE_KEY] = _dispatch_label_for_sidebar_queue(
+        cur_active,
+        pending_label=pending_label,
+        open_label=open_label,
+        on_hold_label=on_hold_label,
+        investigation_label=investigation_label,
+        unattended_label=unattended_label,
+        completed_label=completed_label,
+    )
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
     st.session_state["_dash_prev_open_count"] = total_open
@@ -16084,10 +16338,6 @@ def _sync_dashboard_nav_state(
         st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
         st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = open_label
         st.rerun()
-    elif st.session_state.get(_DASH_TICKET_QUEUE_KEY) not in ticket_options:
-        st.session_state[_DASH_TICKET_QUEUE_KEY] = (
-            open_label if total_open > 0 else pending_label
-        )
     return (
         pending_label,
         open_label,
@@ -17010,6 +17260,7 @@ def _render_sales_case_queue_actions_row(
     **toolbar_kwargs: object,
 ) -> None:
     """Selection summary + Actions popover above the sales case table."""
+    _apply_deferred_widget_clears()
     options = _sc_case_options_for_admin(df)
     if not options:
         return
@@ -17146,48 +17397,50 @@ def _init_sales_active_queue() -> str:
 def _render_sales_sidebar(
     *,
     df: pd.DataFrame,
-    df_tickets: pd.DataFrame,
 ) -> None:
     """Sidebar: Today metrics (2×2), queue list, engineer list — mirrors CSM."""
-    st.markdown(t_section_label("Today"), unsafe_allow_html=True)
-    today_counts = _get_sales_today_counts(df)
-    m1, m2 = st.columns(2)
-    m3, m4 = st.columns(2)
-    with m1:
-        st.metric("New", today_counts["new"])
-    with m2:
-        st.metric("Resolved", today_counts["resolved"])
-    with m3:
-        st.metric("Investigation", today_counts["investigation"])
-    with m4:
-        st.metric("Design", today_counts["design"])
+    with st.container(key="disp_sidebar_inner"):
+        st.markdown(t_section_label("Today"), unsafe_allow_html=True)
+        today_counts = _get_sales_today_counts(df)
+        render_sidebar_today_grid(
+            (
+                ("New", today_counts["new"], "#3b82f6"),
+                ("Resolved", today_counts["resolved"], "#22c55e"),
+                ("Investigation", today_counts["investigation"], "#a78bfa"),
+                ("Design", today_counts["design"], "#f59e0b"),
+            )
+        )
 
-    st.markdown(
-        t_section_label("Queues", margin="margin-top:16px;margin-bottom:10px"),
-        unsafe_allow_html=True,
-    )
-    queue_counts = _get_sales_queue_counts(df)
-    selected_queue = _init_sales_active_queue()
-    picked = render_queue_list(
-        selected=selected_queue,
-        counts=queue_counts,
-        session_key=_SALES_ACTIVE_QUEUE_KEY,
-        queue_order=SALES_QUEUE_ORDER,
-        queue_dots=SALES_QUEUE_DOTS,
-        button_key_prefix="sales_queue",
-    )
-    st.session_state[_SALES_ACTIVE_QUEUE_KEY] = picked
-
-    st.markdown(
-        t_section_label("Engineers", margin="margin-top:12px;margin-bottom:7px"),
-        unsafe_allow_html=True,
-    )
-    for eng in _dispatch_engineer_presence(df_tickets):
-        render_engineer_row(eng)
+        st.markdown(
+            t_section_label("Queues", margin="margin-top:14px;margin-bottom:8px"),
+            unsafe_allow_html=True,
+        )
+        queue_counts = _get_sales_queue_counts(df)
+        selected_queue = _init_sales_active_queue()
+        picked = render_queue_list(
+            selected=selected_queue,
+            counts=queue_counts,
+            session_key=_SALES_ACTIVE_QUEUE_KEY,
+            queue_order=SALES_QUEUE_ORDER,
+            queue_dots=SALES_QUEUE_DOTS,
+            button_key_prefix="sales_queue",
+        )
+        st.session_state[_SALES_ACTIVE_QUEUE_KEY] = picked
 
 
-def _render_sales_assign_panel() -> None:
-    """New sales case panel — same layout pattern as CSM assign (intake vs assign)."""
+def _render_sales_right_rail() -> None:
+    """Right column — New case | Case info tabs."""
+    with st.container(key="disp_right_rail"):
+        tab_new, tab_info = st.tabs(["New case", "Case info"])
+        with tab_new:
+            _render_sales_assign_panel(layout="rail")
+        with tab_info:
+            with st.container(key="disp_detail_panel"):
+                _render_sales_detail_panel()
+
+
+def _render_sales_assign_panel(*, layout: str = "bar") -> None:
+    """New sales case panel — ``bar`` = horizontal, ``rail`` = right sidebar stack."""
     engineers = get_engineer_handles()
     categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     unassigned = "— unassigned —"
@@ -17195,24 +17448,20 @@ def _render_sales_assign_panel() -> None:
         st.session_state.get(_SALES_ASSIGN_MODE_KEY, _SALES_ASSIGN_MODE_INTAKE)
     )
     intake_only = mode == _SALES_ASSIGN_MODE_INTAKE
+    rail = layout == "rail"
+
+    if st.session_state.pop(_DISP_CLEAR_SALES_ASSIGN_KEY, False):
+        _reset_dispatch_sales_assign_form()
 
     with st.container(key="disp_sales_assign_panel"):
-        st.markdown(
-            t_section_label("New sales case", spacing=".06em", margin="margin:0 0 4px"),
-            unsafe_allow_html=True,
-        )
+        if not rail:
+            st.markdown(
+                t_section_label("New sales case", spacing=".06em", margin="margin:0 0 4px"),
+                unsafe_allow_html=True,
+            )
         st.markdown('<div class="disp-mode-toggle sales-mode-toggle">', unsafe_allow_html=True)
         t1, t2 = st.columns(2, gap="small")
         with t1:
-            if st.button(
-                "☰ Intake only",
-                key="sap_mode_intake",
-                use_container_width=True,
-                type="primary" if intake_only else "secondary",
-            ):
-                st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_INTAKE
-                st.rerun()
-        with t2:
             if st.button(
                 "✈ Assign engineer",
                 key="sap_mode_assign",
@@ -17221,8 +17470,129 @@ def _render_sales_assign_panel() -> None:
             ):
                 st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_ASSIGN
                 st.rerun()
+        with t2:
+            if st.button(
+                "☰ Intake only",
+                key="sap_mode_intake",
+                use_container_width=True,
+                type="primary" if intake_only else "secondary",
+            ):
+                st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_INTAKE
+                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            hint = (
+                "Creates case record only — assign engineer later."
+                if intake_only
+                else "Creates case and assigns engineer immediately."
+            )
+            st.markdown(
+                f'<p class="disp-mode-caption">{html.escape(hint)}</p>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            _render_assign_plain_label("Case ref")
+            case_ref = st.text_input(
+                "Case ref",
+                placeholder="Ticket / case ID",
+                key="sap_ref",
+                label_visibility="collapsed",
+            )
+            _render_assign_plain_label("Account")
+            account_name = st.text_input(
+                "Account name",
+                placeholder="Resort / company",
+                key="sap_acc",
+                label_visibility="collapsed",
+            )
+            r1, r2 = st.columns(2, gap="small")
+            with r1:
+                _render_assign_plain_label("Region")
+                region = st.selectbox(
+                    "Region",
+                    list(SALES_REGION_CODES),
+                    key="sap_region",
+                    label_visibility="collapsed",
+                )
+            with r2:
+                _render_assign_plain_label("Priority")
+                priority = st.selectbox(
+                    "Priority",
+                    ["Standard", "High"],
+                    key="sap_priority",
+                    label_visibility="collapsed",
+                )
+            engineer = unassigned
+            if not intake_only:
+                _render_assign_plain_label("Engineer")
+                eng_row, eng_mgr = _assign_field_btn_columns()
+                with eng_row:
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="sap_eng",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="sap_eng",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
+                with eng_mgr:
+                    _render_assign_manage_icon_btn(
+                        manage_key="sap_btn_manage_eng",
+                        manage_help="Manage engineers",
+                        on_manage=manage_engineers_dialog,
+                    )
+            _render_assign_plain_label("Category")
+            cat_row, cat_mgr = _assign_field_btn_columns()
+            with cat_row:
+                _render_category_selectbox(
+                    "Category",
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
+                    key="sap_category",
+                    label_visibility="collapsed",
+                )
+                sales_category = st.session_state.get("sap_category")
+            with cat_mgr:
+                _render_assign_manage_icon_btn(
+                    manage_key="sap_btn_manage_cat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
+            _render_assign_plain_label("Notes")
+            notes = st.text_area(
+                "Notes",
+                placeholder="Optional intake notes…",
+                key="sap_notes",
+                height=72,
+                label_visibility="collapsed",
+            )
+            submit_label = "Create case ↗" if intake_only else "Create + assign ↗"
+            st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
+            clicked = st.button(submit_label, key="sap_submit", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            if clicked:
+                _handle_sales_floor_submit(
+                    case_ref,
+                    account_name,
+                    region,
+                    sales_category,
+                    priority,
+                    engineer,
+                    require_engineer=not intake_only,
+                )
+            return
 
         r1a, r1b, r1c, r1d = st.columns([1.05, 1.55, 0.75, 0.75], gap="medium")
         with r1a:
@@ -17263,16 +17633,25 @@ def _render_sales_assign_panel() -> None:
             r_eng, _r_pad = st.columns([1.18, 2.82], gap="small")
             with r_eng:
                 _render_assign_plain_label("Engineer")
-                eng_sel, eng_mgr = st.columns(
-                    [1, 0.22], gap="small", vertical_alignment="top"
-                )
+                eng_sel, eng_mgr = _assign_field_btn_columns()
                 with eng_sel:
-                    engineer = st.selectbox(
-                        "Engineer",
-                        engineers or ["—"],
-                        key="sap_eng",
-                        label_visibility="collapsed",
-                    )
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="sap_eng",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="sap_eng",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
                 with eng_mgr:
                     _render_assign_manage_icon_btn(
                         manage_key="sap_btn_manage_eng",
@@ -17283,16 +17662,15 @@ def _render_sales_assign_panel() -> None:
         r2a, r2b, r2c = st.columns([1.2, 2.35, 1.05], gap="medium")
         with r2a:
             _render_assign_plain_label("Category")
-            cat_sel, cat_mgr = st.columns(
-                [1, 0.22], gap="small", vertical_alignment="top"
-            )
+            cat_sel, cat_mgr = _assign_field_btn_columns()
             with cat_sel:
-                sales_category = st.selectbox(
+                _render_category_selectbox(
                     "Category",
-                    categories or ["—"],
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
                     key="sap_category",
                     label_visibility="collapsed",
                 )
+                sales_category = st.session_state.get("sap_category")
             with cat_mgr:
                 _render_assign_manage_icon_btn(
                     manage_key="sap_btn_manage_cat",
@@ -17301,10 +17679,11 @@ def _render_sales_assign_panel() -> None:
                 )
         with r2b:
             _render_assign_plain_label("Notes")
-            notes = st.text_input(
+            notes = st.text_area(
                 "Notes",
                 placeholder="Optional intake notes…",
                 key="sap_notes",
+                height=72,
                 label_visibility="collapsed",
             )
         with r2c:
@@ -17347,7 +17726,7 @@ def _handle_sales_floor_submit(
         return
 
     operator_id = _session_operator_id() or "unknown"
-    eng = None if engineer in ("— unassigned —", "—", "") else engineer
+    eng = None if not engineer or engineer in ("— unassigned —", "—", "") else engineer
     if require_engineer and not eng:
         st.toast("Select an engineer", icon="⚠️")
         return
@@ -17375,10 +17754,7 @@ def _handle_sales_floor_submit(
         _sales_cases_insert_row(row)
         _invalidate_dashboard_data_cache()
         st.toast(f"✓ Sales case {case_ref} created", icon="✅")
-        for k in ("sap_ref", "sap_acc", "sap_category", "sap_notes"):
-            st.session_state.pop(k, None)
-        if not require_engineer:
-            st.session_state.pop("sap_eng", None)
+        _schedule_dispatch_sales_assign_form_clear()
         st.session_state[_SALES_ACTIVE_QUEUE_KEY] = SC_STATUS_SALES_TICKET
         st.rerun()
     except Exception as exc:
@@ -17446,7 +17822,7 @@ def _render_sales_row_actions(case: dict, row_key: str) -> None:
     status = str(case.get("status") or "")
     case_ref = str(case.get("case_ref") or "")
 
-    with st.popover("⋯", use_container_width=False):
+    with st.popover("⋮", use_container_width=False):
         st.markdown(
             '<p style="font-size:11px;color:#2a3a5a;text-transform:uppercase;'
             'letter-spacing:.05em;margin-bottom:4px">Move to</p>',
@@ -17474,12 +17850,12 @@ def _render_sales_row_actions(case: dict, row_key: str) -> None:
 
         if _sc_effective_status(status) != SC_STATUS_RESOLVED:
             if st.button(
-                "↩ Assign engineer",
-                key=f"assign_eng_sc_{row_key}",
+                "↩ Reassign",
+                key=f"reassign_sc_{row_key}",
                 use_container_width=True,
             ):
-                st.session_state[_SALES_ROW_ASSIGN] = case_ref
-                st.session_state[_SALES_SELECTED_KEY] = case_ref
+                _sales_prepare_row_selection(case_ref)
+                st.session_state[_SALES_ROW_REASSIGN] = case_ref
                 st.rerun()
 
         if _sc_effective_status(status) == SC_STATUS_RESOLVED:
@@ -17515,6 +17891,7 @@ def _render_sales_detail_panel() -> None:
 
     case = _fetch_sales_case_row_by_ref(str(case_ref))
     if not case:
+        st.warning(f"Case **{html.escape(str(case_ref))}** was not found.")
         return
 
     st.markdown(
@@ -17610,6 +17987,7 @@ def _render_sales_detail_panel() -> None:
 
 def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
     """Inline panels opened from per-row ⋯ menus."""
+    _apply_deferred_widget_clears()
     resolve_ref = st.session_state.get(_SALES_ROW_RESOLVE)
     if resolve_ref:
         row = _fetch_sales_case_row_by_ref(str(resolve_ref))
@@ -17623,6 +18001,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.button("Cancel", key=f"sales_resolve_cancel_{resolve_ref}"):
+                        _clear_sales_floor_resolve_widgets(resolve_ref)
                         st.session_state.pop(_SALES_ROW_RESOLVE, None)
                         st.rerun()
                 with c2:
@@ -17644,6 +18023,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                             st.error(err)
                         else:
                             _invalidate_dashboard_data_cache()
+                            _clear_sales_floor_resolve_widgets(resolve_ref)
                             st.session_state.pop(_SALES_ROW_RESOLVE, None)
                             st.toast(f"{resolve_ref} resolved", icon="✅")
                             st.rerun()
@@ -17696,6 +18076,7 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.button("Cancel", key=f"sales_edit_cancel_{edit_ref}"):
+                        _clear_sales_floor_edit_widgets(edit_ref)
                         st.session_state.pop(_SALES_ROW_EDIT, None)
                         st.rerun()
                 with c2:
@@ -17714,52 +18095,37 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                         try:
                             _sales_cases_update_row(row_id, patch)
                             _invalidate_dashboard_data_cache()
+                            _clear_sales_floor_edit_widgets(edit_ref)
                             st.session_state.pop(_SALES_ROW_EDIT, None)
                             st.toast("Details saved", icon="✅")
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
 
-    assign_ref = st.session_state.get(_SALES_ROW_ASSIGN)
+    assign_ref = st.session_state.get(_SALES_ROW_REASSIGN)
     if assign_ref:
-        row = _fetch_sales_case_row_by_ref(str(assign_ref))
-        if row:
-            engineers = get_engineer_handles()
-            unassigned = "— unassigned —"
-            cur = str(row.get("assigned_to") or "").strip()
-            opts = [unassigned] + engineers
-            default_idx = opts.index(cur) if cur in opts else 0
-            with st.expander(f"Assign engineer · {assign_ref}", expanded=True):
-                eng = st.selectbox(
-                    "Engineer",
-                    opts,
-                    index=default_idx,
-                    key=f"sales_assign_eng_{assign_ref}",
+        cref = str(assign_ref).strip()
+        row = _fetch_sales_case_row_by_ref(cref)
+        if row and _sc_effective_status(row.get("status")) != SC_STATUS_RESOLVED:
+            fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+            field_cats = (
+                get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+            )
+            modal_df = _sales_row_modal_df(df, cref)
+            with st.expander(f"Reassign · {cref}", expanded=True):
+                _render_sales_reassign_editor(
+                    key_prefix="sales_row",
+                    edit_key_prefix="sales_row_reassign",
+                    field_cats=field_cats,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
+                    case_options=[cref],
+                    df=modal_df,
+                    clear_session_keys=(_SALES_ROW_REASSIGN,),
                 )
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Cancel", key=f"sales_assign_cancel_{assign_ref}"):
-                        st.session_state.pop(_SALES_ROW_ASSIGN, None)
-                        st.rerun()
-                with c2:
-                    if st.button(
-                        "Save", key=f"sales_assign_save_{assign_ref}", type="primary"
-                    ):
-                        row_id = str(row.get("id") or "").strip()
-                        patch: dict[str, object] = {}
-                        if eng == unassigned:
-                            patch["assigned_to"] = None
-                        else:
-                            patch["assigned_to"] = eng
-                            _sc_stamp_last_assigned_at(patch)
-                        try:
-                            _sales_cases_update_row(row_id, patch)
-                            _invalidate_dashboard_data_cache()
-                            st.session_state.pop(_SALES_ROW_ASSIGN, None)
-                            st.toast("Engineer updated", icon="✅")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
+                if st.button("Done", key="sales_row_reassign_done"):
+                    st.session_state.pop(_SALES_ROW_REASSIGN, None)
+                    st.rerun()
 
 
 def _render_sales_cases_dashboard() -> None:
@@ -17784,21 +18150,15 @@ def _render_sales_cases_dashboard() -> None:
         st.error("Sign in again — **Operator ID** is required.")
         return
 
-    try:
-        df_tickets = _fetch_tickets()
-    except Exception:
-        df_tickets = pd.DataFrame()
-
     selected_queue = _init_sales_active_queue()
 
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns([1.55, 5.05, 2.3], gap="medium")
+        sb, main, dp = st.columns([1.15, 5.35, 2.5], gap="small")
 
         with sb:
-            _render_sales_sidebar(df=df, df_tickets=df_tickets)
+            _render_sales_sidebar(df=df)
 
         with main:
-            _render_sales_assign_panel()
             cases = _sales_cases_list_for_queue(df, selected_queue)
 
             col_title, col_search = st.columns([3, 1])
@@ -17813,7 +18173,7 @@ def _render_sales_cases_dashboard() -> None:
             with col_search:
                 search_ref = st.text_input(
                     "Search",
-                    placeholder="Search ref",
+                    placeholder="Search case ref",
                     label_visibility="collapsed",
                     key="sales_search",
                 )
@@ -17833,8 +18193,7 @@ def _render_sales_cases_dashboard() -> None:
             _render_sales_floor_modals(df=df)
 
         with dp:
-            with st.container(key="disp_detail_panel"):
-                _render_sales_detail_panel()
+            _render_sales_right_rail()
 
 
 def _dispatch_today_metrics(
@@ -17899,16 +18258,11 @@ def _dispatch_effective_action_status(ticket: dict, *, queue_name: str) -> str:
     """Map DB status + queue context to action-matrix labels."""
     if queue_name == "Unattended":
         return "Unattended"
-    marked = ticket.get("marked_unattended_at")
-    if marked is not None and not (isinstance(marked, float) and pd.isna(marked)):
-        try:
-            if pd.notna(marked):
-                return "Unattended"
-        except Exception:
-            pass
     raw = str(ticket.get("status") or "")
     if raw == "Open":
         return "Needs Review"
+    if raw == "Unattended":
+        return "Unattended"
     return raw
 
 
@@ -17917,6 +18271,29 @@ def _dispatch_prepare_row_selection(ticket_number: str) -> None:
     st.session_state[_DISP_SELECTED_KEY] = tn
     for prefix in ("disp_row", "disp_row_close", "disp_row_resolve"):
         st.session_state[_ticket_selection_session_key(prefix)] = [tn]
+
+
+def _sales_prepare_row_selection(case_ref: str) -> None:
+    cref = str(case_ref).strip()
+    st.session_state[_SALES_SELECTED_KEY] = cref
+    st.session_state[_sc_case_selection_session_key("sales_row")] = [cref]
+
+
+def _sales_row_modal_df(queue_df: pd.DataFrame, case_ref: str) -> pd.DataFrame:
+    """Ensure reassign forms can read the case even after table search filters."""
+    cref = str(case_ref).strip()
+    if not cref:
+        return queue_df
+    if (
+        not queue_df.empty
+        and "case_ref" in queue_df.columns
+        and cref in queue_df["case_ref"].fillna("").astype(str).values
+    ):
+        return queue_df
+    row = _fetch_sales_case_row_by_ref(cref)
+    if row:
+        return pd.DataFrame([row])
+    return queue_df
 
 
 def _dispatch_row_modal_df(queue_df: pd.DataFrame, ticket_number: str) -> pd.DataFrame:
@@ -17940,9 +18317,50 @@ def _dispatch_row_modal_open(ticket_number: str | None, *, ticket_nums: list[str
     tn = str(ticket_number or "").strip()
     if not tn:
         return False
-    if tn in ticket_nums:
-        return True
-    return _fetch_ticket_row(tn) is not None
+    return tn in ticket_nums
+
+
+def _reopen_ticket_to_daily_task(
+    ticket_number: str,
+    *,
+    operator_id: str | None = None,
+    log_action: str = "ReopenedFromUnattended",
+) -> None:
+    """Return a ticket to Daily Task with a fresh assign-day cycle (after unattended/review)."""
+    client = _get_supabase_client()
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    now_iso = _cc_utc_now_iso()
+    op = operator_id or _session_operator_id() or "dashboard-admin"
+    actor = f"@{str(op).lstrip('@')}"
+    updates: dict[str, object] = {
+        "status": STATUS_DAILY_TASK,
+        "updated_at": now_iso,
+        "last_assigned_at": now_iso,
+        "unattended_nudge_sent_at": None,
+        "field_response": None,
+        "field_responded_by": None,
+        "photo_url": None,
+        "responded_at": None,
+    }
+    _cc_execute_ticket_update(client, updates, ticket_number)
+    _cc_ensure_reassign_cleared_response_fields(client, ticket_number)
+    assignee = str(row.get("assigned_to") or "").strip()
+    if assignee:
+        _visits_open_new(client, ticket_number, assignee, visit_start=now_iso)
+    try:
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": str(ticket_number),
+                "member_username": actor,
+                "action_type": log_action,
+                "note": "Reopened to Daily Task — assignment clock reset for a fresh field visit.",
+                "timestamp": now_iso,
+            }
+        ).execute()
+    except Exception:
+        pass
 
 
 def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
@@ -17977,12 +18395,10 @@ def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
                 return
             _move_to_on_hold(ticket_number, operator_id=op)
         elif destination == "Daily task (reopen)":
-            _set_ticket_status(
-                ticket_number,
-                new_status=STATUS_DAILY_TASK,
-                log_action="ReopenedFromUnattended",
-                actor=actor,
-            )
+            if not op:
+                st.toast("Sign in again", icon="⚠️")
+                return
+            _reopen_ticket_to_daily_task(ticket_number, operator_id=op)
         st.toast(f"Moved → {destination}", icon="✅")
         _invalidate_dashboard_data_cache()
         st.rerun()
@@ -18019,7 +18435,7 @@ def _render_dispatch_row_actions(
     status = _dispatch_effective_action_status(ticket, queue_name=queue_name)
     tnum = str(ticket.get("ticket_number") or row_key)
 
-    with st.popover("⋯", use_container_width=False):
+    with st.popover("⋮", use_container_width=False):
         move_options: list[str] = []
         if status in ("Daily Task", "Needs Review", "On Hold"):
             move_options.append("Investigation")
@@ -18092,6 +18508,16 @@ def _render_dispatch_row_actions(
             st.markdown("</div>", unsafe_allow_html=True)
 
 
+_ASSIGN_FIELD_BTN_COLS: tuple[float, float] = (0.88, 0.12)
+
+
+def _assign_field_btn_columns() -> tuple[object, object]:
+    """Wide field + narrow manage button on one horizontal line."""
+    return st.columns(
+        list(_ASSIGN_FIELD_BTN_COLS), gap="small", vertical_alignment="center"
+    )
+
+
 def _render_assign_manage_icon_btn(
     *,
     manage_key: str,
@@ -18100,7 +18526,7 @@ def _render_assign_manage_icon_btn(
 ) -> None:
     st.markdown('<div class="disp-manage-icon">', unsafe_allow_html=True)
     if st.button(
-        "⋯",
+        "⋮",
         key=manage_key,
         help=manage_help,
         use_container_width=False,
@@ -18116,11 +18542,142 @@ def _render_assign_plain_label(label: str) -> None:
     )
 
 
+def _reset_dispatch_assign_form() -> None:
+    """Clear dispatch New ticket fields — call only **before** those widgets render."""
+    st.session_state["qa_ticket_num"] = ""
+    st.session_state["qa_notes"] = ""
+    for k in ("qa_engineer2", "ap_engineer", "ap_category"):
+        st.session_state.pop(k, None)
+
+
+def _schedule_dispatch_assign_form_clear() -> None:
+    st.session_state[_DISP_CLEAR_ASSIGN_KEY] = True
+
+
+def _reset_dispatch_sales_assign_form() -> None:
+    """Clear dispatch New sales case fields — call only **before** those widgets render."""
+    st.session_state["sap_ref"] = ""
+    st.session_state["sap_acc"] = ""
+    st.session_state["sap_notes"] = ""
+    for k in ("sap_eng", "sap_category", "sap_region", "sap_priority"):
+        st.session_state.pop(k, None)
+
+
+def _schedule_dispatch_sales_assign_form_clear() -> None:
+    st.session_state[_DISP_CLEAR_SALES_ASSIGN_KEY] = True
+
+
+def _render_dispatch_case_info_panel(
+    ticket: dict | None,
+) -> None:
+    """Right-rail Case info tab — selected ticket detail + timeline."""
+    with st.container(key="disp_detail_panel"):
+        if not ticket:
+            st.markdown(
+                """
+            <div style="height:180px;display:flex;align-items:center;
+              justify-content:center;color:#2a3a5a;font-size:13px;font-weight:400;
+              text-align:center;padding:0 12px">
+              Select a ticket in the table to view case info
+            </div>""",
+                unsafe_allow_html=True,
+            )
+            return
+        t = ticket
+        st.markdown(
+            f"""
+        <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
+          {t_detail_id(str(t.get('ticket_number') or ''))}
+          <div style="display:flex;align-items:center;gap:7px;margin-top:4px;flex-wrap:wrap">
+            {status_pill(str(t.get('status') or ''))}
+            {t_caption(str(t.get('task_category') or ''))}
+          </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+        eng = str(t.get("assigned_to") or "—")
+        eng2 = str(t.get("assigned_to_2") or "").strip()
+        share = "· shared" if eng2 else "· solo"
+        st.markdown(
+            t_section_label(
+                "Engineer",
+                spacing=".06em",
+                margin="margin:10px 0 5px",
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<span style="font-size:13px;font-weight:400;color:#8a9ac0;'
+            f'line-height:1.5">'
+            f'{html.escape(eng)}{(" + " + html.escape(eng2)) if eng2 else ""} '
+            f'{share}</span>',
+            unsafe_allow_html=True,
+        )
+        if t.get("additional_info"):
+            st.markdown(
+                t_section_label(
+                    "Notes",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""
+            <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
+              background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
+              {html.escape(str(t.get('additional_info') or ''))}
+            </div>""",
+                unsafe_allow_html=True,
+            )
+        _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
+        st.markdown(
+            t_section_label(
+                "Timeline",
+                spacing=".06em",
+                margin="margin:10px 0 5px",
+            ),
+            unsafe_allow_html=True,
+        )
+        logs_df = _fetch_attendance(
+            ticket_number=str(t.get("ticket_number") or ""),
+            limit=6,
+        )
+        logs = logs_df.to_dict("records") if not logs_df.empty else []
+        if not logs:
+            st.caption("No log entries yet.")
+        for i, log in enumerate(logs):
+            render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
+
+
+def _render_dispatch_right_rail(
+    *,
+    queue_df: pd.DataFrame,
+    picked: str | None,
+    on_submit: Callable[[str, str, str, str, str], None],
+) -> None:
+    """Right column — Ticket assign | Case info tabs (mockup layout)."""
+    ticket = None
+    if picked:
+        match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
+        if not match.empty:
+            ticket = _dispatch_row_dict(match.iloc[0])
+
+    with st.container(key="disp_right_rail"):
+        tab_assign, tab_info = st.tabs(["Ticket assign", "Case info"])
+        with tab_assign:
+            render_assign_panel(on_submit=on_submit, layout="rail")
+        with tab_info:
+            _render_dispatch_case_info_panel(ticket)
+
+
 def render_assign_panel(
     *,
     on_submit: Callable[[str, str, str, str, str], None],
+    layout: str = "bar",
 ) -> None:
-    """NEW TICKET panel — Assign + Telegram or Queue only (mockup layout)."""
+    """Assign panel — ``bar`` = horizontal (legacy), ``rail`` = right sidebar stack."""
     engineers = get_engineer_handles()
     categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     none_label = "- none -"
@@ -18128,24 +18685,20 @@ def render_assign_panel(
         st.session_state.get(_DISP_ASSIGN_MODE_KEY, _DISP_ASSIGN_MODE_TELEGRAM)
     )
     queue_only = mode == _DISP_ASSIGN_MODE_QUEUE
+    rail = layout == "rail"
+
+    if st.session_state.pop(_DISP_CLEAR_ASSIGN_KEY, False):
+        _reset_dispatch_assign_form()
 
     with st.container(key="disp_assign_panel"):
-        st.markdown(
-            t_section_label("New ticket", spacing=".06em", margin="margin:0 0 4px"),
-            unsafe_allow_html=True,
-        )
+        if not rail:
+            st.markdown(
+                t_section_label("New ticket", spacing=".06em", margin="margin:0 0 4px"),
+                unsafe_allow_html=True,
+            )
         st.markdown('<div class="disp-mode-toggle sales-mode-toggle">', unsafe_allow_html=True)
         t1, t2 = st.columns(2, gap="small")
         with t1:
-            if st.button(
-                "☰ Queue only",
-                key="disp_mode_queue",
-                use_container_width=True,
-                type="primary" if queue_only else "secondary",
-            ):
-                st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_QUEUE
-                st.rerun()
-        with t2:
             if st.button(
                 "✈ Assign + Telegram",
                 key="disp_mode_telegram",
@@ -18154,8 +18707,106 @@ def render_assign_panel(
             ):
                 st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_TELEGRAM
                 st.rerun()
+        with t2:
+            if st.button(
+                "☰ Queue only",
+                key="disp_mode_queue",
+                use_container_width=True,
+                type="primary" if queue_only else "secondary",
+            ):
+                st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_QUEUE
+                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            hint = (
+                "Adds ticket to Daily Task — no engineer, no Telegram."
+                if queue_only
+                else "Creates ticket, assigns engineer, posts Telegram immediately."
+            )
+            st.markdown(
+                f'<p class="disp-mode-caption">{html.escape(hint)}</p>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div class="disp-assign-header-spacer"></div>', unsafe_allow_html=True)
+
+        if rail:
+            _render_assign_plain_label("Ticket #")
+            ticket_num = st.text_input(
+                "Ticket #",
+                placeholder="9 or 16 digits",
+                key="qa_ticket_num",
+                label_visibility="collapsed",
+            )
+            engineer = engineer2 = "—"
+            if not queue_only:
+                _render_assign_plain_label("Engineer")
+                eng_row, eng_mgr = _assign_field_btn_columns()
+                with eng_row:
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="ap_engineer",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="ap_engineer",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
+                with eng_mgr:
+                    _render_assign_manage_icon_btn(
+                        manage_key="btn_manage_eng",
+                        manage_help="Manage engineers",
+                        on_manage=manage_engineers_dialog,
+                    )
+                _render_assign_plain_label("Engineer 2 (optional)")
+                engineer2 = st.selectbox(
+                    "Engineer 2",
+                    [none_label] + list(engineers),
+                    key="qa_engineer2",
+                    label_visibility="collapsed",
+                )
+            _render_assign_plain_label("Category")
+            cat_row, cat_mgr = _assign_field_btn_columns()
+            with cat_row:
+                _render_category_selectbox(
+                    "Category",
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
+                    key="ap_category",
+                    label_visibility="collapsed",
+                )
+                category = st.session_state.get("ap_category")
+            with cat_mgr:
+                _render_assign_manage_icon_btn(
+                    manage_key="btn_manage_cat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
+            _render_assign_plain_label("Notes")
+            notes = st.text_area(
+                "Notes",
+                placeholder="Optional notes…",
+                key="qa_notes",
+                height=72,
+                label_visibility="collapsed",
+            )
+            submit_label = "Add to queue ↗" if queue_only else "Assign + Telegram ↗"
+            st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
+            if st.button(submit_label, key="qa_submit", use_container_width=True):
+                if queue_only:
+                    _handle_dispatch_queue_only_submit(ticket_num, category, notes)
+                else:
+                    on_submit(ticket_num, engineer, engineer2, category, notes)
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
 
         if queue_only:
             r1a, = st.columns([1], gap="small")
@@ -18181,16 +18832,25 @@ def render_assign_panel(
                 )
             with r1b:
                 _render_assign_plain_label("Engineer")
-                eng_sel, eng_mgr = st.columns(
-                    [1, 0.22], gap="small", vertical_alignment="top"
-                )
+                eng_sel, eng_mgr = _assign_field_btn_columns()
                 with eng_sel:
-                    engineer = st.selectbox(
-                        "Engineer",
-                        engineers or ["—"],
-                        key="ap_engineer",
-                        label_visibility="collapsed",
-                    )
+                    if engineers:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=engineers,
+                            index=None,
+                            placeholder="Select engineer",
+                            key="ap_engineer",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        engineer = st.selectbox(
+                            "Engineer",
+                            options=["—"],
+                            key="ap_engineer",
+                            disabled=True,
+                            label_visibility="collapsed",
+                        )
                 with eng_mgr:
                     _render_assign_manage_icon_btn(
                         manage_key="btn_manage_eng",
@@ -18209,16 +18869,15 @@ def render_assign_panel(
         r2a, r2b, r2c = st.columns([1.2, 2.35, 1.05], gap="medium")
         with r2a:
             _render_assign_plain_label("Category")
-            cat_sel, cat_mgr = st.columns(
-                [1, 0.22], gap="small", vertical_alignment="top"
-            )
+            cat_sel, cat_mgr = _assign_field_btn_columns()
             with cat_sel:
-                category = st.selectbox(
+                _render_category_selectbox(
                     "Category",
-                    categories or ["—"],
+                    categories or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES),
                     key="ap_category",
                     label_visibility="collapsed",
                 )
+                category = st.session_state.get("ap_category")
             with cat_mgr:
                 _render_assign_manage_icon_btn(
                     manage_key="btn_manage_cat",
@@ -18227,10 +18886,11 @@ def render_assign_panel(
                 )
         with r2b:
             _render_assign_plain_label("Notes")
-            notes = st.text_input(
+            notes = st.text_area(
                 "Notes",
                 placeholder="Optional notes…",
                 key="qa_notes",
+                height=72,
                 label_visibility="collapsed",
             )
         with r2c:
@@ -18275,8 +18935,7 @@ def _handle_dispatch_queue_only_submit(
             operator_id=op,
         )
         _invalidate_dashboard_data_cache()
-        for k in ("qa_ticket_num", "qa_notes", "ap_category"):
-            st.session_state.pop(k, None)
+        _schedule_dispatch_assign_form_clear()
         st.toast(summary.replace("**", ""), icon="✅")
         st.rerun()
     except ValueError as exc:
@@ -18302,7 +18961,7 @@ def _handle_dispatch_quick_assign_bar(
     if not re.fullmatch(r"\d{9}|\d{16}", tid):
         st.toast("Ticket # must be 9 or 16 digits", icon="⚠️")
         return
-    if not engineer or engineer == "—" or not category or category == "—":
+    if not engineer or engineer in ("—", "- none -") or not category or category == "—":
         st.toast("Engineer and category are required", icon="⚠️")
         return
     handle2 = None if engineer2 in ("—", "- none -") else engineer2
@@ -18327,6 +18986,7 @@ def _render_dispatch_row_modals(
     cat_names: list[str],
 ) -> None:
     """Inline editors opened from per-row action menus."""
+    _apply_deferred_widget_clears()
     edit_t = st.session_state.get(_DISP_ROW_EDIT)
     if _dispatch_row_modal_open(edit_t, ticket_nums=ticket_nums):
         row = _fetch_ticket_row(str(edit_t))
@@ -18342,6 +19002,7 @@ def _render_dispatch_row_modals(
                         fe_names=fe_names,
                         fe_missing=fe_missing,
                         ticket_options=[str(edit_t)],
+                        clear_session_keys=(_DISP_ROW_EDIT,),
                     )
                     if st.button("Done", key="disp_row_edit_done"):
                         st.session_state.pop(_DISP_ROW_EDIT, None)
@@ -18361,6 +19022,7 @@ def _render_dispatch_row_modals(
                     fe_names=fe_names,
                     fe_missing=fe_missing,
                     ticket_options=[str(reassign_t)],
+                    clear_session_keys=(_DISP_ROW_REASSIGN,),
                 )
                 if st.button("Done", key="disp_row_reassign_done"):
                     st.session_state.pop(_DISP_ROW_REASSIGN, None)
@@ -18507,11 +19169,11 @@ def _dispatch_quick_assign_submit(
         except Exception as exc:
             st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
             _invalidate_dashboard_data_cache()
+            _schedule_dispatch_assign_form_clear()
             st.rerun()
             return
         _invalidate_dashboard_data_cache()
-        for k in ("qa_ticket_num", "qa_engineer2", "qa_notes", "ap_engineer", "ap_category"):
-            st.session_state.pop(k, None)
+        _schedule_dispatch_assign_form_clear()
         st.success(f"{summary} Posted to Telegram.")
         st.rerun()
     except Exception as exc:
@@ -18581,48 +19243,36 @@ def _render_dispatch_csm_dashboard(
     }
 
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns([1.55, 5.05, 2.3], gap="medium")
-
+        sb, main, dp = st.columns([1.15, 5.35, 2.5], gap="small")
 
         with sb:
-            st.markdown(t_section_label("Today"), unsafe_allow_html=True)
-            m1, m2 = st.columns(2)
-            m3, m4 = st.columns(2)
-            with st.container(key="disp_metric_assigned"):
-                m1.metric("Assigned", assigned_today)
-            with st.container(key="disp_metric_responded"):
-                m2.metric("Responded", responded_today)
-            with st.container(key="disp_metric_daily"):
-                m3.metric("Daily task", daily_task_count)
-            with st.container(key="disp_metric_unattended"):
-                m4.metric("Unattended", unattended_count)
+            with st.container(key="disp_sidebar_inner"):
+                st.markdown(t_section_label("Today"), unsafe_allow_html=True)
+                render_sidebar_today_grid(
+                    (
+                        ("Assigned", assigned_today, "#3b82f6"),
+                        ("Responded", responded_today, "#22c55e"),
+                        ("Daily task", daily_task_count, "#3b82f6"),
+                        ("Unattended", unattended_count, "#ef4444"),
+                    )
+                )
 
-            st.markdown(
-                t_section_label(
-                    "Queues", margin="margin-top:16px;margin-bottom:10px"
-                ),
-                unsafe_allow_html=True,
-            )
-            queue_options = list(QUEUE_ORDER)
-            cur = st.session_state.get(aq_key, "Daily Task")
-            if cur not in queue_options:
-                cur = "Daily Task"
-            with st.container(key="disp_sidebar_queues_wrap"):
+                st.markdown(
+                    t_section_label(
+                        "Queues", margin="margin-top:14px;margin-bottom:8px"
+                    ),
+                    unsafe_allow_html=True,
+                )
+                queue_options = list(QUEUE_ORDER)
+                cur = st.session_state.get(aq_key, "Daily Task")
+                if cur not in queue_options:
+                    cur = "Daily Task"
                 selected_queue = render_queue_list(
                     selected=cur,
                     counts=queue_counts,
                     session_key=aq_key,
                 )
-            st.session_state[aq_key] = selected_queue
-
-            st.markdown(
-                t_section_label(
-                    "Engineers", margin="margin-top:12px;margin-bottom:7px"
-                ),
-                unsafe_allow_html=True,
-            )
-            for eng in _dispatch_engineer_presence(df):
-                render_engineer_row(eng)
+                st.session_state[aq_key] = selected_queue
 
         mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
         queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
@@ -18635,19 +19285,20 @@ def _render_dispatch_csm_dashboard(
                 )
             ].copy()
         ticket_rows = [_dispatch_row_dict(r) for _, r in queue_df.iterrows()]
-        picked: str | None = st.session_state.get(_DISP_SELECTED_KEY)
+        ticket_nums = [
+            str(t.get("ticket_number") or "")
+            for t in ticket_rows
+            if t.get("ticket_number")
+        ]
+        _sync_dispatch_queue_view_state(
+            selected_queue=selected_queue,
+            ticket_nums=ticket_nums,
+        )
         is_admin = _is_dashboard_admin()
         fe_names, fe_missing = _try_fetch_field_engineer_usernames()
         cat_names = get_task_categories() or _try_fetch_task_categories()[0]
 
         with main:
-            render_assign_panel(
-                on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
-                    tn, eng, eng2, cat, notes,
-                    fe_names=fe_names, fe_missing=fe_missing,
-                ),
-            )
-
             col_title, col_search = st.columns([3, 1])
             with col_title:
                 n = len(ticket_rows)
@@ -18662,17 +19313,23 @@ def _render_dispatch_csm_dashboard(
                     unsafe_allow_html=True,
                 )
                 if eng_filter:
-                    st.markdown(
-                        f'<div style="font-size:11px;color:#e2e8f8;background:#0d1e3a;'
-                        f'border:0.5px solid #1a3460;padding:2px 6px;border-radius:3px;'
-                        f'display:inline-block;margin-top:4px">● Engineer: {html.escape(str(eng_filter))}'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
+                    fc1, fc2 = st.columns([4, 1], gap="small")
+                    with fc1:
+                        st.markdown(
+                            f'<div style="font-size:11px;color:#e2e8f8;background:#0d1e3a;'
+                            f'border:0.5px solid #1a3460;padding:2px 6px;border-radius:3px;'
+                            f'display:inline-block;margin-top:4px">● Engineer: {html.escape(str(eng_filter))}'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                    with fc2:
+                        if st.button("✕", key="disp_clear_eng_filter", help="Clear engineer filter"):
+                            st.session_state.pop(_DISP_ENGINEER_FILTER_KEY, None)
+                            st.rerun()
             with col_search:
                 search_num = st.text_input(
                     "Search",
-                    placeholder="Search #",
+                    placeholder="Search ticket #",
                     label_visibility="collapsed",
                     key="disp_ticket_search",
                 )
@@ -18698,6 +19355,7 @@ def _render_dispatch_csm_dashboard(
             ticket_nums = [
                 str(t.get("ticket_number") or "") for t in ticket_rows if t.get("ticket_number")
             ]
+            sel = st.session_state.get(_DISP_SELECTED_KEY)
             picked = sel if sel and sel in ticket_nums else None
 
             _render_dispatch_row_modals(
@@ -18710,89 +19368,14 @@ def _render_dispatch_csm_dashboard(
             )
 
         with dp:
-            with st.container(key="disp_detail_panel"):
-                ticket = None
-                if picked:
-                    match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
-                    if not match.empty:
-                        ticket = _dispatch_row_dict(match.iloc[0])
-
-                if not ticket:
-                    st.markdown(
-                        """
-                    <div style="height:200px;display:flex;align-items:center;
-                      justify-content:center;color:#2a3a5a;font-size:13px;font-weight:400">
-                      Select a ticket to view details
-                    </div>""",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    t = ticket
-                    st.markdown(
-                        f"""
-                    <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
-                      {t_detail_id(str(t.get('ticket_number') or ''))}
-                      <div style="display:flex;align-items:center;gap:7px;margin-top:4px">
-                        {status_pill(str(t.get('status') or ''))}
-                        {t_caption(str(t.get('task_category') or ''))}
-                      </div>
-                    </div>
-                    """,
-                        unsafe_allow_html=True,
-                    )
-                    eng = str(t.get("assigned_to") or "—")
-                    eng2 = str(t.get("assigned_to_2") or "").strip()
-                    share = "· shared" if eng2 else "· solo"
-                    st.markdown(
-                        t_section_label(
-                            "Engineer",
-                            spacing=".06em",
-                            margin="margin:10px 0 5px",
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f'<span style="font-size:13px;font-weight:400;color:#8a9ac0;'
-                        f'line-height:1.5">'
-                        f'{html.escape(eng)}{(" + " + html.escape(eng2)) if eng2 else ""} '
-                        f'{share}</span>',
-                        unsafe_allow_html=True,
-                    )
-                    if t.get("additional_info"):
-                        st.markdown(
-                            t_section_label(
-                                "Notes",
-                                spacing=".06em",
-                                margin="margin:10px 0 5px",
-                            ),
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f"""
-                        <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
-                          background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
-                          {html.escape(str(t.get('additional_info') or ''))}
-                        </div>""",
-                            unsafe_allow_html=True,
-                        )
-                    _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
-                    st.markdown(
-                        t_section_label(
-                            "Timeline",
-                            spacing=".06em",
-                            margin="margin:10px 0 5px",
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                    logs_df = _fetch_attendance(
-                        ticket_number=str(t.get("ticket_number") or ""),
-                        limit=6,
-                    )
-                    logs = logs_df.to_dict("records") if not logs_df.empty else []
-                    if not logs:
-                        st.caption("No log entries yet.")
-                    for i, log in enumerate(logs):
-                        render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
+            _render_dispatch_right_rail(
+                queue_df=queue_df,
+                picked=picked,
+                on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
+                    tn, eng, eng2, cat, notes,
+                    fe_names=fe_names, fe_missing=fe_missing,
+                ),
+            )
 
 
 def _render_dashboard(
@@ -18924,437 +19507,21 @@ def _render_dashboard(
             "Run migration `20260625_rename_no_answer_to_on_hold.sql` or move them manually."
         )
 
+    _sync_dashboard_nav_state(
+        total_pending=total_pending,
+        total_on_hold=total_on_hold,
+        total_open=total_open,
+        total_investigation=total_investigation,
+        total_unattended=total_unattended,
+        total_completed=total_completed,
+    )
+
     _render_dispatch_csm_dashboard(
         df=df,
         df_all=df_all,
         masks=masks,
         lookback_days=lookback_days,
     )
-    return
-
-    (
-        pending_label,
-        open_label,
-        on_hold_label,
-        investigation_label,
-        completed_label,
-        unattended_label,
-    ) = _sync_dashboard_nav_state(
-        total_pending=total_pending,
-        total_on_hold=total_on_hold,
-        total_open=total_open,
-        total_investigation=total_investigation,
-        total_unattended=total_unattended,
-        total_completed=total_completed,
-    )
-
-    _render_queue_summary_metrics(
-        total_pending=total_pending,
-        total_on_hold=total_on_hold,
-        total_open=total_open,
-        total_investigation=total_investigation,
-        total_unattended=total_unattended,
-        total_completed=total_completed,
-        pending_label=pending_label,
-        open_label=open_label,
-        on_hold_label=on_hold_label,
-        investigation_label=investigation_label,
-        completed_label=completed_label,
-        unattended_label=unattended_label,
-        total_in_view=total_in_view,
-        total_in_tabs=total_in_tabs,
-        total_other=total_other,
-    )
-    queue_view = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
-
-    if queue_view == STATUS_DAILY_TASK:
-        st.markdown(f"##### {STATUS_DAILY_TASK} — Waiting on Field")
-        if df.empty:
-            st.info(f"No tickets in the last {lookback_days} {day_word}.")
-        else:
-            pend = df[pending_mask].copy()
-            if pend.empty:
-                st.info(f"No pending tickets in the last {lookback_days} {day_word}.")
-            else:
-                pend_show = tuple(
-                    c
-                    for c in (
-                        "ticket_number",
-                        "assigned_to",
-                        "task_category",
-                        "additional_info",
-                        "created_at",
-                        "last_assigned_at",
-                    )
-                    if c in pend.columns
-                )
-                _render_ticket_toolbar_then_table(
-                    pend,
-                    key_prefix="assigned",
-                    cols=pend_show,
-                    status_actions=(
-                        (
-                            "Under Investigation",
-                            STATUS_UNDER_INVESTIGATION,
-                            "MovedToInvestigation",
-                        ),
-                        ("On Hold", STATUS_ON_HOLD, "OnHold"),
-                    ),
-                    allow_delete=True,
-                    allow_edit_assignment=True,
-                    allow_manual_field_response=_is_dashboard_admin(),
-                    allow_reassign=_is_dashboard_admin(),
-                    allow_admin_close=_is_dashboard_admin(),
-                )
-
-                if _is_dashboard_admin():
-                    mismatch = _fetch_pending_with_response_mismatch()
-                    if mismatch:
-                        shown = ", ".join(mismatch[:8])
-                        extra = f" (+{len(mismatch) - 8} more)" if len(mismatch) > 8 else ""
-                        st.warning(
-                            "Daily Task tickets with a **current** field reply not reflected in "
-                            f"status (bot may have failed): {shown}{extra}. Use **Record response**, "
-                            "**Reassign** for a fresh visit, or check **Open**."
-                        )
-
-                if _is_dashboard_admin() and st.session_state.get(
-                    _reassign_session_keys("assigned")["show"]
-                ):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_reassign_editor(
-                        from_status=STATUS_DAILY_TASK,
-                        key_prefix="assigned",
-                        edit_key_prefix="assigned",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(pend),
-                    )
-
-                if st.session_state.get(
-                    _assignment_edit_session_keys("assigned")["show"]
-                ):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_assignment_editor(
-                        required_status=STATUS_DAILY_TASK,
-                        key_prefix="assigned",
-                        edit_key_prefix="assigned",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(pend),
-                    )
-
-                if _is_dashboard_admin() and st.session_state.get(
-                    _manual_field_response_session_keys("assigned")["show"]
-                ):
-                    _render_manual_field_response_editor(
-                        key_prefix="assigned",
-                        edit_key_prefix="assigned",
-                        ticket_options=_ticket_options_for_admin(pend),
-                        allowed_statuses=(STATUS_DAILY_TASK,),
-                        save_label="Save → Open",
-                    )
-
-                stale_col = (
-                    "last_assigned_at"
-                    if "last_assigned_at" in pend.columns
-                    else ("created_at" if "created_at" in pend.columns else None)
-                )
-                if stale_col:
-                    pend["_stale_ts"] = _parse_ts(pend[stale_col])
-                    now_utc = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")
-                    if pend["_stale_ts"].notna().any():
-                        stale_ids = pend.loc[
-                            pend["_stale_ts"].notna()
-                            & ((now_utc - pend["_stale_ts"]) > pd.Timedelta(hours=24)),
-                            "ticket_number",
-                        ].astype(str).tolist()
-                        if stale_ids:
-                            st.caption(
-                                "Stale (>24h since assign, no response): "
-                                + ", ".join(stale_ids[:8])
-                                + (
-                                    f" (+{len(stale_ids) - 8} more)"
-                                    if len(stale_ids) > 8
-                                    else ""
-                                )
-                            )
-
-    elif queue_view == STATUS_ON_HOLD:
-        st.markdown("##### On Hold — Admin Chase Queue")
-        if df.empty:
-            st.info(f"No tickets in the last {lookback_days} {day_word}.")
-        else:
-            na_df = df[on_hold_mask].copy()
-            if na_df.empty:
-                st.info(f"No **On Hold** tickets in the last {lookback_days} {day_word}.")
-            else:
-                na_show = tuple(
-                    c
-                    for c in (
-                        "ticket_number",
-                        "assigned_to",
-                        "task_category",
-                        "additional_info",
-                        "last_assigned_at",
-                        "created_at",
-                    )
-                    if c in na_df.columns
-                )
-                _render_ticket_toolbar_then_table(
-                    na_df,
-                    key_prefix="on_hold",
-                    cols=na_show,
-                    status_actions=(
-                        ("Send to Needs Review", "Open", "BackToOpenFromOnHold"),
-                        (
-                            "Under Investigation",
-                            STATUS_UNDER_INVESTIGATION,
-                            "MovedToInvestigation",
-                        ),
-                    ),
-                    allow_delete=True,
-                    allow_edit_assignment=True,
-                    allow_manual_field_response=_is_dashboard_admin(),
-                    allow_reassign=_is_dashboard_admin(),
-                    allow_admin_close=_is_dashboard_admin(),
-                )
-                if _is_dashboard_admin() and st.session_state.get(
-                    _reassign_session_keys("on_hold")["show"]
-                ):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_reassign_editor(
-                        from_status=STATUS_ON_HOLD,
-                        key_prefix="on_hold",
-                        edit_key_prefix="on_hold",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(na_df),
-                    )
-                if st.session_state.get(
-                    _assignment_edit_session_keys("on_hold")["show"]
-                ):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_assignment_editor(
-                        required_status=STATUS_ON_HOLD,
-                        key_prefix="on_hold",
-                        edit_key_prefix="on_hold",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(na_df),
-                    )
-                if _is_dashboard_admin() and st.session_state.get(
-                    _manual_field_response_session_keys("on_hold")["show"]
-                ):
-                    _render_manual_field_response_editor(
-                        key_prefix="on_hold",
-                        edit_key_prefix="on_hold",
-                        ticket_options=_ticket_options_for_admin(na_df),
-                        allowed_statuses=(STATUS_ON_HOLD,),
-                        save_label="Save → Open",
-                    )
-
-    elif queue_view == "Unattended":
-        st.markdown("##### Unattended — Permanent Record (No Same-Day Field Response)")
-        if df.empty:
-            st.info(f"No tickets in the last {lookback_days} {day_word}.")
-        else:
-            unat = df[unattended_mask].copy()
-            if unat.empty:
-                st.info(
-                    "No **Unattended** tickets in this time window. "
-                    "When an engineer does not reply before assign-day cutoff, the ticket is "
-                    "marked unattended permanently and moved to **Needs Review** for admin."
-                )
-            else:
-                _render_ticket_toolbar_then_table(
-                    unat,
-                    key_prefix="unattended",
-                    cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("status", "marked_unattended_at", "additional_info", "unattended_nudge_sent_at"),
-                    caption=(
-                        "Permanent unattended count — stays even if status changes. "
-                        "New auto-unattended tickets appear in **Needs Review** for admin action."
-                    ),
-                    status_actions=(
-                        ("Send to Daily Task", STATUS_DAILY_TASK, "ReopenedFromUnattended"),
-                    ),
-                    allow_delete=True,
-                )
-
-    elif queue_view == "Open":
-        st.markdown("##### Open — Needs Your Review")
-        if df.empty:
-            st.info(f"No tickets in the last {lookback_days} {day_word}.")
-        else:
-            open_df = df[open_mask].copy()
-            if open_df.empty:
-                st.info(f"No tickets awaiting admin review in the last {lookback_days} {day_word}.")
-            else:
-                _render_ticket_toolbar_then_table(
-                    open_df,
-                    key_prefix="open",
-                    cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("outcome_category", "additional_info", "created_at"),
-                    status_actions=(
-                        ("Mark Resolved", STATUS_RESOLVED, "Resolved"),
-                        (
-                            "Under Investigation",
-                            STATUS_UNDER_INVESTIGATION,
-                            "MovedToInvestigation",
-                        ),
-                        ("On Hold", STATUS_ON_HOLD, "OnHold"),
-                    ),
-                    allow_delete=True,
-                    allow_edit_assignment=True,
-                    allow_manual_field_response=_is_dashboard_admin(),
-                    allow_reassign=True,
-                    allow_mark_follow_up=True,
-                    allow_admin_close=_is_dashboard_admin(),
-                )
-
-                if _is_dashboard_admin() and st.session_state.get(
-                    _manual_field_response_session_keys("open")["show"]
-                ):
-                    _render_manual_field_response_editor(
-                        key_prefix="open",
-                        edit_key_prefix="open",
-                        ticket_options=_ticket_options_for_admin(open_df),
-                        allowed_statuses=("Open",),
-                        save_label="Save response",
-                    )
-
-                if st.session_state.get(
-                    _assignment_edit_session_keys("open")["show"]
-                ):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_assignment_editor(
-                        required_status="Open",
-                        key_prefix="open",
-                        edit_key_prefix="open",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(open_df),
-                    )
-
-                if st.session_state.get(_reassign_session_keys("open")["show"]):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_reassign_editor(
-                        from_status="Open",
-                        key_prefix="open",
-                        edit_key_prefix="open",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(open_df),
-                    )
-
-                with st.expander("Photo gallery", expanded=total_open <= 3):
-                    _render_field_photos_section(open_df)
-
-    elif queue_view == STATUS_UNDER_INVESTIGATION:
-        st.markdown("##### Under Investigation")
-        if df.empty:
-            st.info(f"No tickets in the last {lookback_days} {day_word}.")
-        else:
-            inv_df = df[investigation_mask].copy()
-            if inv_df.empty:
-                st.info(
-                    f"No tickets under investigation in the last {lookback_days} {day_word}. "
-                    "Move tickets here from **Needs Review** via **Under Investigation** or **Follow-up**."
-                )
-            else:
-                st.caption(
-                    "**Follow-up** cases (● in the Follow-up column) stay pinned on top. "
-                    "Other **Under Investigation** tickets have no ●. Search by ticket # if needed."
-                )
-                inv_cols = list(
-                    _TICKET_QUEUE_TABLE_COLS + ("additional_info", "created_at")
-                )
-                if "follow_up_note" in inv_df.columns:
-                    inv_cols.extend(["follow_up_at", "follow_up_note"])
-                _render_ticket_toolbar_then_table(
-                    inv_df,
-                    key_prefix="investigation",
-                    cols=tuple(dict.fromkeys(c for c in inv_cols if c in inv_df.columns)),
-                    highlight_follow_up=True,
-                    caption=None,
-                    status_actions=(
-                        ("Back to Open", "Open", "BackToOpenFromInvestigation"),
-                        ("Mark Resolved", STATUS_RESOLVED, "Resolved"),
-                        ("On Hold", STATUS_ON_HOLD, "OnHold"),
-                    ),
-                    allow_delete=True,
-                    allow_edit_assignment=True,
-                    allow_reassign=True,
-                    allow_admin_close=_is_dashboard_admin(),
-                )
-
-                if st.session_state.get(
-                    _assignment_edit_session_keys("investigation")["show"]
-                ):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_assignment_editor(
-                        required_status=STATUS_UNDER_INVESTIGATION,
-                        key_prefix="investigation",
-                        edit_key_prefix="investigation",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(inv_df),
-                    )
-
-                if st.session_state.get(_reassign_session_keys("investigation")["show"]):
-                    cat_names, _cat_missing = _try_fetch_task_categories()
-                    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-                    _render_reassign_editor(
-                        from_status=STATUS_UNDER_INVESTIGATION,
-                        key_prefix="investigation",
-                        edit_key_prefix="investigation",
-                        cat_names=cat_names,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        ticket_options=_ticket_options_for_admin(inv_df),
-                    )
-
-                with st.expander("Photo gallery", expanded=total_investigation <= 3):
-                    _render_field_photos_section(inv_df)
-
-    elif queue_view == STATUS_RESOLVED:
-        st.markdown(f"##### {STATUS_RESOLVED}")
-        if df.empty:
-            st.info(f"No tickets in the last {lookback_days} {day_word}.")
-        else:
-            done = df[completed_mask].copy()
-            if done.empty:
-                st.info(f"No resolved tickets in the last {lookback_days} {day_word}.")
-            else:
-                _render_ticket_toolbar_then_table(
-                    done,
-                    key_prefix="completed",
-                    cols=_TICKET_QUEUE_TABLE_COLS
-                    + ("outcome_category", "additional_info", "created_at"),
-                    caption="Send back to **Open** for more field work.",
-                    status_actions=(
-                        ("Send back to Open", "Open", "Reopened"),
-                    ),
-                    allow_delete=True,
-                )
-
-                with st.expander("Photo gallery", expanded=False):
-                    _render_field_photos_section(done)
 
 
 def _render_field_photos_section(done: pd.DataFrame) -> None:
@@ -21240,89 +21407,90 @@ def _render_missing_table_help(table: str) -> None:
 
 def _render_attendance_tab(*, lookback_days: int) -> None:
     """Attendance log table; optional filters; timeline in expander."""
-    range_start, range_end = _get_dash_range()
-    st.caption(
-        f"Attendance history · {_format_dash_range_caption() or 'sidebar time range'}"
-    )
-
-    f1, f2 = st.columns(2)
-    ticket_clean = f1.text_input(
-        "Ticket #",
-        placeholder="optional",
-        key="att_ticket_q",
-    ).strip()
-    member_clean = f2.text_input(
-        "Member",
-        placeholder="@username",
-        key="att_member_q",
-    ).strip()
-
-    try:
-        logs = _fetch_attendance(
-            ticket_number=ticket_clean if ticket_clean else None,
-            member_query=member_clean if member_clean else None,
-            since_utc=range_start,
-            until_utc=range_end,
-            limit=2000,
+    with st.container(key="disp_log_body"):
+        range_start, range_end = _get_dash_range()
+        st.caption(
+            f"Attendance history · {_format_dash_range_caption() or 'sidebar time range'}"
         )
-    except _TableMissingError as missing:
-        _render_missing_table_help(missing.table)
-        return
 
-    if logs.empty:
-        st.info("No log entries for this time window. Widen **Time range** or clear filters.")
-        return
+        f1, f2 = st.columns(2)
+        ticket_clean = f1.text_input(
+            "Ticket #",
+            placeholder="optional",
+            key="att_ticket_q",
+        ).strip()
+        member_clean = f2.text_input(
+            "Member",
+            placeholder="@username",
+            key="att_member_q",
+        ).strip()
 
-    show_cols = [
-        c
-        for c in (
-            "timestamp",
-            "ticket_number",
-            "member_username",
-            "action_type",
-            "note",
-            "photo_url",
+        try:
+            logs = _fetch_attendance(
+                ticket_number=ticket_clean if ticket_clean else None,
+                member_query=member_clean if member_clean else None,
+                since_utc=range_start,
+                until_utc=range_end,
+                limit=2000,
+            )
+        except _TableMissingError as missing:
+            _render_missing_table_help(missing.table)
+            return
+
+        if logs.empty:
+            st.info("No log entries for this time window. Widen **Time range** or clear filters.")
+            return
+
+        show_cols = [
+            c
+            for c in (
+                "timestamp",
+                "ticket_number",
+                "member_username",
+                "action_type",
+                "note",
+                "photo_url",
+            )
+            if c in logs.columns
+        ]
+        table = _format_local(logs[show_cols])
+        st.dataframe(
+            table,
+            use_container_width=True,
+            hide_index=True,
+            column_config=_dataframe_column_config(table),
         )
-        if c in logs.columns
-    ]
-    table = _format_local(logs[show_cols])
-    st.dataframe(
-        table,
-        use_container_width=True,
-        hide_index=True,
-        column_config=_dataframe_column_config(table),
-    )
 
-    with st.expander("Timeline (detail cards)", expanded=False):
-        for _, row in logs.iterrows():
-            member = row.get("member_username") or "unknown"
-            action = row.get("action_type") or "?"
-            tid = row.get("ticket_number") or "—"
-            when_local = ""
-            ts_raw = row.get("timestamp")
-            if pd.notna(ts_raw):
-                try:
-                    when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                except Exception:
-                    when_local = str(ts_raw)
-
-            with st.container(border=True):
-                st.markdown(
-                    f"**{member}** · `{action}` · ticket `{tid}` · "
-                    f"{when_local} {LOCAL_TZ_LABEL}"
-                )
-                note = row.get("note")
-                if isinstance(note, str) and note.strip():
-                    st.write(note)
-                photo = row.get("photo_url")
-                if isinstance(photo, str) and photo.startswith("http"):
+        with st.expander("Timeline (detail cards)", expanded=False):
+            for _, row in logs.iterrows():
+                member = row.get("member_username") or "unknown"
+                action = row.get("action_type") or "?"
+                tid = row.get("ticket_number") or "—"
+                when_local = ""
+                ts_raw = row.get("timestamp")
+                if pd.notna(ts_raw):
                     try:
-                        st.image(photo, width=PHOTO_THUMB_WIDTH)
-                    except Exception as exc:
-                        st.warning(f"Could not load image: {exc}")
-                    st.markdown(f"[Open photo in a new tab]({photo})")
+                        when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                    except Exception:
+                        when_local = str(ts_raw)
+
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{member}** · `{action}` · ticket `{tid}` · "
+                        f"{when_local} {LOCAL_TZ_LABEL}"
+                    )
+                    note = row.get("note")
+                    if isinstance(note, str) and note.strip():
+                        st.write(note)
+                    photo = row.get("photo_url")
+                    if isinstance(photo, str) and photo.startswith("http"):
+                        try:
+                            st.image(photo, width=PHOTO_THUMB_WIDTH)
+                        except Exception as exc:
+                            st.warning(f"Could not load image: {exc}")
+                        st.markdown(f"[Open photo in a new tab]({photo})")
 
 
 # Streamlit executes this file as the app script; do not hide ``main()`` behind

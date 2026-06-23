@@ -365,6 +365,22 @@ div.st-key-disp_header_right [data-testid="stPopover"] > button:hover {{
   color: #8a9ac0 !important;
   background: #0d1220 !important;
 }}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"],
+div.st-key-disp_header_right [data-testid="stPopoverBody"] {{
+  min-width: 280px !important;
+  max-width: min(420px, 92vw) !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] [data-testid="stExpander"],
+div.st-key-disp_header_right [data-testid="stPopoverBody"] [data-testid="stExpander"] {{
+  border: 0.5px solid #1a2035 !important;
+  border-radius: 6px !important;
+  background: #0d1220 !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] [data-testid="stExpander"] summary,
+div.st-key-disp_header_right [data-testid="stPopoverBody"] [data-testid="stExpander"] summary {{
+  font-size: 13px !important;
+  color: #8a9ac0 !important;
+}}
 
 /* ── Body — content inset below header ── */
 div.st-key-disp_csm_body {{
@@ -382,32 +398,118 @@ div.st-key-disp_csm_body [data-testid="stVerticalBlockBorderWrapper"] {{
 
 div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {{
   border-right: 0.5px solid var(--disp-border) !important;
-  padding-right: 12px !important;
-  min-width: 248px !important;
-  max-width: 280px !important;
-  flex: 0 0 248px !important;
+  padding-right: 10px !important;
+  min-width: 196px !important;
+  max-width: 220px !important;
+  flex: 0 0 200px !important;
 }}
 div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
-  padding-left: 6px !important;
-  padding-right: 6px !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
   flex: 1 1 auto !important;
   min-width: 0 !important;
 }}
 div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {{
   border-left: 0.5px solid var(--disp-border) !important;
-  padding-left: 12px !important;
-  min-width: 220px !important;
-  flex: 0 0 22% !important;
+  padding-left: 10px !important;
+  min-width: 280px !important;
+  max-width: 320px !important;
+  flex: 0 0 300px !important;
 }}
-div.st-key-disp_csm_body [data-testid="column"]:first-child [data-testid="stHorizontalBlock"] {{
-  gap: 0.4rem !important;
+div.st-key-disp_right_rail {{
+  background: #080b14 !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
+  min-height: calc(100vh - var(--disp-header-h) - 20px) !important;
 }}
-div.st-key-disp_csm_body [data-testid="column"]:first-child [data-testid="stMetric"] {{
-  min-width: 0 !important;
+div.st-key-disp_right_rail [data-testid="stVerticalBlockBorderWrapper"] {{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}}
+div.st-key-disp_right_rail [data-testid="stTabs"] {{
+  margin: 0 !important;
+}}
+div.st-key-disp_right_rail .stTabs [data-baseweb="tab-list"] {{
+  gap: 0 !important;
+  padding: 0 10px !important;
+  border-bottom: 0.5px solid var(--disp-border) !important;
+  background: #080b14 !important;
+}}
+div.st-key-disp_right_rail .stTabs [data-baseweb="tab"] {{
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  color: #4a5a7a !important;
+  padding: 10px 14px 8px !important;
+  background: transparent !important;
+  border-bottom: 2px solid transparent !important;
+}}
+div.st-key-disp_right_rail .stTabs [aria-selected="true"] {{
+  color: #e2e8f8 !important;
+  font-weight: 500 !important;
+  border-bottom-color: #3b82f6 !important;
+}}
+div.st-key-disp_right_rail [data-testid="stTabContent"] {{
+  padding: 0 !important;
+}}
+div.st-key-disp_right_rail div.st-key-disp_assign_panel,
+div.st-key-disp_right_rail div.st-key-disp_sales_assign_panel {{
+  margin-bottom: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 10px 12px 14px !important;
+}}
+div.st-key-disp_right_rail div.st-key-disp_detail_panel {{
+  padding: 10px 12px 14px !important;
+  min-height: 280px !important;
+}}
+div.st-key-disp_right_rail div.st-key-disp_assign_panel .disp-mode-caption {{
+  font-size: 11px !important;
+  color: #4a5a7a !important;
+  margin: 0 0 10px 0 !important;
+  line-height: 1.4 !important;
+}}
+div.st-key-disp_sidebar_inner {{
+  padding: 0 2px 0 0 !important;
 }}
 div.st-key-disp_sidebar_queues {{
-  margin-top: 4px !important;
-  margin-bottom: 6px !important;
+  margin-top: 2px !important;
+  margin-bottom: 4px !important;
+}}
+div.st-key-disp_sidebar_queues [data-testid="stVerticalBlock"] {{
+  gap: 3px !important;
+}}
+div.st-key-disp_sidebar_queues .stButton {{
+  margin: 0 !important;
+  width: 100% !important;
+}}
+.disp-today-grid {{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 8px;
+  margin: 0 0 2px 0;
+  padding: 0;
+}}
+.disp-today-cell {{
+  min-width: 0;
+}}
+.disp-today-label {{
+  font-size: 11px;
+  font-weight: 400;
+  color: #2a3a5a;
+  line-height: 1.2;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.disp-today-value {{
+  font-size: 20px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
 }}
 
 div.st-key-disp_perf_body {{
@@ -518,7 +620,15 @@ div.st-key-disp_sales_assign_panel {{
 div.st-key-disp_assign_panel [data-testid="stHorizontalBlock"],
 div.st-key-disp_sales_assign_panel [data-testid="stHorizontalBlock"] {{
   gap: 0.55rem !important;
-  align-items: flex-start !important;
+  align-items: center !important;
+  flex-wrap: nowrap !important;
+}}
+div.st-key-disp_assign_panel [data-testid="column"],
+div.st-key-disp_sales_assign_panel [data-testid="column"] {{
+  display: flex !important;
+  align-items: center !important;
+  align-self: center !important;
+  min-height: 0 !important;
 }}
 div.st-key-disp_assign_panel [data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"],
 div.st-key-disp_sales_assign_panel [data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {{
@@ -672,16 +782,27 @@ div.st-key-disp_header_right [data-testid="stMarkdownContainer"] span {{
 }}
 [class*="st-key-disp_queue_"] .stButton > button,
 [class*="st-key-sales_queue_"] .stButton > button {{
-  font-size:13px !important;
+  font-size: 12px !important;
   font-weight: 400 !important;
   text-align: left !important;
   display: flex !important;
   align-items: center !important;
-  justify-content: space-between !important;
-  padding: 6px 10px !important;
-  min-height: 32px !important;
+  justify-content: flex-start !important;
+  padding: 5px 8px !important;
+  min-height: 30px !important;
+  height: 30px !important;
   white-space: nowrap !important;
   overflow: hidden !important;
+  border-radius: 5px !important;
+  width: 100% !important;
+}}
+[class*="st-key-disp_queue_"] .stButton > button::before,
+[class*="st-key-sales_queue_"] .stButton > button::before {{
+  content: "●" !important;
+  font-size: 7px !important;
+  line-height: 1 !important;
+  flex: 0 0 auto !important;
+  margin-right: 7px !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button::after,
 [class*="st-key-sales_queue_"] .stButton > button::after {{
@@ -690,29 +811,24 @@ div.st-key-disp_header_right [data-testid="stMarkdownContainer"] span {{
   color: #8a9ac0 !important;
   font-variant-numeric: tabular-nums !important;
   flex: 0 0 auto !important;
-  margin-left: 10px !important;
+  margin-left: auto !important;
+  padding-left: 8px !important;
   line-height: 1 !important;
 }}
-[class*="st-key-disp_queue_"] [data-testid="column"]:nth-child(2),
-[class*="st-key-sales_queue_"] [data-testid="column"]:nth-child(2) {{
-  min-width: 0 !important;
-  flex: 1 1 auto !important;
+[class*="st-key-disp_queue_"].disp-queue-active .stButton > button,
+[class*="st-key-sales_queue_"].disp-queue-active .stButton > button {{
+  background: #0d1e3a !important;
+  border-color: #1a3460 !important;
+  color: #e2e8f8 !important;
 }}
-[class*="st-key-disp_queue_"] [data-testid="column"]:first-child,
-[class*="st-key-sales_queue_"] [data-testid="column"]:first-child {{
-  flex: 0 0 14px !important;
-  min-width: 14px !important;
-  max-width: 14px !important;
+[class*="st-key-disp_queue_"] .stButton > button[kind="primary"],
+[class*="st-key-disp_queue_"] .stButton > button[data-testid="stBaseButton-primary"],
+[class*="st-key-sales_queue_"] .stButton > button[kind="primary"],
+[class*="st-key-sales_queue_"] .stButton > button[data-testid="stBaseButton-primary"] {{
+  background: #0d1e3a !important;
+  border-color: #1a3460 !important;
+  color: #e2e8f8 !important;
 }}
-.disp-queue-dot {{
-  font-size: 10px !important;
-  line-height: 1 !important;
-  margin: 10px 0 0 !important;
-}}
-div.st-key-disp_metric_assigned [data-testid="stMetricValue"] {{ color: #3b82f6 !important; }}
-div.st-key-disp_metric_responded [data-testid="stMetricValue"] {{ color: #22c55e !important; }}
-div.st-key-disp_metric_daily [data-testid="stMetricValue"] {{ color: #3b82f6 !important; }}
-div.st-key-disp_metric_unattended [data-testid="stMetricValue"] {{ color: #ef4444 !important; }}
 
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"],
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] {{
@@ -779,19 +895,19 @@ div.st-key-disp_assign_panel [class*="st-key-btn_manage_cat"] .stButton > button
 div.st-key-disp_sales_assign_panel .disp-manage-icon .stButton > button,
 div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_eng"] .stButton > button,
 div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_cat"] .stButton > button {{
-  font-size:16px !important;
-  font-weight: 700 !important;
+  font-size: 16px !important;
+  font-weight: 500 !important;
   color: #6b7280 !important;
   line-height: 1 !important;
-  width: 24px !important;
-  height: 24px !important;
-  min-height: 24px !important;
-  min-width: 24px !important;
-  max-width: 24px !important;
+  width: 30px !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
   padding: 0 !important;
   margin: 0 !important;
   border: 0.5px solid #2a3548 !important;
-  border-radius: 50% !important;
+  border-radius: 5px !important;
   background: #0d1220 !important;
   box-shadow: none !important;
   white-space: nowrap !important;
@@ -799,6 +915,7 @@ div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_cat"] .stButton > 
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
+  overflow: hidden !important;
 }}
 div.st-key-disp_assign_panel .disp-manage-icon .stButton > button:hover,
 div.st-key-disp_assign_panel [class*="st-key-btn_manage_eng"] .stButton > button:hover,
@@ -817,11 +934,14 @@ div.st-key-disp_sales_assign_panel .disp-manage-icon,
 div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_eng"],
 div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_cat"] {{
   flex: 0 0 auto !important;
-  width: 24px !important;
-  min-width: 24px !important;
-  max-width: 24px !important;
+  width: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
   padding: 0 !important;
   margin: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }}
 div.st-key-disp_assign_panel .disp-manage-icon .stButton,
 div.st-key-disp_assign_panel [class*="st-key-btn_manage_eng"] .stButton,
@@ -829,8 +949,9 @@ div.st-key-disp_assign_panel [class*="st-key-btn_manage_cat"] .stButton,
 div.st-key-disp_sales_assign_panel .disp-manage-icon .stButton,
 div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_eng"] .stButton,
 div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_cat"] .stButton {{
-  width: 24px !important;
-  min-width: 24px !important;
+  width: 30px !important;
+  min-width: 30px !important;
+  margin: 0 !important;
 }}
 div.st-key-disp_assign_panel .disp-manage-icon [data-testid="stVerticalBlock"],
 div.st-key-disp_assign_panel [class*="st-key-btn_manage_eng"] [data-testid="stVerticalBlock"],
@@ -841,9 +962,21 @@ div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_cat"] [data-testid
   align-items: center !important;
   justify-content: center !important;
   min-height: 0 !important;
-  width: 24px !important;
-  margin-top: 0 !important;
-  padding-top: 0 !important;
+  width: 30px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}}
+div.st-key-disp_assign_panel [class*="st-key-btn_manage_eng"] [data-testid="column"],
+div.st-key-disp_assign_panel [class*="st-key-btn_manage_cat"] [data-testid="column"],
+div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_eng"] [data-testid="column"],
+div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_cat"] [data-testid="column"] {{
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 30px !important;
+  max-width: 42px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }}
 .disp-field-label-row {{
   display: flex;
@@ -898,12 +1031,6 @@ div.st-key-disp_assign_panel div.sales-mode-toggle,
 div.st-key-disp_sales_assign_panel div.sales-mode-toggle {{
   margin-bottom: 2px !important;
 }}
-div.st-key-disp_assign_panel [class*="st-key-btn_manage_eng"],
-div.st-key-disp_assign_panel [class*="st-key-btn_manage_cat"],
-div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_eng"],
-div.st-key-disp_sales_assign_panel [class*="st-key-btn_manage_cat"] {{
-  margin-top: 22px !important;
-}}
 div.st-key-disp_assign_panel div.primary-btn [data-testid="stVerticalBlock"] {{
   justify-content: flex-end !important;
   padding-top: 16px !important;
@@ -911,7 +1038,8 @@ div.st-key-disp_assign_panel div.primary-btn [data-testid="stVerticalBlock"] {{
 div.st-key-disp_assign_panel [class*="st-key-btn_manage_eng"] [data-testid="column"],
 div.st-key-disp_assign_panel [class*="st-key-btn_manage_cat"] [data-testid="column"] {{
   display: flex !important;
-  justify-content: flex-end !important;
+  align-items: center !important;
+  justify-content: center !important;
 }}
 div.st-key-disp_assign_panel div.primary-btn .stButton > button {{
   min-height: 28px !important;
@@ -1025,72 +1153,114 @@ div.st-key-disp_sales_assign_panel div.disp-manage-btn [data-testid="stVerticalB
   min-width: 0 !important;
 }}
 
-/* Ticket / sales table — row select (●) + menu (⋯) icon buttons */
-div[class*="st-key-disp_row_actions_"] [data-testid="element-container"] {{
-  margin-bottom: 0 !important;
+/* Ticket / sales table — rows + action buttons (● select + ⋮ menu) */
+div.st-key-disp_ticket_table > [data-testid="stVerticalBlock"] {{
+  gap: 8px !important;
 }}
-div[class*="st-key-disp_row_actions_"] [data-testid="stHorizontalBlock"] {{
+div[class*="st-key-disp_ticket_row_"] [data-testid="element-container"] {{
+  margin: 0 !important;
+  padding: 0 !important;
+}}
+div[class*="st-key-disp_ticket_row_"] [data-testid="stHorizontalBlock"] {{
   align-items: center !important;
-  justify-content: flex-end !important;
-  gap: 4px !important;
+  flex-wrap: nowrap !important;
+  gap: 6px !important;
 }}
-div[class*="st-key-disp_row_actions_"] [data-testid="column"] {{
+div[class*="st-key-disp_ticket_row_"] [data-testid="column"] {{
   display: flex !important;
   align-items: center !important;
-  justify-content: center !important;
-  min-height: 0 !important;
+  align-self: center !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
 }}
-div[class*="st-key-disp_row_sel_"] .stButton,
-div[class*="st-key-disp_row_menu_"] [data-testid="stPopover"] {{
-  width: 24px !important;
-  min-width: 24px !important;
-  max-width: 24px !important;
+div[class*="st-key-disp_ticket_row_"] [data-testid="stMarkdownContainer"] {{
+  width: 100% !important;
   margin: 0 !important;
 }}
-div[class*="st-key-disp_row_sel_"] .stButton > button,
-div[class*="st-key-disp_row_menu_"] [data-testid="stPopover"] > button {{
-  font-size: 11px !important;
+div[class*="st-key-disp_row_actions_"] {{
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 10px !important;
+  width: 100% !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  padding: 5px 4px !important;
+  margin: 0 !important;
+  box-sizing: border-box !important;
+  border: 0.5px solid transparent !important;
+  border-radius: 4px !important;
+}}
+div[class*="st-key-disp_ticket_row_"]:has([data-testid="stBaseButton-primary"]) div[class*="st-key-disp_row_actions_"] {{
+  background: #0d1e3a !important;
+  border-color: #1a3460 !important;
+}}
+div[class*="st-key-disp_row_actions_"] [data-testid="element-container"] {{
+  margin: 0 !important;
+  padding: 0 !important;
+  flex: 0 0 auto !important;
+}}
+div[class*="st-key-disp_row_actions_"] .stButton,
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] {{
+  flex: 0 0 auto !important;
+  width: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
+  margin: 0 !important;
+}}
+div[class*="st-key-disp_row_actions_"] .stButton > button,
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
+  font-size: 12px !important;
   font-weight: 600 !important;
   color: #6b7280 !important;
   line-height: 1 !important;
-  width: 24px !important;
-  height: 24px !important;
-  min-height: 24px !important;
-  min-width: 24px !important;
-  max-width: 24px !important;
+  width: 30px !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
   padding: 0 !important;
   margin: 0 !important;
   border: 0.5px solid #2a3548 !important;
-  border-radius: 4px !important;
+  border-radius: 5px !important;
   background: #0d1220 !important;
   box-shadow: none !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
+  overflow: hidden !important;
 }}
-div[class*="st-key-disp_row_sel_"] .stButton > button[kind="primary"],
-div[class*="st-key-disp_row_sel_"] .stButton > button[data-testid="stBaseButton-primary"] {{
+div[class*="st-key-disp_row_actions_"] .stButton > button[kind="primary"],
+div[class*="st-key-disp_row_actions_"] .stButton > button[data-testid="stBaseButton-primary"] {{
   color: #3b82f6 !important;
   border-color: #1a3460 !important;
   background: #0d1e3a !important;
 }}
-div[class*="st-key-disp_row_sel_"] .stButton > button:hover,
-div[class*="st-key-disp_row_menu_"] [data-testid="stPopover"] > button:hover {{
+div[class*="st-key-disp_row_actions_"] .stButton > button:hover,
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button:hover {{
   color: #8a9ac0 !important;
   border-color: #3b465c !important;
   background: #121a2a !important;
 }}
-div[class*="st-key-disp_row_menu_"] [data-testid="stPopover"] > button {{
-  font-size: 14px !important;
-  font-weight: 400 !important;
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
+  font-size: 16px !important;
+  font-weight: 500 !important;
   letter-spacing: 0 !important;
 }}
-div[class*="st-key-disp_row_sel_"] [data-testid="stVerticalBlock"],
-div[class*="st-key-disp_row_menu_"] [data-testid="stVerticalBlock"] {{
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button svg,
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button [data-testid*="Icon"] {{
+  display: none !important;
+}}
+div[class*="st-key-disp_row_actions_"] [data-testid="stVerticalBlock"] {{
+  flex-direction: row !important;
   align-items: center !important;
-  justify-content: center !important;
+  justify-content: flex-end !important;
+  gap: 10px !important;
   min-height: 0 !important;
-  gap: 0 !important;
   padding: 0 !important;
   margin: 0 !important;
 }}
@@ -1160,6 +1330,307 @@ div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radio
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label {{
   gap: 0 !important;
 }}
+"""
+
+# Global dark styling for Streamlit widgets outside the dispatch 3-column shell.
+DISPATCH_FULL_DARK_CSS = """
+/* ── Typography & links ── */
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] span,
+.stMarkdown p,
+.stMarkdown li {
+  color: var(--disp-muted) !important;
+}
+[data-testid="stMarkdownContainer"] strong,
+.stMarkdown strong {
+  color: var(--disp-text) !important;
+}
+.stMarkdown a,
+[data-testid="stMarkdownContainer"] a {
+  color: var(--disp-accent) !important;
+}
+.stMarkdown code,
+[data-testid="stMarkdownContainer"] code {
+  background: var(--disp-card) !important;
+  color: var(--disp-text) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 3px !important;
+  padding: 0 4px !important;
+}
+
+/* ── Alerts ── */
+[data-testid="stAlert"],
+div[data-testid="stNotification"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  color: var(--disp-muted) !important;
+}
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p,
+div[data-testid="stNotification"] p {
+  color: var(--disp-muted) !important;
+}
+[data-testid="stAlertIcon"] {
+  color: var(--disp-muted) !important;
+}
+
+/* ── Expanders ── */
+[data-testid="stExpander"] {
+  margin: 6px 0 !important;
+  border: none !important;
+  background: transparent !important;
+}
+[data-testid="stExpander"] details {
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  background: var(--disp-card) !important;
+  overflow: hidden;
+}
+[data-testid="stExpander"] summary {
+  color: var(--disp-muted) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  padding: 8px 10px !important;
+  background: transparent !important;
+}
+[data-testid="stExpander"] summary:hover {
+  color: var(--disp-text) !important;
+  background: #121a2a !important;
+}
+[data-testid="stExpander"] details[open] > div,
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+  padding: 8px 10px 10px !important;
+  border-top: 0.5px solid var(--disp-border) !important;
+  background: var(--disp-panel) !important;
+}
+
+/* ── Bordered containers ── */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+}
+
+/* ── Checkbox & radio (outside header) ── */
+[data-testid="stCheckbox"] label,
+[data-testid="stCheckbox"] label span,
+[data-testid="stCheckbox"] label p {
+  color: var(--disp-muted) !important;
+  font-size: 13px !important;
+}
+[data-testid="stRadio"] label span,
+[data-testid="stRadio"] label p {
+  color: var(--disp-muted) !important;
+}
+
+/* ── Date input ── */
+.stDateInput > div > div,
+.stDateInput input {
+  background: var(--disp-card) !important;
+  color: var(--disp-text) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 4px !important;
+}
+.stDateInput label {
+  color: var(--disp-dim) !important;
+  font-size: 11px !important;
+}
+
+/* ── Multi-select ── */
+.stMultiSelect [data-baseweb="select"] > div {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+
+/* ── Select / dropdown menus (Baseweb portal) ── */
+div[data-baseweb="popover"],
+div[data-baseweb="menu"],
+ul[role="listbox"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+ul[role="listbox"] li,
+div[data-baseweb="menu"] li {
+  background: var(--disp-card) !important;
+  color: var(--disp-muted) !important;
+}
+ul[role="listbox"] li:hover,
+div[data-baseweb="menu"] li:hover {
+  background: #121a2a !important;
+  color: var(--disp-text) !important;
+}
+
+/* ── Popover panels ── */
+[data-testid="stPopoverBody"] {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  color: var(--disp-muted) !important;
+  min-width: 13rem !important;
+  max-width: 16rem !important;
+  padding: 8px 10px !important;
+}
+[data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {
+  gap: 4px !important;
+}
+[data-testid="stPopoverBody"] .stButton > button {
+  font-size: 13px !important;
+  min-height: 32px !important;
+  text-align: left !important;
+}
+[data-testid="stPopoverBody"] [data-testid="stExpander"] details {
+  border-color: var(--disp-border) !important;
+}
+[data-testid="stPopoverBody"] hr {
+  border-color: var(--disp-border) !important;
+  margin: 6px 0 !important;
+}
+
+/* ── Data frames & editors ── */
+[data-testid="stDataFrame"],
+[data-testid="stDataEditor"] {
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
+  background: var(--disp-card) !important;
+}
+[data-testid="stDataFrame"] div,
+[data-testid="stDataEditor"] div {
+  background: var(--disp-card) !important;
+}
+[data-testid="stDataFrame"] [data-testid="glideDataEditor"],
+[data-testid="stDataEditor"] [data-testid="glideDataEditor"] {
+  --gdg-bg-cell: #0d1220;
+  --gdg-bg-header: #080b14;
+  --gdg-bg-header-has-focus: #121a2a;
+  --gdg-bg-header-hovered: #121a2a;
+  --gdg-text-dark: #e2e8f8;
+  --gdg-text-medium: #8a9ac0;
+  --gdg-text-light: #4a5a7a;
+  --gdg-text-header: #8a9ac0;
+  --gdg-border-color: #1a2035;
+  --gdg-accent-color: #3b82f6;
+  --gdg-accent-light: rgba(59, 130, 246, 0.15);
+  --gdg-accent-fg: #e2e8f8;
+  --gdg-bg-cell-medium: #0d1220;
+  --gdg-bg-search-cell: #121a2a;
+}
+
+/* ── Code blocks ── */
+.stCode,
+pre,
+code block {
+  background: var(--disp-panel) !important;
+  color: var(--disp-muted) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 4px !important;
+}
+
+/* ── Primary / secondary buttons (Streamlit defaults) ── */
+.stButton > button[kind="primary"],
+button[data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"] {
+  background: #0d2a50 !important;
+  border-color: #1a4a80 !important;
+  color: #3b82f6 !important;
+}
+.stButton > button[kind="primary"]:hover,
+button[data-testid="stBaseButton-primary"]:hover {
+  background: #102f5a !important;
+  border-color: #2563eb !important;
+  color: #60a5fa !important;
+}
+.stButton > button[kind="secondary"],
+button[data-testid="stBaseButton-secondary"] {
+  background: transparent !important;
+  border-color: var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+.stButton > button[kind="secondary"]:hover,
+button[data-testid="stBaseButton-secondary"]:hover {
+  background: var(--disp-card) !important;
+  border-color: #2a3a5a !important;
+  color: var(--disp-text) !important;
+}
+
+/* ── Download button ── */
+.stDownloadButton > button {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+}
+
+/* ── Spinner ── */
+[data-testid="stSpinner"] {
+  color: var(--disp-accent) !important;
+}
+
+/* ── Segmented control ── */
+div[data-baseweb="segmented-control"] {
+  background: var(--disp-panel) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  gap: 4px !important;
+}
+div[data-baseweb="segmented-control"] button {
+  color: var(--disp-dim) !important;
+  background: transparent !important;
+}
+div[data-baseweb="segmented-control"] button[aria-selected="true"] {
+  background: var(--disp-accent-bg) !important;
+  color: var(--disp-text) !important;
+}
+
+/* ── Toolbar rows (queue actions) ── */
+div[class*="st-key-"][class*="_ctx_toolbar"],
+div[class*="st-key-"][class*="_sc_toolbar"] {
+  padding: 4px 0 !important;
+}
+div[class*="st-key-"][class*="_ctx_toolbar"] .stMarkdown p,
+div[class*="st-key-"][class*="_sc_toolbar"] .stMarkdown p {
+  color: var(--disp-muted) !important;
+  margin: 0 !important;
+}
+
+/* ── Log / attendance tab body ── */
+div.st-key-disp_log_body,
+div.st-key-disp_log_body [data-testid="stVerticalBlockBorderWrapper"] {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* ── Performance weekly panels (dispatch palette) ── */
+.weekly-exec-title,
+.weekly-kpi-value,
+.weekly-panel h4 {
+  color: var(--disp-text) !important;
+}
+.weekly-exec-sub,
+.weekly-kpi-label,
+.weekly-exec-badge {
+  color: var(--disp-dim) !important;
+}
+.weekly-exec-badge,
+.weekly-kpi-card,
+.weekly-panel {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+}
+.weekly-exec-header {
+  border-bottom-color: var(--disp-border) !important;
+}
+.weekly-date-range,
+.weekly-kpi-sub {
+  color: var(--disp-accent) !important;
+}
+.weekly-date-wrap [data-testid="stDateInput"] > div {
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+}
 """
 
 # Legacy alias — layout is merged into app.apply_theme()
@@ -1313,6 +1784,24 @@ def render_topbar(*, operator_id: str, now_label: str, section: str = "CSM Cases
     )
 
 
+def render_sidebar_today_grid(
+    items: tuple[tuple[str, int | str, str], ...],
+) -> None:
+    """Compact 2×2 today stats — aligned with queue buttons below."""
+    cells: list[str] = []
+    for label, value, colour in items:
+        cells.append(
+            f'<div class="disp-today-cell">'
+            f'<div class="disp-today-label">{html.escape(str(label))}</div>'
+            f'<div class="disp-today-value" style="color:{html.escape(colour)}">'
+            f"{html.escape(str(value))}</div></div>"
+        )
+    st.markdown(
+        f'<div class="disp-today-grid">{"".join(cells)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_queue_list(
     *,
     selected: str,
@@ -1322,7 +1811,7 @@ def render_queue_list(
     queue_dots: dict[str, str] | None = None,
     button_key_prefix: str = "disp_queue",
 ) -> str:
-    """Sidebar queue picker with colored status dots."""
+    """Sidebar queue picker — dot inside button, count on the right."""
     order = queue_order or QUEUE_ORDER
     dots = queue_dots or QUEUE_DOTS
     picked = selected
@@ -1333,35 +1822,25 @@ def render_queue_list(
             is_active = q == selected
             row_key = q.replace(" ", "_")
             btn_key = f"{button_key_prefix}_{row_key}"
-            c_dot, c_btn = st.columns([0.14, 1], gap="small")
-            with c_dot:
-                st.markdown(
-                    f'<p class="disp-queue-dot" style="color:{dot}">●</p>',
-                    unsafe_allow_html=True,
-                )
-            with c_btn:
-                st.markdown(
-                    f"<style>div.st-key-{btn_key} .stButton > button::after {{"
-                    f'content: "{cnt}";}}</style>',
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    q,
-                    key=btn_key,
-                    use_container_width=True,
-                    type="primary" if is_active else "secondary",
-                ):
-                    st.session_state[session_key] = q
-                    st.rerun()
-            if is_active:
-                st.markdown(
-                    f'<style>div.st-key-{btn_key} button {{'
-                    f"background:#0d1e3a !important;border-color:#1a3460 !important;"
-                    f"color:#e2e8f8 !important;}}"
-                    f"div.st-key-{btn_key} button::after {{"
-                    f"color:#8a9ac0 !important;}}</style>",
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                f"<style>"
+                f"div.st-key-{btn_key} .stButton > button::before {{"
+                f"color: {dot} !important;"
+                f"}}"
+                f"div.st-key-{btn_key} .stButton > button::after {{"
+                f'content: "{cnt}";'
+                f"}}"
+                f"</style>",
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                q,
+                key=btn_key,
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state[session_key] = q
+                st.rerun()
     return str(st.session_state.get(session_key, picked))
 
 
@@ -1438,6 +1917,7 @@ def render_settings_popover(
     on_refresh: Callable[[], None] | None = None,
     on_signout: Callable[[], None] | None = None,
     render_custom_dates: Callable[[], None] | None = None,
+    render_admin: Callable[[], None] | None = None,
 ) -> None:
     """Compact settings popover for the top bar."""
     with st.popover("⚙ Settings", use_container_width=False):
@@ -1497,6 +1977,17 @@ def render_settings_popover(
         else:
             st.session_state[time_preset_key] = range_opt
 
+        if render_admin:
+            st.divider()
+            st.markdown(
+                '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+                'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">'
+                "Admin</p>",
+                unsafe_allow_html=True,
+            )
+            with st.expander("Team accounts", expanded=False):
+                render_admin()
+
         st.divider()
 
         if st.button("Sign out", key="settings_signout", use_container_width=True):
@@ -1553,6 +2044,51 @@ def _row_elapsed(t: dict[str, Any]) -> tuple[str, str]:
     return "#4a5a7a", "—"
 
 
+_TICKET_TABLE_COLS: tuple[float, ...] = (1.45, 1.15, 1.5, 2.35, 1.25, 1.15, 1.0)
+
+
+def _table_cell_style(*, is_sel: bool) -> str:
+    """Shared row cell chrome for ticket/sales tables."""
+    row_bg = "#0d1e3a" if is_sel else "transparent"
+    row_pad = "5px 8px" if is_sel else "5px 6px"
+    row_radius = "4px" if is_sel else "0"
+    border = "0.5px solid #1a3460" if is_sel else "0.5px solid transparent"
+    return (
+        f"padding:{row_pad};background:{row_bg};border-radius:{row_radius};"
+        f"min-height:34px;display:flex;align-items:center;box-sizing:border-box;"
+        f"width:100%;border:{border};white-space:nowrap;overflow:hidden;"
+    )
+
+
+def _render_table_row_actions(
+    *,
+    row_key: str,
+    is_sel: bool,
+    selected_key: str,
+    select_value: str,
+    select_button_key: str,
+    row_data: dict[str, Any],
+    row_id: str,
+    row_actions_fn: Callable[[dict[str, Any], str], None] | None,
+) -> None:
+    """Select (●) + menu (⋮) in one horizontal action strip."""
+    with st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        key=f"disp_row_actions_{row_key}",
+    ):
+        if st.button(
+            "●",
+            key=select_button_key,
+            help="Select row",
+            type="primary" if is_sel else "secondary",
+        ):
+            st.session_state[selected_key] = select_value
+            st.rerun()
+        if row_actions_fn:
+            row_actions_fn(row_data, row_id)
+
+
 def render_ticket_table(
     tickets: list[dict[str, Any]],
     *,
@@ -1571,7 +2107,7 @@ def render_ticket_table(
         return
 
     h1, h2, h3, h4, h5, h6, h7 = st.columns(
-        [1.45, 1.15, 1.85, 2, 1.3, 1.2, 0.7], gap="small"
+        list(_TICKET_TABLE_COLS), gap="small"
     )
     for col, label in zip(
         [h1, h2, h3, h4, h5, h6],
@@ -1589,114 +2125,96 @@ def render_ticket_table(
         unsafe_allow_html=True,
     )
 
-    for t in tickets:
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(
-            [1.45, 1.15, 1.85, 2, 1.3, 1.2, 0.7], gap="small", vertical_alignment="center"
-        )
-        tnum = str(t.get("ticket_number") or "")
-        is_sel = selected == tnum
-        row_bg = "#0d1e3a" if is_sel else "transparent"
-        row_pad = "4px 6px" if is_sel else "2px 0"
-        row_radius = "4px" if is_sel else "0"
-        cell = (
-            f"padding:{row_pad};background:{row_bg};border-radius:{row_radius};"
-            f'margin-bottom:2px;{"border:0.5px solid #1a3460;" if is_sel else ""}'
-        )
+    with st.container(key="disp_ticket_table"):
+        for t in tickets:
+            tnum = str(t.get("ticket_number") or "")
+            is_sel = selected == tnum
+            cell = _table_cell_style(is_sel=is_sel)
 
-        with c1:
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:13px;font-weight:500;'
-                f'color:#8a9ac0;font-variant-numeric:tabular-nums">'
-                f"{html.escape(tnum)}</span></div>",
-                unsafe_allow_html=True,
-            )
-        with c2:
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
-                f'color:#4a5a7a">'
-                f'{html.escape(str(t.get("task_category") or "—"))}</span></div>',
-                unsafe_allow_html=True,
-            )
-        with c3:
-            eng = str(t.get("assigned_to") or "—")
-            eng2 = str(t.get("assigned_to_2") or "").strip()
-            av = _avatar_html(eng)
-            if eng2:
-                av += _avatar_html(eng2, margin_left="-5px")
-            if eng2:
-                tag = (
-                    ' <span style="font-size:11px;font-weight:400;color:#3b82f6">'
-                    "shared</span>"
+            with st.container(key=f"disp_ticket_row_{tnum}"):
+                c1, c2, c3, c4, c5, c6, c7 = st.columns(
+                    list(_TICKET_TABLE_COLS),
+                    gap="small",
+                    vertical_alignment="center",
                 )
-            else:
-                tag = (
-                    f' <span style="font-size:13px;font-weight:400;color:#8a9ac0">'
-                    f"{html.escape(eng)}</span>"
-                )
-            st.markdown(
-                f'<div style="{cell};display:flex;align-items:center;gap:2px">'
-                f"{av}{tag}</div>",
-                unsafe_allow_html=True,
-            )
-        with c4:
-            notes = html.escape(str(t.get("additional_info") or "")[:42])
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
-                f'color:#4a5a7a;white-space:nowrap;overflow:hidden;'
-                f'text-overflow:ellipsis">{notes}</span></div>',
-                unsafe_allow_html=True,
-            )
-        with c5:
-            el_color, el_label = _row_elapsed(t)
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
-                f'color:{el_color};font-variant-numeric:tabular-nums">'
-                f"{html.escape(el_label)}</span></div>",
-                unsafe_allow_html=True,
-            )
-        with c6:
-            st.markdown(
-                f'<div style="{cell}">{status_pill(str(t.get("status") or ""))}</div>',
-                unsafe_allow_html=True,
-            )
-        with c7:
-            with st.container(key=f"disp_row_actions_{tnum}"):
-                sub_sel, sub_menu = st.columns(
-                    [1, 1], gap="small", vertical_alignment="center"
-                )
-                with sub_sel:
-                    with st.container(key=f"disp_row_sel_{tnum}"):
-                        if st.button(
-                            "●",
-                            key=f"sel_{tnum}",
-                            help="Select ticket",
-                            type="primary" if is_sel else "secondary",
-                        ):
-                            st.session_state[selected_key] = tnum
-                            st.rerun()
-                with sub_menu:
-                    with st.container(key=f"disp_row_menu_{tnum}"):
-                        if row_actions_fn:
-                            row_actions_fn(t, tnum)
+
+                with c1:
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:13px;font-weight:500;'
+                        f'color:#8a9ac0;font-variant-numeric:tabular-nums">'
+                        f"{html.escape(tnum)}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with c2:
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
+                        f'color:#4a5a7a">'
+                        f'{html.escape(str(t.get("task_category") or "—"))}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                with c3:
+                    eng = str(t.get("assigned_to") or "—")
+                    eng2 = str(t.get("assigned_to_2") or "").strip()
+                    av = _avatar_html(eng)
+                    if eng2:
+                        av += _avatar_html(eng2, margin_left="-5px")
+                    if eng2:
+                        tag = (
+                            ' <span style="font-size:11px;font-weight:400;color:#3b82f6">'
+                            "shared</span>"
+                        )
+                    else:
+                        tag = (
+                            f' <span style="font-size:13px;font-weight:400;color:#8a9ac0">'
+                            f"{html.escape(eng)}</span>"
+                        )
+                    st.markdown(
+                        f'<div style="{cell};gap:2px;min-width:0">'
+                        f"{av}{tag}</div>",
+                        unsafe_allow_html=True,
+                    )
+                with c4:
+                    notes = html.escape(str(t.get("additional_info") or ""))
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
+                        f'color:#4a5a7a;white-space:nowrap;overflow:hidden;'
+                        f'text-overflow:ellipsis;display:block;min-width:0">'
+                        f"{notes}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with c5:
+                    el_color, el_label = _row_elapsed(t)
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
+                        f'color:{el_color};font-variant-numeric:tabular-nums">'
+                        f"{html.escape(el_label)}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with c6:
+                    st.markdown(
+                        f'<div style="{cell}">{status_pill(str(t.get("status") or ""))}</div>',
+                        unsafe_allow_html=True,
+                    )
+                with c7:
+                    _render_table_row_actions(
+                        row_key=tnum,
+                        is_sel=is_sel,
+                        selected_key=selected_key,
+                        select_value=tnum,
+                        select_button_key=f"sel_{tnum}",
+                        row_data=t,
+                        row_id=tnum,
+                        row_actions_fn=row_actions_fn,
+                    )
 
 
 def render_nudge_banner(tickets: list[dict[str, Any]]) -> None:
+    from unattended import should_show_dashboard_cutoff_warning
+
     near: list[str] = []
     for t in tickets:
-        last_at = t.get("last_assigned_at")
-        if not last_at:
-            continue
-        try:
-            import pandas as pd
-
-            ts = pd.Timestamp(last_at)
-            if ts.tzinfo is None:
-                ts = ts.tz_localize("UTC")
-            hours = (datetime.now(timezone.utc) - ts.to_pydatetime()).total_seconds() / 3600
-            if hours >= 5.5:
-                near.append(str(t.get("ticket_number") or ""))
-        except Exception:
-            continue
+        if should_show_dashboard_cutoff_warning(t):
+            near.append(str(t.get("ticket_number") or ""))
     if not near:
         return
     nums = html.escape(", ".join(n for n in near if n))
@@ -1785,7 +2303,7 @@ def render_sales_case_table(
         return
 
     h1, h2, h3, h4, h5, h6, h7 = st.columns(
-        [1.25, 2.1, 1.0, 1.3, 1.2, 1.2, 0.7], gap="small"
+        [1.25, 2.1, 1.0, 1.3, 1.2, 1.2, 0.72], gap="small"
     )
     for col, label in zip(
         [h1, h2, h3, h4, h5, h6],
@@ -1803,85 +2321,76 @@ def render_sales_case_table(
         unsafe_allow_html=True,
     )
 
-    for c in cases:
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(
-            [1.25, 2.1, 1.0, 1.3, 1.2, 1.2, 0.7], gap="small", vertical_alignment="center"
-        )
-        cref = str(c.get("case_ref") or "")
-        row_id = str(c.get("id") or cref)
-        is_sel = selected == cref
-        row_bg = "#0d1e3a" if is_sel else "transparent"
-        row_pad = "4px 6px" if is_sel else "2px 0"
-        row_radius = "4px" if is_sel else "0"
-        cell = (
-            f"padding:{row_pad};background:{row_bg};border-radius:{row_radius};"
-            f'margin-bottom:2px;{"border:0.5px solid #1a3460;" if is_sel else ""}'
-        )
+    with st.container(key="disp_ticket_table"):
+        for c in cases:
+            cref = str(c.get("case_ref") or "")
+            row_id = str(c.get("id") or cref)
+            is_sel = selected == cref
+            cell = _table_cell_style(is_sel=is_sel)
 
-        with c1:
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:13px;font-weight:500;'
-                f'color:#8a9ac0;font-variant-numeric:tabular-nums">'
-                f"{html.escape(cref)}</span></div>",
-                unsafe_allow_html=True,
-            )
-        with c2:
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:13px;color:#8a9ac0;'
-                f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
-                f'{html.escape(str(c.get("account_name") or ""))}</span></div>',
-                unsafe_allow_html=True,
-            )
-        with c3:
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:11px;color:#4a5a7a">'
-                f'{html.escape(str(c.get("account_region") or "—"))}</span></div>',
-                unsafe_allow_html=True,
-            )
-        with c4:
-            eng = str(c.get("assigned_to") or "").strip()
-            if eng:
-                eng_html = (
-                    f'<span style="font-size:13px;color:#8a9ac0">'
-                    f"{html.escape(eng)}</span>"
+            with st.container(key=f"disp_ticket_row_{row_id}"):
+                c1, c2, c3, c4, c5, c6, c7 = st.columns(
+                    [1.25, 2.1, 1.0, 1.3, 1.2, 1.2, 0.72],
+                    gap="small",
+                    vertical_alignment="center",
                 )
-            else:
-                eng_html = (
-                    '<span style="font-size:13px;color:#4a5a7a;font-style:italic">'
-                    "unassigned</span>"
-                )
-            st.markdown(f'<div style="{cell}">{eng_html}</div>', unsafe_allow_html=True)
-        with c5:
-            pri = str(c.get("sales_priority") or "Standard")
-            color = "#ef4444" if pri == "High" else "#4a5a7a"
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:13px;color:{color}">'
-                f"{html.escape(pri)}</span></div>",
-                unsafe_allow_html=True,
-            )
-        with c6:
-            st.markdown(
-                f'<div style="{cell}"><span style="font-size:11px;font-weight:500;'
-                f'padding:2px 6px;border-radius:3px;background:#1a2035;color:#8a9ac0">'
-                f'{html.escape(str(c.get("status") or ""))}</span></div>',
-                unsafe_allow_html=True,
-            )
-        with c7:
-            with st.container(key=f"disp_row_actions_{row_id}"):
-                sub_sel, sub_menu = st.columns(
-                    [1, 1], gap="small", vertical_alignment="center"
-                )
-                with sub_sel:
-                    with st.container(key=f"disp_row_sel_{row_id}"):
-                        if st.button(
-                            "●",
-                            key=f"sel_sc_{row_id}",
-                            help="Select case",
-                            type="primary" if is_sel else "secondary",
-                        ):
-                            st.session_state[selected_key] = cref
-                            st.rerun()
-                with sub_menu:
-                    with st.container(key=f"disp_row_menu_{row_id}"):
-                        if row_actions_fn:
-                            row_actions_fn(c, row_id)
+
+                with c1:
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:13px;font-weight:500;'
+                        f'color:#8a9ac0;font-variant-numeric:tabular-nums">'
+                        f"{html.escape(cref)}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with c2:
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:13px;color:#8a9ac0;'
+                        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+                        f'{html.escape(str(c.get("account_name") or ""))}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                with c3:
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:11px;color:#4a5a7a">'
+                        f'{html.escape(str(c.get("account_region") or "—"))}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                with c4:
+                    eng = str(c.get("assigned_to") or "").strip()
+                    if eng:
+                        eng_html = (
+                            f'<span style="font-size:13px;color:#8a9ac0">'
+                            f"{html.escape(eng)}</span>"
+                        )
+                    else:
+                        eng_html = (
+                            '<span style="font-size:13px;color:#4a5a7a;font-style:italic">'
+                            "unassigned</span>"
+                        )
+                    st.markdown(f'<div style="{cell}">{eng_html}</div>', unsafe_allow_html=True)
+                with c5:
+                    pri = str(c.get("sales_priority") or "Standard")
+                    color = "#ef4444" if pri == "High" else "#4a5a7a"
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:13px;color:{color}">'
+                        f"{html.escape(pri)}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with c6:
+                    st.markdown(
+                        f'<div style="{cell}"><span style="font-size:11px;font-weight:500;'
+                        f'padding:2px 6px;border-radius:3px;background:#1a2035;color:#8a9ac0">'
+                        f'{html.escape(str(c.get("status") or ""))}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                with c7:
+                    _render_table_row_actions(
+                        row_key=row_id,
+                        is_sel=is_sel,
+                        selected_key=selected_key,
+                        select_value=cref,
+                        select_button_key=f"sel_sc_{row_id}",
+                        row_data=c,
+                        row_id=row_id,
+                        row_actions_fn=row_actions_fn,
+                    )
