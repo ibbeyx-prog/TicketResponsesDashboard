@@ -3246,6 +3246,7 @@ def _navigate_to_on_hold_queue() -> None:
 def _navigate_to_resolved_queue() -> None:
     st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
     st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = STATUS_RESOLVED
+    _clear_dispatch_row_modal_keys()
 
 
 def _outcome_category_options() -> list[str]:
@@ -16097,6 +16098,7 @@ def _apply_pending_dashboard_nav() -> None:
             STATUS_RESOLVED: "Resolved",
         }
         st.session_state[aq_key] = queue_map.get(base_q, base_q)
+        _clear_dispatch_row_modal_keys()
     if pending_sales_queue is not None:
         base = _sc_queue_segment_base(pending_sales_queue)
         st.session_state[_SALES_ACTIVE_QUEUE_KEY] = base
@@ -16225,6 +16227,55 @@ _TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
 )
 
 
+def _dispatch_label_for_sidebar_queue(
+    sidebar_queue: str,
+    *,
+    pending_label: str,
+    open_label: str,
+    on_hold_label: str,
+    investigation_label: str,
+    unattended_label: str,
+    completed_label: str,
+) -> str:
+    """Map sidebar queue name → counted metric label for legacy session keys."""
+    return {
+        "Daily Task": pending_label,
+        "Needs Review": open_label,
+        "On Hold": on_hold_label,
+        "Under Investigation": investigation_label,
+        "Unattended": unattended_label,
+        "Resolved": completed_label,
+    }.get(sidebar_queue, pending_label)
+
+
+def _clear_dispatch_row_modal_keys() -> None:
+    for k in (
+        _DISP_ROW_EDIT,
+        _DISP_ROW_REASSIGN,
+        _DISP_ROW_RECORD,
+        _DISP_ROW_CLOSE,
+        _DISP_ROW_RESOLVE,
+        _DISP_ROW_PHOTOS,
+    ):
+        st.session_state.pop(k, None)
+
+
+def _sync_dispatch_queue_view_state(
+    *,
+    selected_queue: str,
+    ticket_nums: list[str],
+) -> None:
+    """Drop stale row modals/selection when the operator changes queue."""
+    prev = st.session_state.get("_disp_active_queue_prev")
+    if prev != selected_queue:
+        _clear_dispatch_row_modal_keys()
+        st.session_state.pop(_DISP_SELECTED_KEY, None)
+        st.session_state["_disp_active_queue_prev"] = selected_queue
+    sel = st.session_state.get(_DISP_SELECTED_KEY)
+    if sel and sel not in ticket_nums:
+        st.session_state.pop(_DISP_SELECTED_KEY, None)
+
+
 def _sync_dashboard_nav_state(
     *,
     total_pending: int,
@@ -16266,13 +16317,20 @@ def _sync_dashboard_nav_state(
         STATUS_RESOLVED: "Resolved",
     }
 
-    def _sync_dispatch_queue(label: str) -> None:
-        st.session_state[aq_key] = queue_map.get(_queue_segment_base(label), label)
+    cur_active = str(st.session_state.get(aq_key) or "Daily Task")
+    if cur_active not in queue_map.values():
+        cur_active = "Daily Task"
+        st.session_state[aq_key] = cur_active
 
-    cur_q = st.session_state.get(_DASH_TICKET_QUEUE_KEY)
-    if cur_q and _queue_segment_base(cur_q) == STATUS_RESOLVED:
-        st.session_state[_DASH_TICKET_QUEUE_KEY] = completed_label
-        _sync_dispatch_queue(completed_label)
+    st.session_state[_DASH_TICKET_QUEUE_KEY] = _dispatch_label_for_sidebar_queue(
+        cur_active,
+        pending_label=pending_label,
+        open_label=open_label,
+        on_hold_label=on_hold_label,
+        investigation_label=investigation_label,
+        unattended_label=unattended_label,
+        completed_label=completed_label,
+    )
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
     st.session_state["_dash_prev_open_count"] = total_open
@@ -16280,10 +16338,6 @@ def _sync_dashboard_nav_state(
         st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
         st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = open_label
         st.rerun()
-    elif st.session_state.get(_DASH_TICKET_QUEUE_KEY) not in ticket_options:
-        fallback = open_label if total_open > 0 else pending_label
-        st.session_state[_DASH_TICKET_QUEUE_KEY] = fallback
-        _sync_dispatch_queue(fallback)
     return (
         pending_label,
         open_label,
@@ -18204,16 +18258,11 @@ def _dispatch_effective_action_status(ticket: dict, *, queue_name: str) -> str:
     """Map DB status + queue context to action-matrix labels."""
     if queue_name == "Unattended":
         return "Unattended"
-    marked = ticket.get("marked_unattended_at")
-    if marked is not None and not (isinstance(marked, float) and pd.isna(marked)):
-        try:
-            if pd.notna(marked):
-                return "Unattended"
-        except Exception:
-            pass
     raw = str(ticket.get("status") or "")
     if raw == "Open":
         return "Needs Review"
+    if raw == "Unattended":
+        return "Unattended"
     return raw
 
 
@@ -18268,9 +18317,7 @@ def _dispatch_row_modal_open(ticket_number: str | None, *, ticket_nums: list[str
     tn = str(ticket_number or "").strip()
     if not tn:
         return False
-    if tn in ticket_nums:
-        return True
-    return _fetch_ticket_row(tn) is not None
+    return tn in ticket_nums
 
 
 def _reopen_ticket_to_daily_task(
@@ -19238,7 +19285,15 @@ def _render_dispatch_csm_dashboard(
                 )
             ].copy()
         ticket_rows = [_dispatch_row_dict(r) for _, r in queue_df.iterrows()]
-        picked: str | None = st.session_state.get(_DISP_SELECTED_KEY)
+        ticket_nums = [
+            str(t.get("ticket_number") or "")
+            for t in ticket_rows
+            if t.get("ticket_number")
+        ]
+        _sync_dispatch_queue_view_state(
+            selected_queue=selected_queue,
+            ticket_nums=ticket_nums,
+        )
         is_admin = _is_dashboard_admin()
         fe_names, fe_missing = _try_fetch_field_engineer_usernames()
         cat_names = get_task_categories() or _try_fetch_task_categories()[0]
@@ -19300,6 +19355,7 @@ def _render_dispatch_csm_dashboard(
             ticket_nums = [
                 str(t.get("ticket_number") or "") for t in ticket_rows if t.get("ticket_number")
             ]
+            sel = st.session_state.get(_DISP_SELECTED_KEY)
             picked = sel if sel and sel in ticket_nums else None
 
             _render_dispatch_row_modals(
