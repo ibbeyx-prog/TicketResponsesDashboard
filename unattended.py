@@ -71,8 +71,6 @@ def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> boo
     """Pending with no same-day (or prior-day) field response after assign-day cutoff."""
     if not is_daily_task_status(row.get("status")):
         return False
-    if row.get("marked_unattended_at"):
-        return False
     if has_field_response_since_assign(row):
         return False
     assigned_at = _parse_ts(row.get("last_assigned_at"))
@@ -228,11 +226,9 @@ def run_unattended_close(
 ) -> dict[str, int]:
     """Mark eligible Daily Task tickets as unattended and move to **Needs Review** (Open).
 
-    Sets ``marked_unattended_at`` once (permanent count). Status becomes Open for admin.
+    Sets ``marked_unattended_at`` once (permanent metric). Status becomes Open for admin.
     """
-    pending = _fetch_daily_task_tickets(
-        client, tickets_table=tickets_table, not_marked_unattended=True
-    )
+    pending = _fetch_daily_task_tickets(client, tickets_table=tickets_table)
     now_iso = datetime.now(timezone.utc).isoformat()
     closed = 0
     for row in pending:
@@ -245,8 +241,9 @@ def run_unattended_close(
             payload: dict[str, object] = {
                 "status": STATUS_NEEDS_REVIEW,
                 "updated_at": now_iso,
-                "marked_unattended_at": now_iso,
             }
+            if not row.get("marked_unattended_at"):
+                payload["marked_unattended_at"] = now_iso
             client.table(tickets_table).update(payload).eq("ticket_number", ticket).execute()
             client.table(attendance_table).insert(
                 {

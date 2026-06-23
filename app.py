@@ -1325,7 +1325,7 @@ _SALES_ACTIVE_QUEUE_KEY = "active_sales_queue"
 _SALES_SELECTED_KEY = "selected_sales_case"
 _SALES_ROW_RESOLVE = "_sales_row_resolve"
 _SALES_ROW_EDIT = "_sales_row_edit"
-_SALES_ROW_ASSIGN = "_sales_row_assign"
+_SALES_ROW_REASSIGN = "_sales_row_reassign_case"
 _SALES_ASSIGN_MODE_KEY = "sales_assign_mode"
 _SALES_ASSIGN_MODE_INTAKE = "intake"
 _SALES_ASSIGN_MODE_ASSIGN = "assign"
@@ -2853,7 +2853,33 @@ _DASH_ATTENDANCE_POLL_SEC = max(
     15, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "30") or "30"))
 )
 _DASH_DATA_CACHE_TTL_SEC = max(
-    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "20") or "20"))
+    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "45") or "45"))
+)
+
+_TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
+    "ticket_number",
+    "status",
+    "assigned_to",
+    "assigned_to_2",
+    "task_category",
+    "outcome_category",
+    "additional_info",
+    "field_response",
+    "field_responded_by",
+    "photo_url",
+    "responded_at",
+    "last_assigned_at",
+    "created_at",
+    "updated_at",
+    "marked_unattended_at",
+    "unattended_nudge_sent_at",
+    "assignment_telegram_chat_id",
+    "assignment_telegram_message_id",
+    "dashboard_assigned_by",
+    "follow_up_at",
+    "follow_up_note",
+    "dispatch_region",
+    "close_note",
 )
 
 
@@ -3519,19 +3545,30 @@ def _fetch_tickets_cached() -> pd.DataFrame:
         return pd.DataFrame()
     client = _get_supabase_client()
     order_col = _get_order_column()
-    try:
-        res = client.table(TICKETS_TABLE).select("*").order(order_col, desc=True).execute()
-    except Exception as exc:
-        if _looks_like_missing_table_error(exc):
-            raise _TableMissingError(TICKETS_TABLE, exc) from exc
-        if is_transient_supabase_error(exc):
-            _note_supabase_unreachable(exc)
-            return pd.DataFrame()
-        raise
-    rows = res.data or []
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows)
+    select_cols = ",".join(_TICKETS_DASHBOARD_SELECT)
+    last_exc: Exception | None = None
+    for select_arg in (select_cols, "*"):
+        try:
+            res = (
+                client.table(TICKETS_TABLE)
+                .select(select_arg)
+                .order(order_col, desc=True)
+                .execute()
+            )
+            rows = res.data or []
+            return pd.DataFrame(rows) if rows else pd.DataFrame()
+        except Exception as exc:
+            last_exc = exc
+            if select_arg == "*":
+                if _looks_like_missing_table_error(exc):
+                    raise _TableMissingError(TICKETS_TABLE, exc) from exc
+                if is_transient_supabase_error(exc):
+                    _note_supabase_unreachable(exc)
+                    return pd.DataFrame()
+                raise
+    if last_exc is not None:
+        raise last_exc
+    return pd.DataFrame()
 
 
 def _fetch_tickets() -> pd.DataFrame:
@@ -3866,10 +3903,6 @@ def _clear_sales_floor_edit_widgets(case_ref: str) -> None:
         f"sales_edit_pri_{cref}",
         f"sales_edit_desc_{cref}",
     )
-
-
-def _clear_sales_floor_assign_widgets(case_ref: str) -> None:
-    _schedule_deferred_widget_clears(f"sales_assign_eng_{str(case_ref)}")
 
 
 def _clear_sales_floor_resolve_widgets(case_ref: str) -> None:
@@ -12448,6 +12481,20 @@ def _sc_dashboard_reassign_case(
     _sc_stamp_last_assigned_at(patch)
     _sales_cases_update_row(row_id, patch)
     updated = _fetch_sales_case_row_by_id(row_id)
+    cref = str(row.get("case_ref") or "").strip()
+    handle = str(assigned_to or "").strip()
+    if handle and not handle.startswith("@"):
+        handle = f"@{handle.lstrip('@')}"
+    if cref and handle:
+        client = _get_supabase_client()
+        _cc_insert_attendance_log(
+            client,
+            ticket_number=cref,
+            member_username=handle,
+            action_type="Assignment",
+            note=_cc_assignment_log_note(additional_info, operator_id),
+        )
+        _visits_reassign(client, cref, handle)
     return updated or row
 
 
@@ -12460,8 +12507,9 @@ def _render_sales_reassign_editor(
     fe_missing: bool,
     case_options: list[str],
     df: pd.DataFrame,
+    clear_session_keys: tuple[str, ...] = (),
 ) -> None:
-    """Reassign field engineer on a sales case; optional new Telegram post."""
+    """Reassign a sales case — same form and Telegram flow as CSM reassign."""
     if not case_options:
         return
 
@@ -12482,8 +12530,9 @@ def _render_sales_reassign_editor(
         return
 
     st.caption(
-        f"Reassign **{cref}** to a different field engineer. "
-        "Posts a **new** assignment line in Telegram when enabled below."
+        f"Reassign **{cref}** for next-day field work. "
+        "Clears the previous field response and photo. "
+        "Posts a **new** assignment line in Telegram (when enabled below)."
     )
 
     current_handle = _sc_row_text(r0.get("assigned_to")).lstrip("@")
@@ -12571,14 +12620,6 @@ def _render_sales_reassign_editor(
         st.error(f"Could not reassign: {exc}")
         return
 
-    if handle:
-        _sc_log_sales_assignment_activity(
-            case_ref=cref,
-            assignee=handle,
-            operator_id=op,
-            note=notes,
-        )
-
     tg_note = ""
     if st.session_state.get(keys["sync_tg"]):
         token, chat_id = _cc_resolve_telegram_credentials()
@@ -12589,9 +12630,9 @@ def _render_sales_reassign_editor(
             )
         else:
             try:
-                asyncio.run(
+                ref = asyncio.run(
                     notify_telegram_group(
-                        handle.lstrip("@"),
+                        handle,
                         cref,
                         cat,
                         additional_info=notes,
@@ -12606,6 +12647,10 @@ def _render_sales_reassign_editor(
                         group_id=chat_id,
                     )
                 )
+                if _fetch_ticket_row(cref):
+                    _cc_save_assignment_telegram_ref(
+                        _get_supabase_client(), cref, ref
+                    )
                 tg_note = (
                     "Posted a **new** assignment message in the group — "
                     "field must swipe-reply to that line."
@@ -12614,10 +12659,13 @@ def _render_sales_reassign_editor(
                 st.warning(f"Reassigned in dashboard. Telegram post failed: {exc}")
 
     st.session_state[keys["show"]] = False
-    flash = f"**{cref}** reassigned to **{handle}** ({cat})."
-    if tg_note:
-        flash += f" {tg_note}"
-    _sc_set_sales_flash(flash)
+    for sk in clear_session_keys:
+        st.session_state.pop(sk, None)
+    _reset_reassign_form_state(edit_key_prefix)
+    _sc_set_sales_flash(
+        f"**{cref}** reassigned to **{handle}** ({cat})."
+        + (f" {tg_note}" if tg_note else "")
+    )
     _invalidate_dashboard_data_cache()
     st.rerun()
 
@@ -12735,25 +12783,8 @@ def get_engineer_handles() -> list[str]:
 
 def get_task_categories() -> list[str]:
     """Return task categories sorted by sort_order then name."""
-    client = _get_supabase_client()
-    try:
-        rows = (
-            client.table(TASK_CATEGORIES_TABLE)
-            .select("name, sort_order")
-            .order("sort_order")
-            .order("name")
-            .execute()
-            .data
-            or []
-        )
-    except Exception as exc:
-        if _looks_like_missing_table_error(exc):
-            return []
-        if is_transient_supabase_error(exc):
-            _note_supabase_unreachable(exc)
-            return []
-        raise
-    return [str(r["name"]) for r in rows if r.get("name")]
+    names, _missing = _try_fetch_task_categories()
+    return names
 
 
 def _render_engineer_manage_row(eng: dict) -> None:
@@ -14068,15 +14099,15 @@ def main() -> None:
             )
         return
 
-    apply_theme()
     _init_dash_date_range_state()
-    _render_dispatch_app_shell()
 
     auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
     def _dashboard_body_fragment() -> None:
+        apply_theme()
+        _render_dispatch_app_shell()
         _sync_dash_range_from_ui(
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
@@ -17312,7 +17343,6 @@ def _init_sales_active_queue() -> str:
 def _render_sales_sidebar(
     *,
     df: pd.DataFrame,
-    df_tickets: pd.DataFrame,
 ) -> None:
     """Sidebar: Today metrics (2×2), queue list, engineer list — mirrors CSM."""
     with st.container(key="disp_sidebar_inner"):
@@ -17766,12 +17796,12 @@ def _render_sales_row_actions(case: dict, row_key: str) -> None:
 
         if _sc_effective_status(status) != SC_STATUS_RESOLVED:
             if st.button(
-                "↩ Assign engineer",
-                key=f"assign_eng_sc_{row_key}",
+                "↩ Reassign",
+                key=f"reassign_sc_{row_key}",
                 use_container_width=True,
             ):
-                st.session_state[_SALES_ROW_ASSIGN] = case_ref
-                st.session_state[_SALES_SELECTED_KEY] = case_ref
+                _sales_prepare_row_selection(case_ref)
+                st.session_state[_SALES_ROW_REASSIGN] = case_ref
                 st.rerun()
 
         if _sc_effective_status(status) == SC_STATUS_RESOLVED:
@@ -18018,48 +18048,30 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                         except Exception as exc:
                             st.error(str(exc))
 
-    assign_ref = st.session_state.get(_SALES_ROW_ASSIGN)
+    assign_ref = st.session_state.get(_SALES_ROW_REASSIGN)
     if assign_ref:
-        row = _fetch_sales_case_row_by_ref(str(assign_ref))
-        if row:
-            engineers = get_engineer_handles()
-            unassigned = "— unassigned —"
-            cur = str(row.get("assigned_to") or "").strip()
-            opts = [unassigned] + engineers
-            default_idx = opts.index(cur) if cur in opts else 0
-            with st.expander(f"Assign engineer · {assign_ref}", expanded=True):
-                eng = st.selectbox(
-                    "Engineer",
-                    opts,
-                    index=default_idx,
-                    key=f"sales_assign_eng_{assign_ref}",
+        cref = str(assign_ref).strip()
+        row = _fetch_sales_case_row_by_ref(cref)
+        if row and _sc_effective_status(row.get("status")) != SC_STATUS_RESOLVED:
+            fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+            field_cats = (
+                get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+            )
+            modal_df = _sales_row_modal_df(df, cref)
+            with st.expander(f"Reassign · {cref}", expanded=True):
+                _render_sales_reassign_editor(
+                    key_prefix="sales_row",
+                    edit_key_prefix="sales_row_reassign",
+                    field_cats=field_cats,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
+                    case_options=[cref],
+                    df=modal_df,
+                    clear_session_keys=(_SALES_ROW_REASSIGN,),
                 )
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Cancel", key=f"sales_assign_cancel_{assign_ref}"):
-                        _clear_sales_floor_assign_widgets(assign_ref)
-                        st.session_state.pop(_SALES_ROW_ASSIGN, None)
-                        st.rerun()
-                with c2:
-                    if st.button(
-                        "Save", key=f"sales_assign_save_{assign_ref}", type="primary"
-                    ):
-                        row_id = str(row.get("id") or "").strip()
-                        patch: dict[str, object] = {}
-                        if eng == unassigned:
-                            patch["assigned_to"] = None
-                        else:
-                            patch["assigned_to"] = eng
-                            _sc_stamp_last_assigned_at(patch)
-                        try:
-                            _sales_cases_update_row(row_id, patch)
-                            _invalidate_dashboard_data_cache()
-                            _clear_sales_floor_assign_widgets(assign_ref)
-                            st.session_state.pop(_SALES_ROW_ASSIGN, None)
-                            st.toast("Engineer updated", icon="✅")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
+                if st.button("Done", key="sales_row_reassign_done"):
+                    st.session_state.pop(_SALES_ROW_REASSIGN, None)
+                    st.rerun()
 
 
 def _render_sales_cases_dashboard() -> None:
@@ -18084,18 +18096,13 @@ def _render_sales_cases_dashboard() -> None:
         st.error("Sign in again — **Operator ID** is required.")
         return
 
-    try:
-        df_tickets = _fetch_tickets()
-    except Exception:
-        df_tickets = pd.DataFrame()
-
     selected_queue = _init_sales_active_queue()
 
     with st.container(key="disp_csm_body"):
         sb, main, dp = st.columns([1.15, 5.35, 2.5], gap="small")
 
         with sb:
-            _render_sales_sidebar(df=df, df_tickets=df_tickets)
+            _render_sales_sidebar(df=df)
 
         with main:
             cases = _sales_cases_list_for_queue(df, selected_queue)
@@ -18217,6 +18224,29 @@ def _dispatch_prepare_row_selection(ticket_number: str) -> None:
         st.session_state[_ticket_selection_session_key(prefix)] = [tn]
 
 
+def _sales_prepare_row_selection(case_ref: str) -> None:
+    cref = str(case_ref).strip()
+    st.session_state[_SALES_SELECTED_KEY] = cref
+    st.session_state[_sc_case_selection_session_key("sales_row")] = [cref]
+
+
+def _sales_row_modal_df(queue_df: pd.DataFrame, case_ref: str) -> pd.DataFrame:
+    """Ensure reassign forms can read the case even after table search filters."""
+    cref = str(case_ref).strip()
+    if not cref:
+        return queue_df
+    if (
+        not queue_df.empty
+        and "case_ref" in queue_df.columns
+        and cref in queue_df["case_ref"].fillna("").astype(str).values
+    ):
+        return queue_df
+    row = _fetch_sales_case_row_by_ref(cref)
+    if row:
+        return pd.DataFrame([row])
+    return queue_df
+
+
 def _dispatch_row_modal_df(queue_df: pd.DataFrame, ticket_number: str) -> pd.DataFrame:
     """Ensure modal forms can read category/assignment even after table search filters."""
     tn = str(ticket_number).strip()
@@ -18241,6 +18271,49 @@ def _dispatch_row_modal_open(ticket_number: str | None, *, ticket_nums: list[str
     if tn in ticket_nums:
         return True
     return _fetch_ticket_row(tn) is not None
+
+
+def _reopen_ticket_to_daily_task(
+    ticket_number: str,
+    *,
+    operator_id: str | None = None,
+    log_action: str = "ReopenedFromUnattended",
+) -> None:
+    """Return a ticket to Daily Task with a fresh assign-day cycle (after unattended/review)."""
+    client = _get_supabase_client()
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    now_iso = _cc_utc_now_iso()
+    op = operator_id or _session_operator_id() or "dashboard-admin"
+    actor = f"@{str(op).lstrip('@')}"
+    updates: dict[str, object] = {
+        "status": STATUS_DAILY_TASK,
+        "updated_at": now_iso,
+        "last_assigned_at": now_iso,
+        "unattended_nudge_sent_at": None,
+        "field_response": None,
+        "field_responded_by": None,
+        "photo_url": None,
+        "responded_at": None,
+    }
+    _cc_execute_ticket_update(client, updates, ticket_number)
+    _cc_ensure_reassign_cleared_response_fields(client, ticket_number)
+    assignee = str(row.get("assigned_to") or "").strip()
+    if assignee:
+        _visits_open_new(client, ticket_number, assignee, visit_start=now_iso)
+    try:
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": str(ticket_number),
+                "member_username": actor,
+                "action_type": log_action,
+                "note": "Reopened to Daily Task — assignment clock reset for a fresh field visit.",
+                "timestamp": now_iso,
+            }
+        ).execute()
+    except Exception:
+        pass
 
 
 def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
@@ -18275,12 +18348,10 @@ def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
                 return
             _move_to_on_hold(ticket_number, operator_id=op)
         elif destination == "Daily task (reopen)":
-            _set_ticket_status(
-                ticket_number,
-                new_status=STATUS_DAILY_TASK,
-                log_action="ReopenedFromUnattended",
-                actor=actor,
-            )
+            if not op:
+                st.toast("Sign in again", icon="⚠️")
+                return
+            _reopen_ticket_to_daily_task(ticket_number, operator_id=op)
         st.toast(f"Moved → {destination}", icon="✅")
         _invalidate_dashboard_data_cache()
         st.rerun()
