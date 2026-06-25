@@ -19078,6 +19078,27 @@ def _handle_dispatch_quick_assign_bar(
     )
 
 
+def _dispatch_any_row_modal_active(
+    *,
+    ticket_nums: list[str],
+    is_admin: bool,
+) -> bool:
+    """True when a per-row action form should occupy the side panel."""
+    keys = [
+        _DISP_ROW_EDIT,
+        _DISP_ROW_REASSIGN,
+        _DISP_ROW_RESOLVE,
+        _DISP_ROW_FOLLOW_UP,
+        _DISP_ROW_PHOTOS,
+    ]
+    if is_admin:
+        keys += [_DISP_ROW_RECORD, _DISP_ROW_CLOSE]
+    return any(
+        _dispatch_row_modal_open(st.session_state.get(k), ticket_nums=ticket_nums)
+        for k in keys
+    )
+
+
 def _render_dispatch_row_modals(
     *,
     queue_df: pd.DataFrame,
@@ -19392,8 +19413,22 @@ def _render_dispatch_csm_dashboard(
         "Resolved": int(masks["completed"].sum()),
     }
 
+    _modal_pending = any(
+        str(st.session_state.get(k) or "").strip()
+        for k in (
+            _DISP_ROW_EDIT,
+            _DISP_ROW_REASSIGN,
+            _DISP_ROW_RESOLVE,
+            _DISP_ROW_FOLLOW_UP,
+            _DISP_ROW_PHOTOS,
+            _DISP_ROW_RECORD,
+            _DISP_ROW_CLOSE,
+        )
+    )
+    _body_col_ratios = [1.15, 4.35, 3.5] if _modal_pending else [1.15, 5.35, 2.5]
+
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns([1.15, 5.35, 2.5], gap="small")
+        sb, main, dp = st.columns(_body_col_ratios, gap="small")
 
         with sb:
             with st.container(key="disp_sidebar_inner"):
@@ -19529,24 +19564,28 @@ def _render_dispatch_csm_dashboard(
             sel = st.session_state.get(_DISP_SELECTED_KEY)
             picked = sel if sel and sel in ticket_nums else None
 
-            _render_dispatch_row_modals(
-                queue_df=display_df,
-                ticket_nums=ticket_nums,
-                is_admin=is_admin,
-                fe_names=fe_names,
-                fe_missing=fe_missing,
-                cat_names=cat_names,
-            )
-
         with dp:
-            _render_dispatch_right_rail(
-                queue_df=display_df,
-                picked=picked,
-                on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
-                    tn, eng, eng2, cat, notes,
-                    fe_names=fe_names, fe_missing=fe_missing,
-                ),
-            )
+            if _dispatch_any_row_modal_active(
+                ticket_nums=ticket_nums, is_admin=is_admin
+            ):
+                with st.container(key="disp_row_action_panel"):
+                    _render_dispatch_row_modals(
+                        queue_df=display_df,
+                        ticket_nums=ticket_nums,
+                        is_admin=is_admin,
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        cat_names=cat_names,
+                    )
+            else:
+                _render_dispatch_right_rail(
+                    queue_df=display_df,
+                    picked=picked,
+                    on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
+                        tn, eng, eng2, cat, notes,
+                        fe_names=fe_names, fe_missing=fe_missing,
+                    ),
+                )
 
 
 def _render_dashboard(
