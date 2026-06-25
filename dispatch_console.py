@@ -2174,12 +2174,20 @@ def render_ticket_table(
                         unsafe_allow_html=True,
                     )
                 with c4:
+                    fu = html.escape(str(t.get("follow_up_label") or "").strip())
                     notes = html.escape(str(t.get("additional_info") or ""))
+                    if fu:
+                        note_html = (
+                            f'<span style="color:#a78bfa;font-weight:500">{fu}</span>'
+                            + (f' <span style="color:#4a5a7a">{notes}</span>' if notes else "")
+                        )
+                    else:
+                        note_html = notes
                     st.markdown(
                         f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
-                        f'color:#4a5a7a;white-space:nowrap;overflow:hidden;'
+                        f'white-space:nowrap;overflow:hidden;'
                         f'text-overflow:ellipsis;display:block;min-width:0">'
-                        f"{notes}</span></div>",
+                        f"{note_html}</span></div>",
                         unsafe_allow_html=True,
                     )
                 with c5:

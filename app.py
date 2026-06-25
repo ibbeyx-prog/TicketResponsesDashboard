@@ -613,6 +613,9 @@ _DISP_ROW_RECORD = "disp_row_record_ticket"
 _DISP_ROW_CLOSE = "disp_row_close_ticket"
 _DISP_ROW_RESOLVE = "disp_row_resolve_ticket"
 _DISP_ROW_PHOTOS = "disp_row_photo_ticket"
+_DISP_ROW_FOLLOW_UP = "disp_row_follow_up_ticket"
+_DISP_INVESTIGATION_SUBTAB_KEY = "disp_investigation_subtab"
+_INVESTIGATION_SUBTABS: tuple[str, ...] = ("All", "Follow-up", "General")
 _DISP_ASSIGN_MODE_KEY = "disp_assign_mode"
 _DISP_ASSIGN_MODE_TELEGRAM = "telegram"
 _DISP_ASSIGN_MODE_QUEUE = "queue_only"
@@ -16256,6 +16259,7 @@ def _clear_dispatch_row_modal_keys() -> None:
         _DISP_ROW_CLOSE,
         _DISP_ROW_RESOLVE,
         _DISP_ROW_PHOTOS,
+        _DISP_ROW_FOLLOW_UP,
     ):
         st.session_state.pop(k, None)
 
@@ -18251,7 +18255,85 @@ def _dispatch_row_dict(row: pd.Series) -> dict[str, object]:
                 d[col] = pd.Timestamp(d[col]).to_pydatetime()
             except Exception:
                 pass
+    fu = _follow_up_display_label(row)
+    if fu:
+        d["follow_up_label"] = fu
     return d
+
+
+def _investigation_subtab_counts(df: pd.DataFrame) -> dict[str, int]:
+    if df.empty:
+        return {"All": 0, "Follow-up": 0, "General": 0}
+    if "follow_up_at" not in df.columns:
+        n = len(df)
+        return {"All": n, "Follow-up": 0, "General": n}
+    tracked = _parse_ts(df["follow_up_at"]).notna()
+    return {
+        "All": len(df),
+        "Follow-up": int(tracked.sum()),
+        "General": int((~tracked).sum()),
+    }
+
+
+def _apply_investigation_subtab(df: pd.DataFrame, subtab: str) -> pd.DataFrame:
+    """Filter/sort Under Investigation rows for All | Follow-up | General."""
+    if df.empty:
+        return df
+    subtab = subtab if subtab in _INVESTIGATION_SUBTABS else "All"
+    if subtab == "All":
+        return _sort_investigation_by_follow_up(df)
+    if "follow_up_at" not in df.columns:
+        return df.iloc[0:0].copy() if subtab == "Follow-up" else df
+    tracked = _parse_ts(df["follow_up_at"]).notna()
+    if subtab == "Follow-up":
+        return _sort_investigation_by_follow_up(df.loc[tracked].copy())
+    return df.loc[~tracked].copy()
+
+
+def _render_investigation_subtabs(df: pd.DataFrame) -> str:
+    """Header tabs inside Under Investigation — All | Follow-up | General."""
+    counts = _investigation_subtab_counts(df)
+    cur = str(st.session_state.get(_DISP_INVESTIGATION_SUBTAB_KEY) or "All")
+    if cur not in _INVESTIGATION_SUBTABS:
+        cur = "All"
+        st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = cur
+    cols = st.columns(len(_INVESTIGATION_SUBTABS), gap="small")
+    for col, name in zip(cols, _INVESTIGATION_SUBTABS, strict=True):
+        cnt = counts[name]
+        label = f"{name} ({cnt})" if cnt else name
+        with col:
+            if st.button(
+                label,
+                key=f"disp_inv_subtab_{name.replace('-', '_').lower()}",
+                type="primary" if name == cur else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = name
+                st.rerun()
+    subtab = str(st.session_state.get(_DISP_INVESTIGATION_SUBTAB_KEY) or cur)
+    if subtab == "Follow-up" and counts["Follow-up"] > 0:
+        st.caption(
+            "Oldest follow-up first — chase these before newer investigation cases."
+        )
+    elif subtab == "All" and counts["Follow-up"] > 0:
+        st.caption(
+            f"**{counts['Follow-up']}** follow-up case(s) pinned to the top (●)."
+        )
+    return subtab
+
+
+def _sync_investigation_subtab_view_state(
+    *,
+    subtab: str,
+    ticket_nums: list[str],
+) -> None:
+    prev = st.session_state.get("_disp_investigation_subtab_prev")
+    if prev != subtab:
+        st.session_state.pop(_DISP_SELECTED_KEY, None)
+        st.session_state["_disp_investigation_subtab_prev"] = subtab
+    sel = st.session_state.get(_DISP_SELECTED_KEY)
+    if sel and sel not in ticket_nums:
+        st.session_state.pop(_DISP_SELECTED_KEY, None)
 
 
 def _dispatch_effective_action_status(ticket: dict, *, queue_name: str) -> str:
@@ -18494,6 +18576,12 @@ def _render_dispatch_row_actions(
                 st.session_state[_DISP_ROW_PHOTOS] = tnum
                 st.rerun()
 
+        if status == "Needs Review":
+            if st.button("↻ Follow up", key=f"followup_{row_key}", use_container_width=True):
+                _dispatch_prepare_row_selection(tnum)
+                st.session_state[_DISP_ROW_FOLLOW_UP] = tnum
+                st.rerun()
+
         if status not in ("Resolved", "Unattended"):
             if st.button("↗ Move to Sales", key=f"sales_{row_key}", use_container_width=True):
                 _dispatch_ticket_move_to_sales(tnum)
@@ -18614,6 +18702,20 @@ def _render_dispatch_case_info_panel(
             f'{share}</span>',
             unsafe_allow_html=True,
         )
+        if t.get("follow_up_label"):
+            st.markdown(
+                t_section_label(
+                    "Follow-up",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<span style="font-size:13px;font-weight:500;color:#a78bfa">'
+                f"{html.escape(str(t.get('follow_up_label') or ''))}</span>",
+                unsafe_allow_html=True,
+            )
         if t.get("additional_info"):
             st.markdown(
                 t_section_label(
@@ -19075,6 +19177,54 @@ def _render_dispatch_row_modals(
                 st.session_state.pop(_DISP_ROW_RESOLVE, None)
                 st.rerun()
 
+    follow_t = st.session_state.get(_DISP_ROW_FOLLOW_UP)
+    if _dispatch_row_modal_open(follow_t, ticket_nums=ticket_nums):
+        with st.expander(f"Follow up · {follow_t}", expanded=True):
+            st.caption(
+                "Tracked case: shows **●** under Investigation → **Follow-up** "
+                "(oldest first). Use **Investigation** in Move to for general review."
+            )
+            note = st.text_area(
+                "Follow-up note (optional)",
+                placeholder="e.g. Revisit Tuesday — waiting for site access",
+                key="disp_row_follow_up_note",
+                height=72,
+            )
+            if st.button(
+                "Confirm follow-up",
+                key="disp_row_follow_up_confirm",
+                type="primary",
+                use_container_width=True,
+            ):
+                op = _session_operator_id()
+                if not op:
+                    st.error("Sign in again — operator session is missing.")
+                else:
+                    try:
+                        _mark_ticket_for_follow_up(
+                            str(follow_t),
+                            note=note,
+                            operator_id=op,
+                        )
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    except Exception as exc:
+                        st.error(f"Could not mark follow-up: {exc}")
+                    else:
+                        st.session_state.pop(_DISP_ROW_FOLLOW_UP, None)
+                        _schedule_deferred_widget_clears("disp_row_follow_up_note")
+                        st.session_state[active_queue_key()] = "Under Investigation"
+                        st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = "Follow-up"
+                        st.toast(
+                            f"{follow_t} → Under Investigation (follow-up tracked ●)",
+                            icon="✅",
+                        )
+                        _invalidate_dashboard_data_cache()
+                        st.rerun()
+            if st.button("Cancel", key="disp_row_follow_up_cancel", use_container_width=True):
+                st.session_state.pop(_DISP_ROW_FOLLOW_UP, None)
+                st.rerun()
+
     photo_t = st.session_state.get(_DISP_ROW_PHOTOS)
     if _dispatch_row_modal_open(photo_t, ticket_nums=ticket_nums):
         row = _fetch_ticket_row(str(photo_t))
@@ -19284,30 +19434,30 @@ def _render_dispatch_csm_dashboard(
                     axis=1,
                 )
             ].copy()
-        ticket_rows = [_dispatch_row_dict(r) for _, r in queue_df.iterrows()]
-        ticket_nums = [
-            str(t.get("ticket_number") or "")
-            for t in ticket_rows
-            if t.get("ticket_number")
-        ]
-        _sync_dispatch_queue_view_state(
-            selected_queue=selected_queue,
-            ticket_nums=ticket_nums,
+        inv_base_df: pd.DataFrame | None = (
+            queue_df.copy()
+            if selected_queue == "Under Investigation"
+            else None
         )
         is_admin = _is_dashboard_admin()
         fe_names, fe_missing = _try_fetch_field_engineer_usernames()
         cat_names = get_task_categories() or _try_fetch_task_categories()[0]
+        display_df = queue_df
+        picked: str | None = None
 
         with main:
+            investigation_subtab: str | None = None
+            display_df = queue_df
+
             col_title, col_search = st.columns([3, 1])
             with col_title:
-                n = len(ticket_rows)
+                n_preview = len(display_df) if inv_base_df is None else len(inv_base_df)
                 qtitle = (
                     selected_queue.lower()
                     if selected_queue == "Daily Task"
                     else selected_queue
                 )
-                count_label = f"{n} ticket{'s' if n != 1 else ''}"
+                count_label = f"{n_preview} ticket{'s' if n_preview != 1 else ''}"
                 st.markdown(
                     f"{t_heading(html.escape(qtitle))} {t_queue_sub(count_label)}",
                     unsafe_allow_html=True,
@@ -19333,6 +19483,27 @@ def _render_dispatch_csm_dashboard(
                     label_visibility="collapsed",
                     key="disp_ticket_search",
                 )
+
+            if inv_base_df is not None:
+                investigation_subtab = _render_investigation_subtabs(inv_base_df)
+                display_df = _apply_investigation_subtab(inv_base_df, investigation_subtab)
+
+            ticket_rows = [_dispatch_row_dict(r) for _, r in display_df.iterrows()]
+            ticket_nums = [
+                str(t.get("ticket_number") or "")
+                for t in ticket_rows
+                if t.get("ticket_number")
+            ]
+            _sync_dispatch_queue_view_state(
+                selected_queue=selected_queue,
+                ticket_nums=ticket_nums,
+            )
+            if investigation_subtab is not None:
+                _sync_investigation_subtab_view_state(
+                    subtab=investigation_subtab,
+                    ticket_nums=ticket_nums,
+                )
+
             if search_num.strip():
                 q = search_num.strip()
                 ticket_rows = [
@@ -19359,7 +19530,7 @@ def _render_dispatch_csm_dashboard(
             picked = sel if sel and sel in ticket_nums else None
 
             _render_dispatch_row_modals(
-                queue_df=queue_df,
+                queue_df=display_df,
                 ticket_nums=ticket_nums,
                 is_admin=is_admin,
                 fe_names=fe_names,
@@ -19369,7 +19540,7 @@ def _render_dispatch_csm_dashboard(
 
         with dp:
             _render_dispatch_right_rail(
-                queue_df=queue_df,
+                queue_df=display_df,
                 picked=picked,
                 on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
                     tn, eng, eng2, cat, notes,
