@@ -1671,6 +1671,7 @@ QUEUE_DOTS: dict[str, str] = {
     "Needs Review": "#22c55e",
     "On Hold": "#f59e0b",
     "Under Investigation": "#a78bfa",
+    "Follow up": "#f472b6",
     "Unattended": "#ef4444",
     "Resolved": "#4a5a7a",
 }
