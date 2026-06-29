@@ -2856,7 +2856,7 @@ _DASH_ATTENDANCE_POLL_SEC = max(
     15, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "30") or "30"))
 )
 _DASH_DATA_CACHE_TTL_SEC = max(
-    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "45") or "45"))
+    15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "120") or "120"))
 )
 
 _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
@@ -2886,18 +2886,47 @@ _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
 )
 
 
-def _invalidate_dashboard_data_cache() -> None:
-    """Drop cached reads after writes; keep the Supabase client connection."""
-    for clearable in (
-        _fetch_tickets_cached,
-        _fetch_sales_cases_cached,
-        _fetch_latest_attendance_ts_cached,
-        _fetch_visits_in_range_cached,
-        _cached_field_engineer_usernames,
-        _cached_task_categories,
-    ):
+def _invalidate_dashboard_data_cache(
+    *,
+    tickets: bool = True,
+    sales_cases: bool = True,
+    attendance: bool = True,
+    visits: bool = True,
+    field_engineers: bool = True,
+    task_categories: bool = True,
+) -> None:
+    """Drop cached reads after writes; keep the Supabase client connection.
+
+    Each cache maps to its own Supabase round-trip on the next render, so a
+    blanket clear after every write forces up to six refetches even when only
+    one dataset changed. Callers should disable the caches their write cannot
+    affect (e.g. a ticket dispatch action never changes the sales-case list,
+    the field-engineer roster, or the task-category list) to keep the board
+    snappy. Defaults clear everything for broad/unknown writes.
+    """
+    clearables = []
+    if tickets:
+        clearables.append(_fetch_tickets_cached)
+    if sales_cases:
+        clearables.append(_fetch_sales_cases_cached)
+    if attendance:
+        clearables.append(_fetch_latest_attendance_ts_cached)
+    if visits:
+        clearables.append(_fetch_visits_in_range_cached)
+    if field_engineers:
+        clearables.append(_cached_field_engineer_usernames)
+    if task_categories:
+        clearables.append(_cached_task_categories)
+    for clearable in clearables:
         clearable.clear()
     st.session_state.pop(_DASH_MISMATCH_CACHE_KEY, None)
+
+
+# Ticket/dispatch writes can never change the sales-case list, the field
+# engineer roster, or the task-category list — skip those refetches.
+_TICKET_WRITE_CACHE_SCOPE = dict(
+    sales_cases=False, field_engineers=False, task_categories=False
+)
 
 
 def _maybe_run_unattended_close() -> None:
@@ -2917,7 +2946,7 @@ def _maybe_run_unattended_close() -> None:
         st.session_state[_DASH_UNATTENDED_TICK_KEY] = now
         closed = int(stats.get("closed") or 0)
         if closed:
-            _invalidate_dashboard_data_cache()
+            _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
             st.toast(
                 f"Marked {closed} ticket(s) unattended and sent to **Needs Review** "
                 "(permanent count)."
@@ -3364,7 +3393,7 @@ def _persist_ticket_resolved_with_outcome(
             closed_by="dashboard",
             visit_end=now_iso,
         )
-    _invalidate_dashboard_data_cache()
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
     return outcome
 
 
@@ -4823,7 +4852,7 @@ def _render_manual_field_response_editor(
             st.success(f"{picked} → **Open** (field response saved).")
         else:
             st.success(f"{picked}: field response updated.")
-        _invalidate_dashboard_data_cache()
+        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
         st.rerun()
 
 
@@ -12099,7 +12128,7 @@ def _render_reassign_editor(
         f"**{picked}** reassigned → **Daily Task** ({handle}, {cat})."
         + (f" {tg_note}" if tg_note else "")
     )
-    _invalidate_dashboard_data_cache()
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
     st.rerun()
 
 
@@ -14055,7 +14084,7 @@ def _sidebar_command_center() -> None:
         _sidebar_field_assign()
 
 
-DEFAULT_REFRESH_MINUTES = 1
+DEFAULT_REFRESH_MINUTES = 3
 MIN_REFRESH_MINUTES = 1
 MAX_REFRESH_MINUTES = 60
 
@@ -18482,7 +18511,7 @@ def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
                 return
             _reopen_ticket_to_daily_task(ticket_number, operator_id=op)
         st.toast(f"Moved → {destination}", icon="✅")
-        _invalidate_dashboard_data_cache()
+        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
         st.rerun()
     except Exception as exc:
         st.toast(f"Move failed: {exc}", icon="❌")
@@ -19036,7 +19065,7 @@ def _handle_dispatch_queue_only_submit(
             additional_info=(notes or "").strip() or None,
             operator_id=op,
         )
-        _invalidate_dashboard_data_cache()
+        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
         _schedule_dispatch_assign_form_clear()
         st.toast(summary.replace("**", ""), icon="✅")
         st.rerun()
@@ -19240,7 +19269,7 @@ def _render_dispatch_row_modals(
                             f"{follow_t} → Under Investigation (follow-up tracked ●)",
                             icon="✅",
                         )
-                        _invalidate_dashboard_data_cache()
+                        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
                         st.rerun()
             if st.button("Cancel", key="disp_row_follow_up_cancel", use_container_width=True):
                 st.session_state.pop(_DISP_ROW_FOLLOW_UP, None)
@@ -19339,11 +19368,11 @@ def _dispatch_quick_assign_submit(
             _cc_save_assignment_telegram_ref(_get_supabase_client(), tid, tg_ref)
         except Exception as exc:
             st.warning(f"{summary} Telegram post failed (saved in Supabase): {exc}")
-            _invalidate_dashboard_data_cache()
+            _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
             _schedule_dispatch_assign_form_clear()
             st.rerun()
             return
-        _invalidate_dashboard_data_cache()
+        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
         _schedule_dispatch_assign_form_clear()
         st.success(f"{summary} Posted to Telegram.")
         st.rerun()
