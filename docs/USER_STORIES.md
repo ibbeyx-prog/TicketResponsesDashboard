@@ -2,7 +2,7 @@
 
 **Format:** As a **[role]**, I want **[goal]**, so that **[benefit]**.  
 **Platform-agnostic:** Stories describe intent, not Streamlit-specific widgets.  
-**Version:** 2026-06 (dispatch console + Performance rebuild)
+**Version:** 2026-06b (adds Follow up queue + Needs Review follow-up action stories)
 
 **Related docs:** [DEVELOPER_REQUIREMENTS.md](./DEVELOPER_REQUIREMENTS.md) · [DATABASE_SCHEMA.md](./DATABASE_SCHEMA.md)
 
@@ -127,7 +127,17 @@ As a **Dashboard Operator**, I want the right detail panel to show status, engin
 As a **Dashboard Operator**, I want to review tickets in **Needs Review** after a field response, so that I can verify quality before closing or escalating.
 
 **US-OP-10**  
-As a **Dashboard Operator**, I want to move a ticket to **Under Investigation** with an optional follow-up date, so that long-running cases stay visible.
+As a **Dashboard Operator**, I want to move a ticket to **Under Investigation** (general park) from the Needs Review row menu, so that long-running cases stay visible without follow-up tracking.
+
+**US-OP-10b**  
+As a **Dashboard Operator**, I want a **↻ Follow up** action on Needs Review tickets that captures an optional note, so that the case is tracked with a `follow_up_at` timestamp and surfaces in the dedicated **Follow up** queue.
+
+- **Given** a ticket in Needs Review  
+- **When** I choose **↻ Follow up**, add a note, and confirm  
+- **Then** the ticket moves to Under Investigation with `follow_up_at`/`follow_up_note` set and appears in the **Follow up** sidebar queue (oldest first)
+
+**US-OP-10c**  
+As a **Dashboard Operator**, I want a sidebar **Follow up** queue that lists tracked follow-ups oldest-first, so that I chase the longest-waiting cases before newer investigation work.
 
 **US-OP-11**  
 As a **Dashboard Operator**, I want to **reassign** a Needs Review or Investigation ticket without admin help, so that I can redirect work quickly.
