@@ -4,7 +4,7 @@
 **Stack:** Streamlit dashboard (`app.py`), UI theme/layout (`dispatch_console.py`), Telegram bot (`bot.py`), Supabase (Postgres + Storage), optional React staff matrix (`components/staff_matrix/`)  
 **Timezone:** UTC+5 for operator-facing dates, Log filters, and Performance week boundaries (Sun–Sat)  
 **Audience:** Developers, IT, integrators rebuilding or extending the system  
-**Version:** 2026-06 (dispatch console + Performance rebuild)
+**Version:** 2026-06b (dispatch console + Performance rebuild; sidebar Follow up queue, Needs Review row-menu redesign, cache/refresh tuning)
 
 ---
 
@@ -123,10 +123,12 @@ Rendered by `_render_dispatch_app_shell()` on every post-login screen.
 
 | Control | Effect |
 |---------|--------|
-| Auto-refresh toggle + interval (1–60 min) | Polls attendance for new Telegram activity |
+| Auto-refresh toggle + interval (1–60 min, **default 3 min**) | Periodic fragment rerun; polls attendance for new Telegram activity |
 | **Time range** | Today · This week · Last 30 days · Custom (From/To) |
-| Refresh now | Reloads data |
+| Refresh now | Reloads data (clears cached reads) |
 | Sign out | Clears session |
+
+Cached Supabase reads use a **120 s TTL** (`_DASH_DATA_CACHE_TTL_SEC`, env `DASH_DATA_CACHE_TTL_SEC`). Writes invalidate caches narrowly: ticket/dispatch actions skip clearing the sales-case, field-engineer, and task-category caches they cannot affect (`_invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)`).
 
 **Time range** filters Log and Performance in-range metrics. **Active CSM queue rows** (non-Resolved) remain visible regardless of range.
 
@@ -179,11 +181,16 @@ Supabase connectivity banner when unreachable. Branding: NetOps / Coverage Eye.
 | Daily Task | `Daily Task` | Awaiting field response |
 | Needs Review | `Open` | Post-reply admin review |
 | On Hold | `On Hold` | Admin chase queue |
-| Under Investigation | `Under Investigation` | Long-running; follow-ups |
-| Unattended | `Unattended` | Permanent no-response record |
+| Under Investigation | `Under Investigation` | Long-running cases |
+| Follow up | `Under Investigation` **+ `follow_up_at` set** | Tracked follow-ups, oldest first (derived queue — no separate status) |
+| Unattended | `Open` **+ `marked_unattended_at` set** | Permanent no-response record (derived) |
 | Resolved | `Resolved` | Closed |
 
-**Visibility:** Active queue tickets (Daily Task, Open, On Hold, Under Investigation, Unattended) always shown; Resolved filtered by time range where applicable.
+**Follow up** is a derived queue: it is the subset of **Under Investigation** rows that have `follow_up_at` set (mask `follow_up`, `_ticket_follow_up_mask`). It is sorted oldest-first so the longest-waiting follow-ups surface at the top. Marking a ticket for follow-up from **Needs Review** sets `follow_up_at` / `follow_up_note` and routes it here.
+
+**Under Investigation sub-tabs:** **All** (follow-ups pinned to top with ●) and **General** (rows without `follow_up_at`). `_INVESTIGATION_SUBTABS = ("All", "General")`.
+
+**Visibility:** Active queue tickets (Daily Task, Open, On Hold, Under Investigation, Follow up, Unattended) always shown; Resolved filtered by time range where applicable.
 
 ### 6.3 Ticket fields
 
@@ -208,18 +215,21 @@ Supabase connectivity banner when unreachable. Branding: NetOps / Coverage Eye.
 
 | Action | Daily Task | Needs Review | On Hold | Investigation | Resolved | Unattended |
 |--------|:----------:|:------------:|:-------:|:-------------:|:--------:|:----------:|
-| → Investigation | ✓ | ✓ | ✓ | — | — | — |
+| → Investigation | ✓ | ✓ (paired) | ✓ | — | — | — |
+| ↻ Follow up | — | ✓ (paired) | — | — | — | — |
 | → On Hold | Admin | Admin | — | Admin | — | — |
 | → Resolved | — | ✓ | — | ✓ | — | — |
-| → Needs Review | — | — | ✓ | ✓ | ✓ | — |
-| → Daily Task | — | — | — | — | — | ✓ |
+| → Daily Task (reopen) | — | — | — | — | — | ✓ |
 | Edit assignment | ✓ | ✓ | ✓ | ✓ | — | — |
 | Reassign | Admin | ✓ | Admin | ✓ | — | — |
 | Record response | Admin | Admin | Admin | — | — | — |
 | Admin close | Admin | Admin | Admin | Admin | — | — |
 | View photos | — | ✓ | — | ✓ | ✓ | — |
 | Move to Sales | ✓ | ✓ | ✓ | ✓ | — | — |
-| Delete | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+**Needs Review row menu grouping** (`_render_dispatch_row_actions`): a dedicated **“Follow up & Investigation”** section pairs **↻ Follow up** (opens note + Confirm → `_mark_ticket_for_follow_up`, routes to the Follow up queue) with **Investigation** (immediate `_move_to_investigation(follow_up=False)`). For other statuses, Investigation remains under **Move to**.
+
+**Resolve** is presented as a popover/expander resolve form (outcome category + optional comment). **Admin close** requires a comment.
 
 ### 6.5 Inline assign panel fields
 
@@ -388,19 +398,25 @@ Performance sets `_dash_pending_main_nav`, `_dash_pending_ticket_select`, `_dash
 stateDiagram-v2
   [*] --> DailyTask: Assign / queue
   DailyTask --> Open: Field responds
-  DailyTask --> Unattended: No response by cutoff
-  Unattended --> Open: Admin review route
-  Open --> Resolved: Mark Resolved
-  Open --> Investigation: Under Investigation
+  DailyTask --> Open: Auto-unattended (marked_unattended_at set)
+  Open --> Resolved: Mark Resolved (outcome category)
+  Open --> Investigation: Under Investigation (general)
+  Open --> Investigation: Follow up (sets follow_up_at + note)
   Open --> OnHold: On Hold (admin)
-  OnHold --> Open: Send to Needs Review
+  OnHold --> Open: Field responds
   Investigation --> Resolved: Mark Resolved
-  Investigation --> Open: Back to Open
-  Resolved --> Open: Reopen
+  DailyTask --> Investigation: Move
+  OnHold --> Investigation: Move
+  DailyTask --> Resolved: Admin close
+  Open --> Resolved: Admin close
+  Investigation --> DailyTask: Reassign
+  Open --> DailyTask: Reassign / reopen
   DailyTask --> Open: Admin record response
   DailyTask --> Sales: Move to Sales
   Open --> Sales: Move to Sales
 ```
+
+**Follow up vs Unattended are not separate `status` values** — both are derived views over real statuses (`Under Investigation` + `follow_up_at`, and `Open` + `marked_unattended_at` respectively). Resolve clears `follow_up_at` / `follow_up_note`.
 
 ### 10.2 Sales case lifecycle
 
@@ -461,7 +477,9 @@ Env: `UNATTENDED_NUDGE_HOURS`, `ASSIGN_DAY_CUTOFF_HOUR`, `CRON_SECRET`
 | `perf_selected_engineer` | Performance detail panel |
 | `_dash_time_preset`, `_dash_range_from_utc`, `_dash_range_to_utc` | Global time range |
 
-Row modal keys: `disp_row_edit_ticket`, `disp_row_reassign_ticket`, `disp_row_record_ticket`, `disp_row_close_ticket`, `disp_row_photo_ticket`
+Row modal keys: `disp_row_edit_ticket`, `disp_row_reassign_ticket`, `disp_row_record_ticket`, `disp_row_close_ticket`, `disp_row_resolve_ticket`, `disp_row_photo_ticket`, `disp_row_follow_up_ticket`
+
+Investigation sub-tab key: `disp_investigation_subtab` (values: `All`, `General`).
 
 ---
 
@@ -523,7 +541,7 @@ Row modal keys: `disp_row_edit_ticket`, `disp_row_reassign_ticket`, `disp_row_re
 | Photos | Supabase Storage public bucket |
 | Performance matrix | React virtualized grid; HTML fallback capped at 40 tickets |
 | Security | RLS on tables; dashboard users via RPC; webhook secret |
-| Refresh | Auto-refresh 1–60 min; manual refresh |
+| Refresh | Auto-refresh 1–60 min (default 3); 120 s read cache; manual refresh |
 | Min UI font | 11px floor for micro labels |
 
 ---

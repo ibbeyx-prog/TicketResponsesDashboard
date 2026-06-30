@@ -3,7 +3,7 @@
 **Database:** Supabase (PostgreSQL 15+)  
 **Extensions:** `pgcrypto` (password hashing)  
 **Storage:** Supabase Storage bucket `ticket-photos`  
-**Last reviewed:** Migrations through `20260716_assigned_to_second_engineer.sql` (56 files in `supabase/migrations/`)
+**Last reviewed:** Migrations through `20260716_assigned_to_second_engineer.sql` (56 files in `supabase/migrations/`); verified against live schema (9 public tables) 2026-06. Adds derived **Follow up** queue note.
 
 ---
 
@@ -417,7 +417,16 @@ Aggregates `ticket_visits` by `assignee`, `outcome`: `visit_count`, `first_visit
 | `On Hold` | On Hold |
 | `Under Investigation` | Under Investigation |
 | `Resolved` | Resolved |
-| `Unattended` | Unattended |
+| `Unattended` | (legacy status; superseded by `marked_unattended_at` flag) |
+
+### Derived UI queues (no dedicated `status` value)
+
+| UI queue | Derivation | App mask |
+|----------|------------|----------|
+| **Follow up** | `status = 'Under Investigation'` AND `follow_up_at IS NOT NULL` (oldest first) | `follow_up` (`_ticket_follow_up_mask`) |
+| **Unattended** | `marked_unattended_at IS NOT NULL` (status is typically `Open` after auto-close) | `unattended` (`_ticket_marked_unattended_mask`) |
+
+These are filtered/sorted in the application layer; they do **not** require their own `status` value and are not part of the `status` CHECK constraint.
 
 ### Sales status
 
