@@ -7346,6 +7346,7 @@ _PERF_MATRIX_LOG_ACTION_KIND: dict[str, str] = {
     "MovedToInvestigation": "admin",
     "Reopened": "admin",
     "ReopenedFromUnattended": "admin",
+    "ReopenedFromResolved": "admin",
 }
 
 
@@ -18491,6 +18492,65 @@ def _reopen_ticket_to_daily_task(
         pass
 
 
+def _reopen_ticket_to_needs_review(
+    ticket_number: str,
+    *,
+    operator_id: str | None = None,
+) -> None:
+    """Admin undo accidental resolve — restore field response to **Needs Review**."""
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    if str(row.get("status") or "") != STATUS_RESOLVED:
+        raise ValueError(
+            f"Ticket **{ticket_number}** is **{row.get('status') or '—'}** — "
+            "reopen is only allowed from **Resolved**."
+        )
+    client = _get_supabase_client()
+    now_iso = _cc_utc_now_iso()
+    op = operator_id or _session_operator_id() or "dashboard-admin"
+    actor = f"@{str(op).lstrip('@')}"
+    _cc_execute_ticket_update(
+        client,
+        {
+            "status": "Open",
+            "outcome_category": None,
+            "updated_at": now_iso,
+        },
+        ticket_number,
+    )
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=str(ticket_number),
+        member_username=actor,
+        action_type="ReopenedFromResolved",
+        note="Restored to Needs Review after accidental resolve.",
+    )
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+
+
+def _reopen_ticket_from_resolved_to_daily_task(
+    ticket_number: str,
+    *,
+    operator_id: str | None = None,
+) -> None:
+    """Admin undo resolve when the ticket should return to **Daily Task**."""
+    row = _fetch_ticket_row(ticket_number)
+    if not row:
+        raise ValueError(f"Ticket **{ticket_number}** not found.")
+    if str(row.get("status") or "") != STATUS_RESOLVED:
+        raise ValueError(
+            f"Ticket **{ticket_number}** is **{row.get('status') or '—'}** — "
+            "reopen is only allowed from **Resolved**."
+        )
+    _reopen_ticket_to_daily_task(
+        ticket_number,
+        operator_id=operator_id,
+        log_action="ReopenedFromResolved",
+    )
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+
+
 def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
     """Map destination label → status string and update ticket."""
     status_map = {
@@ -18498,6 +18558,8 @@ def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
         "Resolve": STATUS_RESOLVED,
         "On hold": STATUS_ON_HOLD,
         "Daily task (reopen)": STATUS_DAILY_TASK,
+        "Needs Review (reopen)": "Open",
+        "Daily Task (reopen)": STATUS_DAILY_TASK,
     }
     new_status = status_map.get(destination)
     if not new_status:
@@ -18527,6 +18589,16 @@ def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
                 st.toast("Sign in again", icon="⚠️")
                 return
             _reopen_ticket_to_daily_task(ticket_number, operator_id=op)
+        elif destination == "Needs Review (reopen)":
+            if not op:
+                st.toast("Sign in again", icon="⚠️")
+                return
+            _reopen_ticket_to_needs_review(ticket_number, operator_id=op)
+        elif destination == "Daily Task (reopen)":
+            if not op:
+                st.toast("Sign in again", icon="⚠️")
+                return
+            _reopen_ticket_from_resolved_to_daily_task(ticket_number, operator_id=op)
         st.toast(f"Moved → {destination}", icon="✅")
         _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
         st.rerun()
@@ -18571,6 +18643,10 @@ def _render_dispatch_row_actions(
             move_options.append("Resolve")
         if status == "Unattended":
             move_options.append("Daily task (reopen)")
+        if is_admin and status == "Resolved":
+            if str(ticket.get("field_response") or "").strip():
+                move_options.append("Needs Review (reopen)")
+            move_options.append("Daily Task (reopen)")
         if is_admin and status in ("Daily Task", "Needs Review", "Under Investigation"):
             move_options.append("On hold")
 
