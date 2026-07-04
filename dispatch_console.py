@@ -1693,6 +1693,11 @@ TIMELINE_DOT: dict[str, str] = {
     "Nudge": "#f59e0b",
     "AutoUnattended": "#ef4444",
     "OnHold": "#f59e0b",
+    "AdminClosed": "#f59e0b",
+    "Resolved": "#34d399",
+    "MovedToInvestigation": "#a78bfa",
+    "ReopenedFromUnattended": "#3b82f6",
+    "ReopenedFromResolved": "#3b82f6",
     "LegacyLogin": "#4a5a7a",
 }
 
@@ -2274,6 +2279,14 @@ def render_timeline_entry(log: dict[str, Any], *, is_last: bool, tz: timezone) -
     dot_color = TIMELINE_DOT.get(action, "#1a2035")
     member = html.escape(str(log.get("member_username") or "—"))
     when = html.escape(format_utc5(log.get("timestamp"), tz=tz))
+    note_raw = str(log.get("note") or "").strip()
+    note_html = ""
+    if note_raw:
+        note_html = (
+            f'<div style="font-size:12px;font-weight:400;color:#8a9ac0;line-height:1.45;'
+            f"margin-top:4px;white-space:pre-wrap;word-break:break-word\">"
+            f"{html.escape(note_raw)}</div>"
+        )
     st.markdown(
         f"""
     <div style="display:flex;gap:8px;padding-bottom:{'0' if is_last else '10px'};position:relative">
@@ -2284,6 +2297,7 @@ def render_timeline_entry(log: dict[str, Any], *, is_last: bool, tz: timezone) -
       <div>
         <div style="font-size:13px;font-weight:400;color:#4a5a7a;line-height:1.4">{html.escape(action)} · {member}</div>
         <div style="font-size:11px;font-weight:400;color:#2a3a5a;margin-top:1px">{when}</div>
+        {note_html}
       </div>
     </div>
     """,

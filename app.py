@@ -2920,6 +2920,8 @@ def _invalidate_dashboard_data_cache(
         clearables.append(_cached_task_categories)
     for clearable in clearables:
         clearable.clear()
+    if tickets or attendance or visits:
+        _get_dispatch_ticket_case_activity.clear()
     st.session_state.pop(_DASH_MISMATCH_CACHE_KEY, None)
 
 
@@ -7349,6 +7351,38 @@ _PERF_MATRIX_LOG_ACTION_KIND: dict[str, str] = {
     "ReopenedFromResolved": "admin",
 }
 
+_ADMIN_COMMENT_ACTION_TYPES: frozenset[str] = frozenset(
+    k for k, v in _PERF_MATRIX_LOG_ACTION_KIND.items() if v == "admin"
+)
+
+
+def _latest_admin_comment_for_ticket(ticket_number: str) -> dict[str, str] | None:
+    """Most recent admin resolve/close/hold note from attendance logs."""
+    tn = str(ticket_number or "").strip()
+    if not tn:
+        return None
+    try:
+        logs = _fetch_attendance(ticket_number=tn, limit=80)
+    except Exception:
+        return None
+    if logs.empty:
+        return None
+    for _, row in logs.iterrows():
+        action = str(row.get("action_type") or "").strip()
+        if action not in _ADMIN_COMMENT_ACTION_TYPES:
+            continue
+        note = _clean_display_value(row.get("note"))
+        if not note:
+            continue
+        at_label, _ = _perf_matrix_case_info_ts(row.get("timestamp"))
+        return {
+            "author": _clean_display_value(row.get("member_username"), default="—") or "—",
+            "text": note,
+            "at": at_label,
+            "action": action,
+        }
+    return None
+
 
 def _perf_matrix_comment_key(author: str, text: str) -> tuple[str, str]:
     a = str(author or "").strip().lower().lstrip("@")
@@ -7790,10 +7824,14 @@ def _render_dispatch_case_activity_panel(ticket_number: str) -> None:
                 f"</div>{when_row}{text_row}"
                 f"</div></li>"
             )
+        expand_comments = bool(
+            comments
+            and str(comments[0].get("kind") or "") == "admin"
+        )
         if cards:
             with st.expander(
                 f"Responses & comments ({len(cards)})",
-                expanded=False,
+                expanded=expand_comments,
             ):
                 st.markdown(
                     f'<ul style="margin:0;padding:0">{"".join(cards)}</ul>',
@@ -18865,6 +18903,32 @@ def _render_dispatch_case_info_panel(
             <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
               background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
               {html.escape(str(t.get('additional_info') or ''))}
+            </div>""",
+                unsafe_allow_html=True,
+            )
+        admin_comment = _latest_admin_comment_for_ticket(str(t.get("ticket_number") or ""))
+        if admin_comment:
+            st.markdown(
+                t_section_label(
+                    "Last admin comment",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            admin_author = html.escape(admin_comment.get("author") or "—")
+            admin_when = html.escape(admin_comment.get("at") or "")
+            admin_text = html.escape(admin_comment.get("text") or "")
+            when_line = (
+                f'<p style="font-size:11px;color:#2a3a5a;margin:4px 0 0">'
+                f"{admin_author}{(' · ' + admin_when) if admin_when else ''}</p>"
+            )
+            st.markdown(
+                f"""
+            <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
+              background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
+              <p style="margin:0;white-space:pre-wrap;word-break:break-word">{admin_text}</p>
+              {when_line}
             </div>""",
                 unsafe_allow_html=True,
             )
