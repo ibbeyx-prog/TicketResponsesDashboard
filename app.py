@@ -69,6 +69,7 @@ import logging
 import math
 import os
 import re
+from collections import Counter
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -226,7 +227,90 @@ def _perf_count_span(n: int | float) -> str:
     )
 
 
+_GDG_DARK_VARS = """
+  --gdg-bg-cell: #0d1220;
+  --gdg-bg-header: #080b14;
+  --gdg-bg-header-has-focus: #121a2a;
+  --gdg-bg-header-hovered: #121a2a;
+  --gdg-text-dark: #e2e8f8;
+  --gdg-text-medium: #8a9ac0;
+  --gdg-text-light: #4a5a7a;
+  --gdg-text-header: #8a9ac0;
+  --gdg-border-color: #1a2035;
+  --gdg-accent-color: #3b82f6;
+  --gdg-accent-light: rgba(59, 130, 246, 0.15);
+  --gdg-accent-fg: #e2e8f8;
+  --gdg-bg-cell-medium: #0d1220;
+  --gdg-bg-search-cell: #121a2a;
+"""
+
+
+def _render_perf_dataframe(
+    df: pd.DataFrame | None,
+    *,
+    empty_msg: str = "No rows.",
+    max_rows: int | None = None,
+    **kwargs: object,
+) -> None:
+    """Performance tables — explicit height avoids empty glide grids inside columns."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        st.markdown(
+            f'<p style="font-size:11px;color:#8a9ac0;margin:4px 0">'
+            f"{html.escape(empty_msg)}</p>",
+            unsafe_allow_html=True,
+        )
+        return
+    view = df.head(max_rows) if max_rows else df
+    row_count = len(view)
+    height: int | str = (
+        "content" if row_count <= 15 else min(480, 42 + row_count * 35)
+    )
+    kwargs.pop("use_container_width", None)
+    kwargs.setdefault("hide_index", True)
+    st.dataframe(view, width="stretch", height=height, **kwargs)
+
+
+def _perf_table_section_heading(text: object) -> str:
+    """Heading above a perf table — distinct from in-grid column headers."""
+    safe = html.escape(str(text))
+    return (
+        f'<p class="perf-table-section-title">{safe}</p>'
+    )
+
+
+def _render_perf_table_section(
+    title: str,
+    df: pd.DataFrame | None,
+    *,
+    top_margin: str = "1.1rem",
+    **kwargs: object,
+) -> None:
+    """Section title clearly separated from the dataframe below it."""
+    st.markdown(
+        f'<div class="perf-table-section" style="margin-top:{top_margin}">'
+        f"{_perf_table_section_heading(title)}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    _render_perf_dataframe(df, **kwargs)
+
+
 PERF_OVERVIEW_CSS = """
+    /* Performance table section — title outside the bordered grid */
+    .perf-table-section {
+      margin-bottom: 0.35rem;
+    }
+    .perf-table-section-title,
+    [data-testid="stMarkdownContainer"] .perf-table-section-title {
+      font-size: 13px !important;
+      font-weight: 500 !important;
+      color: #e2e8f8 !important;
+      text-transform: none !important;
+      letter-spacing: 0 !important;
+      line-height: 1.4 !important;
+      margin: 0 0 0.65rem !important;
+      padding: 0 !important;
+    }
     /* Performance overview — staff solo/shared board + queue chips */
     .perf-ss-board {
       display: flex;
@@ -267,7 +351,8 @@ PERF_OVERVIEW_CSS = """
       overflow: hidden;
       background: #0d1220;
     }
-    .perf-ss-pill.has-sales { max-width: 20rem; }
+    .perf-ss-pill.has-sales,
+    .perf-ss-pill.has-resort { max-width: 20rem; }
     .perf-ss-seg {
       flex: 1 1 50%;
       display: flex;
@@ -286,10 +371,12 @@ PERF_OVERVIEW_CSS = """
       color: #e2e8f8;
     }
     .perf-ss-seg.shared { color: #8a9ac0; }
-    .perf-ss-pill.has-sales .perf-ss-seg.shared {
+    .perf-ss-pill.has-sales .perf-ss-seg.shared,
+    .perf-ss-pill.has-resort .perf-ss-seg.shared {
       border-right: 0.5px solid #1a2035;
     }
-    .perf-ss-seg.sales { color: #22c55e; }
+    .perf-ss-seg.sales,
+    .perf-ss-seg.resort { color: #a78bfa; }
     .perf-ss-seg .num, .perf-ss-seg .perf-count {
       font-size:14px;
       font-weight: 600;
@@ -570,6 +657,13 @@ def apply_theme(*, login: bool = False) -> None:
     {DISPATCH_LAYOUT_RULES}
     {DISPATCH_FULL_DARK_CSS}
     {PERF_OVERVIEW_CSS}
+    [data-testid="stDataFrame"] .stDataFrameGlideDataEditor,
+    [data-testid="stDataEditor"] .stDataEditorGlideDataEditor,
+    [data-testid="stDataFrame"] [data-testid="glideDataEditor"],
+    [data-testid="stDataEditor"] [data-testid="glideDataEditor"] {{
+      {_GDG_DARK_VARS}
+      min-height: 6rem !important;
+    }}
     div.st-key-disp_perf_body [data-testid="stRadio"] > div {{
       flex-direction: column !important;
       gap: 1px !important;
@@ -817,6 +911,20 @@ SC_STATUS_INVESTIGATION = "Investigation"
 SC_STATUS_REGIONAL = "Regional for site visit"
 SC_STATUS_DESIGN = "Design"
 SC_STATUS_RESOLVED = STATUS_RESOLVED
+# Map resort-case statuses onto the residential queue sidebar (unified Ticket screen).
+_RESORT_STATUS_TO_UNIFIED_QUEUE: dict[str, str] = {
+    SC_STATUS_SALES_TICKET: "Daily Task",
+    SC_STATUS_INVESTIGATION: "Under Investigation",
+    SC_STATUS_REGIONAL: "Under Investigation",
+    SC_STATUS_DESIGN: "On Hold",
+    SC_STATUS_RESOLVED: STATUS_RESOLVED,
+}
+_UNIFIED_QUEUE_TO_RESORT_STATUSES: dict[str, list[str]] = {
+    "Daily Task": [SC_STATUS_SALES_TICKET],
+    "Under Investigation": [SC_STATUS_INVESTIGATION, SC_STATUS_REGIONAL],
+    "On Hold": [SC_STATUS_DESIGN],
+    "Resolved": [SC_STATUS_RESOLVED],
+}
 # Shown together under the Investigation queue (no separate Regional column).
 _SC_INVESTIGATION_QUEUE_STATUSES: tuple[str, ...] = (
     SC_STATUS_INVESTIGATION,
@@ -1339,6 +1447,7 @@ _DASH_PENDING_SALES_QUEUE_KEY = "_dash_pending_sales_queue"
 _DASH_PENDING_TICKET_SELECT_KEY = "_dash_pending_ticket_select"
 _DASH_PENDING_ENGINEER_FILTER_KEY = "_dash_pending_engineer_filter"
 _DASH_PENDING_SALES_SELECT_KEY = "_dash_pending_sales_select"
+_DASH_PENDING_CASE_TYPE_FILTER_KEY = "_dash_pending_case_type_filter"
 _PERF_FOCUS_ASSIGNEE_KEY = "perf_focus_assignee"
 _PERF_RANGE_PRESET_KEY = "perf_range"
 _PERF_ACTIVE_VIEW_KEY = "perf_active_view"
@@ -1348,18 +1457,31 @@ _PERF_RANGE_TO_KEY = "_perf_range_to_utc"
 _PERF_VIEW_OPTIONS: tuple[str, ...] = (
     "Overview",
     "Weekly",
-    "Sales cases",
     "Case info",
     "Handled",
     "On hold",
     "Unattended",
 )
+_PERF_OVERVIEW_COL_RESIDENTIAL = "Residential"
+_PERF_OVERVIEW_COL_RESORT = "Resort"
 _DISP_ENGINEER_FILTER_KEY = "disp_engineer_filter"
-_DASH_NAV_CSM = "CSM Cases"
-_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = (_DASH_NAV_CSM, "Sales Cases", "Log", "Performance")
+_DASH_NAV_TICKET = "Ticket"
+_DASH_NAV_CSM = _DASH_NAV_TICKET  # legacy alias
+CASE_TYPE_RESIDENTIAL = "Residential"
+CASE_TYPE_RESORT = "Resort"
+_CASE_TYPE_FILTER_ALL = "All"
+_DISP_CASE_TYPE_FILTER_KEY = "disp_case_type_filter"
+_DISP_SELECTED_CASE_TYPE_KEY = "disp_selected_case_type"
+_DISP_ASSIGN_CASE_TYPE_KEY = "disp_assign_case_type"
+_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = (_DASH_NAV_TICKET, "Log", "Performance")
+_DASH_NAV_LEGACY_REDIRECT: dict[str, str] = {
+    "CSM cases": _DASH_NAV_TICKET,
+    "Sales cases": _DASH_NAV_TICKET,
+    "csm": _DASH_NAV_TICKET,
+    "sales": _DASH_NAV_TICKET,
+}
 _DASH_MAIN_NAV_LABELS: dict[str, str] = {
-    _DASH_NAV_CSM: "CSM cases",
-    "Sales Cases": "Sales cases",
+    _DASH_NAV_TICKET: "Ticket",
     "Log": "Log",
     "Performance": "Performance",
 }
@@ -1390,8 +1512,8 @@ _SC_CC_FE_SELECT_2_KEY = "sc_cc_fe_select_2"
 _SC_CC_FE_MANUAL_2_KEY = "sc_cc_fe_manual_2"
 _SC_CC_CLEAR_ST_INTAKE_KEY = "_sc_cc_clear_st_intake"
 _CC_SIDEBAR_TAB_KEY = "_cc_sidebar_tab"
-CC_TAB_CSM = "CSM"
-CC_TAB_SALES = "SALES"
+CC_TAB_CSM = "Residential"
+CC_TAB_SALES = "Resort"
 _CC_SIDEBAR_TAB_OPTIONS: tuple[str, ...] = (CC_TAB_CSM, CC_TAB_SALES)
 _BON_SIDEBAR_OPEN_KEY = "bon_sidebar_open"
 _BON_MENU_OPEN_KEY = "bon_app_menu_open"
@@ -1409,12 +1531,14 @@ def _bon_sidebar_is_open() -> bool:
 
 
 def _normalize_dash_main_nav(value: object) -> str:
-    """Map legacy nav labels (e.g. Tickets, CSM) to current options."""
-    nav = str(value or _DASH_NAV_CSM).strip()
-    if nav in ("Tickets", "CSM"):
-        return _DASH_NAV_CSM
-    if nav == "Sales cases":
-        return "Sales Cases"
+    """Map legacy nav labels (e.g. Tickets, CSM, Sales Cases) to current options."""
+    nav = str(value or _DASH_NAV_TICKET).strip()
+    if nav in _DASH_NAV_LEGACY_REDIRECT:
+        return _DASH_NAV_LEGACY_REDIRECT[nav]
+    if nav in ("Tickets", "CSM", "CSM Cases", "CSM cases"):
+        return _DASH_NAV_TICKET
+    if nav in ("Sales Cases", "Sales cases"):
+        return _DASH_NAV_TICKET
     return nav
 
 
@@ -2908,10 +3032,13 @@ def _invalidate_dashboard_data_cache(
     clearables = []
     if tickets:
         clearables.append(_fetch_tickets_cached)
+        _cached_latest_admin_comment.clear()
     if sales_cases:
         clearables.append(_fetch_sales_cases_cached)
+        _cached_resort_unified_bundle.clear()
     if attendance:
         clearables.append(_fetch_latest_attendance_ts_cached)
+        _cached_latest_admin_comment.clear()
     if visits:
         clearables.append(_fetch_visits_in_range_cached)
     if field_engineers:
@@ -2920,6 +3047,8 @@ def _invalidate_dashboard_data_cache(
         clearables.append(_cached_task_categories)
     for clearable in clearables:
         clearable.clear()
+    if tickets or attendance or visits:
+        _get_dispatch_ticket_case_activity.clear()
     st.session_state.pop(_DASH_MISMATCH_CACHE_KEY, None)
 
 
@@ -4686,16 +4815,16 @@ def _render_ticket_transfer_to_sales_popover(
     key_prefix: str,
     options: list[str],
 ) -> None:
-    with st.popover("Move to Sales", use_container_width=True):
+    with st.popover("Move to Resort", use_container_width=True):
         picked_list = _get_selected_queue_tickets(key_prefix, options)
         if not picked_list:
-            st.caption("Select ticket(s), then open **Move to Sales** again.")
+            st.caption("Select ticket(s), then open **Move to Resort** again.")
             return
         st.markdown("**" + "**, **".join(picked_list[:12]) + "**")
         if len(picked_list) > 12:
             st.caption(f"+ {len(picked_list) - 12} more")
         st.caption(
-            "Creates a **Sales case** and removes the CSM ticket. "
+            "Creates a **Resort case** and removes the residential ticket. "
             "**Log** keeps attendance history."
         )
         op = _session_operator_id()
@@ -4715,7 +4844,7 @@ def _render_ticket_transfer_to_sales_popover(
             key=f"{key_prefix}_xfer_sales_region",
         )
         confirm = st.checkbox(
-            "Yes, move to Sales Cases",
+            "Yes, move to Resort",
             value=False,
             key=f"{key_prefix}_xfer_sales_confirm",
         )
@@ -4742,11 +4871,11 @@ def _render_ticket_transfer_to_sales_popover(
             if ok:
                 _invalidate_dashboard_data_cache()
                 st.session_state[_ticket_selection_session_key(key_prefix)] = []
-                st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
+                st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
                 st.session_state[_DASH_PENDING_SALES_QUEUE_KEY] = _queue_segment_label(
                     SC_STATUS_SALES_TICKET, 1
                 )
-                st.success(f"Moved **{ok}** ticket(s) to **Sales Cases**.")
+                st.success(f"Moved **{ok}** ticket(s) to **Resort**.")
                 st.rerun()
 
 
@@ -5250,7 +5379,7 @@ def _render_ticket_overflow_menu(
             with st.expander("Follow-up", expanded=False):
                 _render_follow_up_form_inline(key_prefix=key_prefix, options=options)
         if allow_transfer_to_sales and _session_operator_id():
-            with st.expander("Move to Sales", expanded=False):
+            with st.expander("Move to Resort", expanded=False):
                 picked_list = picked
                 if not picked_list:
                     st.caption("No tickets selected.")
@@ -5263,7 +5392,7 @@ def _render_ticket_overflow_menu(
                         label_visibility="collapsed",
                     )
                     confirm = st.checkbox(
-                        "Yes, move to Sales Cases",
+                        "Yes, move to Resort",
                         key=f"{key_prefix}_ctx_xfer_confirm",
                     )
                     if st.button(
@@ -5287,11 +5416,9 @@ def _render_ticket_overflow_menu(
                             st.session_state[
                                 _ticket_selection_session_key(key_prefix)
                             ] = []
-                            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = (
-                                "Sales Cases"
-                            )
+                            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
                             _cc_set_flash(
-                                f"Moved **{ok}** ticket(s) to **Sales Cases**."
+                                f"Moved **{ok}** ticket(s) to **Resort**."
                             )
                             st.rerun()
         for label, _status, _log in overflow_status:
@@ -5503,7 +5630,7 @@ def _render_ticket_actions_popover_body(
                 df=df,
             )
     if allow_transfer_to_sales and _session_operator_id():
-        with st.expander("Move to Sales", expanded=False):
+        with st.expander("Move to Resort", expanded=False):
             picked_list = _get_selected_queue_tickets(key_prefix, options)
             if picked_list:
                 region = st.selectbox(
@@ -5512,7 +5639,7 @@ def _render_ticket_actions_popover_body(
                     key=f"{key_prefix}_pop_xfer_region",
                 )
                 confirm = st.checkbox(
-                    "Confirm move to Sales",
+                    "Confirm move to Resort",
                     key=f"{key_prefix}_pop_xfer_confirm",
                 )
                 if st.button(
@@ -5535,8 +5662,8 @@ def _render_ticket_actions_popover_body(
                     if ok:
                         _invalidate_dashboard_data_cache()
                         st.session_state[_ticket_selection_session_key(key_prefix)] = []
-                        st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
-                        _cc_set_flash(f"Moved **{ok}** ticket(s) to **Sales Cases**.")
+                        st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
+                        _cc_set_flash(f"Moved **{ok}** ticket(s) to **Resort**.")
                         st.rerun()
 
     if allow_delete:
@@ -6371,7 +6498,7 @@ def _perf_overview_board_summary(
     *,
     visits_history: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Overview board rows: visit-cycle solo/shared fair credit + Sales Cases."""
+    """Overview board rows: visit-cycle solo/shared fair credit + Resort cases."""
     sales = sales_summary if sales_summary is not None else pd.DataFrame()
     people: set[str] = set()
     if not overview_table.empty and "Person" in overview_table.columns:
@@ -6425,18 +6552,18 @@ def _perf_overview_board_summary(
                 "Solo tickets": solo,
                 "Shared tickets": shared,
                 "Tickets touched": solo + shared,
-                "Field queues": int(field_map.get(norm, 0)),
-                "Sales Cases": int(sales_map.get(norm, 0)),
+                _PERF_OVERVIEW_COL_RESIDENTIAL: int(field_map.get(norm, 0)),
+                _PERF_OVERVIEW_COL_RESORT: int(sales_map.get(norm, 0)),
             }
         )
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
-    out = out[(out["Field queues"] > 0) | (out["Sales Cases"] > 0)]
+    out = out[(out[_PERF_OVERVIEW_COL_RESIDENTIAL] > 0) | (out[_PERF_OVERVIEW_COL_RESORT] > 0)]
     if out.empty:
         return out
     return out.sort_values(
-        ["Field queues", "Sales Cases", "Tickets touched"],
+        [_PERF_OVERVIEW_COL_RESIDENTIAL, _PERF_OVERVIEW_COL_RESORT, "Tickets touched"],
         ascending=[False, False, False],
     )
 
@@ -6481,7 +6608,7 @@ def _perf_solo_shared_board_summary(
     visits: pd.DataFrame,
     sales_summary: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    """Visit solo/shared counts plus Sales Cases staff (e.g. sales-only in window)."""
+    """Visit solo/shared counts plus Resort cases staff (e.g. resort-only in window)."""
     visit_summary = (
         _perf_solo_shared_summary_all(visits)
         if not visits.empty
@@ -6493,21 +6620,23 @@ def _perf_solo_shared_board_summary(
     if sales.empty or "Person" not in sales.columns or "Total" not in sales.columns:
         out = visit_summary.copy()
         if not out.empty:
-            out["Sales Cases"] = 0
+            out[_PERF_OVERVIEW_COL_RESORT] = 0
         return out
-    sales_cols = sales[["Person", "Total"]].rename(columns={"Total": "Sales Cases"})
+    sales_cols = sales[["Person", "Total"]].rename(
+        columns={"Total": _PERF_OVERVIEW_COL_RESORT},
+    )
     if visit_summary.empty:
         out = sales_cols.copy()
         out["Solo tickets"] = 0
         out["Shared tickets"] = 0
         out["Tickets touched"] = 0
-        return out.sort_values(["Sales Cases", "Person"], ascending=[False, True])
+        return out.sort_values([_PERF_OVERVIEW_COL_RESORT, "Person"], ascending=[False, True])
     merged = visit_summary.merge(sales_cols, on="Person", how="outer")
-    for col in ("Solo tickets", "Shared tickets", "Tickets touched", "Sales Cases"):
+    for col in ("Solo tickets", "Shared tickets", "Tickets touched", _PERF_OVERVIEW_COL_RESORT):
         if col in merged.columns:
             merged[col] = merged[col].fillna(0).astype(int)
     return merged.sort_values(
-        ["Tickets touched", "Sales Cases", "Solo tickets"],
+        ["Tickets touched", _PERF_OVERVIEW_COL_RESORT, "Solo tickets"],
         ascending=[False, False, False],
     )
 
@@ -6545,15 +6674,15 @@ def _perf_attach_sales_to_overview(
     overview_table: pd.DataFrame,
     sales_summary: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Add per-person Sales Cases counts (field ``Total`` stays field-only)."""
+    """Add per-person Resort counts (field ``Total`` stays residential-only)."""
     if sales_summary.empty or "Total" not in sales_summary.columns:
         if overview_table.empty:
             return overview_table
         out = overview_table.copy()
-        out["Sales Cases"] = 0
+        out[_PERF_OVERVIEW_COL_RESORT] = 0
         return out
     sales_col = sales_summary[["Person", "Total"]].rename(
-        columns={"Total": "Sales Cases"},
+        columns={"Total": _PERF_OVERVIEW_COL_RESORT},
     )
     if overview_table.empty:
         out = sales_col.copy()
@@ -6561,7 +6690,7 @@ def _perf_attach_sales_to_overview(
         out["Handled"] = 0
         return out
     merged = overview_table.merge(sales_col, on="Person", how="outer")
-    for col in ("Total", "Sales Cases", "Handled"):
+    for col in ("Total", _PERF_OVERVIEW_COL_RESORT, "Handled"):
         if col in merged.columns:
             merged[col] = merged[col].fillna(0).astype(int)
     return merged
@@ -6574,7 +6703,7 @@ def _perf_grand_total_for_board(
     sales_summary: pd.DataFrame | None = None,
     focus: str = "All",
 ) -> int:
-    """Ring total: field queue snapshot + Sales Cases in the sidebar window."""
+    """Ring total: residential queue snapshot + Resort cases in the sidebar window."""
     field_n = _perf_count_column_total(overview_table, "Total", focus=focus)
     sales_n = _perf_count_column_total(
         sales_summary if sales_summary is not None else pd.DataFrame(),
@@ -6606,12 +6735,20 @@ def _perf_overview_total_breakdown(
 def _perf_overview_ring_subhtml(field_n: int, sales_n: int) -> str:
     if field_n and sales_n:
         return (
-            f'<div class="perf-ss-total-sub">Field {field_n} · Sales {sales_n}</div>'
+            f'<div class="perf-ss-total-sub">'
+            f'{_PERF_OVERVIEW_COL_RESIDENTIAL} {field_n} · '
+            f'{_PERF_OVERVIEW_COL_RESORT} {sales_n}</div>'
         )
     if sales_n:
-        return f'<div class="perf-ss-total-sub">Sales {sales_n}</div>'
+        return (
+            f'<div class="perf-ss-total-sub">'
+            f'{_PERF_OVERVIEW_COL_RESORT} {sales_n}</div>'
+        )
     if field_n:
-        return f'<div class="perf-ss-total-sub">Field {field_n}</div>'
+        return (
+            f'<div class="perf-ss-total-sub">'
+            f'{_PERF_OVERVIEW_COL_RESIDENTIAL} {field_n}</div>'
+        )
     return ""
 
 
@@ -6627,8 +6764,8 @@ def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
     else:
         r = summary.sum(numeric_only=True)
     labels = (
-        ("Total", "Field queues"),
-        ("Sales Cases", "Sales Cases"),
+        ("Total", _PERF_OVERVIEW_COL_RESIDENTIAL),
+        (_PERF_OVERVIEW_COL_RESORT, _PERF_OVERVIEW_COL_RESORT),
         (STATUS_DAILY_TASK, STATUS_DAILY_TASK),
         ("Needs Review", "Needs Review"),
         ("Investigation", "Investigation"),
@@ -6643,7 +6780,7 @@ def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
         if col not in summary.columns:
             continue
         val = int(r.get(col, 0))
-        if val == 0 and col not in ("Total", "Sales Cases", "Handled"):
+        if val == 0 and col not in ("Total", _PERF_OVERVIEW_COL_RESORT, "Handled"):
             continue
         chips.append(
             f'<span class="perf-queue-chip">{html.escape(label)}'
@@ -6687,12 +6824,12 @@ def _render_perf_solo_shared_board(
     if summary.empty:
         if total_n == 0:
             st.markdown(
-                '<p class="perf-ss-hint">No field tickets or Sales Cases in the system.</p>',
+                '<p class="perf-ss-hint">No residential or resort tickets in the system.</p>',
                 unsafe_allow_html=True,
             )
         elif total_n > 0:
             st.markdown(
-                '<p class="perf-ss-hint">Overview counts all tickets in queue snapshot + Sales Cases.</p>',
+                '<p class="perf-ss-hint">Overview counts residential queue snapshot + resort cases.</p>',
                 unsafe_allow_html=True,
             )
         if total_n > 0:
@@ -6703,7 +6840,7 @@ def _render_perf_solo_shared_board(
                 unsafe_allow_html=True,
             )
         elif summary.empty:
-            st.caption("No engineers in visit or Sales Cases data for this window.")
+            st.caption("No engineers in visit or resort case data for this window.")
         return
 
     focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
@@ -6725,22 +6862,22 @@ def _render_perf_solo_shared_board(
         person = str(row["Person"])
         solo = int(row.get("Solo tickets", 0))
         shared = int(row.get("Shared tickets", 0))
-        sales_n_person = int(row.get("Sales Cases", 0))
+        resort_n_person = int(row.get(_PERF_OVERVIEW_COL_RESORT, 0))
         selected = focus_key and _perf_norm_member(person) == focus_key
         row_cls = "perf-ss-row is-selected" if selected else "perf-ss-row"
-        sales_seg = ""
-        if sales_n_person > 0:
-            sales_seg = (
-                f'<span class="perf-ss-seg sales">sales'
-                f"{_perf_count_span(sales_n_person)}</span>"
+        resort_seg = ""
+        if resort_n_person > 0:
+            resort_seg = (
+                f'<span class="perf-ss-seg resort">resort'
+                f"{_perf_count_span(resort_n_person)}</span>"
             )
         rows_html.append(
             f'<div class="{row_cls}">'
             f'<span class="perf-ss-name">{html.escape(person)}</span>'
-            f'<div class="perf-ss-pill{" has-sales" if sales_n_person else ""}">'
+            f'<div class="perf-ss-pill{" has-resort" if resort_n_person else ""}">'
             f'<span class="perf-ss-seg solo">solo{_perf_count_span(solo)}</span>'
             f'<span class="perf-ss-seg shared">shared{_perf_count_span(shared)}</span>'
-            f"{sales_seg}"
+            f"{resort_seg}"
             f"</div>"
             f"</div>"
         )
@@ -6760,8 +6897,8 @@ def _render_perf_solo_shared_board(
         "visit cycle on the ticket counts (respond, reassign, etc.). "
         "**Solo** = only one engineer ever touched that ticket; "
         "**shared** = two or more engineers on the same ticket. "
-        "<strong>Sales</strong> = all Sales Cases · "
-        "Ring = field queues + Sales (excludes <strong>Unattended</strong>). "
+        "<strong>Resort</strong> = all resort cases · "
+        "Ring = residential queues + resort (excludes <strong>Unattended</strong>). "
         "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
         unsafe_allow_html=True,
     )
@@ -6773,7 +6910,7 @@ def _render_perf_solo_shared_detail(
     focus: str,
     sales_cases: pd.DataFrame | None = None,
 ) -> None:
-    """Field visit ticket list + Sales Cases for Overview (always visible)."""
+    """Residential visit ticket list + resort cases for Overview detail."""
     all_focus = focus in ("", "All")
     detail = (
         _perf_ticket_detail_rows(
@@ -6789,17 +6926,17 @@ def _render_perf_solo_shared_detail(
         if not all_focus:
             sales_view = _perf_filter_by_person(sales_view, focus)
     if detail.empty and sales_view.empty:
-        st.caption("No field visit or Sales Case ticket detail in this window.")
+        st.caption("No residential visit or resort case detail in this window.")
         return
 
     label = "All engineers" if all_focus else focus
     if not detail.empty:
-        st.markdown(f"**Field tickets — {label} ({len(detail)})**")
+        st.markdown(f"**Residential tickets — {label} ({len(detail)})**")
         shared_only = detail[detail["Type"] == "Shared"]
         if not shared_only.empty:
             st.caption(f"**{len(shared_only)}** shared (multiple engineers on the same ticket).")
-            st.dataframe(shared_only, use_container_width=True, hide_index=True)
-        st.dataframe(detail, use_container_width=True, hide_index=True)
+            st.dataframe(shared_only, width="stretch", hide_index=True, height="content")
+        _render_perf_dataframe(detail)
 
     if not sales_view.empty:
         cols = [
@@ -6824,7 +6961,7 @@ def _render_perf_solo_shared_detail(
         show = show.rename(columns={k: v for k, v in rename.items() if k in show.columns})
         if "Updated" in show.columns:
             show["Updated"] = show["Updated"].dt.strftime("%Y-%m-%d %H:%M")
-        st.markdown(f"**Sales Cases — {label} ({len(show)})**")
+        st.markdown(f"**Resort cases — {label} ({len(show)})**")
         st.dataframe(show, use_container_width=True, hide_index=True)
 
 
@@ -7349,6 +7486,46 @@ _PERF_MATRIX_LOG_ACTION_KIND: dict[str, str] = {
     "ReopenedFromResolved": "admin",
 }
 
+_ADMIN_COMMENT_ACTION_TYPES: frozenset[str] = frozenset(
+    k for k, v in _PERF_MATRIX_LOG_ACTION_KIND.items() if v == "admin"
+)
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _cached_latest_admin_comment(ticket_number: str) -> dict[str, str] | None:
+    """Most recent admin resolve/close/hold note from attendance logs."""
+    tn = str(ticket_number or "").strip()
+    if not tn:
+        return None
+    try:
+        logs = _fetch_attendance(ticket_number=tn, limit=80)
+    except Exception:
+        return None
+    if logs.empty:
+        return None
+    for _, row in logs.iterrows():
+        action = str(row.get("action_type") or "").strip()
+        if action not in _ADMIN_COMMENT_ACTION_TYPES:
+            continue
+        note = _clean_display_value(row.get("note"))
+        if not note:
+            continue
+        at_label, _ = _perf_matrix_case_info_ts(row.get("timestamp"))
+        return {
+            "author": _clean_display_value(row.get("member_username"), default="—") or "—",
+            "text": note,
+            "at": at_label,
+            "action": action,
+        }
+    return None
+
+
+def _latest_admin_comment_for_ticket(ticket_number: str) -> dict[str, str] | None:
+    tn = str(ticket_number or "").strip()
+    if not tn:
+        return None
+    return _cached_latest_admin_comment(tn)
+
 
 def _perf_matrix_comment_key(author: str, text: str) -> tuple[str, str]:
     a = str(author or "").strip().lower().lstrip("@")
@@ -7790,10 +7967,14 @@ def _render_dispatch_case_activity_panel(ticket_number: str) -> None:
                 f"</div>{when_row}{text_row}"
                 f"</div></li>"
             )
+        expand_comments = bool(
+            comments
+            and str(comments[0].get("kind") or "") == "admin"
+        )
         if cards:
             with st.expander(
                 f"Responses & comments ({len(cards)})",
-                expanded=False,
+                expanded=expand_comments,
             ):
                 st.markdown(
                     f'<ul style="margin:0;padding:0">{"".join(cards)}</ul>',
@@ -8664,8 +8845,164 @@ def _render_dash_custom_date_inputs() -> None:
     _sync_dash_range_from_ui("Pick dates")
 
 
+def _init_lookup_state() -> None:
+    if "show_lookup" not in st.session_state:
+        st.session_state.show_lookup = False
+    if "lookup_query" not in st.session_state:
+        st.session_state.lookup_query = ""
+    if "lookup_result" not in st.session_state:
+        st.session_state.lookup_result = None
+
+
+def _lookup_ref(query: str) -> dict[str, object] | None:
+    """Search Residential first, then Resort by reference."""
+    raw = str(query or "").strip()
+    if not raw:
+        return None
+    digits_only = re.sub(r"\D", "", raw)
+    client = _get_supabase_client()
+
+    if digits_only:
+        result = (
+            client.table(TICKETS_TABLE)
+            .select("ticket_number, status, assigned_to, assigned_to_2, task_category")
+            .eq("ticket_number", digits_only)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return {"type": CASE_TYPE_RESIDENTIAL, "data": dict(result.data[0])}
+
+    result = (
+        client.table(SALES_CASES_TABLE)
+        .select("case_ref, status, assigned_to, account_name, account_region, sales_priority")
+        .eq("case_ref", raw)
+        .limit(1)
+        .execute()
+    )
+    if result.data:
+        return {"type": CASE_TYPE_RESORT, "data": dict(result.data[0])}
+
+    if digits_only and digits_only != raw:
+        result = (
+            client.table(SALES_CASES_TABLE)
+            .select("case_ref, status, assigned_to, account_name, account_region, sales_priority")
+            .ilike("case_ref", f"%{digits_only}%")
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return {"type": CASE_TYPE_RESORT, "data": dict(result.data[0])}
+
+    return None
+
+
+def _lookup_navigate(rtype: str, data: dict[str, object]) -> None:
+    """Use pending nav keys so Ticket tab opens with the selected case."""
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
+    st.session_state[_DASH_PENDING_CASE_TYPE_FILTER_KEY] = _CASE_TYPE_FILTER_ALL
+    if rtype == CASE_TYPE_RESIDENTIAL:
+        st.session_state[_DASH_PENDING_TICKET_SELECT_KEY] = str(
+            data.get("ticket_number") or ""
+        )
+    else:
+        st.session_state[_DASH_PENDING_SALES_SELECT_KEY] = str(data.get("case_ref") or "")
+    st.session_state.show_lookup = False
+    st.session_state.lookup_result = None
+    st.session_state.lookup_query = ""
+    st.rerun()
+
+
+@st.dialog("🔍 Ticket / Case Lookup", width="small")
+def render_lookup_popover() -> None:
+    """Lookup dialog for Residential tickets and Resort cases."""
+    _init_lookup_state()
+    st.markdown(
+        '<p style="font-size:13px;color:#4a5a7a;margin-bottom:12px">'
+        "Search by 9 or 16-digit ticket number or case ref.</p>",
+        unsafe_allow_html=True,
+    )
+    query = st.text_input(
+        "Ref",
+        placeholder="e.g. 100652041 or SC-2206-014",
+        value=str(st.session_state.get("lookup_query") or ""),
+        label_visibility="collapsed",
+        key="lookup_input",
+    )
+    st.session_state.lookup_query = query.strip()
+    col_search, col_clear = st.columns([3, 1])
+    with col_search:
+        search_clicked = st.button(
+            "Search", key="lookup_search_btn", use_container_width=True
+        )
+    with col_clear:
+        if st.button("Clear", key="lookup_clear_btn", use_container_width=True):
+            st.session_state.lookup_query = ""
+            st.session_state.lookup_result = None
+            st.rerun()
+
+    if search_clicked and query.strip():
+        st.session_state.lookup_result = _lookup_ref(query.strip())
+
+    result = st.session_state.get("lookup_result")
+    if result is None and not search_clicked:
+        return
+    if result is None:
+        st.markdown(
+            '<div style="padding:14px;background:#0d1220;border:0.5px solid #1a2035;'
+            "border-radius:6px;font-size:13px;color:#2a3a5a;text-align:center;margin-top:8px'>"
+            "No residential ticket or resort case found with that ref.</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    rtype = str(result.get("type") or "")
+    data = result.get("data") or {}
+    if not isinstance(data, dict):
+        data = {}
+    ref = data.get("ticket_number") or data.get("case_ref") or "—"
+    status = data.get("status") or "—"
+    eng = data.get("assigned_to") or "—"
+    type_bg = "#0d1e3a" if rtype == CASE_TYPE_RESIDENTIAL else "#1a1030"
+    type_color = "#5b7fb5" if rtype == CASE_TYPE_RESIDENTIAL else "#a78bfa"
+    extra = ""
+    if rtype == CASE_TYPE_RESORT:
+        extra = (
+            '<div style="font-size:13px;color:#4a5a7a;margin-top:2px">'
+            f"{html.escape(str(data.get('account_name') or '—'))} · "
+            f"{html.escape(str(data.get('account_region') or '—'))}</div>"
+        )
+    st.markdown(
+        f"""
+        <div style="background:#080b14;border:0.5px solid #1a3460;border-radius:6px;
+          padding:12px;margin-top:10px">
+          <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:3px;
+            background:{type_bg};color:{type_color};display:inline-block;margin-bottom:6px">
+            {html.escape(rtype)}
+          </span>
+          <div style="font-size:15px;font-weight:500;color:#e2e8f8;margin-bottom:3px">
+            {html.escape(str(ref))}
+          </div>
+          {extra}
+          <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <span style="font-size:11px;font-weight:500;padding:3px 8px;border-radius:3px;
+              background:#1a2035;color:#8a9ac0">{html.escape(str(status))}</span>
+            <span style="font-size:13px;color:#4a5a7a">
+              {html.escape("Unassigned" if str(eng) == "—" else str(eng))}
+            </span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="primary-btn" style="margin-top:10px">', unsafe_allow_html=True)
+    if st.button("Open in Ticket tab →", key="lookup_open_btn", use_container_width=True):
+        _lookup_navigate(rtype, data)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def _render_dash_filters_panel() -> None:
-    """Auto-refresh, ticket lookup — Filters menu."""
+    """Auto-refresh — legacy Filters menu (lookup lives in the header)."""
     st.toggle("Auto-Refresh", value=True, key="bon_toolbar_auto_refresh")
     if st.session_state.get("bon_toolbar_auto_refresh", True):
         st.slider(
@@ -8676,20 +9013,7 @@ def _render_dash_filters_panel() -> None:
             step=1,
             key="bon_toolbar_refresh_interval",
         )
-    lookup = st.text_input(
-        "Look Up Ticket #",
-        placeholder="9 or 16 digits",
-        key="dash_ticket_lookup",
-    )
-    if lookup.strip():
-        row = _fetch_ticket_row(lookup.strip())
-        if row:
-            st.success(
-                f"**{row.get('ticket_number')}** — **{row.get('status')}**, "
-                f"→ {row.get('assigned_to') or '—'}"
-            )
-        else:
-            st.warning("Not found.")
+    st.caption("Ticket lookup is in the header — **🔍 Lookup** next to Settings.")
     if st.button("↻ Refresh now", key="bon_menu_refresh_btn", use_container_width=True):
         _invalidate_dashboard_data_cache()
         st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
@@ -8832,7 +9156,7 @@ def _render_dispatch_app_shell() -> None:
     now_label = now.strftime("%a %d %b") + " · " + now.strftime("%H:%M UTC+5")
 
     with st.container(key="disp_header_shell"):
-        hl, hr = st.columns([3, 1], gap="small", vertical_alignment="center")
+        hl, hr = st.columns([2.6, 1.15], gap="small", vertical_alignment="center")
         with hl:
             with st.container(key="disp_header_left"):
                 bc, nc = st.columns([1.15, 4], gap="small", vertical_alignment="center")
@@ -8850,12 +9174,19 @@ def _render_dispatch_app_shell() -> None:
         with hr:
             with st.container(key="disp_header_right"):
                 _render_dispatch_header_right(now_label, op_display)
+    if bool(st.session_state.get("show_lookup", False)):
+        render_lookup_popover()
 
 
 def _render_dispatch_header_right(now_label: str, op_display: str) -> None:
-    """Clock, operator, and settings — single tight row on the right."""
-    info, settings = st.columns([1, 1], gap="small", vertical_alignment="center")
-    with info:
+    """Clock, operator, lookup, and settings — separate header slots (no overlap)."""
+    _init_lookup_state()
+    c_clock, c_lookup, c_settings = st.columns(
+        [2.4, 0.75, 0.75],
+        gap="small",
+        vertical_alignment="center",
+    )
+    with c_clock:
         st.markdown(
             f'<div class="disp-header-right-cluster">'
             f'<span class="disp-header-clock">{html.escape(now_label)}</span>'
@@ -8865,8 +9196,14 @@ def _render_dispatch_header_right(now_label: str, op_display: str) -> None:
             f"</div>",
             unsafe_allow_html=True,
         )
-    with settings:
-        _render_dispatch_settings_popover()
+    with c_lookup:
+        with st.container(key="disp_header_lookup"):
+            if st.button("🔍 Lookup", key="topbar_lookup_btn", use_container_width=False):
+                st.session_state.show_lookup = True
+                st.rerun()
+    with c_settings:
+        with st.container(key="disp_header_settings"):
+            _render_dispatch_settings_popover()
 
 
 def _render_dispatch_settings_popover() -> None:
@@ -8893,6 +9230,7 @@ def _render_dispatch_settings_popover() -> None:
         on_refresh=_refresh,
         on_signout=_signout,
         render_custom_dates=_custom_dates,
+        range_caption=_format_dash_range_caption(),
         render_admin=(
             _render_dispatch_settings_admin if _is_dashboard_admin() else None
         ),
@@ -9870,7 +10208,7 @@ def _weekly_altair_theme(chart: alt.Chart) -> alt.Chart:
     return (
         chart.configure(**_WEEKLY_CHART_THEME)
         .configure_view(strokeWidth=0, stroke="transparent")
-        .configure_axis(labelColor="#2a3a5a", titleColor="#e2e8f8", gridColor="#1a2035")
+        .configure_axis(labelColor="#8a9ac0", titleColor="#e2e8f8", gridColor="#1a2035")
         .configure_legend(labelColor="#8a9ac0", titleColor="#e2e8f8")
     )
 
@@ -10167,16 +10505,18 @@ def _render_perf_weekly_executive_dashboard(
             show["Action Required"] = show["Action Required"].map(
                 {"High": "🚩 High", "Review": "🟧 Review"}
             )
-            st.dataframe(
+            _render_perf_dataframe(
                 show,
-                use_container_width=True,
-                hide_index=True,
                 column_config={
                     "Tickets": st.column_config.NumberColumn(format="%d"),
                 },
             )
         else:
-            st.caption("No priority cases this week.")
+            st.markdown(
+                '<p style="font-size:11px;color:#8a9ac0;margin:4px 0">'
+                "No priority cases this week.</p>",
+                unsafe_allow_html=True,
+            )
     with trend_col:
         st.markdown('<div class="weekly-panel"><h4>Efficiency Trends</h4></div>', unsafe_allow_html=True)
         trend_df = metrics["trend_df"]
@@ -10197,7 +10537,11 @@ def _render_perf_weekly_executive_dashboard(
             )
             st.altair_chart(trend, use_container_width=True)
         else:
-            st.caption("Not enough history for trends.")
+            st.markdown(
+                '<p style="font-size:11px;color:#8a9ac0;margin:4px 0">'
+                "Not enough history for trends.</p>",
+                unsafe_allow_html=True,
+            )
 
 
 def _render_perf_weekly_attended_report(
@@ -10298,11 +10642,11 @@ def _render_perf_weekly_attended_report(
     )
 
     if summary.empty:
-        st.info("No attended CSM tickets or Sales cases in this week.")
+        st.info("No attended residential tickets or resort cases in this week.")
         return
 
     st.subheader("Staff breakdown")
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    _render_perf_dataframe(summary)
 
     file_stamp = f"{d0.isoformat()}_{d1.isoformat()}"
     dl1, dl2 = st.columns(2)
@@ -10324,7 +10668,7 @@ def _render_perf_weekly_attended_report(
         )
 
     with st.expander(f"Case list ({len(detail)})", expanded=False):
-        st.dataframe(detail, use_container_width=True, hide_index=True)
+        _render_perf_dataframe(detail)
 
 
 def _perf_combine_work(
@@ -10600,7 +10944,7 @@ def _render_perf_handled_work_table(df: pd.DataFrame) -> None:
     show = show.rename(columns={k: v for k, v in rename.items() if k in show.columns})
     if "_local" in detail.columns:
         show["Activity (local)"] = detail["_local"].dt.strftime("%Y-%m-%d %H:%M")
-    st.dataframe(_format_local(show), use_container_width=True, hide_index=True)
+    _render_perf_dataframe(_format_local(show), max_rows=200)
 
 
 def _render_perf_ticket_table(df: pd.DataFrame) -> None:
@@ -10846,11 +11190,11 @@ def _perf_sales_case_list_view(df: pd.DataFrame) -> pd.DataFrame:
 
 def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
     if df.empty:
-        st.caption("No Sales Cases to list.")
+        st.caption("No Resort cases to list.")
         return
     show = _perf_sales_case_list_view(df)
     if show.empty:
-        st.caption("No Sales Cases to list.")
+        st.caption("No Resort cases to list.")
         return
     col_cfg = {
         "Ticket Number": st.column_config.TextColumn("Ticket Number", width="small"),
@@ -10985,7 +11329,7 @@ def _render_perf_sales_cases_tab(
         "**Performance credit** = field engineer when `assigned_to` is set, otherwise **Admin**."
     )
     if sales_df.empty:
-        st.info("No Sales Cases for this filter — try **All** in Focus Assignee or widen the time range.")
+        st.info("No Resort cases for this filter — try **All** in Focus Assignee or widen the time range.")
         return
 
     view = _perf_enrich_sales_cases(sales_df)
@@ -11024,7 +11368,7 @@ def _render_perf_sales_cases_tab(
         if "staff" in view.columns and "_local" in view.columns:
             _render_perf_stacked_staff_chart(
                 view,
-                y_title="Sales Cases",
+                y_title="Resort cases",
                 bucket_fmt=bucket_fmt,
                 x_title=x_title,
                 axis_format=axis_format,
@@ -11432,7 +11776,7 @@ def _cc_insert_transferred_ticket(
         member_username=f"@{operator_id.lstrip('@')}",
         action_type="TransferredFromSales",
         note=_cc_assignment_log_note(
-            f"Moved from Sales Cases → **{status}**.",
+            f"Moved from Resort → **{status}**.",
             operator_id,
         ),
     )
@@ -12173,7 +12517,7 @@ def _sc_patch_assignment_fields(
     """Update sales case field assignment (same fields as CSM edit assignment)."""
     row = _fetch_sales_case_row_by_id(row_id)
     if not row:
-        raise ValueError("Sales case not found.")
+        raise ValueError("Resort case not found.")
     if _sc_effective_status(row.get("status")) == SC_STATUS_RESOLVED:
         raise ValueError("Cannot edit assignment on a **Resolved** sales case.")
 
@@ -12496,7 +12840,7 @@ def _sc_dashboard_reassign_case(
     """Reassign field engineer on a sales case (same intent as CSM reassign)."""
     row = _fetch_sales_case_row_by_id(row_id)
     if not row:
-        raise ValueError("Sales case not found.")
+        raise ValueError("Resort case not found.")
     status = _sc_effective_status(row.get("status"))
     if status == SC_STATUS_RESOLVED:
         raise ValueError("Cannot reassign a **Resolved** sales case.")
@@ -13512,7 +13856,7 @@ def _sc_insert_intake_case(
             note=description,
         )
 
-    flash = f"Case created — see **{status}** under **Sales Cases**."
+    flash = f"Case created — see **{status}** under **Resort**."
     level = "success"
 
     if post_telegram and assigned_to and field_task_category:
@@ -13549,7 +13893,7 @@ def _sc_insert_intake_case(
 
     _invalidate_dashboard_data_cache()
     _sc_set_sales_flash(flash, level=level)
-    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state[_DASH_PENDING_SALES_QUEUE_KEY] = _queue_segment_label(
         queue_metric_label, 1
     )
@@ -13606,7 +13950,7 @@ def _sidebar_sales_intake() -> None:
             "Add to Daily Task Only (No Engineer, No Telegram)",
             key=_SC_CC_SKIP_ASSIGN_KEY,
             help=(
-                "Creates the **Sales case** without posting to the field group. "
+                "Creates the **Resort case** without posting to the field group. "
                 "Assign an engineer later from the sales work panel."
             ),
         )
@@ -15435,7 +15779,8 @@ _BON_THEME_CSS = """
         overflow: hidden;
         background: var(--bon-card);
     }
-    .perf-ss-pill.has-sales {
+    .perf-ss-pill.has-sales,
+    .perf-ss-pill.has-resort {
         max-width: 20rem;
     }
     .perf-ss-seg {
@@ -15457,11 +15802,13 @@ _BON_THEME_CSS = """
     .perf-ss-seg.shared {
         color: var(--bon-oak);
     }
-    .perf-ss-pill.has-sales .perf-ss-seg.shared {
+    .perf-ss-pill.has-sales .perf-ss-seg.shared,
+    .perf-ss-pill.has-resort .perf-ss-seg.shared {
         border-right: 1px solid rgba(215, 180, 145, 0.22);
     }
-    .perf-ss-seg.sales {
-        color: #b8d4a8;
+    .perf-ss-seg.sales,
+    .perf-ss-seg.resort {
+        color: #a78bfa;
     }
     .perf-ss-seg .num, .perf-ss-seg .perf-count {
         font-size: 14px;
@@ -16112,7 +16459,7 @@ def _migrate_legacy_queue_nav() -> None:
     if base in ("Log", "Performance"):
         st.session_state[_DASH_MAIN_NAV_KEY] = base
     else:
-        st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_CSM
+        st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_TICKET
         st.session_state[_DASH_TICKET_QUEUE_KEY] = legacy
 
 
@@ -16125,13 +16472,21 @@ def _render_dashboard_header(*, refreshed_at: str) -> None:
 
 def _apply_pending_dashboard_nav() -> None:
     """Apply metric-click navigation before nav widgets are drawn."""
+    current_nav = str(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET))
+    redirected_current = _DASH_NAV_LEGACY_REDIRECT.get(current_nav)
+    if redirected_current:
+        st.session_state[_DASH_MAIN_NAV_KEY] = redirected_current
+
     pending_main = st.session_state.pop(_DASH_PENDING_MAIN_NAV_KEY, None)
     pending_ticket_queue = st.session_state.pop(_DASH_PENDING_TICKET_QUEUE_KEY, None)
     pending_sales_queue = st.session_state.pop(_DASH_PENDING_SALES_QUEUE_KEY, None)
     pending_ticket = st.session_state.pop(_DASH_PENDING_TICKET_SELECT_KEY, None)
     pending_engineer = st.session_state.pop(_DASH_PENDING_ENGINEER_FILTER_KEY, None)
+    pending_case_type = st.session_state.pop(_DASH_PENDING_CASE_TYPE_FILTER_KEY, None)
     if pending_main is not None:
-        st.session_state[_DASH_MAIN_NAV_KEY] = _normalize_dash_main_nav(pending_main)
+        st.session_state[_DASH_MAIN_NAV_KEY] = _normalize_dash_main_nav(
+            _DASH_NAV_LEGACY_REDIRECT.get(str(pending_main), pending_main)
+        )
     if pending_ticket_queue is not None:
         st.session_state[_DASH_TICKET_QUEUE_KEY] = pending_ticket_queue
         aq_key = active_queue_key()
@@ -16155,9 +16510,15 @@ def _apply_pending_dashboard_nav() -> None:
         st.session_state[_DISP_SELECTED_KEY] = str(pending_ticket)
     if pending_engineer is not None:
         st.session_state[_DISP_ENGINEER_FILTER_KEY] = _perf_norm_member(pending_engineer)
+    if pending_case_type:
+        st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = str(pending_case_type)
     pending_sales_case = st.session_state.pop(_DASH_PENDING_SALES_SELECT_KEY, None)
     if pending_sales_case is not None:
-        st.session_state[_SALES_SELECTED_KEY] = str(pending_sales_case)
+        cref = str(pending_sales_case)
+        st.session_state[_SALES_SELECTED_KEY] = cref
+        st.session_state[_DISP_SELECTED_KEY] = cref
+        st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
+        st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = _CASE_TYPE_FILTER_ALL
 
 
 def _render_clickable_queue_metric(
@@ -16399,7 +16760,7 @@ def _sync_dashboard_nav_state(
 
 
 def _render_main_navigation() -> str:
-    """Top row: CSM cases | Sales cases | Log | Performance (mockup tab labels)."""
+    """Top row: Ticket | Log | Performance."""
     current = _normalize_dash_main_nav(
         st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM)
     )
@@ -16931,14 +17292,14 @@ def _cc_transfer_ticket_to_sales_case(
     account_name: str | None = None,
     account_region: str = "CENTRAL",
 ) -> None:
-    """Move a CSM field ticket into Sales Cases (removes the ticket row)."""
+    """Move a residential ticket into Resort cases (removes ticket row)."""
     tid = str(ticket_number or "").strip()
     row = _fetch_ticket_row(tid)
     if not row:
         raise ValueError(f"Ticket **{tid}** not found.")
     if _fetch_sales_case_row_by_ref(tid):
         raise ValueError(
-            f"Sales case **{tid}** already exists — remove or merge the duplicate first."
+            f"Resort case **{tid}** already exists — remove or merge the duplicate first."
         )
 
     task_cat = str(row.get("task_category") or "").strip() or "Coverage Check"
@@ -16981,7 +17342,7 @@ def _cc_transfer_ticket_to_sales_case(
         member_username=f"@{operator_id.lstrip('@')}",
         action_type="TransferredToSales",
         note=_cc_assignment_log_note(
-            "Moved to Sales Cases (ticket row removed).",
+            "Moved to Resort (ticket row removed).",
             operator_id,
         ),
     )
@@ -16993,24 +17354,24 @@ def _cc_transfer_sales_case_to_ticket(
     *,
     operator_id: str,
 ) -> str:
-    """Move a sales case into CSM tickets (removes the sales case row). Returns ticket number."""
+    """Move a resort case into residential tickets (removes resort row)."""
     sales_row = _fetch_sales_case_row_by_id(row_id)
     if not sales_row:
-        raise ValueError("Sales case not found.")
+        raise ValueError("Resort case not found.")
 
     case_ref = str(sales_row.get("case_ref") or "").strip()
     if not case_ref:
-        raise ValueError("Sales case has no ticket / case reference.")
+        raise ValueError("Resort case has no ticket / case reference.")
     try:
         tid = _cc_validate_ticket_number(case_ref)
     except ValueError as exc:
         raise ValueError(
-            f"Case ref **{case_ref}** must be **9** or **16** digits to move to CSM."
+            f"Case ref **{case_ref}** must be **9** or **16** digits to move to Residential."
         ) from exc
 
     if _fetch_ticket_row(tid):
         raise ValueError(
-            f"CSM ticket **{tid}** already exists — resolve the duplicate first."
+            f"Residential ticket **{tid}** already exists — resolve the duplicate first."
         )
 
     task_cat = (
@@ -17047,20 +17408,20 @@ def _render_sales_case_transfer_to_csm_popover(
     options: list[str],
     op: str,
 ) -> None:
-    with st.popover("Move to CSM", use_container_width=True):
+    with st.popover("Move to Residential", use_container_width=True):
         picked_list = _get_selected_queue_sales_cases(key_prefix, options)
         if not picked_list:
-            st.caption("Select case(s), then open **Move to CSM** again.")
+            st.caption("Select case(s), then open **Move to Residential** again.")
             return
         st.markdown("**" + "**, **".join(picked_list[:12]) + "**")
         if len(picked_list) > 12:
             st.caption(f"+ {len(picked_list) - 12} more")
         st.caption(
-            "Creates a CSM field ticket (**Daily Task** or **Resolved**) and "
-            "removes the sales case. Case ref must be **9** or **16** digits."
+            "Creates a residential ticket (**Daily Task** or **Resolved**) and "
+            "removes the resort case. Case ref must be **9** or **16** digits."
         )
         confirm = st.checkbox(
-            "Yes, move to CSM tickets",
+            "Yes, move to Residential",
             value=False,
             key=f"{key_prefix}_xfer_csm_confirm",
         )
@@ -17490,7 +17851,7 @@ def _render_sales_right_rail() -> None:
 
 
 def _render_sales_assign_panel(*, layout: str = "bar") -> None:
-    """New sales case panel — ``bar`` = horizontal, ``rail`` = right sidebar stack."""
+    """New resort case panel — ``bar`` = horizontal, ``rail`` = right sidebar stack."""
     engineers = get_engineer_handles()
     categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     unassigned = "— unassigned —"
@@ -17506,7 +17867,7 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
     with st.container(key="disp_sales_assign_panel"):
         if not rail:
             st.markdown(
-                t_section_label("New sales case", spacing=".06em", margin="margin:0 0 4px"),
+                t_section_label("New resort case", spacing=".06em", margin="margin:0 0 4px"),
                 unsafe_allow_html=True,
             )
         st.markdown('<div class="disp-mode-toggle sales-mode-toggle">', unsafe_allow_html=True)
@@ -17803,7 +18164,7 @@ def _handle_sales_floor_submit(
     try:
         _sales_cases_insert_row(row)
         _invalidate_dashboard_data_cache()
-        st.toast(f"✓ Sales case {case_ref} created", icon="✅")
+        st.toast(f"✓ Resort case {case_ref} created", icon="✅")
         _schedule_dispatch_sales_assign_form_clear()
         st.session_state[_SALES_ACTIVE_QUEUE_KEY] = SC_STATUS_SALES_TICKET
         st.rerun()
@@ -17947,6 +18308,10 @@ def _render_sales_detail_panel() -> None:
     st.markdown(
         f"""
     <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
+      <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:3px;
+        background:#1a1030;color:#a78bfa;display:inline-block;margin-bottom:6px">
+        Resort
+      </span>
       <div style="font-size:16px;font-weight:500;color:#e2e8f8;margin-bottom:5px">
         {html.escape(str(case.get("case_ref") or ""))}</div>
       {status_pill(str(case.get("status") or ""))}
@@ -17983,10 +18348,11 @@ def _render_sales_detail_panel() -> None:
         unsafe_allow_html=True,
     )
     eng = str(case.get("assigned_to") or "").strip()
+    eng2 = str(case.get("assigned_to_2") or "").strip()
     if eng:
         st.markdown(
             f'<div style="font-size:13px;color:#8a9ac0;margin-bottom:12px">'
-            f"{html.escape(eng)}</div>",
+            f"{html.escape(eng)}{(' + ' + html.escape(eng2)) if eng2 else ''}</div>",
             unsafe_allow_html=True,
         )
     else:
@@ -18011,6 +18377,40 @@ def _render_sales_detail_panel() -> None:
             unsafe_allow_html=True,
         )
 
+    close_note = str(case.get("close_note") or "").strip()
+    if str(case.get("status") or "").strip() == SC_STATUS_RESOLVED and close_note:
+        st.markdown(
+            t_section_label("Admin comment", spacing=".06em", margin="margin:0 0 5px"),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="font-size:13px;color:#e2e8f8;line-height:1.5;margin-bottom:12px;'
+            f'background:#231a06;border:0.5px solid #3d2a0a;border-radius:5px;padding:8px">'
+            f"{html.escape(close_note)}</div>",
+            unsafe_allow_html=True,
+        )
+
+    field_response = str(case.get("field_response") or "").strip()
+    if field_response:
+        st.markdown(
+            t_section_label("Field response", spacing=".06em", margin="margin:0 0 5px"),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;margin-bottom:12px;'
+            f'background:#0d1220;border:0.5px solid #1a2035;border-radius:5px;padding:8px">'
+            f"{html.escape(field_response)}</div>",
+            unsafe_allow_html=True,
+        )
+
+    photo_url = str(case.get("photo_url") or "").strip()
+    if photo_url:
+        st.markdown(
+            t_section_label("Site photo", spacing=".06em", margin="margin:0 0 5px"),
+            unsafe_allow_html=True,
+        )
+        st.image(photo_url, use_container_width=True)
+
     _render_dispatch_case_activity_panel(str(case.get("case_ref") or ""))
 
     st.markdown(
@@ -18023,16 +18423,8 @@ def _render_sales_detail_panel() -> None:
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        t_section_label("Timeline", spacing=".06em", margin="margin:10px 0 5px"),
-        unsafe_allow_html=True,
-    )
-    logs_df = _fetch_attendance(ticket_number=str(case.get("case_ref") or ""), limit=12)
-    logs = logs_df.to_dict("records") if not logs_df.empty else []
-    if not logs:
-        st.caption("No log entries yet.")
-    for i, log in enumerate(logs):
-        render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
+    _render_resort_reopen_actions(case)
+    _render_attendance_timeline(str(case.get("case_ref") or ""))
 
 
 def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
@@ -18304,7 +18696,282 @@ def _dispatch_row_dict(row: pd.Series) -> dict[str, object]:
     fu = _follow_up_display_label(row)
     if fu:
         d["follow_up_label"] = fu
+    d.setdefault("case_type", CASE_TYPE_RESIDENTIAL)
     return d
+
+
+def _residential_row_to_unified_dict(row: pd.Series) -> dict[str, object]:
+    d = _dispatch_row_dict(row)
+    d["case_type"] = CASE_TYPE_RESIDENTIAL
+    return d
+
+
+def _resort_row_to_unified_dict(row: dict[str, object]) -> dict[str, object]:
+    ref = str(row.get("case_ref") or "").strip()
+    status = _sc_effective_status(row.get("status"))
+    category = (
+        str(row.get("field_task_category") or row.get("sales_category") or "").strip()
+        or "—"
+    )
+    account = str(row.get("account_name") or "").strip()
+    notes = str(row.get("description") or row.get("additional_info") or "").strip()
+    account_notes = " · ".join([p for p in (account, notes) if p]).strip()
+    return {
+        "ticket_number": ref,
+        "case_ref": ref,
+        "case_type": CASE_TYPE_RESORT,
+        "task_category": category,
+        "assigned_to": str(row.get("assigned_to") or "—"),
+        "assigned_to_2": str(row.get("assigned_to_2") or "").strip(),
+        "additional_info": account_notes or notes,
+        "status": status,
+        "sales_priority": str(row.get("sales_priority") or "Standard"),
+        "updated_at": row.get("updated_at"),
+        "last_assigned_at": row.get("last_assigned_at"),
+        "_sales_row": row,
+    }
+
+
+def _unified_row_updated_ts(row: dict[str, object]) -> float:
+    raw = row.get("updated_at")
+    if raw is None:
+        return 0.0
+    try:
+        return float(pd.Timestamp(raw).value)
+    except Exception:
+        return 0.0
+
+
+def _sales_rows_for_resort_bundle(
+    sales_df: pd.DataFrame | None,
+) -> tuple[tuple[str, str, str, str, str, str, str, str, str], ...]:
+    """Compact hashable rows — one pass input for the resort unified cache."""
+    if sales_df is None or sales_df.empty:
+        return ()
+    out: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+    for rec in sales_df.to_dict("records"):
+        out.append(
+            (
+                str(rec.get("id") or ""),
+                str(rec.get("case_ref") or "").strip(),
+                str(rec.get("status") or ""),
+                str(rec.get("field_task_category") or rec.get("sales_category") or ""),
+                str(rec.get("assigned_to") or ""),
+                str(rec.get("assigned_to_2") or ""),
+                str(rec.get("description") or rec.get("additional_info") or ""),
+                str(rec.get("updated_at") or ""),
+                str(rec.get("last_assigned_at") or ""),
+            )
+        )
+    return tuple(out)
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _cached_resort_unified_bundle(
+    rows: tuple[tuple[str, str, str, str, str, str, str, str, str], ...],
+) -> dict[str, object]:
+    """Queue counts + pre-built resort rows keyed by unified sidebar queue."""
+    counts = {q: 0 for q in QUEUE_ORDER}
+    by_queue: dict[str, list[dict[str, object]]] = {q: [] for q in QUEUE_ORDER}
+    for rid, ref, status_raw, cat, eng, eng2, notes, updated, last_assigned in rows:
+        if not ref:
+            continue
+        status = _sc_effective_status(status_raw)
+        queue = _RESORT_STATUS_TO_UNIFIED_QUEUE.get(status)
+        if not queue:
+            continue
+        counts[queue] += 1
+        rec: dict[str, object] = {
+            "id": rid,
+            "case_ref": ref,
+            "status": status_raw,
+            "field_task_category": cat,
+            "sales_category": cat,
+            "assigned_to": eng,
+            "assigned_to_2": eng2,
+            "description": notes,
+            "updated_at": updated or None,
+            "last_assigned_at": last_assigned or None,
+        }
+        by_queue[queue].append(_resort_row_to_unified_dict(rec))
+    for queue in QUEUE_ORDER:
+        by_queue[queue].sort(key=_unified_row_updated_ts, reverse=True)
+    return {"counts": counts, "by_queue": by_queue}
+
+
+def _empty_resort_unified_bundle() -> dict[str, object]:
+    return {
+        "counts": {q: 0 for q in QUEUE_ORDER},
+        "by_queue": {q: [] for q in QUEUE_ORDER},
+    }
+
+
+def _get_resort_unified_bundle(sales_df: pd.DataFrame | None) -> dict[str, object]:
+    rows = _sales_rows_for_resort_bundle(sales_df)
+    if not rows:
+        return _empty_resort_unified_bundle()
+    return _cached_resort_unified_bundle(rows)
+
+
+def _resort_cases_for_unified_queue(
+    sales_df: pd.DataFrame | None,
+    queue_name: str,
+) -> list[dict[str, object]]:
+    """Resort rows for one unified queue (uses cached bundle)."""
+    bundle = _get_resort_unified_bundle(sales_df)
+    by_queue = bundle.get("by_queue") or {}
+    if not isinstance(by_queue, dict):
+        return []
+    rows = by_queue.get(queue_name) or []
+    return list(rows) if isinstance(rows, list) else []
+
+
+def _resort_unified_queue_counts(sales_df: pd.DataFrame | None) -> dict[str, int]:
+    bundle = _get_resort_unified_bundle(sales_df)
+    counts = bundle.get("counts") or {}
+    if not isinstance(counts, dict):
+        return {q: 0 for q in QUEUE_ORDER}
+    return {q: int(counts.get(q, 0)) for q in QUEUE_ORDER}
+
+
+def _merge_unified_queue_counts(
+    residential: dict[str, int],
+    resort: dict[str, int],
+    *,
+    case_type_filter: str,
+) -> dict[str, int]:
+    if case_type_filter == CASE_TYPE_RESIDENTIAL:
+        return dict(residential)
+    if case_type_filter == CASE_TYPE_RESORT:
+        return dict(resort)
+    return {
+        q: int(residential.get(q, 0)) + int(resort.get(q, 0)) for q in QUEUE_ORDER
+    }
+
+
+def _render_unified_queue_list(
+    *,
+    selected: str,
+    residential_counts: dict[str, int],
+    resort_counts: dict[str, int],
+    session_key: str,
+    case_type_filter: str,
+) -> str:
+    """Unified queue picker with R/S split chips when both types are present."""
+    picked = selected if selected in QUEUE_ORDER else "Daily Task"
+    with st.container(key="disp_sidebar_queues"):
+        for q in QUEUE_ORDER:
+            res = int(residential_counts.get(q, 0))
+            rsr = int(resort_counts.get(q, 0))
+            total = res + rsr
+            is_active = q == picked
+            dot = QUEUE_DOTS.get(q, "#4a5a7a")
+            row_key = q.replace(" ", "_")
+            btn_key = f"uqueue_{row_key}"
+            if case_type_filter == _CASE_TYPE_FILTER_ALL and res > 0 and rsr > 0:
+                badge = (
+                    f'<span style="font-size:9px;background:#0d1e3a;color:#5b7fb5;'
+                    f'padding:1px 4px;border-radius:2px;margin-right:2px">R{res}</span>'
+                    f'<span style="font-size:9px;background:#1a1030;color:#a78bfa;'
+                    f'padding:1px 4px;border-radius:2px">S{rsr}</span>'
+                )
+            else:
+                bg = "#2d1515" if q == "Unattended" else "#1a2035"
+                fg = "#ef4444" if q == "Unattended" else "#4a5a7a"
+                if q == "Follow up":
+                    bg, fg = "#1a1030", "#a78bfa"
+                badge = (
+                    f'<span style="font-size:11px;padding:2px 6px;border-radius:3px;'
+                    f'background:{bg};color:{fg}">{total}</span>'
+                )
+            st.markdown(
+                f"<style>"
+                f"div.st-key-{btn_key} .stButton > button::before {{"
+                f"color: {dot} !important;"
+                f"}}"
+                f"div.st-key-{btn_key} .stButton > button::after {{"
+                f"content: \"\";"
+                f"}}"
+                f"</style>",
+                unsafe_allow_html=True,
+            )
+            c_label, c_badge = st.columns([4, 1.6], gap="small", vertical_alignment="center")
+            with c_label:
+                if st.button(
+                    q,
+                    key=btn_key,
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary",
+                ):
+                    st.session_state[session_key] = q
+                    st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = "All"
+                    st.rerun()
+                    return q
+            with c_badge:
+                st.markdown(
+                    f'<div style="display:flex;justify-content:flex-end">{badge}</div>',
+                    unsafe_allow_html=True,
+                )
+    return str(st.session_state.get(session_key, picked))
+
+
+def _apply_unified_case_type_filter(
+    rows: list[dict[str, object]],
+    case_type_filter: str,
+) -> list[dict[str, object]]:
+    if case_type_filter == _CASE_TYPE_FILTER_ALL:
+        return rows
+    return [r for r in rows if str(r.get("case_type") or "") == case_type_filter]
+
+
+def _init_case_type_filter() -> str:
+    cur = str(st.session_state.get(_DISP_CASE_TYPE_FILTER_KEY) or _CASE_TYPE_FILTER_ALL)
+    if cur not in (_CASE_TYPE_FILTER_ALL, CASE_TYPE_RESIDENTIAL, CASE_TYPE_RESORT):
+        cur = _CASE_TYPE_FILTER_ALL
+        st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = cur
+    return cur
+
+
+def _render_unified_case_type_filter() -> str:
+    """All | Residential | Resort chips above the ticket table."""
+    cur = _init_case_type_filter()
+    opts = (_CASE_TYPE_FILTER_ALL, CASE_TYPE_RESIDENTIAL, CASE_TYPE_RESORT)
+    cols = st.columns(len(opts), gap="small")
+    for col, label in zip(cols, opts, strict=True):
+        with col:
+            if st.button(
+                label,
+                key=f"disp_case_type_{label.replace(' ', '_').lower()}",
+                type="primary" if label == cur else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = label
+                st.rerun()
+    return cur
+
+
+def _sales_any_row_modal_active() -> bool:
+    return bool(
+        st.session_state.get(_SALES_ROW_RESOLVE)
+        or st.session_state.get(_SALES_ROW_EDIT)
+        or st.session_state.get(_SALES_ROW_REASSIGN)
+    )
+
+
+def _render_unified_row_actions(
+    ticket: dict[str, object],
+    row_key: str,
+    *,
+    is_admin: bool,
+    queue_name: str,
+) -> None:
+    if str(ticket.get("case_type") or "") == CASE_TYPE_RESORT:
+        sales_row = ticket.get("_sales_row") or ticket
+        _render_sales_row_actions(sales_row, row_key)
+    else:
+        _render_dispatch_row_actions(
+            ticket, is_admin, row_key, queue_name=queue_name
+        )
 
 
 def _investigation_subtab_counts(df: pd.DataFrame) -> dict[str, int]:
@@ -18621,7 +19288,7 @@ def _dispatch_ticket_move_to_sales(ticket_number: str) -> None:
         _invalidate_dashboard_data_cache()
         st.rerun()
     except Exception as exc:
-        st.toast(f"Move to Sales failed: {exc}", icon="❌")
+        st.toast(f"Move to Resort failed: {exc}", icon="❌")
 
 
 def _render_dispatch_row_actions(
@@ -18718,7 +19385,7 @@ def _render_dispatch_row_actions(
                 st.rerun()
 
         if status not in ("Resolved", "Unattended"):
-            if st.button("↗ Move to Sales", key=f"sales_{row_key}", use_container_width=True):
+            if st.button("↗ Move to Resort", key=f"sales_{row_key}", use_container_width=True):
                 _dispatch_ticket_move_to_sales(tnum)
 
         if is_admin:
@@ -18790,6 +19457,161 @@ def _schedule_dispatch_sales_assign_form_clear() -> None:
     st.session_state[_DISP_CLEAR_SALES_ASSIGN_KEY] = True
 
 
+def _render_attendance_timeline(ref: str) -> None:
+    """Shared timeline for both Residential tickets and Resort case refs."""
+    st.markdown(
+        '<div style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        'text-transform:uppercase;letter-spacing:.06em;margin:14px 0 8px">'
+        "Timeline</div>",
+        unsafe_allow_html=True,
+    )
+    logs_df = _fetch_attendance(ticket_number=str(ref or ""), limit=6)
+    logs = logs_df.to_dict("records") if not logs_df.empty else []
+    logs = list(reversed(logs))
+    action_dots = {
+        "Assignment": "#5b7fb5",
+        "Response": "#22c55e",
+        "Resolved": "#22c55e",
+        "Nudge": "#f59e0b",
+        "AutoUnattended": "#ef4444",
+        "FollowUp": "#a78bfa",
+        "Investigation": "#8a9ac0",
+        "Reassigned": "#60a5fa",
+    }
+    if not logs:
+        st.markdown(
+            '<div style="font-size:13px;color:#2a3a5a">No activity logged yet.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    for i, log in enumerate(logs):
+        is_last = i == len(logs) - 1
+        dot = action_dots.get(str(log.get("action_type") or ""), "#1a2035")
+        ts = "—"
+        try:
+            ts = (
+                pd.Timestamp(log.get("timestamp"))
+                .tz_convert(LOCAL_TZ)
+                .strftime("%d %b · %H:%M")
+            )
+        except Exception:
+            pass
+        st.markdown(
+            f"""
+            <div style="display:flex;gap:8px;padding-bottom:{'0' if is_last else '11px'};
+              position:relative">
+              <div style="position:relative;flex-shrink:0">
+                <div style="width:7px;height:7px;border-radius:50%;
+                  background:{dot};margin-top:3px"></div>
+                {'<div style="position:absolute;left:3px;top:10px;bottom:0;width:0.5px;background:#1a2035"></div>' if not is_last else ''}
+              </div>
+              <div>
+                <div style="font-size:13px;color:#4a5a7a;line-height:1.4">
+                  {html.escape(str(log.get('action_type') or '—'))} · {html.escape(str(log.get('member_username') or '—'))}
+                </div>
+                <div style="font-size:11px;color:#2a3a5a">{html.escape(ts)}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def _reopen_case_from_detail(*, ref: str, target: str, rtype: str) -> None:
+    """Resolved-only reopen actions from detail panel."""
+    client = _get_supabase_client()
+    now = _cc_utc_now_iso()
+    operator_id = _session_operator_id() or "dashboard"
+    actor = f"@{operator_id.lstrip('@')}"
+    if rtype == CASE_TYPE_RESIDENTIAL:
+        row = _fetch_ticket_row(ref)
+        if not row:
+            st.toast("Ticket not found.", icon="❌")
+            return
+        payload: dict[str, object] = {"updated_at": now}
+        if target == "Daily Task":
+            payload["status"] = STATUS_DAILY_TASK
+            payload["last_assigned_at"] = now
+            _cc_execute_ticket_update(client, payload, ref)
+            assigned_to = str(row.get("assigned_to") or "").strip()
+            if assigned_to:
+                _visits_open_new(client, ref, assigned_to, visit_start=now)
+        else:
+            payload["status"] = "Open"
+            _cc_execute_ticket_update(client, payload, ref)
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": ref,
+                "member_username": actor,
+                "action_type": "Reassigned",
+                "note": f"Residential ticket reopened to {target}.",
+                "timestamp": now,
+            }
+        ).execute()
+    else:
+        case = _fetch_sales_case_row_by_ref(ref)
+        if not case:
+            st.toast("Resort case not found.", icon="❌")
+            return
+        row_id = str(case.get("id") or "").strip()
+        if not row_id:
+            st.toast("Resort case id missing.", icon="❌")
+            return
+        _sales_cases_update_row(row_id, {"status": SC_STATUS_SALES_TICKET, "updated_at": now})
+        client.table(ATTENDANCE_LOGS_TABLE).insert(
+            {
+                "ticket_number": ref,
+                "member_username": actor,
+                "action_type": "Reassigned",
+                "note": f"Resort case reopened to {target} (→ Sales ticket queue).",
+                "timestamp": now,
+            }
+        ).execute()
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+    st.toast(f"✓ {ref} reopened to {target}", icon="✅")
+    st.rerun()
+
+
+def _render_residential_reopen_actions(ticket: dict[str, object]) -> None:
+    if str(ticket.get("status") or "") != STATUS_RESOLVED:
+        return
+    if not _is_dashboard_admin():
+        return
+    ref = str(ticket.get("ticket_number") or "").strip()
+    if not ref:
+        return
+    st.markdown(
+        t_section_label("Reopen", spacing=".06em", margin="margin:12px 0 6px"),
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns(2, gap="small")
+    with c1:
+        if st.button("→ Daily task", key=f"detail_reopen_dt_{ref}", use_container_width=True):
+            _reopen_case_from_detail(ref=ref, target="Daily Task", rtype=CASE_TYPE_RESIDENTIAL)
+    with c2:
+        if st.button("→ Needs review", key=f"detail_reopen_nr_{ref}", use_container_width=True):
+            _reopen_case_from_detail(ref=ref, target="Needs Review", rtype=CASE_TYPE_RESIDENTIAL)
+
+
+def _render_resort_reopen_actions(case: dict[str, object]) -> None:
+    if str(case.get("status") or "") != SC_STATUS_RESOLVED:
+        return
+    ref = str(case.get("case_ref") or "").strip()
+    if not ref:
+        return
+    st.markdown(
+        t_section_label("Reopen", spacing=".06em", margin="margin:12px 0 6px"),
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns(2, gap="small")
+    with c1:
+        if st.button("→ Daily task", key=f"detail_reopen_resort_dt_{ref}", use_container_width=True):
+            _reopen_case_from_detail(ref=ref, target="Daily Task", rtype=CASE_TYPE_RESORT)
+    with c2:
+        if st.button("→ Needs review", key=f"detail_reopen_resort_nr_{ref}", use_container_width=True):
+            _reopen_case_from_detail(ref=ref, target="Needs Review", rtype=CASE_TYPE_RESORT)
+
+
 def _render_dispatch_case_info_panel(
     ticket: dict | None,
 ) -> None:
@@ -18807,9 +19629,16 @@ def _render_dispatch_case_info_panel(
             )
             return
         t = ticket
+        case_type = str(t.get("case_type") or CASE_TYPE_RESIDENTIAL)
+        type_bg = "#0d1e3a" if case_type == CASE_TYPE_RESIDENTIAL else "#1a1030"
+        type_fg = "#5b7fb5" if case_type == CASE_TYPE_RESIDENTIAL else "#a78bfa"
         st.markdown(
             f"""
         <div style="padding-bottom:12px;border-bottom:0.5px solid #1a2035;margin-bottom:12px">
+          <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:3px;
+            background:{type_bg};color:{type_fg};display:inline-block;margin-bottom:6px">
+            {html.escape(case_type)}
+          </span>
           {t_detail_id(str(t.get('ticket_number') or ''))}
           <div style="display:flex;align-items:center;gap:7px;margin-top:4px;flex-wrap:wrap">
             {status_pill(str(t.get('status') or ''))}
@@ -18868,24 +19697,83 @@ def _render_dispatch_case_info_panel(
             </div>""",
                 unsafe_allow_html=True,
             )
+        if (
+            str(t.get("status") or "").strip() == STATUS_RESOLVED
+            and str(t.get("additional_info") or "").strip()
+        ):
+            st.markdown(
+                t_section_label(
+                    "Admin comment",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""
+            <div style="font-size:13px;font-weight:400;color:#e2e8f8;line-height:1.5;
+              background:#231a06;border:0.5px solid #3d2a0a;border-radius:4px;padding:7px">
+              {html.escape(str(t.get('additional_info') or ''))}
+            </div>""",
+                unsafe_allow_html=True,
+            )
+        admin_comment = _latest_admin_comment_for_ticket(str(t.get("ticket_number") or ""))
+        if admin_comment:
+            st.markdown(
+                t_section_label(
+                    "Last admin comment",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            admin_author = html.escape(admin_comment.get("author") or "—")
+            admin_when = html.escape(admin_comment.get("at") or "")
+            admin_text = html.escape(admin_comment.get("text") or "")
+            when_line = (
+                f'<p style="font-size:11px;color:#2a3a5a;margin:4px 0 0">'
+                f"{admin_author}{(' · ' + admin_when) if admin_when else ''}</p>"
+            )
+            st.markdown(
+                f"""
+            <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
+              background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
+              <p style="margin:0;white-space:pre-wrap;word-break:break-word">{admin_text}</p>
+              {when_line}
+            </div>""",
+                unsafe_allow_html=True,
+            )
+        field_resp = str(t.get("field_response") or "").strip()
+        if field_resp:
+            st.markdown(
+                t_section_label(
+                    "Field response",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
+                f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
+                f"{html.escape(field_resp)}</div>",
+                unsafe_allow_html=True,
+            )
+        photo_url = str(t.get("photo_url") or "").strip()
+        if photo_url:
+            st.markdown(
+                t_section_label(
+                    "Site photo",
+                    spacing=".06em",
+                    margin="margin:10px 0 5px",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.image(photo_url, use_container_width=True)
+
         _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
-        st.markdown(
-            t_section_label(
-                "Timeline",
-                spacing=".06em",
-                margin="margin:10px 0 5px",
-            ),
-            unsafe_allow_html=True,
-        )
-        logs_df = _fetch_attendance(
-            ticket_number=str(t.get("ticket_number") or ""),
-            limit=6,
-        )
-        logs = logs_df.to_dict("records") if not logs_df.empty else []
-        if not logs:
-            st.caption("No log entries yet.")
-        for i, log in enumerate(logs):
-            render_timeline_entry(log, is_last=(i == len(logs) - 1), tz=LOCAL_TZ)
+        _render_residential_reopen_actions(t)
+        _render_attendance_timeline(str(t.get("ticket_number") or ""))
 
 
 def _render_dispatch_right_rail(
@@ -18893,20 +19781,100 @@ def _render_dispatch_right_rail(
     queue_df: pd.DataFrame,
     picked: str | None,
     on_submit: Callable[[str, str, str, str, str], None],
+    sales_df: pd.DataFrame | None = None,
 ) -> None:
-    """Right column — Ticket assign | Case info tabs (mockup layout)."""
+    """Right column — Ticket assign | Case info tabs (residential + resort)."""
     ticket = None
     if picked:
-        match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
-        if not match.empty:
-            ticket = _dispatch_row_dict(match.iloc[0])
+        sel_type = str(st.session_state.get(_DISP_SELECTED_CASE_TYPE_KEY) or "")
+        if sel_type == CASE_TYPE_RESORT:
+            st.session_state[_SALES_SELECTED_KEY] = picked
+            ticket = None
+        else:
+            match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
+            if not match.empty:
+                ticket = _dispatch_row_dict(match.iloc[0])
 
     with st.container(key="disp_right_rail"):
         tab_assign, tab_info = st.tabs(["Ticket assign", "Case info"])
         with tab_assign:
-            render_assign_panel(on_submit=on_submit, layout="rail")
+            _render_unified_assign_panel(on_submit=on_submit, layout="rail")
         with tab_info:
-            _render_dispatch_case_info_panel(ticket)
+            if (
+                picked
+                and str(st.session_state.get(_DISP_SELECTED_CASE_TYPE_KEY) or "")
+                == CASE_TYPE_RESORT
+            ):
+                with st.container(key="disp_detail_panel"):
+                    _render_sales_detail_panel()
+            else:
+                _render_dispatch_case_info_panel(ticket)
+
+
+def _render_unified_assign_panel(
+    *,
+    on_submit: Callable[[str, str, str, str, str], None],
+    layout: str = "rail",
+) -> None:
+    """Ticket assign panel adapts to active case type filter."""
+    if _DISP_ASSIGN_CASE_TYPE_KEY not in st.session_state:
+        st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
+    case_type_filter = _init_case_type_filter()
+    cur = str(st.session_state.get(_DISP_ASSIGN_CASE_TYPE_KEY) or CASE_TYPE_RESIDENTIAL)
+    if cur not in (CASE_TYPE_RESIDENTIAL, CASE_TYPE_RESORT):
+        cur = CASE_TYPE_RESIDENTIAL
+        st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = cur
+
+    if case_type_filter == CASE_TYPE_RESIDENTIAL:
+        cur = CASE_TYPE_RESIDENTIAL
+        st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = cur
+    elif case_type_filter == CASE_TYPE_RESORT:
+        cur = CASE_TYPE_RESORT
+        st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = cur
+    else:
+        st.markdown(
+            t_section_label("Case type", spacing=".06em", margin="margin:0 0 6px"),
+            unsafe_allow_html=True,
+        )
+        c1, c2 = st.columns(2, gap="small")
+        with c1:
+            if st.button(
+                "🔧 Residential",
+                key="disp_assign_type_residential",
+                use_container_width=True,
+                type="primary" if cur == CASE_TYPE_RESIDENTIAL else "secondary",
+            ):
+                st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
+                st.rerun()
+        with c2:
+            if st.button(
+                "🏢 Resort",
+                key="disp_assign_type_resort",
+                use_container_width=True,
+                type="primary" if cur == CASE_TYPE_RESORT else "secondary",
+            ):
+                st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESORT
+                st.rerun()
+        cur = str(st.session_state.get(_DISP_ASSIGN_CASE_TYPE_KEY) or CASE_TYPE_RESIDENTIAL)
+
+    hint_dot = "#5b7fb5" if cur == CASE_TYPE_RESIDENTIAL else "#a78bfa"
+    hint_text = (
+        "Creates a residential ticket, assigns engineer, posts Telegram."
+        if cur == CASE_TYPE_RESIDENTIAL
+        else "Creates a resort case in intake flow."
+    )
+    st.markdown(
+        f'<p style="font-size:12px;color:#4a5a7a;margin:0 0 10px;'
+        f'background:#0d1220;border:0.5px solid #1a2035;border-radius:6px;'
+        f'padding:9px 11px"><span style="color:{hint_dot}">●</span> '
+        f"{html.escape(hint_text)}</p>",
+        unsafe_allow_html=True,
+    )
+
+    if cur == CASE_TYPE_RESORT:
+        _render_sales_assign_panel(layout=layout)
+    else:
+        render_assign_panel(on_submit=on_submit, layout=layout)
 
 
 def render_assign_panel(
@@ -19529,8 +20497,9 @@ def _render_dispatch_csm_dashboard(
     df_all: pd.DataFrame,
     masks: dict[str, pd.Series],
     lookback_days: int,
+    sales_df: pd.DataFrame | None = None,
 ) -> None:
-    """Three-column dispatch console for field ticket queues."""
+    """Three-column dispatch console — residential + resort cases on one Ticket screen."""
     aq_key = active_queue_key()
     if aq_key not in st.session_state:
         st.session_state[aq_key] = "Daily Task"
@@ -19538,7 +20507,7 @@ def _render_dispatch_csm_dashboard(
     assigned_today, responded_today, daily_task_count, unattended_count = (
         _dispatch_today_metrics(df_all, df_in_view=df)
     )
-    queue_counts = {
+    residential_queue_counts = {
         "Daily Task": int(masks["pending"].sum()),
         "Needs Review": int(masks["open"].sum()),
         "On Hold": int(masks["on_hold"].sum()),
@@ -19547,7 +20516,16 @@ def _render_dispatch_csm_dashboard(
         "Unattended": int(masks["unattended"].sum()),
         "Resolved": int(masks["completed"].sum()),
     }
-
+    case_type_filter = _init_case_type_filter()
+    include_resort = (
+        case_type_filter != CASE_TYPE_RESIDENTIAL and sales_df is not None
+    )
+    resort_bundle = (
+        _get_resort_unified_bundle(sales_df) if include_resort else _empty_resort_unified_bundle()
+    )
+    resort_counts = resort_bundle["counts"]
+    if not isinstance(resort_counts, dict):
+        resort_counts = {q: 0 for q in QUEUE_ORDER}
     _modal_pending = any(
         str(st.session_state.get(k) or "").strip()
         for k in (
@@ -19587,10 +20565,14 @@ def _render_dispatch_csm_dashboard(
                 cur = st.session_state.get(aq_key, "Daily Task")
                 if cur not in queue_options:
                     cur = "Daily Task"
-                selected_queue = render_queue_list(
+                selected_queue = _render_unified_queue_list(
                     selected=cur,
-                    counts=queue_counts,
+                    residential_counts=residential_queue_counts,
+                    resort_counts={
+                        q: int(resort_counts.get(q, 0)) for q in QUEUE_ORDER
+                    },
                     session_key=aq_key,
+                    case_type_filter=case_type_filter,
                 )
                 st.session_state[aq_key] = selected_queue
 
@@ -19651,7 +20633,7 @@ def _render_dispatch_csm_dashboard(
             with col_search:
                 search_num = st.text_input(
                     "Search",
-                    placeholder="Search ticket #",
+                    placeholder="Search ref...",
                     label_visibility="collapsed",
                     key="disp_ticket_search",
                 )
@@ -19664,7 +20646,23 @@ def _render_dispatch_csm_dashboard(
                     "Oldest follow-up first — chase these before newer investigation cases."
                 )
 
-            ticket_rows = [_dispatch_row_dict(r) for _, r in display_df.iterrows()]
+            case_type_filter = _render_unified_case_type_filter()
+            include_resort = (
+                case_type_filter != CASE_TYPE_RESIDENTIAL and sales_df is not None
+            )
+
+            ticket_rows: list[dict[str, object]] = []
+            if case_type_filter != CASE_TYPE_RESORT:
+                ticket_rows = [
+                    _residential_row_to_unified_dict(r) for _, r in display_df.iterrows()
+                ]
+            if include_resort:
+                by_queue = resort_bundle.get("by_queue") or {}
+                if isinstance(by_queue, dict):
+                    resort_rows = by_queue.get(selected_queue) or []
+                    if isinstance(resort_rows, list):
+                        ticket_rows.extend(resort_rows)
+            ticket_rows = _apply_unified_case_type_filter(ticket_rows, case_type_filter)
             ticket_nums = [
                 str(t.get("ticket_number") or "")
                 for t in ticket_rows
@@ -19686,33 +20684,48 @@ def _render_dispatch_csm_dashboard(
                     t for t in ticket_rows if q in str(t.get("ticket_number") or "")
                 ]
 
+            ticket_nums = [
+                str(t.get("ticket_number") or "")
+                for t in ticket_rows
+                if t.get("ticket_number")
+            ]
+
             if selected_queue == "Daily Task":
-                render_nudge_banner(ticket_rows)
+                render_nudge_banner(
+                    [t for t in ticket_rows if t.get("case_type") == CASE_TYPE_RESIDENTIAL]
+                )
 
             sel = st.session_state.get(_DISP_SELECTED_KEY)
             render_ticket_table(
                 ticket_rows,
                 selected=sel,
                 selected_key=_DISP_SELECTED_KEY,
-                row_actions_fn=lambda t, rk: _render_dispatch_row_actions(
-                    t, is_admin, rk, queue_name=selected_queue
+                show_case_type=True,
+                case_type_session_key=_DISP_SELECTED_CASE_TYPE_KEY,
+                row_actions_fn=lambda t, rk: _render_unified_row_actions(
+                    t, rk, is_admin=is_admin, queue_name=selected_queue
                 ),
             )
 
-            ticket_nums = [
-                str(t.get("ticket_number") or "") for t in ticket_rows if t.get("ticket_number")
+            residential_nums = [
+                str(t.get("ticket_number") or "")
+                for t in ticket_rows
+                if t.get("ticket_number")
+                and t.get("case_type") == CASE_TYPE_RESIDENTIAL
             ]
+            if _sales_any_row_modal_active() and sales_df is not None:
+                _render_sales_floor_modals(df=sales_df)
             sel = st.session_state.get(_DISP_SELECTED_KEY)
             picked = sel if sel and sel in ticket_nums else None
 
         with dp:
             if _dispatch_any_row_modal_active(
-                ticket_nums=ticket_nums, is_admin=is_admin
+                ticket_nums=residential_nums, is_admin=is_admin
             ):
                 with st.container(key="disp_row_action_panel"):
                     _render_dispatch_row_modals(
                         queue_df=display_df,
-                        ticket_nums=ticket_nums,
+                        ticket_nums=residential_nums,
                         is_admin=is_admin,
                         fe_names=fe_names,
                         fe_missing=fe_missing,
@@ -19722,6 +20735,7 @@ def _render_dispatch_csm_dashboard(
                 _render_dispatch_right_rail(
                     queue_df=display_df,
                     picked=picked,
+                    sales_df=sales_df,
                     on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
                         tn, eng, eng2, cat, notes,
                         fe_names=fe_names, fe_missing=fe_missing,
@@ -19737,17 +20751,17 @@ def _render_dashboard(
     refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
     _apply_pending_dashboard_nav()
     _migrate_legacy_queue_nav()
-    nav_intent = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM))
+    nav_intent = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET))
     if nav_intent not in _DASH_MAIN_NAV_OPTIONS:
-        st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_CSM
-        nav_intent = _DASH_NAV_CSM
+        st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_TICKET
+        nav_intent = _DASH_NAV_TICKET
     elif nav_intent != st.session_state.get(_DASH_MAIN_NAV_KEY):
         st.session_state[_DASH_MAIN_NAV_KEY] = nav_intent
 
     main_nav = _normalize_dash_main_nav(
-        st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM)
+        st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET)
     )
-    if main_nav != _DASH_NAV_CSM:
+    if main_nav == _DASH_NAV_TICKET:
         _render_dashboard_header(refreshed_at=refreshed_at)
 
     if main_nav == "Log":
@@ -19755,9 +20769,6 @@ def _render_dashboard(
         return
     if main_nav == "Performance":
         _render_field_performance_tab(lookback_days=lookback_days)
-        return
-    if main_nav == "Sales Cases":
-        _render_sales_cases_dashboard()
         return
 
     _maybe_run_unattended_close()
@@ -19867,11 +20878,19 @@ def _render_dashboard(
         total_completed=total_completed,
     )
 
+    case_type_filter = _init_case_type_filter()
+    sales_df = (
+        _fetch_sales_cases_df()
+        if case_type_filter != CASE_TYPE_RESIDENTIAL
+        else None
+    )
+
     _render_dispatch_csm_dashboard(
         df=df,
         df_all=df_all,
         masks=masks,
         lookback_days=lookback_days,
+        sales_df=sales_df,
     )
 
 
@@ -19963,7 +20982,7 @@ def _get_performance_snapshot_counts(
     )
     if focus == "All":
         total = len(slices["in_view"])
-        sales_n = len(sales_all)
+        resort_n = _count_resort_active(sales_all=sales_all)
     else:
         total = (
             len(pending_f)
@@ -19973,7 +20992,7 @@ def _get_performance_snapshot_counts(
             + len(investigation_f)
             + len(unattended_f)
         )
-        sales_n = (
+        resort_n = (
             int(sales_enriched.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1).sum())
             if not sales_enriched.empty
             else 0
@@ -19987,8 +21006,25 @@ def _get_performance_snapshot_counts(
         "resolved": len(completed_f),
         "investigation": len(investigation_f),
         "unattended": len(unattended_f),
-        "sales": sales_n,
+        "resort": resort_n,
     }
+
+
+def _count_resort_active(*, sales_all: pd.DataFrame | None = None) -> int:
+    """Count active (non-resolved) resort cases."""
+    if sales_all is not None and not sales_all.empty and "status" in sales_all.columns:
+        return int((sales_all["status"].astype(str).map(_sc_effective_status) != SC_STATUS_RESOLVED).sum())
+    try:
+        result = (
+            _get_supabase_client()
+            .table(SALES_CASES_TABLE)
+            .select("id", count="exact")
+            .neq("status", SC_STATUS_RESOLVED)
+            .execute()
+        )
+        return int(result.count or 0)
+    except Exception:
+        return 0
 
 
 def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
@@ -20009,7 +21045,7 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
             counts["unattended"],
             "#ef4444" if counts["unattended"] > 0 else "#8a9ac0",
         ),
-        ("SALES", counts["sales"], "#8a9ac0"),
+        ("RESORT", counts["resort"], "#a78bfa"),
     ]
     for col, (label, val, color) in zip(row1, metrics_row1):
         with col:
@@ -20281,7 +21317,7 @@ def _render_perf_solo_shared_chart(
       <span><span style="width:8px;height:8px;border-radius:2px;
         background:{CHART_COLORS['shared']};display:inline-block;margin-right:4px"></span>Shared</span>
       <span><span style="width:8px;height:8px;border-radius:2px;
-        background:{CHART_COLORS['sales']};display:inline-block;margin-right:4px"></span>Sales</span>
+        background:{CHART_COLORS['sales']};display:inline-block;margin-right:4px"></span>Resort</span>
     </div>
     """,
         unsafe_allow_html=True,
@@ -20297,7 +21333,7 @@ def _render_perf_solo_shared_chart(
     if not data:
         st.markdown(
             '<div style="padding:24px;text-align:center;color:#2a3a5a;font-size:14px">'
-            "No field or sales activity for this filter</div>",
+            "No residential or resort activity for this filter</div>",
             unsafe_allow_html=True,
         )
         return
@@ -20330,25 +21366,152 @@ def _render_perf_solo_shared_chart(
                 segs += f'<div style="background:{CHART_COLORS["sales"]};width:{sales_pct}%"></div>'
             if not segs:
                 segs = f'<div style="background:{CHART_COLORS["grid"]};width:100%"></div>'
+            stat_parts: list[str] = []
+            if field_total:
+                stat_parts.append(f"{solo} solo / {shared} shared")
+            if sales:
+                stat_parts.append(
+                    f'<span style="color:#a78bfa">{sales} resort</span>'
+                )
+            stats_line = " · ".join(stat_parts) if stat_parts else "0"
             st.markdown(
                 f"""
-            <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
-              background:{CHART_COLORS['grid']};margin-top:4px">{segs}</div>
+            <div style="margin-top:4px">
+              <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
+                background:{CHART_COLORS['grid']}">{segs}</div>
+              <p style="font-size:11px;line-height:1.35;margin:4px 0 0;color:#8a9ac0">
+                {stats_line}</p>
+            </div>
             """,
                 unsafe_allow_html=True,
             )
-            parts = []
-            if field_total:
-                parts.append(f"{solo} solo / {shared} shared")
-            if sales:
-                parts.append(f"{sales} sales")
-            st.caption(" · ".join(parts) if parts else "0")
-    st.caption(
-        "Solo / shared = **visit fair credit** — every engineer with a visit cycle on the ticket "
-        "counts (not only whoever holds it now). Reassign chains (A → B → C) credit all staff "
-        "who touched the case. **Sales** = all sales cases in queue; undispatched cases credit "
-        "**Admin**."
+    st.markdown(
+        '<p style="font-size:11px;color:#4a5a7a;margin:8px 0 0">'
+        "Solo / shared = <strong>visit fair credit</strong> — every engineer with a visit cycle "
+        "on the ticket counts (not only whoever holds it now). Reassign chains (A → B → C) credit "
+        "all staff who touched the case. <strong>Resort</strong> = all resort cases in queue; "
+        "undispatched cases credit <strong>Admin</strong>.</p>",
+        unsafe_allow_html=True,
     )
+
+
+def _render_resort_overview_column(
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Resort activity summary: status breakdown + dispatched engineer bars."""
+    resort_view = _perf_rows_in_updated_range(
+        sales_all, range_start=range_start, range_end=range_end
+    )
+    if focus not in ("", "All"):
+        resort_view = resort_view.loc[
+            resort_view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)
+        ]
+
+    if resort_view.empty:
+        st.caption("No resort activity in this range.")
+        return
+
+    st_col = (
+        resort_view["status"].astype(str).map(_sc_effective_status)
+        if "status" in resort_view.columns
+        else pd.Series("", index=resort_view.index)
+    )
+    status_counts = Counter(st_col.tolist())
+    resort_status_colors = {
+        SC_STATUS_SALES_TICKET: ("#1a1030", "#a78bfa"),
+        SC_STATUS_INVESTIGATION: ("#1a2035", "#8a9ac0"),
+        SC_STATUS_REGIONAL: ("#1a2035", "#8a9ac0"),
+        SC_STATUS_DESIGN: ("#231a06", "#b8954f"),
+        SC_STATUS_RESOLVED: ("#0d2218", "#22c55e"),
+    }
+    for status, (bg, fg) in resort_status_colors.items():
+        count = int(status_counts.get(status, 0))
+        if count == 0:
+            continue
+        st.markdown(
+            f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+          padding:7px 9px;background:{bg};border-radius:4px;margin-bottom:4px">
+          <span style="font-size:12px;color:{fg}">{html.escape(status)}</span>
+          <span style="font-size:14px;font-weight:600;color:{fg};
+            font-variant-numeric:tabular-nums">{count}</span>
+        </div>""",
+            unsafe_allow_html=True,
+        )
+
+    if "assigned_to" not in resort_view.columns:
+        return
+    dispatched = [
+        _perf_norm_member(v)
+        for v in resort_view["assigned_to"].tolist()
+        if _sc_sales_has_field_assignee(v)
+    ]
+    if not dispatched:
+        return
+    eng_counts = Counter(dispatched)
+    max_c = max(eng_counts.values())
+    st.markdown(
+        t_section_label("By engineer", spacing=".06em", margin="margin:10px 0 6px"),
+        unsafe_allow_html=True,
+    )
+    for eng, count in eng_counts.most_common(5):
+        pct = (count / max_c) * 100 if max_c else 0
+        col_btn, col_bar = st.columns([1.4, 3])
+        with col_btn:
+            if st.button(f"@{eng.lstrip('@')}", key=f"ov_resort_{eng}", use_container_width=True):
+                st.session_state[_PERF_SELECTED_ENGINEER_KEY] = eng.lstrip("@")
+                st.rerun()
+        with col_bar:
+            st.markdown(
+                f"""
+            <div style="height:16px;border-radius:3px;overflow:hidden;
+              background:#1a2035;margin-top:3px">
+              <div style="background:#8b7bb0;width:{pct}%;height:100%"></div>
+            </div>""",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"{count}")
+
+
+def _render_perf_overview_tab(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Overview: Residential solo/shared + Resort summary column."""
+    col_res, col_resort = st.columns([2, 1.2], gap="medium")
+    with col_res:
+        st.markdown(
+            '<p style="font-size:12px;font-weight:500;color:#e2e8f8;'
+            'margin:6px 0 8px">Residential — solo vs shared</p>',
+            unsafe_allow_html=True,
+        )
+        _render_perf_solo_shared_chart(
+            df_all,
+            sales_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    with col_resort:
+        st.markdown(
+            '<p style="font-size:12px;font-weight:500;color:#e2e8f8;'
+            'margin:6px 0 8px">Resort</p>',
+            unsafe_allow_html=True,
+        )
+        _render_resort_overview_column(
+            sales_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
 
 
 def _get_engineer_performance_detail(
@@ -20362,7 +21525,7 @@ def _get_engineer_performance_detail(
 ) -> dict[str, object]:
     """Breakdown for one engineer in the Performance detail panel."""
     credit_key = _perf_resolve_overview_credit_key(engineer)
-    sales_count = _perf_overview_sales_count(
+    resort_count = _perf_overview_sales_count(
         sales_all, credit_key=credit_key, focus="All"
     )
 
@@ -20440,7 +21603,7 @@ def _get_engineer_performance_detail(
             h, rem = divmod(int(avg_seconds) // 60, 60)
             avg_response = f"{h}h {rem:02d}m"
 
-    recent_sales: list[dict[str, str]] = []
+    recent_resort: list[dict[str, str]] = []
     if not sales_all.empty and credit_key:
         sales_rows = [
             row
@@ -20452,7 +21615,7 @@ def _get_engineer_performance_detail(
             reverse=True,
         )
         for row in sales_rows[:5]:
-            recent_sales.append(
+            recent_resort.append(
                 {
                     "case_ref": str(row.get("case_ref") or ""),
                     "account_name": str(row.get("account_name") or "(uncategorized)"),
@@ -20460,15 +21623,15 @@ def _get_engineer_performance_detail(
             )
 
     return {
-        "total": solo + shared + sales_count,
+        "total": solo + shared + resort_count,
         "solo": solo,
         "shared": shared,
-        "sales": sales_count,
+        "resort_count": resort_count,
         "resolved": resolved,
         "unattended": unattended,
         "avg_response": avg_response,
         "recent_tickets": recent_tickets,
-        "recent_sales": recent_sales,
+        "recent_resort": recent_resort,
     }
 
 
@@ -20523,7 +21686,7 @@ def _render_performance_detail_panel(
     rows = [
         ("Solo tickets", detail["solo"], "#8a9ac0"),
         ("Shared tickets", detail["shared"], "#8a9ac0"),
-        ("Sales cases", detail["sales"], "#a78bfa"),
+        ("Resort cases", detail["resort_count"], "#a78bfa"),
         ("Resolved", detail["resolved"], "#8a9ac0"),
         ("Avg response time", detail["avg_response"], "#8a9ac0"),
         (
@@ -20561,32 +21724,32 @@ def _render_performance_detail_panel(
     if not detail["recent_tickets"]:
         st.caption("No field tickets in this range.")
 
-    recent_sales = detail.get("recent_sales") or []
-    if recent_sales:
+    recent_resort = detail.get("recent_resort") or []
+    if recent_resort:
         st.markdown(
-            t_section_label("Recent sales", spacing=".06em", margin="margin:14px 0 5px"),
+            t_section_label("Recent resort", spacing=".06em", margin="margin:14px 0 5px"),
             unsafe_allow_html=True,
         )
-        for c in recent_sales:
+        for c in recent_resort:
             ref = str(c.get("case_ref") or "")
             if not ref:
                 continue
             if st.button(
                 f"{ref} · {c.get('account_name', '')}",
-                key=f"perf_sales_{ref}",
+                key=f"perf_resort_{ref}",
                 use_container_width=True,
             ):
                 _perf_jump_to_sales_case(ref)
 
 
 def _perf_jump_to_csm_ticket(ticket_number: str) -> None:
-    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state[_DASH_PENDING_TICKET_SELECT_KEY] = str(ticket_number)
     st.rerun()
 
 
 def _perf_jump_to_sales_case(case_ref: str) -> None:
-    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = "Sales Cases"
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state[_DASH_PENDING_SALES_SELECT_KEY] = str(case_ref)
     st.rerun()
 
@@ -20632,205 +21795,6 @@ def _perf_sales_matches_focus(row: pd.Series, focus: str) -> bool:
     return _perf_sales_credited_person(row) == _perf_person_credit_key(focus)
 
 
-def _get_sales_status_counts_perf(
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> dict[str, int]:
-    view = _perf_rows_in_updated_range(
-        sales_all, range_start=range_start, range_end=range_end
-    )
-    if view.empty:
-        return {s: 0 for s in ("Sales ticket", "Investigation", "Design", "Resolved")}
-    if focus not in ("", "All"):
-        view = view.loc[view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
-    if "status" in view.columns:
-        st_col = view["status"].map(_sc_effective_status)
-    else:
-        st_col = pd.Series("", index=view.index)
-    return {
-        "Sales ticket": int(st_col.eq(SC_STATUS_SALES_TICKET).sum()),
-        "Investigation": int(st_col.eq(SC_STATUS_INVESTIGATION).sum()),
-        "Design": int(st_col.eq(SC_STATUS_DESIGN).sum()),
-        "Resolved": int(st_col.eq(SC_STATUS_RESOLVED).sum()),
-    }
-
-
-def _get_sales_cases_by_engineer_perf(
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> list[dict[str, object]]:
-    view = _perf_rows_in_updated_range(
-        sales_all, range_start=range_start, range_end=range_end
-    )
-    if view.empty or "assigned_to" not in view.columns:
-        return []
-    dispatched = view.loc[view["assigned_to"].apply(_sc_sales_has_field_assignee)]
-    if focus not in ("", "All"):
-        key = _perf_norm_member(focus)
-        dispatched = dispatched.loc[
-            dispatched["assigned_to"].map(_perf_norm_member).eq(key)
-        ]
-    if dispatched.empty:
-        return []
-    counts = (
-        dispatched["assigned_to"]
-        .map(_perf_norm_member)
-        .value_counts()
-        .sort_values(ascending=False)
-    )
-    return [
-        {"engineer": eng.lstrip("@").lower(), "count": int(c)}
-        for eng, c in counts.items()
-        if eng not in ("", "(unknown)")
-    ]
-
-
-def _get_sales_cases_in_range_perf(
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> list[dict[str, object]]:
-    view = _perf_rows_in_updated_range(
-        sales_all, range_start=range_start, range_end=range_end
-    )
-    if view.empty:
-        return []
-    if focus not in ("", "All"):
-        view = view.loc[view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
-    if view.empty:
-        return []
-    sort_ts = _parse_ts(view["updated_at"]) if "updated_at" in view.columns else view.index
-    view = view.assign(_sort=sort_ts).sort_values("_sort", ascending=False)
-    rows: list[dict[str, object]] = []
-    for _, row in view.head(15).iterrows():
-        rows.append(
-            {
-                "case_ref": str(row.get("case_ref") or ""),
-                "account_name": str(row.get("account_name") or "—"),
-                "status": str(row.get("status") or "—"),
-            }
-        )
-    return rows
-
-
-def _render_perf_sales_performance_tab(
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> None:
-    """Sales-only Performance tab — status cards, engineer bars, case list."""
-    st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
-        "Cases by status</p>",
-        unsafe_allow_html=True,
-    )
-    status_counts = _get_sales_status_counts_perf(
-        sales_all, focus=focus, range_start=range_start, range_end=range_end
-    )
-    cols = st.columns(4)
-    sales_status_colors = {
-        "Sales ticket": "#a78bfa",
-        "Investigation": "#8a9ac0",
-        "Design": "#8a9ac0",
-        "Resolved": "#4a5a7a",
-    }
-    for col, (status, color) in zip(cols, sales_status_colors.items()):
-        with col:
-            st.markdown(
-                f"""
-            <div style="background:#0d1220;border:0.5px solid #1a2035;
-              border-radius:5px;padding:8px 9px">
-              <div style="font-size:22px;font-weight:600;color:{color};
-                font-variant-numeric:tabular-nums">{status_counts.get(status, 0)}</div>
-              <div style="font-size:11px;color:#2a3a5a;margin-top:2px">{status.upper()}</div>
-            </div>
-            """,
-                unsafe_allow_html=True,
-            )
-
-    st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:14px 0 8px">'
-        "Cases by engineer</p>",
-        unsafe_allow_html=True,
-    )
-    staff_data = _get_sales_cases_by_engineer_perf(
-        sales_all, focus=focus, range_start=range_start, range_end=range_end
-    )
-    if not staff_data:
-        st.markdown(
-            '<div style="padding:24px;text-align:center;color:#2a3a5a;font-size:14px">'
-            "No dispatched sales cases in this range</div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        max_count = max(int(r["count"]) for r in staff_data)
-        for row in staff_data:
-            eng = str(row["engineer"])
-            col_btn, col_bar = st.columns([1, 4])
-            with col_btn:
-                if st.button(f"@{eng}", key=f"sp_eng_{eng}", use_container_width=True):
-                    st.session_state[_PERF_SELECTED_ENGINEER_KEY] = eng
-                    st.rerun()
-            with col_bar:
-                pct = (int(row["count"]) / max_count * 100) if max_count else 0
-                st.markdown(
-                    f"""
-                <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
-                  background:{CHART_COLORS['grid']};margin-top:4px">
-                  <div style="background:{CHART_COLORS['sales']};width:{pct}%"></div>
-                </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-                st.caption(f"{row['count']} cases")
-
-    st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:14px 0 8px">'
-        "Case list</p>",
-        unsafe_allow_html=True,
-    )
-    cases = _get_sales_cases_in_range_perf(
-        sales_all, focus=focus, range_start=range_start, range_end=range_end
-    )
-    if not cases:
-        st.caption("No sales cases in this range.")
-        return
-    for c in cases:
-        col_ref, col_acc, col_status, col_btn = st.columns([1, 2, 1.2, 0.8])
-        with col_ref:
-            st.markdown(
-                f'<span style="font-size:13px;color:#8a9ac0;font-variant-numeric:tabular-nums">'
-                f'{html.escape(str(c["case_ref"]))}</span>',
-                unsafe_allow_html=True,
-            )
-        with col_acc:
-            st.markdown(
-                f'<span style="font-size:13px;color:#4a5a7a">'
-                f'{html.escape(str(c["account_name"]))}</span>',
-                unsafe_allow_html=True,
-            )
-        with col_status:
-            st.markdown(
-                f'<span style="font-size:11px;color:#2a3a5a">'
-                f'{html.escape(str(c["status"]))}</span>',
-                unsafe_allow_html=True,
-            )
-        with col_btn:
-            ref = str(c["case_ref"])
-            if st.button("View →", key=f"sp_case_{ref}", use_container_width=True):
-                _perf_jump_to_sales_case(ref)
-
-
 def _get_case_info_rows(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
@@ -20852,7 +21816,7 @@ def _get_case_info_rows(
             staff += f" + {t.get('assigned_to_2')}"
         rows.append(
             {
-                "type": "csm",
+                "type": "residential",
                 "ref": str(t.get("ticket_number") or ""),
                 "title": str(t.get("task_category") or "—"),
                 "staff": staff,
@@ -20874,7 +21838,7 @@ def _get_case_info_rows(
             staff = f"{_perf_norm_member(admin)} (admin)" if admin and admin != "—" else "—"
         rows.append(
             {
-                "type": "sales",
+                "type": "resort",
                 "ref": str(c.get("case_ref") or ""),
                 "title": str(c.get("account_name") or "—"),
                 "staff": staff,
@@ -20925,9 +21889,14 @@ def _render_perf_case_info_list_tab(
 
     for row in rows:
         c1, c2, c3, c4, c5, c6 = st.columns([0.7, 1.25, 1.85, 1.15, 1.05, 0.95], gap="small")
-        icon = "🔧" if row["type"] == "csm" else "🏢"
+        is_residential = row["type"] == "residential"
+        icon = "🔧" if is_residential else "🏢"
+        color = "#5b7fb5" if is_residential else "#a78bfa"
         with c1:
-            st.markdown(f'<span style="font-size:14px">{icon}</span>', unsafe_allow_html=True)
+            st.markdown(
+                f'<span style="font-size:14px;color:{color}">{icon}</span>',
+                unsafe_allow_html=True,
+            )
         with c2:
             st.markdown(
                 f'<span style="font-size:13px;color:#8a9ac0">{html.escape(str(row["ref"]))}</span>',
@@ -20952,7 +21921,7 @@ def _render_perf_case_info_list_tab(
             ref = str(row["ref"])
             rtype = str(row["type"])
             if st.button("View →", key=f"ci_{rtype}_{ref}", use_container_width=True):
-                if rtype == "csm":
+                if rtype == "residential":
                     _perf_jump_to_csm_ticket(ref)
                 else:
                     _perf_jump_to_sales_case(ref)
@@ -20983,7 +21952,7 @@ def _get_handled_field_tickets_perf(
     ]
 
 
-def _get_handled_sales_cases_perf(
+def _get_handled_resort_cases_perf(
     sales_all: pd.DataFrame,
     *,
     focus: str,
@@ -21121,21 +22090,21 @@ def _render_perf_handled_list_tab(
     field_handled = _get_handled_field_tickets_perf(
         df_all, focus=focus, range_start=range_start, range_end=range_end
     )
-    sales_handled = _get_handled_sales_cases_perf(
+    resort_handled = _get_handled_resort_cases_perf(
         sales_all, focus=focus, range_start=range_start, range_end=range_end
     )
-    total = len(field_handled) + len(sales_handled)
+    total = len(field_handled) + len(resort_handled)
 
     st.markdown(
         f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 4px">'
         f"Handled this range — {total} total</p>",
         unsafe_allow_html=True,
     )
-    st.caption(f"{len(field_handled)} field · {len(sales_handled)} sales")
+    st.caption(f"{len(field_handled)} residential · {len(resort_handled)} resort")
 
     st.markdown(
         '<p style="font-size:13px;font-weight:500;color:#8a9ac0;margin:12px 0 6px">'
-        "Field tickets</p>",
+        "Residential tickets</p>",
         unsafe_allow_html=True,
     )
     if field_handled:
@@ -21163,15 +22132,15 @@ def _render_perf_handled_list_tab(
                 if st.button("View →", key=f"hd_field_{tn}", use_container_width=True):
                     _perf_jump_to_csm_ticket(tn)
     else:
-        st.caption("No field tickets handled in this range")
+        st.caption("No residential tickets handled in this range")
 
     st.markdown(
         '<p style="font-size:13px;font-weight:500;color:#8a9ac0;margin:12px 0 6px">'
-        "Sales cases</p>",
+        "Resort cases</p>",
         unsafe_allow_html=True,
     )
-    if sales_handled:
-        for c in sales_handled:
+    if resort_handled:
+        for c in resort_handled:
             col_ref, col_acc, col_eng, col_btn = st.columns([1, 1.3, 1.2, 0.8])
             ref = str(c["case_ref"])
             if _sc_sales_has_field_assignee(c.get("assigned_to")):
@@ -21195,10 +22164,10 @@ def _render_perf_handled_list_tab(
                     unsafe_allow_html=True,
                 )
             with col_btn:
-                if st.button("View →", key=f"hd_sales_{ref}", use_container_width=True):
+                if st.button("View →", key=f"hd_resort_{ref}", use_container_width=True):
                     _perf_jump_to_sales_case(ref)
     else:
-        st.caption("No sales cases handled in this range")
+        st.caption("No resort cases handled in this range")
 
 
 def _get_weekly_attended_by_engineer(
@@ -21497,7 +22466,7 @@ def _render_perf_handled_tab(
     n_handled_investigation: int,
     n_handled_visit_tickets: int,
 ) -> None:
-    sales_part = f" + <strong>{n_work_sales}</strong> Sales" if n_work_sales else ""
+    sales_part = f" + <strong>{n_work_sales}</strong> Resort" if n_work_sales else ""
     st.markdown(
         t_heading("Handled"),
         unsafe_allow_html=True,
@@ -21509,97 +22478,87 @@ def _render_perf_handled_tab(
         f"<strong>{n_handled_resolved}</strong> {html.escape(STATUS_RESOLVED)} + "
         f"<strong>{n_handled_investigation}</strong> Investigation with activity in "
         f"<strong>{html.escape(range_caption)}</strong> "
-        f"(resolve, reassign, admin action, or sales update). "
+        f"(resolve, reassign, admin action, or resort update). "
         f"<strong>Visit fair credit:</strong> {n_handled_visit_tickets} responded ticket(s).</p>",
         unsafe_allow_html=True,
     )
     if work_view.empty and visits_f.empty:
-        st.info("No handled field/sales cases or visits for this filter.")
+        st.info("No handled residential/resort cases or visits for this filter.")
         return
     view = work_view
-    c_chart, c_table = st.columns([3, 2])
-    with c_chart:
-        if not visits_f.empty:
-            responded_visits = visits_f[visits_f["outcome"].astype(str).eq("responded")]
-            if responded_visits.empty:
-                st.caption("No responded visits in this time range.")
-            else:
-                st.markdown(
-                    t_section_label(
-                        "Handled by visit assignee (fair credit)",
-                        spacing=".06em",
-                        margin="margin:0 0 6px",
-                    ),
-                    unsafe_allow_html=True,
-                )
-                _render_handled_visit_credit_bar(responded_visits)
-        elif not view.empty:
-            _render_perf_person_bar(
-                view,
-                title=f"Handled by assignee ({range_caption})",
-                value_name="Handled",
-            )
-    with c_table:
-        if view.empty:
-            st.caption("No handled cases in this time range.")
+    if not visits_f.empty:
+        responded_visits = visits_f[visits_f["outcome"].astype(str).eq("responded")]
+        if responded_visits.empty:
+            st.caption("No responded visits in this time range.")
         else:
             st.markdown(
                 t_section_label(
-                    f"Split ({range_caption})",
+                    "Handled by visit assignee (fair credit)",
                     spacing=".06em",
                     margin="margin:0 0 6px",
                 ),
                 unsafe_allow_html=True,
             )
-            group_cols = ["track", "_outcome", "category"]
-            group_cols = [c for c in group_cols if c in view.columns]
-            split = (
-                view.groupby(group_cols, as_index=False)
+            _render_handled_visit_credit_bar(responded_visits)
+    elif not view.empty:
+        _render_perf_person_bar(
+            view,
+            title=f"Handled by assignee ({range_caption})",
+            value_name="Handled",
+        )
+
+    if view.empty:
+        st.caption("No handled cases in this time range.")
+    else:
+        group_cols = ["track", "_outcome", "category"]
+        group_cols = [c for c in group_cols if c in view.columns]
+        split = (
+            view.groupby(group_cols, as_index=False)
+            .size()
+            .rename(columns={"size": "Cases"})
+            .sort_values(
+                ["Cases"] + group_cols,
+                ascending=[False] + [True] * len(group_cols),
+            )
+        )
+        split = split.rename(
+            columns={
+                "track": "Track",
+                "_outcome": "Outcome",
+                "category": "Category",
+            }
+        )
+        _render_perf_table_section(
+            f"Split ({range_caption})",
+            split,
+            top_margin="1.25rem",
+        )
+        field_view = (
+            view.loc[view["track"].eq("Field")]
+            if "track" in view.columns
+            else view
+        )
+        if "assigned_category" in field_view.columns and not field_view.empty:
+            assign_split = (
+                field_view.groupby(["_outcome", "assigned_category"], as_index=False)
                 .size()
-                .rename(columns={"size": "Cases"})
+                .rename(
+                    columns={
+                        "size": "Tickets",
+                        "_outcome": "Outcome",
+                        "assigned_category": "Assigned category",
+                    }
+                )
                 .sort_values(
-                    ["Cases"] + group_cols,
-                    ascending=[False] + [True] * len(group_cols),
+                    ["Tickets", "Outcome", "Assigned category"],
+                    ascending=[False, True, True],
                 )
             )
-            split = split.rename(
-                columns={
-                    "track": "Track",
-                    "_outcome": "Outcome",
-                    "category": "Category",
-                }
+            _render_perf_table_section(
+                "Field: assigned vs outcome (mismatch check)",
+                assign_split,
+                top_margin="1.5rem",
             )
-            st.dataframe(split, use_container_width=True, hide_index=True)
-            field_view = (
-                view.loc[view["track"].eq("Field")]
-                if "track" in view.columns
-                else view
-            )
-            if "assigned_category" in field_view.columns and not field_view.empty:
-                assign_split = (
-                    field_view.groupby(["_outcome", "assigned_category"], as_index=False)
-                    .size()
-                    .rename(
-                        columns={
-                            "size": "Tickets",
-                            "_outcome": "Outcome",
-                            "assigned_category": "Assigned category",
-                        }
-                    )
-                    .sort_values(
-                        ["Tickets", "Outcome", "Assigned category"],
-                        ascending=[False, True, True],
-                    )
-                )
-                st.markdown(
-                    t_section_label(
-                        "Field: assigned vs outcome (mismatch check)",
-                        spacing=".06em",
-                        margin="margin:10px 0 6px",
-                    ),
-                    unsafe_allow_html=True,
-                )
-                st.dataframe(assign_split, use_container_width=True, hide_index=True)
     if not view.empty:
         with st.expander("Trend & case list", expanded=False):
             _render_perf_outcome_trend(
@@ -21645,7 +22604,7 @@ def _render_performance_tab(*, lookback_days: int) -> None:
             raw_sales = _fetch_sales_cases_cached()
             sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
         except Exception as exc:
-            st.warning(f"Could not load Sales Cases for Performance: {exc}")
+            st.warning(f"Could not load Resort cases for Performance: {exc}")
 
         counts = _get_performance_snapshot_counts(
             slices=slices, sales_all=sales_all, focus=focus
@@ -21665,7 +22624,7 @@ def _render_performance_tab(*, lookback_days: int) -> None:
 
             view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
             if view == "Overview":
-                _render_perf_solo_shared_chart(
+                _render_perf_overview_tab(
                     df_all,
                     sales_all,
                     focus=focus,
@@ -21675,13 +22634,6 @@ def _render_performance_tab(*, lookback_days: int) -> None:
             elif view == "Weekly":
                 _render_perf_weekly_tab(
                     df_all,
-                    sales_all,
-                    focus=focus,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-            elif view == "Sales cases":
-                _render_perf_sales_performance_tab(
                     sales_all,
                     focus=focus,
                     range_start=range_start,
