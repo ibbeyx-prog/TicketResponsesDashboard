@@ -64,6 +64,7 @@ import base64
 import hashlib
 import html
 import hmac
+import inspect
 import json
 import logging
 import math
@@ -9224,17 +9225,24 @@ def _render_dispatch_settings_popover() -> None:
         _render_dash_custom_date_inputs()
         _sync_dash_range_from_ui("Pick dates")
 
-    render_settings_popover(
-        time_preset_options=list(_DASH_TIME_PRESET_OPTIONS),
-        time_preset_key=_DASH_TIME_PRESET_KEY,
-        on_refresh=_refresh,
-        on_signout=_signout,
-        render_custom_dates=_custom_dates,
-        range_caption=_format_dash_range_caption(),
-        render_admin=(
+    popover_kwargs: dict[str, object] = {
+        "time_preset_options": list(_DASH_TIME_PRESET_OPTIONS),
+        "time_preset_key": _DASH_TIME_PRESET_KEY,
+        "on_refresh": _refresh,
+        "on_signout": _signout,
+        "render_custom_dates": _custom_dates,
+        "range_caption": _format_dash_range_caption(),
+        "render_admin": (
             _render_dispatch_settings_admin if _is_dashboard_admin() else None
         ),
-    )
+    }
+    try:
+        allowed = set(inspect.signature(render_settings_popover).parameters.keys())
+        popover_kwargs = {k: v for k, v in popover_kwargs.items() if k in allowed}
+    except (TypeError, ValueError):
+        # Keep best-effort kwargs when signature inspection is unavailable.
+        pass
+    render_settings_popover(**popover_kwargs)
     preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
     if preset != "Pick dates":
         _sync_dash_range_from_ui(preset)

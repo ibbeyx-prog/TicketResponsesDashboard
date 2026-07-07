@@ -365,10 +365,102 @@ div.st-key-disp_header_right [data-testid="stPopover"] > button:hover {{
   color: #8a9ac0 !important;
   background: #0d1220 !important;
 }}
+div.st-key-disp_header_lookup [data-testid="stPopover"] > button {{
+  color: #3b82f6 !important;
+  border-color: #1a3460 !important;
+  background: #0d1e3a !important;
+}}
+div.st-key-disp_header_lookup [data-testid="stPopover"] > button:hover {{
+  color: #60a5fa !important;
+  border-color: #2563eb !important;
+  background: #102f5a !important;
+}}
+div.st-key-disp_header_lookup,
+div.st-key-disp_header_settings {{
+  width: auto !important;
+  max-width: fit-content !important;
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}}
+div.st-key-disp_header_lookup [data-testid="element-container"],
+div.st-key-disp_header_settings [data-testid="element-container"] {{
+  width: auto !important;
+  max-width: fit-content !important;
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}}
+div.st-key-disp_header_lookup [data-testid="stPopover"],
+div.st-key-disp_header_settings [data-testid="stPopover"] {{
+  width: auto !important;
+  max-width: fit-content !important;
+  display: inline-flex !important;
+  margin: 0 !important;
+}}
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3) {{
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: fit-content !important;
+  max-width: fit-content !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}}
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] {{
+  gap: 8px !important;
+}}
 div.st-key-disp_header_shell [data-testid="stPopoverBody"],
 div.st-key-disp_header_right [data-testid="stPopoverBody"] {{
   min-width: 280px !important;
   max-width: min(420px, 92vw) !important;
+  padding: 10px 12px !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] [data-testid="stVerticalBlock"],
+div.st-key-disp_header_right [data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {{
+  gap: 0.35rem !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] .settings-section-label,
+div.st-key-disp_header_right [data-testid="stPopoverBody"] .settings-section-label {{
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #8a9ac0 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  margin: 0.65rem 0 0.35rem !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] .settings-range-cap,
+div.st-key-disp_header_right [data-testid="stPopoverBody"] .settings-range-cap {{
+  font-size: 11px !important;
+  color: #4a5a7a !important;
+  margin: 0 0 0.45rem !important;
+  line-height: 1.35 !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] div[data-testid="stRadio"] > div[role="radiogroup"],
+div.st-key-disp_header_right [data-testid="stPopoverBody"] div[data-testid="stRadio"] > div[role="radiogroup"] {{
+  flex-direction: column !important;
+  gap: 2px !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] div[data-testid="stRadio"] label,
+div.st-key-disp_header_right [data-testid="stPopoverBody"] div[data-testid="stRadio"] label {{
+  padding: 5px 8px !important;
+  margin: 0 !important;
+  font-size: 13px !important;
+  color: #8a9ac0 !important;
+  border-radius: 4px !important;
+  min-height: unset !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] div[data-testid="stRadio"] label[data-checked="true"],
+div.st-key-disp_header_right [data-testid="stPopoverBody"] div[data-testid="stRadio"] label[data-checked="true"] {{
+  color: #e2e8f8 !important;
+  background: #121a2a !important;
+}}
+div.st-key-disp_header_shell [data-testid="stPopoverBody"] hr,
+div.st-key-disp_header_right [data-testid="stPopoverBody"] hr {{
+  margin: 0.5rem 0 !important;
 }}
 div.st-key-disp_header_shell [data-testid="stPopoverBody"] [data-testid="stExpander"],
 div.st-key-disp_header_right [data-testid="stPopoverBody"] [data-testid="stExpander"] {{
@@ -1496,27 +1588,31 @@ div[data-baseweb="menu"] li:hover {
   border-radius: 6px !important;
   overflow: hidden !important;
   background: var(--disp-card) !important;
+  min-height: 6rem;
 }
-[data-testid="stDataFrame"] div,
-[data-testid="stDataEditor"] div {
-  background: var(--disp-card) !important;
-}
+[data-testid="stDataFrame"] .stDataFrameGlideDataEditor,
+[data-testid="stDataEditor"] .stDataEditorGlideDataEditor,
 [data-testid="stDataFrame"] [data-testid="glideDataEditor"],
 [data-testid="stDataEditor"] [data-testid="glideDataEditor"] {
-  --gdg-bg-cell: #0d1220;
-  --gdg-bg-header: #080b14;
-  --gdg-bg-header-has-focus: #121a2a;
-  --gdg-bg-header-hovered: #121a2a;
-  --gdg-text-dark: #e2e8f8;
-  --gdg-text-medium: #8a9ac0;
-  --gdg-text-light: #4a5a7a;
-  --gdg-text-header: #8a9ac0;
-  --gdg-border-color: #1a2035;
-  --gdg-accent-color: #3b82f6;
-  --gdg-accent-light: rgba(59, 130, 246, 0.15);
-  --gdg-accent-fg: #e2e8f8;
-  --gdg-bg-cell-medium: #0d1220;
-  --gdg-bg-search-cell: #121a2a;
+  --gdg-bg-cell: #0d1220 !important;
+  --gdg-bg-header: #080b14 !important;
+  --gdg-bg-header-has-focus: #121a2a !important;
+  --gdg-bg-header-hovered: #121a2a !important;
+  --gdg-text-dark: #e2e8f8 !important;
+  --gdg-text-medium: #8a9ac0 !important;
+  --gdg-text-light: #4a5a7a !important;
+  --gdg-text-header: #8a9ac0 !important;
+  --gdg-border-color: #1a2035 !important;
+  --gdg-accent-color: #3b82f6 !important;
+  --gdg-accent-light: rgba(59, 130, 246, 0.15) !important;
+  --gdg-accent-fg: #e2e8f8 !important;
+  --gdg-bg-cell-medium: #0d1220 !important;
+  --gdg-bg-search-cell: #121a2a !important;
+  min-height: 6rem !important;
+}
+[data-testid="stDataFrame"] .dvn-scroller,
+[data-testid="stDataEditor"] .dvn-scroller {
+  min-height: 4rem !important;
 }
 
 /* ── Code blocks ── */
@@ -1763,7 +1859,7 @@ def format_utc5(dt: object, *, tz: timezone) -> str:
         return str(dt)
 
 
-def render_topbar(*, operator_id: str, now_label: str, section: str = "CSM Cases") -> None:
+def render_topbar(*, operator_id: str, now_label: str, section: str = "Ticket") -> None:
     """Legacy single-row header (prefer unified shell in app.py)."""
     op = html.escape(operator_id or "—")
     st.markdown(
@@ -1924,12 +2020,12 @@ def render_settings_popover(
     on_signout: Callable[[], None] | None = None,
     render_custom_dates: Callable[[], None] | None = None,
     render_admin: Callable[[], None] | None = None,
+    range_caption: str = "",
 ) -> None:
     """Compact settings popover for the top bar."""
     with st.popover("⚙ Settings", use_container_width=False):
         st.markdown(
-            '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
-            'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Refresh</p>',
+            '<p class="settings-section-label" style="margin-top:0">Refresh</p>',
             unsafe_allow_html=True,
         )
         auto = st.toggle(
@@ -1958,23 +2054,32 @@ def render_settings_popover(
         st.divider()
 
         st.markdown(
-            '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
-            'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Date range</p>',
+            '<p class="settings-section-label">Date range</p>',
             unsafe_allow_html=True,
         )
+        if range_caption:
+            st.markdown(
+                f'<p class="settings-range-cap">{html.escape(range_caption)}</p>',
+                unsafe_allow_html=True,
+            )
         menu_labels = [o for o in time_preset_options if o != "Pick dates"]
         display_opts = menu_labels + ["Custom"]
         cur = str(st.session_state.get(time_preset_key, "This week"))
         if cur == "Pick dates":
             cur = "Custom"
         if cur not in display_opts:
-            cur = display_opts[0] if display_opts else "Today"
-        range_opt = st.selectbox(
+            cur = "This week"
+            st.session_state[time_preset_key] = "This week"
+        # Drop legacy searchable selectbox state (could show stale filter text).
+        st.session_state.pop("settings_range", None)
+        radio_key = f"settings_time_range_{time_preset_key}"
+        if st.session_state.get(radio_key) not in display_opts:
+            st.session_state[radio_key] = cur
+        range_opt = st.radio(
             "Range",
             display_opts,
-            index=display_opts.index(cur),
             label_visibility="collapsed",
-            key="settings_range",
+            key=radio_key,
         )
         if range_opt == "Custom":
             st.session_state[time_preset_key] = "Pick dates"
@@ -1986,9 +2091,7 @@ def render_settings_popover(
         if render_admin:
             st.divider()
             st.markdown(
-                '<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
-                'text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">'
-                "Admin</p>",
+                '<p class="settings-section-label">Admin</p>',
                 unsafe_allow_html=True,
             )
             with st.expander("Team accounts", expanded=False):
@@ -2051,6 +2154,13 @@ def _row_elapsed(t: dict[str, Any]) -> tuple[str, str]:
 
 
 _TICKET_TABLE_COLS: tuple[float, ...] = (1.45, 1.15, 1.5, 2.35, 1.25, 1.15, 1.0)
+_TICKET_TABLE_COLS_WITH_TYPE: tuple[float, ...] = (
+    1.35, 0.95, 1.05, 1.35, 2.0, 1.15, 1.05, 1.0
+)
+_CASE_TYPE_PILL_COLORS: dict[str, str] = {
+    "Residential": "#3b82f6",
+    "Resort": "#a78bfa",
+}
 
 
 def _table_cell_style(*, is_sel: bool) -> str:
@@ -2076,6 +2186,7 @@ def _render_table_row_actions(
     row_data: dict[str, Any],
     row_id: str,
     row_actions_fn: Callable[[dict[str, Any], str], None] | None,
+    case_type_session_key: str | None = None,
 ) -> None:
     """Select (●) + menu (⋮) in one horizontal action strip."""
     with st.container(
@@ -2090,9 +2201,29 @@ def _render_table_row_actions(
             type="primary" if is_sel else "secondary",
         ):
             st.session_state[selected_key] = select_value
+            if case_type_session_key:
+                selected_type = str(row_data.get("case_type") or "").strip()
+                st.session_state[case_type_session_key] = selected_type
+                if selected_type == "Resort":
+                    st.session_state["selected_sales_case"] = select_value
+                    st.session_state["disp_selected_ticket"] = None
+                else:
+                    st.session_state["disp_selected_ticket"] = select_value
+                    st.session_state["selected_sales_case"] = None
             st.rerun()
         if row_actions_fn:
             row_actions_fn(row_data, row_id)
+
+
+def _case_type_pill_html(case_type: str) -> str:
+    raw = str(case_type or "—").strip() or "—"
+    label = "Res" if raw == "Residential" else "Rsr" if raw == "Resort" else raw
+    label = html.escape(label)
+    color = _CASE_TYPE_PILL_COLORS.get(raw, "#4a5a7a")
+    return (
+        f'<span style="font-size:11px;font-weight:500;color:{color};'
+        f'white-space:nowrap">{label}</span>'
+    )
 
 
 def render_ticket_table(
@@ -2101,6 +2232,8 @@ def render_ticket_table(
     selected: str | None,
     selected_key: str,
     row_actions_fn: Callable[[dict[str, Any], str], None] | None = None,
+    show_case_type: bool = False,
+    case_type_session_key: str | None = None,
 ) -> None:
     """Render ticket rows as Streamlit columns (supports per-row popovers)."""
     if not tickets:
@@ -2112,13 +2245,18 @@ def render_ticket_table(
         )
         return
 
-    h1, h2, h3, h4, h5, h6, h7 = st.columns(
-        list(_TICKET_TABLE_COLS), gap="small"
+    col_ratios = (
+        list(_TICKET_TABLE_COLS_WITH_TYPE)
+        if show_case_type
+        else list(_TICKET_TABLE_COLS)
     )
-    for col, label in zip(
-        [h1, h2, h3, h4, h5, h6],
-        ["Ticket", "Category", "Engineer", "Notes", "Elapsed", "Status"],
-    ):
+    header_labels = (
+        ["Ticket", "Type", "Category", "Engineer", "Notes", "Elapsed", "Status"]
+        if show_case_type
+        else ["Ticket", "Category", "Engineer", "Notes", "Elapsed", "Status"]
+    )
+    header_cols = st.columns(col_ratios, gap="small")
+    for col, label in zip(header_cols[:-1], header_labels):
         with col:
             st.markdown(
                 f'<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
@@ -2138,27 +2276,45 @@ def render_ticket_table(
             cell = _table_cell_style(is_sel=is_sel)
 
             with st.container(key=f"disp_ticket_row_{tnum}"):
-                c1, c2, c3, c4, c5, c6, c7 = st.columns(
-                    list(_TICKET_TABLE_COLS),
+                row_cols = st.columns(
+                    col_ratios,
                     gap="small",
                     vertical_alignment="center",
                 )
+                col_idx = 0
 
-                with c1:
+                with row_cols[col_idx]:
+                    fu_dot = ""
+                    if (
+                        str(t.get("case_type") or "") == "Residential"
+                        and str(t.get("follow_up_at") or "").strip()
+                    ):
+                        fu_dot = '<span style="font-size:12px;color:#a78bfa;margin-left:4px">●</span>'
                     st.markdown(
                         f'<div style="{cell}"><span style="font-size:13px;font-weight:500;'
                         f'color:#8a9ac0;font-variant-numeric:tabular-nums">'
-                        f"{html.escape(tnum)}</span></div>",
+                        f"{html.escape(tnum)}{fu_dot}</span></div>",
                         unsafe_allow_html=True,
                     )
-                with c2:
+                col_idx += 1
+                if show_case_type:
+                    with row_cols[col_idx]:
+                        st.markdown(
+                            f'<div style="{cell}">{_case_type_pill_html(str(t.get("case_type") or ""))}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    col_idx += 1
+                c_cat, c_eng, c_notes, c_elapsed, c_status, c_actions = row_cols[
+                    col_idx : col_idx + 6
+                ]
+                with c_cat:
                     st.markdown(
                         f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
                         f'color:#4a5a7a">'
                         f'{html.escape(str(t.get("task_category") or "—"))}</span></div>',
                         unsafe_allow_html=True,
                     )
-                with c3:
+                with c_eng:
                     eng = str(t.get("assigned_to") or "—")
                     eng2 = str(t.get("assigned_to_2") or "").strip()
                     av = _avatar_html(eng)
@@ -2179,7 +2335,7 @@ def render_ticket_table(
                         f"{av}{tag}</div>",
                         unsafe_allow_html=True,
                     )
-                with c4:
+                with c_notes:
                     fu = html.escape(str(t.get("follow_up_label") or "").strip())
                     notes = html.escape(str(t.get("additional_info") or ""))
                     if fu:
@@ -2196,20 +2352,36 @@ def render_ticket_table(
                         f"{note_html}</span></div>",
                         unsafe_allow_html=True,
                     )
-                with c5:
-                    el_color, el_label = _row_elapsed(t)
-                    st.markdown(
-                        f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
-                        f'color:{el_color};font-variant-numeric:tabular-nums">'
-                        f"{html.escape(el_label)}</span></div>",
-                        unsafe_allow_html=True,
-                    )
-                with c6:
+                with c_elapsed:
+                    if str(t.get("case_type") or "") == "Resort":
+                        pri = str(t.get("sales_priority") or "Standard").strip() or "Standard"
+                        style = {
+                            "Strategic": ("#2d1515", "#ef4444"),
+                            "Urgent": ("#231a06", "#f59e0b"),
+                            "High": ("#231a06", "#b8954f"),
+                            "Standard": ("#1a2035", "#4a5a7a"),
+                        }
+                        bg, fg = style.get(pri, ("#1a2035", "#4a5a7a"))
+                        st.markdown(
+                            f'<div style="{cell}"><span style="font-size:11px;font-weight:500;'
+                            f'padding:3px 7px;border-radius:3px;background:{bg};color:{fg}">'
+                            f"{html.escape(pri)}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        el_color, el_label = _row_elapsed(t)
+                        st.markdown(
+                            f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
+                            f'color:{el_color};font-variant-numeric:tabular-nums">'
+                            f"{html.escape(el_label)}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                with c_status:
                     st.markdown(
                         f'<div style="{cell}">{status_pill(str(t.get("status") or ""))}</div>',
                         unsafe_allow_html=True,
                     )
-                with c7:
+                with c_actions:
                     _render_table_row_actions(
                         row_key=tnum,
                         is_sel=is_sel,
@@ -2219,6 +2391,7 @@ def render_ticket_table(
                         row_data=t,
                         row_id=tnum,
                         row_actions_fn=row_actions_fn,
+                        case_type_session_key=case_type_session_key,
                     )
 
 
