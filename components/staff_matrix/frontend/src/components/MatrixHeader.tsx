@@ -9,6 +9,8 @@ export function MatrixHeader({ summary }: MatrixHeaderProps) {
     summary.topCollaborativeStaffCount > 1
       ? `#${summary.topCollaborativeCaseId} (${summary.topCollaborativeStaffCount} Staff)`
       : "—";
+  const residential = summary.residentialCases ?? summary.totalCases;
+  const resort = summary.resortCases ?? 0;
 
   return (
     <header className="border-b border-dashboard-border bg-dashboard-bg px-4 py-4">
@@ -24,6 +26,9 @@ export function MatrixHeader({ summary }: MatrixHeaderProps) {
           <strong className="font-semibold text-dashboard-text">
             {summary.totalCases.toLocaleString()}
           </strong>
+          <span className="ml-1 text-[12px] text-dashboard-muted">
+            (Res {residential.toLocaleString()} · Rsr {resort.toLocaleString()})
+          </span>
         </span>
         <span>
           Avg. Staff per Case:{" "}

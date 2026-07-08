@@ -54,6 +54,8 @@ export interface Ticket {
 
 export interface MatrixSummary {
   totalCases: number;
+  residentialCases?: number;
+  resortCases?: number;
   avgStaffPerCase: number;
   topCollaborativeCaseId: string;
   topCollaborativeStaffCount: number;

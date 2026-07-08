@@ -7097,6 +7097,40 @@ def _perf_apply_field_assignment_credits(
     }
 
 
+def _perf_tickets_bipartite_data(
+    tickets: pd.DataFrame,
+    *,
+    focus: str,
+) -> dict[str, object] | None:
+    """All residential tickets and credited staff for the Case Info matrix."""
+    if tickets.empty or "ticket_number" not in tickets.columns:
+        return None
+    ticket_engineers: dict[str, set[str]] = {}
+    for _, row in tickets.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if not tn:
+            continue
+        ticket_engineers[tn] = set(_perf_ticket_credit_assignees(row))
+    if not ticket_engineers:
+        return None
+    focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
+    all_engineers = sorted(
+        {e for engs in ticket_engineers.values() for e in engs},
+        key=str.lower,
+    )
+    all_tickets = sorted(
+        ticket_engineers.keys(),
+        key=lambda t: (-len(ticket_engineers[t]), str(t).lower()),
+    )
+    return {
+        "all_engineers": all_engineers,
+        "all_tickets": all_tickets,
+        "ticket_engineers": ticket_engineers,
+        "focus_key": focus_key,
+        "total_tickets": len(all_tickets),
+    }
+
+
 def _perf_visit_bipartite_data(
     visits: pd.DataFrame,
     *,
@@ -8094,9 +8128,10 @@ def _perf_build_staff_matrix_payload(
         search=search,
         lookup_ticket=lookup_ticket,
     )
+    # Keep full ticket pool for the React matrix so header counts and search
+    # can cover backlog cases as well (virtualized grid handles larger datasets).
+    all_ticket_ids: list[str] = data["all_tickets"]  # type: ignore[assignment]
     pool_total = len(pool)
-    if pool_total > _PERF_MATRIX_MAX_TICKETS:
-        pool = pool[:_PERF_MATRIX_MAX_TICKETS]
     prepared = _perf_prepare_visits_df(visits_all)
     sales_by_ref = _perf_sales_cases_by_ref(
         sales_cases if sales_cases is not None else pd.DataFrame()
@@ -8177,15 +8212,22 @@ def _perf_build_staff_matrix_payload(
     avg_staff = (sum(staff_counts) / total) if total else 0.0
     top_idx = max(range(total), key=lambda i: staff_counts[i]) if total else 0
     top_ticket = tickets[top_idx] if total else {}
+    residential_ids = set(tickets_by_num)
+    resort_ids = set(sales_by_ref)
+    residential_cases = sum(1 for tid in all_ticket_ids if tid in residential_ids)
+    resort_cases = sum(1 for tid in all_ticket_ids if tid in resort_ids)
+    backlog_total = len(all_ticket_ids)
     return {
         "tickets": tickets,
         "staffMembers": all_engineers,
         "staffColors": eng_colors,
         "lookupTicket": lookup_ticket or "",
         "poolTotal": pool_total,
-        "poolTruncated": pool_total > _PERF_MATRIX_MAX_TICKETS,
+        "poolTruncated": False,
         "summary": {
-            "totalCases": total,
+            "totalCases": backlog_total,
+            "residentialCases": residential_cases,
+            "resortCases": resort_cases,
             "avgStaffPerCase": round(avg_staff, 1),
             "topCollaborativeCaseId": str(top_ticket.get("id") or ""),
             "topCollaborativeStaffCount": int(staff_counts[top_idx]) if total else 0,
@@ -8391,28 +8433,20 @@ def _render_perf_case_info_tab(
     lookup_raw = _perf_matrix_sync_lookup_from_component()
     lookup_tid = _perf_normalize_matrix_lookup(lookup_raw)
     visits_matrix = _perf_matrix_merge_ticket_lookup(visits_all, lookup_raw)
-    sales_base = (
-        _perf_sales_cases_for_case_info(
-            sales_all if sales_all is not None else pd.DataFrame(),
-            range_start=range_start,
-            range_end=range_end,
-        )
-        if range_start is not None and range_end is not None
-        else (sales_all if sales_all is not None else pd.DataFrame())
-    )
-    sales_matrix = _perf_matrix_merge_sales_lookup(sales_base, lookup_raw)
-    visits_data = _perf_visit_bipartite_data(visits_matrix, focus=focus)
+    sales_full = sales_all if sales_all is not None else pd.DataFrame()
+    tickets_full = tickets_all if tickets_all is not None else pd.DataFrame()
+    sales_matrix = _perf_matrix_merge_sales_lookup(sales_full, lookup_raw)
+    tickets_data = _perf_tickets_bipartite_data(tickets_full, focus=focus)
     sales_data = _perf_sales_case_bipartite_data(sales_matrix, focus=focus)
-    data_matrix = _perf_merge_case_info_bipartite_data(visits_data, sales_data)
-    data_matrix = _perf_apply_field_assignment_credits(
-        data_matrix,
-        tickets_all if tickets_all is not None else pd.DataFrame(),
-    )
+    visits_data = _perf_visit_bipartite_data(visits_matrix, focus=focus)
+    data_matrix = _perf_merge_case_info_bipartite_data(tickets_data, sales_data)
+    data_matrix = _perf_merge_case_info_bipartite_data(data_matrix, visits_data)
+    data_matrix = _perf_apply_field_assignment_credits(data_matrix, tickets_full)
     st.caption(
-        "Rows = field tickets and **sales cases** · columns = staff · colored dots show "
-        "involvement. Use **Ticket ID** / **case ref** in the matrix filter bar to search "
-        "or look up history outside the sidebar date range (9 or 16 digits). "
-        "Case Info on the right."
+        "Rows = **all residential tickets** and **all resort cases** (full backlog) · "
+        "columns = staff · visit dots reflect activity in the sidebar date range. "
+        "Use **Ticket ID** / **case ref** in the filter bar to search backlog "
+        "(9 or 16 digits loads history outside the date range). Case Info on the right."
     )
     if lookup_tid and not data_matrix:
         st.warning(
@@ -21008,7 +21042,7 @@ def _get_performance_snapshot_counts(
     )
     if focus == "All":
         total = len(slices["in_view"])
-        resort_n = _count_resort_active(sales_all=sales_all)
+        resort_n = _count_resort_total(sales_all=sales_all)
     else:
         total = (
             len(pending_f)
@@ -21036,16 +21070,15 @@ def _get_performance_snapshot_counts(
     }
 
 
-def _count_resort_active(*, sales_all: pd.DataFrame | None = None) -> int:
-    """Count active (non-resolved) resort cases."""
-    if sales_all is not None and not sales_all.empty and "status" in sales_all.columns:
-        return int((sales_all["status"].astype(str).map(_sc_effective_status) != SC_STATUS_RESOLVED).sum())
+def _count_resort_total(*, sales_all: pd.DataFrame | None = None) -> int:
+    """Count all resort cases in the backlog (resolved + open)."""
+    if sales_all is not None and not sales_all.empty:
+        return len(sales_all)
     try:
         result = (
             _get_supabase_client()
             .table(SALES_CASES_TABLE)
             .select("id", count="exact")
-            .neq("status", SC_STATUS_RESOLVED)
             .execute()
         )
         return int(result.count or 0)
