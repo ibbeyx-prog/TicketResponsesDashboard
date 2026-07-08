@@ -2289,7 +2289,6 @@ def _render_table_row_actions(
                 st.session_state[case_type_session_key] = selected_type
                 if selected_type == "Resort":
                     st.session_state["selected_sales_case"] = select_value
-                    st.session_state["disp_selected_ticket"] = None
                 else:
                     st.session_state["disp_selected_ticket"] = select_value
                     st.session_state["selected_sales_case"] = None

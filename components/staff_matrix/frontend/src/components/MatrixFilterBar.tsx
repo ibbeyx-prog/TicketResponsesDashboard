@@ -27,7 +27,7 @@ export function MatrixFilterBar({
           type="search"
           value={filters.search}
           onChange={(e) => onChange({ ...filters, search: e.target.value })}
-          placeholder="Ticket ID — 9 or 16 digits loads history outside date range"
+          placeholder="Search backlog — ticket ID or case ref (9/16 digits loads outside date range)"
           className={`${selectClass} pl-8`}
         />
       </label>

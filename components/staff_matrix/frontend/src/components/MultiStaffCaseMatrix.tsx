@@ -44,6 +44,8 @@ function buildSummary(tickets: Ticket[]): MatrixSummary {
   if (!tickets.length) {
     return {
       totalCases: 0,
+      residentialCases: 0,
+      resortCases: 0,
       avgStaffPerCase: 0,
       topCollaborativeCaseId: "",
       topCollaborativeStaffCount: 0,
@@ -58,6 +60,8 @@ function buildSummary(tickets: Ticket[]): MatrixSummary {
   }
   return {
     totalCases: tickets.length,
+    residentialCases: tickets.length,
+    resortCases: 0,
     avgStaffPerCase: staffSum / tickets.length,
     topCollaborativeCaseId: top.id,
     topCollaborativeStaffCount: top.assignedStaff.length,
@@ -408,8 +412,8 @@ export function MultiStaffCaseMatrix({
             {filteredTickets.length > 0 ? (
               <span>
                 Viewing {viewStart}-{viewEnd} of {filteredTickets.length.toLocaleString()}
-                {filteredTickets.length < tickets.length
-                  ? ` (${tickets.length.toLocaleString()} total)`
+                {filteredTickets.length < summary.totalCases
+                  ? ` (${summary.totalCases.toLocaleString()} backlog)`
                   : ""}
               </span>
             ) : (
