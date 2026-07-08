@@ -50,12 +50,12 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
   );
 
   return (
-    <aside className="flex w-[300px] shrink-0 flex-col border-l border-dashboard-border bg-[#121212]">
+    <aside className="flex max-h-full w-[300px] shrink-0 flex-col overflow-hidden border-l border-dashboard-border bg-[#121212]">
       <div className="border-b border-dashboard-border px-4 py-3">
         <h2 className="text-sm font-semibold text-white">Case Info</h2>
       </div>
 
-      <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4 text-[13px]">
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-y-contain px-4 py-4 text-[13px]">
         <dl className="space-y-2.5">
           <div>
             <dt className="text-dashboard-muted">Case #</dt>
@@ -138,7 +138,7 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
                 ) : null}
               </h3>
               {comments.length > 0 ? (
-                <ul className="space-y-2">
+                <ul className="max-h-52 space-y-2 overflow-y-auto overscroll-y-contain pr-1">
                   {comments.map((item, idx) => (
                     <li
                       key={`${item.at}-${item.author}-${idx}`}
@@ -177,7 +177,7 @@ export function CaseInfoPanel({ ticket, staffColors, staffCount }: CaseInfoPanel
                 ) : null}
               </h3>
               {photos.length > 0 ? (
-                <ul className="space-y-1.5">
+                <ul className="max-h-40 space-y-1.5 overflow-y-auto overscroll-y-contain pr-1">
                   {photos.map((item, idx) => (
                     <li key={`${item.url}-${idx}`}>
                       <a

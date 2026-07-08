@@ -512,7 +512,8 @@ div.st-key-disp_right_rail {{
   background: #080b14 !important;
   border: 0.5px solid var(--disp-border) !important;
   border-radius: 6px !important;
-  overflow: hidden !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
   min-height: calc(100vh - var(--disp-header-h) - 20px) !important;
 }}
 div.st-key-disp_right_rail [data-testid="stVerticalBlockBorderWrapper"] {{
@@ -556,6 +557,71 @@ div.st-key-disp_right_rail div.st-key-disp_sales_assign_panel {{
 div.st-key-disp_right_rail div.st-key-disp_detail_panel {{
   padding: 10px 12px 14px !important;
   min-height: 280px !important;
+  max-height: calc(100vh - var(--disp-header-h) - 52px) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain !important;
+}}
+.disp-case-activity-scroll {{
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain !important;
+  padding-right: 4px;
+  margin-bottom: 4px;
+}}
+.disp-case-activity-scroll--comments {{
+  max-height: 220px !important;
+}}
+.disp-case-activity-scroll--photos {{
+  max-height: 160px !important;
+}}
+.disp-case-activity-more {{
+  font-size: 11px !important;
+  color: #2a3a5a !important;
+  margin: 6px 0 0 !important;
+}}
+.disp-case-photo-link {{
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  background: #0d1220 !important;
+  border: 0.5px solid #1a2035 !important;
+  border-radius: 4px !important;
+  padding: 7px 8px !important;
+  text-decoration: none !important;
+}}
+.disp-case-photo-link:hover {{
+  border-color: #2a3a5a !important;
+}}
+.disp-case-photo-icon {{
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: #121a2a;
+  font-size: 14px;
+}}
+.disp-case-photo-body {{
+  min-width: 0;
+  flex: 1;
+}}
+.disp-case-photo-title {{
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #3b82f6 !important;
+}}
+.disp-case-photo-meta {{
+  display: block;
+  font-size: 11px;
+  color: #2a3a5a !important;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }}
 div.st-key-disp_right_rail div.st-key-disp_assign_panel .disp-mode-caption {{
   font-size: 11px !important;
@@ -669,8 +735,25 @@ div.st-key-disp_detail_panel {{
   border-left: none !important;
   padding-left: 0 !important;
 }}
+div.st-key-disp_right_rail div.st-key-disp_detail_panel [data-testid="stVerticalBlock"] {{
+  gap: 0.75rem !important;
+}}
+div.st-key-disp_detail_panel [data-testid="element-container"] {{
+  overflow: visible !important;
+  margin-bottom: 0.35rem !important;
+}}
+div.st-key-disp_detail_panel [data-testid="stMarkdownContainer"] {{
+  overflow: visible !important;
+}}
+div.st-key-disp_detail_panel [data-testid="stMarkdownContainer"] p {{
+  margin: 0 0 6px 0 !important;
+  line-height: 1.35 !important;
+}}
+div.st-key-disp_detail_panel [data-testid="stImage"] {{
+  margin: 4px 0 10px !important;
+}}
 div.st-key-disp_detail_panel [data-testid="stExpander"] {{
-  margin: 8px 0 0 !important;
+  margin: 10px 0 6px !important;
 }}
 div.st-key-disp_detail_panel [data-testid="stExpander"] details {{
   border: 0.5px solid #1a2035 !important;

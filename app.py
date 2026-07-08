@@ -728,6 +728,8 @@ CHART_COLORS: dict[str, str] = {
     "solo": "#5b7fb5",
     "shared": "#5a9c7a",
     "sales": "#8b7bb0",
+    "resort_solo": "#8b7bb0",
+    "resort_shared": "#a78bfa",
     "on_hold": "#b8954f",
     "unattended": "#c06868",
     "grid": "#1a2035",
@@ -994,6 +996,31 @@ def _clean_display_value(val: object, *, default: str = "") -> str:
     if not s or s.lower() in ("nan", "none", "null", "nat"):
         return default
     return s
+
+
+def _displayable_photo_url(val: object) -> str:
+    """Return a http(s) photo URL, or empty when missing / NaN / invalid."""
+    url = _clean_display_value(val)
+    if url.startswith("http"):
+        return url
+    return ""
+
+
+def _case_detail_block(
+    label: str,
+    body_html: str,
+    *,
+    margin: str = "margin:0 0 6px",
+    first: bool = False,
+) -> str:
+    """One labelled field block; batch several into a single st.markdown call."""
+    top = "0" if first else "14px"
+    return (
+        f'<div style="margin-top:{top};display:block;clear:both;overflow:visible">'
+        f"{t_section_label(label, spacing='.06em', margin=margin)}"
+        f"{body_html}"
+        f"</div>"
+    )
 
 
 def _sc_row_text(val: object) -> str:
@@ -3057,6 +3084,15 @@ def _invalidate_dashboard_data_cache(
 # engineer roster, or the task-category list — skip those refetches.
 _TICKET_WRITE_CACHE_SCOPE = dict(
     sales_cases=False, field_engineers=False, task_categories=False
+)
+# New Telegram/attendance rows only affect ticket queues — skip unrelated refetches.
+_ATTENDANCE_TOAST_CACHE_SCOPE = dict(
+    tickets=True,
+    sales_cases=False,
+    attendance=False,
+    visits=False,
+    field_engineers=False,
+    task_categories=False,
 )
 
 
@@ -6988,6 +7024,10 @@ def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
 _PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
 _PERF_MATRIX_COMPONENT_KEY = "perf_staff_matrix"
 _PERF_MATRIX_MAX_TICKETS = 40
+_CASE_INFO_MAX_COMMENTS = 40
+_CASE_INFO_MAX_PHOTOS = 25
+_CASE_INFO_COMMENT_SCROLL_MAX_PX = 220
+_CASE_INFO_PHOTO_SCROLL_MAX_PX = 160
 _PERF_MATRIX_OUTCOME_STYLE: dict[str, tuple[str, str]] = {
     "assigned": ("A", "#3b82f6"),
     "responded": ("✓", "#22c55e"),
@@ -7897,6 +7937,109 @@ def _perf_comment_kind_label(kind: object) -> str:
     }.get(str(kind or ""), "Response")
 
 
+def _dispatch_case_comment_card_html(item: dict[str, object]) -> str:
+    author = html.escape(_clean_display_value(item.get("author"), default="—") or "—")
+    kind = html.escape(_perf_comment_kind_label(item.get("kind")))
+    when = html.escape(_clean_display_value(item.get("at")))
+    text = html.escape(_clean_display_value(item.get("text")))
+    if not text and author == "—":
+        return ""
+    when_row = (
+        f'<p style="font-size:11px;color:#2a3a5a;margin:2px 0 0">{when}</p>'
+        if when
+        else ""
+    )
+    text_row = (
+        f'<p style="font-size:13px;color:#8a9ac0;line-height:1.5;'
+        f'margin:6px 0 0;white-space:pre-wrap;word-break:break-word">{text}</p>'
+        if text
+        else ""
+    )
+    return (
+        f'<li style="list-style:none;margin-bottom:6px">'
+        f'<div style="background:#0d1220;border:0.5px solid #1a2035;'
+        f'border-radius:4px;padding:7px 8px">'
+        f'<div style="display:flex;justify-content:space-between;gap:8px">'
+        f'<span style="font-size:13px;font-weight:500;color:#e2e8f8">{author}</span>'
+        f'<span style="font-size:11px;color:#2a3a5a;flex-shrink:0">{kind}</span>'
+        f"</div>{when_row}{text_row}"
+        f"</div></li>"
+    )
+
+
+def _dispatch_case_photo_link_html(item: dict[str, object], *, idx: int, total: int) -> str:
+    url = _clean_display_value(item.get("url"))
+    if not url.startswith("http"):
+        return ""
+    author = html.escape(_clean_display_value(item.get("author"), default="—") or "—")
+    when = html.escape(_clean_display_value(item.get("at")))
+    label = f"Photo {idx + 1}" if total > 1 else "Photo"
+    meta = f"{author}{(' · ' + when) if when else ''}"
+    safe_url = html.escape(url)
+    return (
+        f'<li style="list-style:none;margin-bottom:6px">'
+        f'<a href="{safe_url}" target="_blank" rel="noopener" class="disp-case-photo-link">'
+        f'<span class="disp-case-photo-icon" aria-hidden="true">🖼</span>'
+        f'<span class="disp-case-photo-body">'
+        f'<span class="disp-case-photo-title">{label} ↗</span>'
+        f'<span class="disp-case-photo-meta">{meta}</span>'
+        f"</span></a></li>"
+    )
+
+
+def _dispatch_case_activity_sections_html(
+    comments: list[dict[str, object]],
+    photos: list[dict[str, object]],
+) -> str:
+    """Matrix-style Comments + Photos blocks with internal scroll (matches React CaseInfoPanel)."""
+    parts: list[str] = []
+    if comments:
+        cards = [
+            c
+            for item in comments[:_CASE_INFO_MAX_COMMENTS]
+            if (c := _dispatch_case_comment_card_html(item))
+        ]
+        extra = max(0, len(comments) - _CASE_INFO_MAX_COMMENTS)
+        more = (
+            f'<p class="disp-case-activity-more">Showing {_CASE_INFO_MAX_COMMENTS} of '
+            f"{len(comments)} comments</p>"
+            if extra
+            else ""
+        )
+        parts.append(
+            _case_detail_block(
+                f"Comments ({len(comments)})",
+                f'<div class="disp-case-activity-scroll disp-case-activity-scroll--comments" '
+                f'style="max-height:{_CASE_INFO_COMMENT_SCROLL_MAX_PX}px">'
+                f'<ul style="margin:0;padding:0">{"".join(cards)}</ul>{more}</div>',
+                margin="margin:0 0 6px",
+            )
+        )
+    if photos:
+        photo_rows = [
+            row
+            for idx, item in enumerate(photos[:_CASE_INFO_MAX_PHOTOS])
+            if (row := _dispatch_case_photo_link_html(item, idx=idx, total=len(photos)))
+        ]
+        extra = max(0, len(photos) - _CASE_INFO_MAX_PHOTOS)
+        more = (
+            f'<p class="disp-case-activity-more">Showing {_CASE_INFO_MAX_PHOTOS} of '
+            f"{len(photos)} photos</p>"
+            if extra
+            else ""
+        )
+        parts.append(
+            _case_detail_block(
+                f"Photos ({len(photos)})",
+                f'<div class="disp-case-activity-scroll disp-case-activity-scroll--photos" '
+                f'style="max-height:{_CASE_INFO_PHOTO_SCROLL_MAX_PX}px">'
+                f'<ul style="margin:0;padding:0">{"".join(photo_rows)}</ul>{more}</div>',
+                margin="margin:0 0 6px",
+            )
+        )
+    return "".join(parts)
+
+
 @st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
 def _get_dispatch_ticket_case_activity(ticket_number: str) -> dict[str, object]:
     """All responses, comments, and photos for one ticket (same sources as Case Info matrix)."""
@@ -7914,108 +8057,26 @@ def _get_dispatch_ticket_case_activity(ticket_number: str) -> dict[str, object]:
 
 
 def _render_dispatch_case_activity_panel(ticket_number: str) -> None:
-    """Comments + photo gallery — mirrors Performance Case Info panel content."""
+    """Comments + photos — same layout as Multi-Staff Case Info matrix panel."""
     activity = _get_dispatch_ticket_case_activity(ticket_number)
     comments = list(activity.get("comments") or [])
     photos = list(activity.get("photos") or [])
 
     if not comments and not photos:
         st.markdown(
-            t_section_label(
-                "Responses & photos",
-                spacing=".06em",
-                margin="margin:10px 0 5px",
+            _case_detail_block(
+                "Comments",
+                '<p style="font-size:11px;color:#2a3a5a;margin:0">'
+                "No responses or comments recorded for this ticket.</p>",
+                margin="margin:0 0 6px",
             ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<p style="font-size:11px;color:#2a3a5a;margin:0 0 12px">'
-            "No responses or comments recorded for this ticket.</p>",
             unsafe_allow_html=True,
         )
         return
 
-    if comments:
-        cards: list[str] = []
-        for item in comments:
-            author = html.escape(
-                _clean_display_value(item.get("author"), default="—") or "—"
-            )
-            kind = html.escape(_perf_comment_kind_label(item.get("kind")))
-            when = html.escape(_clean_display_value(item.get("at")))
-            text = html.escape(_clean_display_value(item.get("text")))
-            if not text and author == "—":
-                continue
-            when_row = (
-                f'<p style="font-size:11px;color:#2a3a5a;margin:2px 0 0">{when}</p>'
-                if when
-                else ""
-            )
-            text_row = (
-                f'<p style="font-size:13px;color:#8a9ac0;line-height:1.5;'
-                f'margin:6px 0 0;white-space:pre-wrap;word-break:break-word">{text}</p>'
-                if text
-                else ""
-            )
-            cards.append(
-                f'<li style="list-style:none;margin-bottom:6px">'
-                f'<div style="background:#0d1220;border:0.5px solid #1a2035;'
-                f'border-radius:4px;padding:7px 8px">'
-                f'<div style="display:flex;justify-content:space-between;gap:8px">'
-                f'<span style="font-size:13px;font-weight:500;color:#e2e8f8">'
-                f"{author}</span>"
-                f'<span style="font-size:11px;color:#2a3a5a;flex-shrink:0">{kind}</span>'
-                f"</div>{when_row}{text_row}"
-                f"</div></li>"
-            )
-        expand_comments = bool(
-            comments
-            and str(comments[0].get("kind") or "") == "admin"
-        )
-        if cards:
-            with st.expander(
-                f"Responses & comments ({len(cards)})",
-                expanded=expand_comments,
-            ):
-                st.markdown(
-                    f'<ul style="margin:0;padding:0">{"".join(cards)}</ul>',
-                    unsafe_allow_html=True,
-                )
-
-    if photos:
-        photo_rows: list[str] = []
-        for idx, item in enumerate(photos):
-            url = _clean_display_value(item.get("url"))
-            if not url.startswith("http"):
-                continue
-            author = html.escape(
-                _clean_display_value(item.get("author"), default="—") or "—"
-            )
-            when = html.escape(_clean_display_value(item.get("at")))
-            label = f"Photo {idx + 1}" if len(photos) > 1 else "Photo"
-            meta = f"{author}{(' · ' + when) if when else ''}"
-            safe_url = html.escape(url)
-            photo_rows.append(
-                f'<li style="list-style:none;margin-bottom:6px">'
-                f'<a href="{safe_url}" target="_blank" rel="noopener" '
-                f'style="display:block;background:#0d1220;border:0.5px solid #1a2035;'
-                f'border-radius:4px;padding:7px 8px;text-decoration:none">'
-                f'<span style="font-size:13px;font-weight:500;color:#e2e8f8">'
-                f"{label} ↗</span>"
-                f'<span style="display:block;font-size:11px;color:#2a3a5a;margin-top:2px">'
-                f"{meta}</span></a></li>"
-            )
-        if photo_rows:
-            tn = str(ticket_number or "").strip() or "—"
-            n = len(photo_rows)
-            with st.expander(
-                f"Ticket {tn} — {n} photo(s)",
-                expanded=False,
-            ):
-                st.markdown(
-                    f'<ul style="margin:0;padding:0">{"".join(photo_rows)}</ul>',
-                    unsafe_allow_html=True,
-                )
+    html = _dispatch_case_activity_sections_html(comments, photos)
+    if html:
+        st.markdown(html, unsafe_allow_html=True)
 
 
 def _perf_build_staff_matrix_payload(
@@ -8033,6 +8094,9 @@ def _perf_build_staff_matrix_payload(
         search=search,
         lookup_ticket=lookup_ticket,
     )
+    pool_total = len(pool)
+    if pool_total > _PERF_MATRIX_MAX_TICKETS:
+        pool = pool[:_PERF_MATRIX_MAX_TICKETS]
     prepared = _perf_prepare_visits_df(visits_all)
     sales_by_ref = _perf_sales_cases_by_ref(
         sales_cases if sales_cases is not None else pd.DataFrame()
@@ -8118,6 +8182,8 @@ def _perf_build_staff_matrix_payload(
         "staffMembers": all_engineers,
         "staffColors": eng_colors,
         "lookupTicket": lookup_ticket or "",
+        "poolTotal": pool_total,
+        "poolTruncated": pool_total > _PERF_MATRIX_MAX_TICKETS,
         "summary": {
             "totalCases": total,
             "avgStaffPerCase": round(avg_staff, 1),
@@ -8166,6 +8232,13 @@ def _render_perf_visit_staff_matrix(
     if not tickets:
         st.caption("No tickets to show in the matrix.")
         return
+
+    pool_total = int(payload.get("poolTotal") or len(tickets))
+    if payload.get("poolTruncated") or pool_total > len(tickets):
+        st.caption(
+            f"Showing first **{len(tickets)}** of **{pool_total}** tickets in the matrix. "
+            "Narrow the date range or use Ticket ID lookup to find a specific case."
+        )
 
     if _staff_matrix_component is not None and _HAS_STAFF_MATRIX:
         _staff_matrix_component(payload, height=720, key=_PERF_MATRIX_COMPONENT_KEY)
@@ -11457,7 +11530,7 @@ def _maybe_toast_new_telegram_activity() -> None:
     prev_dt = prev.to_pydatetime()
     if latest > prev_dt:
         st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
-        _invalidate_dashboard_data_cache()
+        _invalidate_dashboard_data_cache(**_ATTENDANCE_TOAST_CACHE_SCOPE)
         st.toast(
             "New field activity — refreshing **Open** / **Daily Task** queues.",
             icon="📥",
@@ -16783,6 +16856,7 @@ def _render_main_navigation() -> str:
                 key=tab_key,
                 type="primary" if is_active else "secondary",
                 use_container_width=False,
+                disabled=is_active,
             ):
                 st.session_state[_DASH_MAIN_NAV_KEY] = opt
                 st.rerun()
@@ -18328,90 +18402,79 @@ def _render_sales_detail_panel() -> None:
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        t_section_label("Account", spacing=".06em", margin="margin:0 0 5px"),
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;margin-bottom:12px">'
-        f'{html.escape(str(case.get("account_name") or ""))} · '
-        f'{html.escape(str(case.get("account_region") or "—"))}</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        t_section_label("Priority", spacing=".06em", margin="margin:0 0 5px"),
-        unsafe_allow_html=True,
-    )
     pri = str(case.get("sales_priority") or "Standard")
     color = "#ef4444" if pri == "High" else "#8a9ac0"
-    st.markdown(
-        f'<div style="font-size:13px;color:{color};margin-bottom:12px">'
-        f"{html.escape(pri)}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        t_section_label("Engineer", spacing=".06em", margin="margin:0 0 5px"),
-        unsafe_allow_html=True,
-    )
     eng = str(case.get("assigned_to") or "").strip()
     eng2 = str(case.get("assigned_to_2") or "").strip()
     if eng:
-        st.markdown(
-            f'<div style="font-size:13px;color:#8a9ac0;margin-bottom:12px">'
-            f"{html.escape(eng)}{(' + ' + html.escape(eng2)) if eng2 else ''}</div>",
-            unsafe_allow_html=True,
+        eng_body = (
+            f'<div style="font-size:13px;color:#8a9ac0">'
+            f"{html.escape(eng)}{(' + ' + html.escape(eng2)) if eng2 else ''}</div>"
         )
     else:
-        st.markdown(
-            '<div style="font-size:13px;color:#4a5a7a;font-style:italic;margin-bottom:12px">'
-            "Unassigned</div>",
-            unsafe_allow_html=True,
+        eng_body = (
+            '<div style="font-size:13px;color:#4a5a7a;font-style:italic">'
+            "Unassigned</div>"
         )
+
+    detail_parts: list[str] = [
+        _case_detail_block(
+            "Account",
+            f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5">'
+            f'{html.escape(str(case.get("account_name") or ""))} · '
+            f'{html.escape(str(case.get("account_region") or "—"))}</div>',
+            first=True,
+        ),
+        _case_detail_block(
+            "Priority",
+            f'<div style="font-size:13px;color:{color}">{html.escape(pri)}</div>',
+        ),
+        _case_detail_block("Engineer", eng_body),
+    ]
 
     notes = str(case.get("description") or "").strip()
     if notes:
-        st.markdown(
-            t_section_label("Case note", spacing=".06em", margin="margin:0 0 5px"),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"""
-        <div style="font-size:13px;color:#8a9ac0;line-height:1.5;margin-bottom:12px;
-          background:#0d1220;border:0.5px solid #1a2035;border-radius:5px;padding:8px">
-          {html.escape(notes)}
-        </div>""",
-            unsafe_allow_html=True,
+        detail_parts.append(
+            _case_detail_block(
+                "Case note",
+                f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
+                f'background:#0d1220;border:0.5px solid #1a2035;border-radius:5px;padding:8px">'
+                f"{html.escape(notes)}</div>",
+            )
         )
 
     close_note = str(case.get("close_note") or "").strip()
     if str(case.get("status") or "").strip() == SC_STATUS_RESOLVED and close_note:
-        st.markdown(
-            t_section_label("Admin comment", spacing=".06em", margin="margin:0 0 5px"),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div style="font-size:13px;color:#e2e8f8;line-height:1.5;margin-bottom:12px;'
-            f'background:#231a06;border:0.5px solid #3d2a0a;border-radius:5px;padding:8px">'
-            f"{html.escape(close_note)}</div>",
-            unsafe_allow_html=True,
+        detail_parts.append(
+            _case_detail_block(
+                "Admin comment",
+                f'<div style="font-size:13px;color:#e2e8f8;line-height:1.5;'
+                f'background:#231a06;border:0.5px solid #3d2a0a;border-radius:5px;padding:8px">'
+                f"{html.escape(close_note)}</div>",
+            )
         )
 
     field_response = str(case.get("field_response") or "").strip()
     if field_response:
-        st.markdown(
-            t_section_label("Field response", spacing=".06em", margin="margin:0 0 5px"),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;margin-bottom:12px;'
-            f'background:#0d1220;border:0.5px solid #1a2035;border-radius:5px;padding:8px">'
-            f"{html.escape(field_response)}</div>",
-            unsafe_allow_html=True,
+        detail_parts.append(
+            _case_detail_block(
+                "Field response",
+                f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
+                f'background:#0d1220;border:0.5px solid #1a2035;border-radius:5px;padding:8px">'
+                f"{html.escape(field_response)}</div>",
+            )
         )
 
-    photo_url = str(case.get("photo_url") or "").strip()
+    detail_parts.append(
+        _case_detail_block(
+            "Attended by",
+            f'<div style="font-size:13px;color:#8a9ac0">'
+            f'{html.escape(str(case.get("attended_by") or "—"))}</div>',
+        )
+    )
+    st.markdown("".join(detail_parts), unsafe_allow_html=True)
+
+    photo_url = _displayable_photo_url(case.get("photo_url"))
     if photo_url:
         st.markdown(
             t_section_label("Site photo", spacing=".06em", margin="margin:0 0 5px"),
@@ -18420,16 +18483,6 @@ def _render_sales_detail_panel() -> None:
         st.image(photo_url, use_container_width=True)
 
     _render_dispatch_case_activity_panel(str(case.get("case_ref") or ""))
-
-    st.markdown(
-        t_section_label("Attended by", spacing=".06em", margin="margin:0 0 5px"),
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div style="font-size:13px;color:#8a9ac0;margin-bottom:12px">'
-        f'{html.escape(str(case.get("attended_by") or "—"))}</div>',
-        unsafe_allow_html=True,
-    )
 
     _render_resort_reopen_actions(case)
     _render_attendance_timeline(str(case.get("case_ref") or ""))
@@ -19659,82 +19712,50 @@ def _render_dispatch_case_info_panel(
         eng = str(t.get("assigned_to") or "—")
         eng2 = str(t.get("assigned_to_2") or "").strip()
         share = "· shared" if eng2 else "· solo"
-        st.markdown(
-            t_section_label(
+        detail_parts: list[str] = [
+            _case_detail_block(
                 "Engineer",
-                spacing=".06em",
-                margin="margin:10px 0 5px",
+                f'<span style="font-size:13px;font-weight:400;color:#8a9ac0;'
+                f'line-height:1.5;display:block">'
+                f'{html.escape(eng)}{(" + " + html.escape(eng2)) if eng2 else ""} '
+                f"{share}</span>",
+                first=True,
             ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<span style="font-size:13px;font-weight:400;color:#8a9ac0;'
-            f'line-height:1.5">'
-            f'{html.escape(eng)}{(" + " + html.escape(eng2)) if eng2 else ""} '
-            f'{share}</span>',
-            unsafe_allow_html=True,
-        )
+        ]
         if t.get("follow_up_label"):
-            st.markdown(
-                t_section_label(
+            detail_parts.append(
+                _case_detail_block(
                     "Follow-up",
-                    spacing=".06em",
-                    margin="margin:10px 0 5px",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f'<span style="font-size:13px;font-weight:500;color:#a78bfa">'
-                f"{html.escape(str(t.get('follow_up_label') or ''))}</span>",
-                unsafe_allow_html=True,
+                    f'<span style="font-size:13px;font-weight:500;color:#a78bfa;'
+                    f'display:block">'
+                    f"{html.escape(str(t.get('follow_up_label') or ''))}</span>",
+                )
             )
         if t.get("additional_info"):
-            st.markdown(
-                t_section_label(
+            detail_parts.append(
+                _case_detail_block(
                     "Notes",
-                    spacing=".06em",
-                    margin="margin:10px 0 5px",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"""
-            <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
-              background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
-              {html.escape(str(t.get('additional_info') or ''))}
-            </div>""",
-                unsafe_allow_html=True,
+                    f'<div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;'
+                    f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
+                    f"{html.escape(str(t.get('additional_info') or ''))}"
+                    f"</div>",
+                )
             )
         if (
             str(t.get("status") or "").strip() == STATUS_RESOLVED
             and str(t.get("additional_info") or "").strip()
         ):
-            st.markdown(
-                t_section_label(
+            detail_parts.append(
+                _case_detail_block(
                     "Admin comment",
-                    spacing=".06em",
-                    margin="margin:10px 0 5px",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"""
-            <div style="font-size:13px;font-weight:400;color:#e2e8f8;line-height:1.5;
-              background:#231a06;border:0.5px solid #3d2a0a;border-radius:4px;padding:7px">
-              {html.escape(str(t.get('additional_info') or ''))}
-            </div>""",
-                unsafe_allow_html=True,
+                    f'<div style="font-size:13px;font-weight:400;color:#e2e8f8;line-height:1.5;'
+                    f'background:#231a06;border:0.5px solid #3d2a0a;border-radius:4px;padding:7px">'
+                    f"{html.escape(str(t.get('additional_info') or ''))}"
+                    f"</div>",
+                )
             )
         admin_comment = _latest_admin_comment_for_ticket(str(t.get("ticket_number") or ""))
         if admin_comment:
-            st.markdown(
-                t_section_label(
-                    "Last admin comment",
-                    spacing=".06em",
-                    margin="margin:10px 0 5px",
-                ),
-                unsafe_allow_html=True,
-            )
             admin_author = html.escape(admin_comment.get("author") or "—")
             admin_when = html.escape(admin_comment.get("at") or "")
             admin_text = html.escape(admin_comment.get("text") or "")
@@ -19742,32 +19763,29 @@ def _render_dispatch_case_info_panel(
                 f'<p style="font-size:11px;color:#2a3a5a;margin:4px 0 0">'
                 f"{admin_author}{(' · ' + admin_when) if admin_when else ''}</p>"
             )
-            st.markdown(
-                f"""
-            <div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;
-              background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">
-              <p style="margin:0;white-space:pre-wrap;word-break:break-word">{admin_text}</p>
-              {when_line}
-            </div>""",
-                unsafe_allow_html=True,
+            detail_parts.append(
+                _case_detail_block(
+                    "Last admin comment",
+                    f'<div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;'
+                    f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
+                    f'<p style="margin:0;white-space:pre-wrap;word-break:break-word">{admin_text}</p>'
+                    f"{when_line}"
+                    f"</div>",
+                )
             )
         field_resp = str(t.get("field_response") or "").strip()
         if field_resp:
-            st.markdown(
-                t_section_label(
+            detail_parts.append(
+                _case_detail_block(
                     "Field response",
-                    spacing=".06em",
-                    margin="margin:10px 0 5px",
-                ),
-                unsafe_allow_html=True,
+                    f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
+                    f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
+                    f"{html.escape(field_resp)}</div>",
+                )
             )
-            st.markdown(
-                f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
-                f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
-                f"{html.escape(field_resp)}</div>",
-                unsafe_allow_html=True,
-            )
-        photo_url = str(t.get("photo_url") or "").strip()
+        if detail_parts:
+            st.markdown("".join(detail_parts), unsafe_allow_html=True)
+        photo_url = _displayable_photo_url(t.get("photo_url"))
         if photo_url:
             st.markdown(
                 t_section_label(
@@ -21083,14 +21101,89 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
             )
 
 
+def _perf_overview_ticket_numbers(df_all: pd.DataFrame) -> list[str]:
+    """All ticket numbers in the active snapshot (Overview includes every case)."""
+    if df_all.empty or "ticket_number" not in df_all.columns:
+        return []
+    return sorted(
+        {str(n).strip() for n in df_all["ticket_number"].tolist() if str(n).strip()},
+        key=str,
+    )
+
+
+def _perf_overview_field_tickets(
+    df_all: pd.DataFrame,
+    *,
+    person: str | None = None,
+) -> pd.DataFrame:
+    """All field tickets for Overview — every queue, including Unattended."""
+    if df_all.empty or "ticket_number" not in df_all.columns:
+        return pd.DataFrame()
+    part = df_all.copy()
+    if person and person not in ("", "All"):
+        part = part.loc[part.apply(lambda r: _perf_row_credited_to_person(r, person), axis=1)]
+    return part
+
+
 def _perf_load_overview_visits_history(df_all: pd.DataFrame) -> pd.DataFrame:
-    """All visit cycles for tickets in credited field queues (Overview fair credit)."""
+    """Visit cycles for every ticket in the snapshot (Overview fair credit)."""
     if df_all.empty:
         return pd.DataFrame()
-    tnums = _perf_credited_ticket_numbers(df_all)
+    tnums = _perf_overview_ticket_numbers(df_all)
     if not tnums:
         return pd.DataFrame()
     return _fetch_visits_for_snapshot_cached("\n".join(tnums))
+
+
+def _perf_overview_assignment_solo_shared_counts(
+    df_all: pd.DataFrame,
+    *,
+    credit_key: str,
+) -> tuple[int, int]:
+    """Solo vs shared on assignment for all snapshot tickets credited to this person."""
+    if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+        return 0, 0
+    credited = _perf_overview_field_tickets(df_all, person=credit_key)
+    solo = shared = 0
+    for _, row in credited.iterrows():
+        if get_credit_type(row) == "shared":
+            shared += 1
+        else:
+            solo += 1
+    return solo, shared
+
+
+def _perf_overview_visit_solo_shared_counts(
+    visits: pd.DataFrame,
+    *,
+    credit_key: str,
+    df_all: pd.DataFrame | None = None,
+) -> tuple[int, int]:
+    """Visit-cycle solo/shared for all snapshot tickets (not only credited queues)."""
+    if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+        return 0, 0
+    if visits.empty:
+        if df_all is not None and not df_all.empty:
+            return _perf_overview_assignment_solo_shared_counts(df_all, credit_key=credit_key)
+        return 0, 0
+
+    prepared = _perf_prepare_visits_df(visits)
+    if df_all is not None and not df_all.empty:
+        all_nums = set(_perf_overview_ticket_numbers(df_all))
+        if all_nums and "ticket_number" in prepared.columns:
+            prepared = prepared[
+                prepared["ticket_number"].astype(str).str.strip().isin(all_nums)
+            ]
+    if prepared.empty:
+        return 0, 0
+
+    key = _perf_norm_member(credit_key)
+    detail = _perf_ticket_detail_rows(prepared, person=key)
+    if detail.empty:
+        return 0, 0
+    solo = int((detail["Type"] == "Solo").sum())
+    shared = int((detail["Type"] == "Shared").sum())
+    return solo, shared
 
 
 def _perf_visit_solo_shared_counts(
@@ -21182,7 +21275,7 @@ def _perf_overview_people(
             if credited not in ("", "(unknown)"):
                 people.add(credited)
 
-    credited_field = _perf_credited_field_tickets(df_all)
+    credited_field = _perf_overview_field_tickets(df_all)
     if not credited_field.empty:
         for _, row in credited_field.iterrows():
             for assignee in _perf_ticket_credit_assignees(row):
@@ -21192,10 +21285,10 @@ def _perf_overview_people(
     if visits_history is not None and not visits_history.empty:
         prepared = _perf_prepare_visits_df(visits_history)
         if not df_all.empty and "ticket_number" in prepared.columns:
-            credited_nums = set(_perf_credited_ticket_numbers(df_all))
-            if credited_nums:
+            all_nums = set(_perf_overview_ticket_numbers(df_all))
+            if all_nums:
                 prepared = prepared[
-                    prepared["ticket_number"].astype(str).str.strip().isin(credited_nums)
+                    prepared["ticket_number"].astype(str).str.strip().isin(all_nums)
                 ]
         if "assignee" in prepared.columns:
             for assignee in prepared["assignee"].dropna().unique():
@@ -21257,232 +21350,179 @@ def _get_solo_shared_data(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> list[dict[str, object]]:
-    """Visit-cycle solo/shared (fair credit) + sales snapshot per credited person."""
-    del range_start, range_end  # Overview solo/shared ignore sidebar range
+    """Visit-cycle solo/shared fair credit per engineer (all residential tickets)."""
+    del sales_all, range_start, range_end
 
     visits_history = _perf_load_overview_visits_history(df_all)
 
     engineers = _perf_overview_people(
         focus=focus,
         df_all=df_all,
-        sales_all=sales_all,
+        sales_all=pd.DataFrame(),
         visits_history=visits_history,
     )
 
     results: list[dict[str, object]] = []
     for credit_key in engineers:
-        if credit_key in ("", "(unknown)"):
+        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
             continue
-        solo, shared = _perf_visit_solo_shared_counts(
+        solo, shared = _perf_overview_visit_solo_shared_counts(
             visits_history,
             credit_key=credit_key,
             df_all=df_all,
         )
-        sales = _perf_overview_sales_count(
-            sales_all, credit_key=credit_key, focus=focus
-        )
-        if solo > 0 or shared > 0 or sales > 0:
-            btn_key = _perf_overview_button_key(credit_key)
-            is_admin_credit = (
-                credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL
-                and solo == 0
-                and shared == 0
-                and sales > 0
-            )
+        if solo > 0 or shared > 0:
             results.append(
                 {
                     "credit_key": credit_key,
-                    "engineer": btn_key,
+                    "engineer": _perf_overview_button_key(credit_key),
                     "label": _perf_overview_row_label(credit_key),
                     "solo": solo,
                     "shared": shared,
-                    "sales": sales,
-                    "is_admin_credit": is_admin_credit,
                 }
             )
-    return results
+    return sorted(results, key=lambda r: int(r["solo"]) + int(r["shared"]), reverse=True)
 
 
-def _render_perf_solo_shared_chart(
-    df_all: pd.DataFrame,
+def _get_resort_solo_shared_data(
     sales_all: pd.DataFrame,
     *,
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
-) -> None:
-    """Clickable solo vs shared bars — selecting a row opens the detail panel."""
-    st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
-        'margin:6px 0 8px">Solo vs shared</p>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"""
-    <div style="display:flex;gap:14px;font-size:11px;color:#4a5a7a;margin-bottom:8px">
-      <span><span style="width:8px;height:8px;border-radius:2px;
-        background:{CHART_COLORS['solo']};display:inline-block;margin-right:4px"></span>Solo</span>
-      <span><span style="width:8px;height:8px;border-radius:2px;
-        background:{CHART_COLORS['shared']};display:inline-block;margin-right:4px"></span>Shared</span>
-      <span><span style="width:8px;height:8px;border-radius:2px;
-        background:{CHART_COLORS['sales']};display:inline-block;margin-right:4px"></span>Resort</span>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
-    data = _get_solo_shared_data(
-        df_all,
-        sales_all,
-        focus=focus,
-        range_start=range_start,
-        range_end=range_end,
-    )
-    if not data:
-        st.markdown(
-            '<div style="padding:24px;text-align:center;color:#2a3a5a;font-size:14px">'
-            "No residential or resort activity for this filter</div>",
-            unsafe_allow_html=True,
-        )
-        return
-
-    for row in data:
-        btn_id = str(row["engineer"])
-        label = str(row.get("label") or f"@{btn_id}")
-        if row.get("is_admin_credit"):
-            label = f"🔒 {label.lstrip('🔒 ')}"
-        solo = int(row["solo"])
-        shared = int(row["shared"])
-        sales = int(row.get("sales", 0))
-        field_total = solo + shared
-        bar_total = field_total + sales or 1
-        solo_pct = (solo / bar_total) * 100
-        shared_pct = (shared / bar_total) * 100
-        sales_pct = (sales / bar_total) * 100
-        col_btn, col_bar = st.columns([1, 4])
-        with col_btn:
-            if st.button(label, key=f"ss_row_{btn_id}", use_container_width=True):
-                st.session_state[_PERF_SELECTED_ENGINEER_KEY] = btn_id
-                st.rerun()
-        with col_bar:
-            segs = ""
-            if solo_pct > 0:
-                segs += f'<div style="background:{CHART_COLORS["solo"]};width:{solo_pct}%"></div>'
-            if shared_pct > 0:
-                segs += f'<div style="background:{CHART_COLORS["shared"]};width:{shared_pct}%"></div>'
-            if sales_pct > 0:
-                segs += f'<div style="background:{CHART_COLORS["sales"]};width:{sales_pct}%"></div>'
-            if not segs:
-                segs = f'<div style="background:{CHART_COLORS["grid"]};width:100%"></div>'
-            stat_parts: list[str] = []
-            if field_total:
-                stat_parts.append(f"{solo} solo / {shared} shared")
-            if sales:
-                stat_parts.append(
-                    f'<span style="color:#a78bfa">{sales} resort</span>'
-                )
-            stats_line = " · ".join(stat_parts) if stat_parts else "0"
-            st.markdown(
-                f"""
-            <div style="margin-top:4px">
-              <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
-                background:{CHART_COLORS['grid']}">{segs}</div>
-              <p style="font-size:11px;line-height:1.35;margin:4px 0 0;color:#8a9ac0">
-                {stats_line}</p>
-            </div>
-            """,
-                unsafe_allow_html=True,
-            )
-    st.markdown(
-        '<p style="font-size:11px;color:#4a5a7a;margin:8px 0 0">'
-        "Solo / shared = <strong>visit fair credit</strong> — every engineer with a visit cycle "
-        "on the ticket counts (not only whoever holds it now). Reassign chains (A → B → C) credit "
-        "all staff who touched the case. <strong>Resort</strong> = all resort cases in queue; "
-        "undispatched cases credit <strong>Admin</strong>.</p>",
-        unsafe_allow_html=True,
-    )
-
-
-def _render_resort_overview_column(
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> None:
-    """Resort activity summary: status breakdown + dispatched engineer bars."""
-    resort_view = _perf_rows_in_updated_range(
-        sales_all, range_start=range_start, range_end=range_end
-    )
+) -> list[dict[str, object]]:
+    """Solo vs shared resort-case credit per person (all resort cases)."""
+    del range_start, range_end
+    resort_view = sales_all.copy() if not sales_all.empty else pd.DataFrame()
     if focus not in ("", "All"):
         resort_view = resort_view.loc[
             resort_view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)
         ]
-
     if resort_view.empty:
-        st.caption("No resort activity in this range.")
-        return
+        return []
 
-    st_col = (
-        resort_view["status"].astype(str).map(_sc_effective_status)
-        if "status" in resort_view.columns
-        else pd.Series("", index=resort_view.index)
-    )
-    status_counts = Counter(st_col.tolist())
-    resort_status_colors = {
-        SC_STATUS_SALES_TICKET: ("#1a1030", "#a78bfa"),
-        SC_STATUS_INVESTIGATION: ("#1a2035", "#8a9ac0"),
-        SC_STATUS_REGIONAL: ("#1a2035", "#8a9ac0"),
-        SC_STATUS_DESIGN: ("#231a06", "#b8954f"),
-        SC_STATUS_RESOLVED: ("#0d2218", "#22c55e"),
-    }
-    for status, (bg, fg) in resort_status_colors.items():
-        count = int(status_counts.get(status, 0))
-        if count == 0:
+    tallies: dict[str, dict[str, int]] = {}
+    for _, row in resort_view.iterrows():
+        credit_type = get_credit_type(row)
+        for eng in _perf_ticket_credit_assignees(row):
+            credit_key = _perf_person_credit_key(eng)
+            if credit_key in ("", "(unknown)"):
+                continue
+            bucket = tallies.setdefault(credit_key, {"solo": 0, "shared": 0})
+            if credit_type == "shared":
+                bucket["shared"] += 1
+            else:
+                bucket["solo"] += 1
+
+    results: list[dict[str, object]] = []
+    for credit_key, counts in tallies.items():
+        solo = int(counts["solo"])
+        shared = int(counts["shared"])
+        if solo <= 0 and shared <= 0:
             continue
-        st.markdown(
-            f"""
-        <div style="display:flex;align-items:center;justify-content:space-between;
-          padding:7px 9px;background:{bg};border-radius:4px;margin-bottom:4px">
-          <span style="font-size:12px;color:{fg}">{html.escape(status)}</span>
-          <span style="font-size:14px;font-weight:600;color:{fg};
-            font-variant-numeric:tabular-nums">{count}</span>
-        </div>""",
-            unsafe_allow_html=True,
+        results.append(
+            {
+                "credit_key": credit_key,
+                "engineer": _perf_overview_button_key(credit_key),
+                "label": _perf_overview_row_label(credit_key),
+                "solo": solo,
+                "shared": shared,
+                "is_admin_credit": credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL,
+            }
         )
+    return sorted(results, key=lambda r: int(r["solo"]) + int(r["shared"]), reverse=True)
 
-    if "assigned_to" not in resort_view.columns:
-        return
-    dispatched = [
-        _perf_norm_member(v)
-        for v in resort_view["assigned_to"].tolist()
-        if _sc_sales_has_field_assignee(v)
-    ]
-    if not dispatched:
-        return
-    eng_counts = Counter(dispatched)
-    max_c = max(eng_counts.values())
+
+def _solo_shared_rows_by_credit_key(
+    rows: list[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    return {str(r["credit_key"]): r for r in rows}
+
+
+def _render_combined_overview_legend() -> None:
     st.markdown(
-        t_section_label("By engineer", spacing=".06em", margin="margin:10px 0 6px"),
+        f"""
+    <div style="display:flex;flex-wrap:wrap;gap:10px 14px;font-size:11px;color:#4a5a7a;margin-bottom:6px">
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:{CHART_COLORS['solo']};display:inline-block;margin-right:4px"></span>Res solo</span>
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:{CHART_COLORS['shared']};display:inline-block;margin-right:4px"></span>Res shared</span>
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:{CHART_COLORS['resort_solo']};display:inline-block;margin-right:4px"></span>Rsr solo</span>
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:{CHART_COLORS['resort_shared']};display:inline-block;margin-right:4px"></span>Rsr shared</span>
+    </div>
+    <p style="font-size:11px;color:#4a5a7a;margin:0 0 8px;line-height:1.4">
+      <strong>Residential</strong> = all tickets · visit fair credit (full snapshot) ·
+      <strong>Resort</strong> = all cases · assignment credit (full snapshot).</p>
+    """,
         unsafe_allow_html=True,
     )
-    for eng, count in eng_counts.most_common(5):
-        pct = (count / max_c) * 100 if max_c else 0
-        col_btn, col_bar = st.columns([1.4, 3])
-        with col_btn:
-            if st.button(f"@{eng.lstrip('@')}", key=f"ov_resort_{eng}", use_container_width=True):
-                st.session_state[_PERF_SELECTED_ENGINEER_KEY] = eng.lstrip("@")
-                st.rerun()
-        with col_bar:
-            st.markdown(
-                f"""
-            <div style="height:16px;border-radius:3px;overflow:hidden;
-              background:#1a2035;margin-top:3px">
-              <div style="background:#8b7bb0;width:{pct}%;height:100%"></div>
-            </div>""",
-                unsafe_allow_html=True,
-            )
-            st.caption(f"{count}")
+
+
+def _render_combined_overview_row(
+    *,
+    credit_key: str,
+    res: dict[str, object] | None,
+    rsr: dict[str, object] | None,
+) -> None:
+    """One engineer — residential + resort solo/shared in a single bar."""
+    res_solo = int(res.get("solo", 0)) if res else 0
+    res_shared = int(res.get("shared", 0)) if res else 0
+    rsr_solo = int(rsr.get("solo", 0)) if rsr else 0
+    rsr_shared = int(rsr.get("shared", 0)) if rsr else 0
+    total = res_solo + res_shared + rsr_solo + rsr_shared
+    if total <= 0:
+        return
+
+    source = res or rsr or {}
+    btn_id = str(source.get("engineer") or _perf_overview_button_key(credit_key))
+    label = str(source.get("label") or _perf_overview_row_label(credit_key))
+    if (rsr or {}).get("is_admin_credit") and not res:
+        label = f"🔒 {label.lstrip('🔒 ')}"
+    key_suffix = _perf_overview_button_key(credit_key)
+
+    def _pct(n: int) -> float:
+        return (n / total) * 100 if total else 0.0
+
+    segs = ""
+    for count, color in (
+        (res_solo, CHART_COLORS["solo"]),
+        (res_shared, CHART_COLORS["shared"]),
+        (rsr_solo, CHART_COLORS["resort_solo"]),
+        (rsr_shared, CHART_COLORS["resort_shared"]),
+    ):
+        if count > 0:
+            segs += f'<div style="background:{color};width:{_pct(count)}%"></div>'
+    if not segs:
+        segs = f'<div style="background:{CHART_COLORS["grid"]};width:100%"></div>'
+
+    stat_parts: list[str] = []
+    if res_solo or res_shared:
+        stat_parts.append(f"Res {res_solo} solo / {res_shared} shared")
+    if rsr_solo or rsr_shared:
+        stat_parts.append(
+            f'<span style="color:#a78bfa">Rsr {rsr_solo} solo / {rsr_shared} shared</span>'
+        )
+    stats_line = " · ".join(stat_parts)
+
+    col_btn, col_bar = st.columns([1, 4])
+    with col_btn:
+        if st.button(label, key=f"ov_all_{key_suffix}", use_container_width=True):
+            st.session_state[_PERF_SELECTED_ENGINEER_KEY] = btn_id
+            st.rerun()
+    with col_bar:
+        st.markdown(
+            f"""
+        <div style="margin-top:4px">
+          <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
+            background:{CHART_COLORS['grid']}">{segs}</div>
+          <p style="font-size:11px;line-height:1.35;margin:4px 0 0;color:#8a9ac0">
+            {stats_line}</p>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
 
 
 def _render_perf_overview_tab(
@@ -21493,33 +21533,64 @@ def _render_perf_overview_tab(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    """Overview: Residential solo/shared + Resort summary column."""
-    col_res, col_resort = st.columns([2, 1.2], gap="medium")
-    with col_res:
+    """Overview: residential + resort solo/shared combined per engineer."""
+    res_rows = _get_solo_shared_data(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    rsr_rows = _get_resort_solo_shared_data(
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    res_map = _solo_shared_rows_by_credit_key(res_rows)
+    rsr_map = _solo_shared_rows_by_credit_key(rsr_rows)
+
+    all_keys = sorted(
+        set(res_map) | set(rsr_map),
+        key=lambda k: (
+            -(
+                int(res_map.get(k, {}).get("solo", 0))
+                + int(res_map.get(k, {}).get("shared", 0))
+                + int(rsr_map.get(k, {}).get("solo", 0))
+                + int(rsr_map.get(k, {}).get("shared", 0))
+            ),
+            str(k).lower(),
+        ),
+    )
+
+    if not all_keys:
         st.markdown(
-            '<p style="font-size:12px;font-weight:500;color:#e2e8f8;'
-            'margin:6px 0 8px">Residential — solo vs shared</p>',
+            '<div style="padding:24px;text-align:center;color:#2a3a5a;font-size:14px">'
+            "No residential or resort activity for this filter</div>",
             unsafe_allow_html=True,
         )
-        _render_perf_solo_shared_chart(
-            df_all,
-            sales_all,
-            focus=focus,
-            range_start=range_start,
-            range_end=range_end,
+        return
+
+    st.markdown(
+        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
+        'margin:6px 0 8px">Solo vs shared — Residential + Resort (all cases)</p>',
+        unsafe_allow_html=True,
+    )
+    _render_combined_overview_legend()
+
+    for credit_key in all_keys:
+        _render_combined_overview_row(
+            credit_key=credit_key,
+            res=res_map.get(credit_key),
+            rsr=rsr_map.get(credit_key),
         )
-    with col_resort:
-        st.markdown(
-            '<p style="font-size:12px;font-weight:500;color:#e2e8f8;'
-            'margin:6px 0 8px">Resort</p>',
-            unsafe_allow_html=True,
-        )
-        _render_resort_overview_column(
-            sales_all,
-            focus=focus,
-            range_start=range_start,
-            range_end=range_end,
-        )
+
+    st.markdown(
+        '<p style="font-size:11px;color:#4a5a7a;margin:8px 0 0">'
+        "Click an engineer to open detail in the right panel. "
+        "Solo = one assignee; shared = two assignees.</p>",
+        unsafe_allow_html=True,
+    )
 
 
 def _get_engineer_performance_detail(
@@ -22618,19 +22689,22 @@ def _render_performance_tab(*, lookback_days: int) -> None:
             slices=slices, sales_all=sales_all, focus=focus
         )
 
+        view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+        needs_range_visits = view in ("Case info", "Handled") or bool(
+            st.session_state.get(_PERF_SELECTED_ENGINEER_KEY)
+        )
         visits_all = pd.DataFrame()
-        try:
-            visits_all = _fetch_visits_in_range(range_start, range_end)
-        except Exception:
-            pass
+        if needs_range_visits:
+            try:
+                visits_all = _fetch_visits_in_range(range_start, range_end)
+            except Exception:
+                pass
 
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
 
         with col_main:
             _render_performance_metric_strip(counts=counts)
             st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
-
-            view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
             if view == "Overview":
                 _render_perf_overview_tab(
                     df_all,
