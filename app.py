@@ -21439,6 +21439,33 @@ def _solo_shared_rows_by_credit_key(
     return {str(r["credit_key"]): r for r in rows}
 
 
+def _perf_overview_unattended_counts_by_credit(
+    df_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> dict[str, int]:
+    """Unattended ticket counts per credited engineer (overview snapshot scope)."""
+    if df_all.empty:
+        return {}
+    view = df_all.copy()
+    if focus not in ("", "All"):
+        view = view.loc[view.apply(lambda r: _perf_row_credited_to_person(r, focus), axis=1)]
+    if view.empty:
+        return {}
+    unattended = view.loc[_ticket_marked_unattended_mask(view)]
+    if unattended.empty:
+        return {}
+
+    counts: dict[str, int] = {}
+    for _, row in unattended.iterrows():
+        for eng in _perf_ticket_credit_assignees(row):
+            credit_key = _perf_person_credit_key(eng)
+            if credit_key in ("", "(unknown)"):
+                continue
+            counts[credit_key] = int(counts.get(credit_key, 0)) + 1
+    return counts
+
+
 def _render_combined_overview_legend() -> None:
     st.markdown(
         f"""
@@ -21451,6 +21478,8 @@ def _render_combined_overview_legend() -> None:
         background:{CHART_COLORS['resort_solo']};display:inline-block;margin-right:4px"></span>Rsr solo</span>
       <span><span style="width:8px;height:8px;border-radius:2px;
         background:{CHART_COLORS['resort_shared']};display:inline-block;margin-right:4px"></span>Rsr shared</span>
+      <span><span style="width:8px;height:8px;border-radius:2px;
+        background:#ef4444;display:inline-block;margin-right:4px"></span>Unattended</span>
     </div>
     <p style="font-size:11px;color:#4a5a7a;margin:0 0 8px;line-height:1.4">
       <strong>Residential</strong> = all tickets · visit fair credit (full snapshot) ·
@@ -21465,13 +21494,15 @@ def _render_combined_overview_row(
     credit_key: str,
     res: dict[str, object] | None,
     rsr: dict[str, object] | None,
+    unattended_count: int = 0,
 ) -> None:
     """One engineer — residential + resort solo/shared in a single bar."""
     res_solo = int(res.get("solo", 0)) if res else 0
     res_shared = int(res.get("shared", 0)) if res else 0
     rsr_solo = int(rsr.get("solo", 0)) if rsr else 0
     rsr_shared = int(rsr.get("shared", 0)) if rsr else 0
-    total = res_solo + res_shared + rsr_solo + rsr_shared
+    unattended = int(unattended_count)
+    total = res_solo + res_shared + rsr_solo + rsr_shared + unattended
     if total <= 0:
         return
 
@@ -21491,6 +21522,7 @@ def _render_combined_overview_row(
         (res_shared, CHART_COLORS["shared"]),
         (rsr_solo, CHART_COLORS["resort_solo"]),
         (rsr_shared, CHART_COLORS["resort_shared"]),
+        (unattended, "#ef4444"),
     ):
         if count > 0:
             segs += f'<div style="background:{color};width:{_pct(count)}%"></div>'
@@ -21500,10 +21532,11 @@ def _render_combined_overview_row(
     stat_parts: list[str] = []
     if res_solo or res_shared:
         stat_parts.append(f"Res {res_solo} solo / {res_shared} shared")
-    if rsr_solo or rsr_shared:
-        stat_parts.append(
-            f'<span style="color:#a78bfa">Rsr {rsr_solo} solo / {rsr_shared} shared</span>'
-        )
+    rsr_line = (
+        f'<span style="color:#a78bfa">Rsr {rsr_solo} solo / {rsr_shared} shared</span>'
+        f' / <span style="color:#ef4444">Unatt {unattended}</span>'
+    )
+    stat_parts.append(rsr_line)
     stats_line = " · ".join(stat_parts)
 
     col_btn, col_bar = st.columns([1, 4])
@@ -21549,15 +21582,17 @@ def _render_perf_overview_tab(
     )
     res_map = _solo_shared_rows_by_credit_key(res_rows)
     rsr_map = _solo_shared_rows_by_credit_key(rsr_rows)
+    unattended_map = _perf_overview_unattended_counts_by_credit(df_all, focus=focus)
 
     all_keys = sorted(
-        set(res_map) | set(rsr_map),
+        set(res_map) | set(rsr_map) | set(unattended_map),
         key=lambda k: (
             -(
                 int(res_map.get(k, {}).get("solo", 0))
                 + int(res_map.get(k, {}).get("shared", 0))
                 + int(rsr_map.get(k, {}).get("solo", 0))
                 + int(rsr_map.get(k, {}).get("shared", 0))
+                + int(unattended_map.get(k, 0))
             ),
             str(k).lower(),
         ),
@@ -21583,6 +21618,7 @@ def _render_perf_overview_tab(
             credit_key=credit_key,
             res=res_map.get(credit_key),
             rsr=rsr_map.get(credit_key),
+            unattended_count=int(unattended_map.get(credit_key, 0)),
         )
 
     st.markdown(
