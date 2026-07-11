@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 from typing import Any
 
 import streamlit as st
 
-# Horizontal inset for header/body content (block-container itself is full-bleed).
+_UI_TZ_UTC5 = timezone(timedelta(hours=5))
 _DISP_INSET = "10px"
 _DISP_BODY_TOP = "6px"
 _DISP_HEADER_H = "56px"
@@ -106,7 +106,7 @@ html, body {{ background: var(--disp-bg) !important; overflow-x: hidden !importa
 div.st-key-disp_header_shell {{
   background: #0b0f18 !important;
   border-bottom: 0.5px solid var(--disp-border) !important;
-  padding: 0 {_DISP_INSET} !important;
+  padding: 0 20px 0 {_DISP_INSET} !important;
   margin: 0 !important;
   width: 100% !important;
   max-width: 100% !important;
@@ -231,15 +231,15 @@ div.st-key-disp_main_nav_tabs [data-testid="stVerticalBlock"] {{
   overflow: visible !important;
   display: flex !important;
   align-items: center !important;
-  justify-content: flex-start !important;
+  justify-content: center !important;
 }}
 div.st-key-disp_main_nav_tabs [data-testid="stHorizontalBlock"] {{
   display: flex !important;
   flex-direction: row !important;
   flex-wrap: nowrap !important;
   align-items: center !important;
-  justify-content: flex-start !important;
-  width: auto !important;
+  justify-content: center !important;
+  width: 100% !important;
   gap: 0 !important;
   overflow: visible !important;
 }}
@@ -259,7 +259,7 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {{
   font-size:14px !important;
   font-weight: 400 !important;
   letter-spacing: 0 !important;
-  padding: 0 14px !important;
+  padding: 0 18px !important;
   min-height: var(--disp-header-h) !important;
   height: var(--disp-header-h) !important;
   line-height: 1.1 !important;
@@ -270,7 +270,7 @@ div.st-key-disp_main_nav_tabs .stButton > button[data-testid="baseButton-primary
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"] {{
   color: #e2e8f8 !important;
   font-weight: 500 !important;
-  border-bottom-color: #3b82f6 !important;
+  border-bottom-color: #5b7fb5 !important;
   background: transparent !important;
   background-color: transparent !important;
 }}
@@ -287,7 +287,7 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"]:hover
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"]:hover,
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"]:hover {{
   color: #e2e8f8 !important;
-  border-bottom-color: #3b82f6 !important;
+  border-bottom-color: #5b7fb5 !important;
   background: transparent !important;
   background-color: transparent !important;
 }}
@@ -299,7 +299,7 @@ div.st-key-disp_main_nav_tabs [data-testid="column"] {{
   padding: 0 !important;
   display: flex !important;
   align-items: center !important;
-  justify-content: flex-start !important;
+  justify-content: center !important;
 }}
 div.st-key-disp_main_nav_tabs [data-testid="element-container"] {{
   margin: 0 !important;
@@ -324,9 +324,155 @@ div.st-key-disp_header_shell [data-testid="stHorizontalBlock"] > div[data-testid
   flex-direction: row !important;
   align-items: center !important;
   justify-content: flex-end !important;
-  flex: 0 0 auto !important;
+  flex: 1 1 auto !important;
   min-width: 0 !important;
   overflow: visible !important;
+}}
+/* Middle band: nav + clock + operator + actions on one 56px midline */
+div.st-key-disp_header_mid,
+div.st-key-disp_header_mid [data-testid="stVerticalBlockBorderWrapper"],
+div.st-key-disp_header_mid [data-testid="stVerticalBlock"] {{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  width: 100% !important;
+  height: var(--disp-header-h) !important;
+  min-height: var(--disp-header-h) !important;
+  max-height: var(--disp-header-h) !important;
+  overflow: visible !important;
+  display: flex !important;
+  align-items: center !important;
+}}
+div.st-key-disp_header_mid [data-testid="stHorizontalBlock"] {{
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  width: 100% !important;
+  height: var(--disp-header-h) !important;
+  gap: 0 !important;
+}}
+div.st-key-disp_header_mid > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
+  display: flex !important;
+  align-items: center !important;
+  height: var(--disp-header-h) !important;
+  min-height: var(--disp-header-h) !important;
+  max-height: var(--disp-header-h) !important;
+}}
+div.st-key-disp_header_mid > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {{
+  flex: 0 0 auto !important;
+  justify-content: flex-start !important;
+}}
+div.st-key-disp_header_mid > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {{
+  flex: 1 1 auto !important;
+  justify-content: flex-end !important;
+}}
+div.st-key-disp_header_right,
+div.st-key-disp_header_right [data-testid="stVerticalBlockBorderWrapper"],
+div.st-key-disp_header_right [data-testid="stVerticalBlock"] {{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  width: 100% !important;
+  height: var(--disp-header-h) !important;
+  min-height: var(--disp-header-h) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+}}
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] {{
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  width: 100% !important;
+  height: var(--disp-header-h) !important;
+  gap: 10px !important;
+}}
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  height: var(--disp-header-h) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}}
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {{
+  padding-right: 4px !important;
+  flex: 0 0 auto !important;
+  min-width: 52px !important;
+}}
+div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
+  min-width: 48px !important;
+  width: auto !important;
+  padding: 0 10px !important;
+  box-sizing: border-box !important;
+}}
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3),
+div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(4) {{
+  border-left: 0.5px solid #1a2035 !important;
+  padding-left: 10px !important;
+}}
+div.disp-header-mid-item {{
+  display: flex !important;
+  align-items: center !important;
+  height: var(--disp-header-h) !important;
+  gap: 9px;
+}}
+span.disp-header-clock-pill {{
+  font-size: 12px;
+  color: #5b7fb5;
+  background: #0d1e3a;
+  border: 0.5px solid #1a3460;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  box-sizing: border-box;
+}}
+div.st-key-disp_header_lookup .stButton > button,
+div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
+  background: transparent !important;
+  border: 0.5px solid #1a2035 !important;
+  color: #4a5a7a !important;
+  font-size: 13px !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  padding: 0 12px !important;
+  border-radius: 6px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin: 0 !important;
+}}
+div.st-key-disp_header_lookup .stButton > button:hover,
+div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
+  border-color: #2a3a5a !important;
+  color: #8a9ac0 !important;
+  background: #0d1220 !important;
+}}
+div.st-key-disp_header_lookup,
+div.st-key-disp_header_settings,
+div.st-key-disp_header_lookup [data-testid="stVerticalBlock"],
+div.st-key-disp_header_settings [data-testid="stVerticalBlock"],
+div.st-key-disp_header_lookup [data-testid="element-container"],
+div.st-key-disp_header_settings [data-testid="element-container"] {{
+  display: flex !important;
+  align-items: center !important;
+  height: var(--disp-header-h) !important;
+  min-height: var(--disp-header-h) !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }}
 div.st-key-disp_header_shell [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child [data-testid="element-container"] {{
   width: auto !important;
@@ -344,36 +490,26 @@ div.st-key-disp_header_shell [data-testid="stPopover"] {{
 }}
 div.st-key-disp_header_shell [data-testid="stPopover"] > button,
 div.st-key-disp_header_right [data-testid="stPopover"] > button {{
-  font-size:14px !important;
+  font-size:13px !important;
   font-weight: 400 !important;
   letter-spacing: .01em !important;
-  color: #8a9ac0 !important;
+  color: #4a5a7a !important;
   white-space: nowrap !important;
-  padding: 6px 12px !important;
-  min-height: 32px !important;
-  height: 32px !important;
+  padding: 0 12px !important;
+  min-height: 34px !important;
+  height: 34px !important;
   min-width: max-content !important;
-  border: 0.5px solid #2a3a5a !important;
-  border-radius: 999px !important;
+  border: 0.5px solid #1a2035 !important;
+  border-radius: 6px !important;
   background: transparent !important;
   line-height: 1.2 !important;
   box-shadow: none !important;
 }}
 div.st-key-disp_header_shell [data-testid="stPopover"] > button:hover,
 div.st-key-disp_header_right [data-testid="stPopover"] > button:hover {{
-  border-color: #4a5a7a !important;
+  border-color: #2a3a5a !important;
   color: #8a9ac0 !important;
   background: #0d1220 !important;
-}}
-div.st-key-disp_header_lookup [data-testid="stPopover"] > button {{
-  color: #3b82f6 !important;
-  border-color: #1a3460 !important;
-  background: #0d1e3a !important;
-}}
-div.st-key-disp_header_lookup [data-testid="stPopover"] > button:hover {{
-  color: #60a5fa !important;
-  border-color: #2563eb !important;
-  background: #102f5a !important;
 }}
 div.st-key-disp_header_lookup,
 div.st-key-disp_header_settings {{
@@ -397,18 +533,7 @@ div.st-key-disp_header_settings [data-testid="stPopover"] {{
   max-width: fit-content !important;
   display: inline-flex !important;
   margin: 0 !important;
-}}
-div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
-div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3) {{
-  flex: 0 0 auto !important;
-  width: auto !important;
-  min-width: fit-content !important;
-  max-width: fit-content !important;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-}}
-div.st-key-disp_header_right [data-testid="stHorizontalBlock"] {{
-  gap: 8px !important;
+  align-items: center !important;
 }}
 div.st-key-disp_header_shell [data-testid="stPopoverBody"],
 div.st-key-disp_header_right [data-testid="stPopoverBody"] {{
@@ -1942,9 +2067,19 @@ def format_utc5(dt: object, *, tz: timezone) -> str:
         return str(dt)
 
 
-def render_topbar(*, operator_id: str, now_label: str, section: str = "Ticket") -> None:
+def render_topbar(
+    *,
+    operator_id: str,
+    now_label: str | None = None,
+    section: str = "Ticket",
+    is_admin: bool = False,
+    is_legacy: bool = False,
+) -> None:
     """Legacy single-row header (prefer unified shell in app.py)."""
     op = html.escape(operator_id or "—")
+    if now_label is None:
+        now_label = datetime.now(_UI_TZ_UTC5).strftime("%a %d %b · %H:%M UTC+5")
+    role = "identity unverified" if is_legacy else ("admin" if is_admin else "operator")
     st.markdown(
         f"""
     <div class="disp-full-bleed" style="
@@ -1952,16 +2087,14 @@ def render_topbar(*, operator_id: str, now_label: str, section: str = "Ticket") 
       height:var(--disp-header-h);display:flex;align-items:center;padding:0 {_DISP_INSET};
       position:sticky;top:0;z-index:999;gap:0;margin-bottom:0.5rem
     ">
-      <span class="disp-brand" style="padding-right:18px;border-right:0.5px solid #1a2035">
-        NetOps · Coverage Eye
-      </span>
+      <div style="display:flex;flex-direction:column;padding-right:18px;border-right:0.5px solid #1a2035">
+        <span style="font-size:9px;font-weight:600;color:#5b7fb5;letter-spacing:.12em;text-transform:uppercase">NetOps</span>
+        <span style="font-size:13px;font-weight:500;color:#e2e8f8">Coverage Eye</span>
+      </div>
       <span style="font-size:15px;color:#2a3a5a;padding:0 16px">{html.escape(section)}</span>
       <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
-        <span class="disp-header-clock">{html.escape(now_label)}</span>
-        <span class="disp-header-op">
-          <span class="disp-header-op-dot"></span>
-          {op}
-        </span>
+        <span class="disp-header-clock-pill">{html.escape(now_label)}</span>
+        <span class="disp-header-op">{op} · {html.escape(role)}</span>
       </div>
     </div>
     """,
@@ -2106,7 +2239,7 @@ def render_settings_popover(
     range_caption: str = "",
 ) -> None:
     """Compact settings popover for the top bar."""
-    with st.popover("⚙ Settings", use_container_width=False):
+    with st.popover("⚙", use_container_width=False):
         st.markdown(
             '<p class="settings-section-label" style="margin-top:0">Refresh</p>',
             unsafe_allow_html=True,

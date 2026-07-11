@@ -529,7 +529,59 @@ def apply_theme(*, login: bool = False) -> None:
     .stTabs [aria-selected="true"] {{
       color: #e2e8f8 !important;
       font-weight: 400 !important;
-      border-bottom-color: #3b82f6 !important;
+      border-bottom-color: #5b7fb5 !important;
+    }}
+
+    /* ── Topbar: nav + clock + operator + actions on one midline ── */
+    div.st-key-disp_main_nav_tabs [data-testid="stHorizontalBlock"] {{
+      justify-content: flex-start !important;
+      width: auto !important;
+    }}
+    div.st-key-disp_header_lookup .stButton > button,
+    div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
+      background: transparent !important;
+      border: 0.5px solid #1a2035 !important;
+      color: #4a5a7a !important;
+      font-size: 13px !important;
+      height: 34px !important;
+      min-height: 34px !important;
+      max-height: 34px !important;
+      padding: 0 12px !important;
+      border-radius: 6px !important;
+      display: inline-flex !important;
+      align-items: center !important;
+    }}
+    div.st-key-disp_header_lookup .stButton > button:hover,
+    div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
+      border-color: #2a3a5a !important;
+      color: #8a9ac0 !important;
+      background: #0d1220 !important;
+    }}
+    span.disp-header-clock-pill {{
+      font-size: 12px;
+      color: #5b7fb5;
+      background: #0d1e3a;
+      border: 0.5px solid #1a3460;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      height: 28px;
+      box-sizing: border-box;
+    }}
+    div.disp-header-mid-item {{
+      display: flex !important;
+      align-items: center !important;
+      height: 56px !important;
+      gap: 9px;
+    }}
+    div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
+    div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3),
+    div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(4) {{
+      border-left: 0.5px solid #1a2035;
+      padding-left: 10px !important;
     }}
 
     /* ── All buttons base ── */
@@ -1501,7 +1553,7 @@ _CASE_TYPE_FILTER_ALL = "All"
 _DISP_CASE_TYPE_FILTER_KEY = "disp_case_type_filter"
 _DISP_SELECTED_CASE_TYPE_KEY = "disp_selected_case_type"
 _DISP_ASSIGN_CASE_TYPE_KEY = "disp_assign_case_type"
-_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = (_DASH_NAV_TICKET, "Log", "Performance")
+_DASH_MAIN_NAV_OPTIONS: tuple[str, ...] = (_DASH_NAV_TICKET, "Performance", "Log")
 _DASH_NAV_LEGACY_REDIRECT: dict[str, str] = {
     "CSM cases": _DASH_NAV_TICKET,
     "Sales cases": _DASH_NAV_TICKET,
@@ -8128,9 +8180,7 @@ def _perf_build_staff_matrix_payload(
         search=search,
         lookup_ticket=lookup_ticket,
     )
-    # Keep full ticket pool for the React matrix so header counts and search
-    # can cover backlog cases as well (virtualized grid handles larger datasets).
-    all_ticket_ids: list[str] = data["all_tickets"]  # type: ignore[assignment]
+    # Matrix rows/search use the focus-filtered pool; summary counts match visible scope.
     pool_total = len(pool)
     prepared = _perf_prepare_visits_df(visits_all)
     sales_by_ref = _perf_sales_cases_by_ref(
@@ -8214,9 +8264,9 @@ def _perf_build_staff_matrix_payload(
     top_ticket = tickets[top_idx] if total else {}
     residential_ids = set(tickets_by_num)
     resort_ids = set(sales_by_ref)
-    residential_cases = sum(1 for tid in all_ticket_ids if tid in residential_ids)
-    resort_cases = sum(1 for tid in all_ticket_ids if tid in resort_ids)
-    backlog_total = len(all_ticket_ids)
+    residential_cases = sum(1 for tid in pool if tid in residential_ids)
+    resort_cases = sum(1 for tid in pool if tid in resort_ids)
+    backlog_total = len(pool)
     return {
         "tickets": tickets,
         "staffMembers": all_engineers,
@@ -8455,14 +8505,14 @@ def _render_perf_case_info_tab(
         )
     elif not data_matrix:
         st.info(
-            "No field or sales case activity in this window. Enter a full **Ticket ID** "
-            "or **case ref** in the matrix filter bar, or widen the sidebar date range."
+            "No cases match the current focus filter. Set **Focus assignee** to **All**, "
+            "or enter a **Ticket ID** / **case ref** in the matrix filter bar."
         )
     else:
         if lookup_tid and lookup_tid not in (data_matrix.get("all_tickets") or []):
             st.warning(
-                f"**{lookup_tid}** is not in the current matrix pool — "
-                "try widening the date range or check the ID."
+                f"**{lookup_tid}** was not found in tickets_active or resort cases — "
+                "check the ID."
             )
         _render_perf_visit_staff_matrix(
             visits_matrix,
@@ -9251,63 +9301,156 @@ def _render_app_menu_panel() -> None:
             st.rerun()
 
 
+def _is_legacy_session() -> bool:
+    """True when the current session was authenticated via shared password."""
+    return bool(st.session_state.get("is_legacy_session"))
+
+
+def _get_operator_chip_data(
+    operator_id: str,
+    is_admin: bool,
+    is_legacy: bool,
+) -> dict[str, str]:
+    """
+    Avatar colour, initials, name label, and role label for the topbar operator chip.
+
+    Session types:
+    - Admin: green avatar, "admin" role
+    - Operator: blue avatar, "operator" role
+    - Legacy: amber "?" avatar, "identity unverified" role
+    """
+    if is_legacy:
+        return {
+            "av_bg": "#231a06",
+            "av_border": "#4d3a10",
+            "av_color": "#f59e0b",
+            "initials": "?",
+            "name": "Shared session",
+            "role": "identity unverified",
+            "role_color": "#f59e0b",
+        }
+    if is_admin:
+        initials = "".join(
+            p[0].upper()
+            for p in operator_id.replace("@", "").replace("_", " ").split()[:2]
+        )
+        return {
+            "av_bg": "#0d2218",
+            "av_border": "#14381e",
+            "av_color": "#22c55e",
+            "initials": initials or "AD",
+            "name": operator_id,
+            "role": "admin",
+            "role_color": "#2a3a5a",
+        }
+    initials = "".join(
+        p[0].upper()
+        for p in operator_id.replace("@", "").replace("_", " ").split()[:2]
+    )
+    return {
+        "av_bg": "#0d1e3a",
+        "av_border": "#1a3460",
+        "av_color": "#5b7fb5",
+        "initials": initials or "OP",
+        "name": operator_id,
+        "role": "operator",
+        "role_color": "#2a3a5a",
+    }
+
+
 def _render_dispatch_app_menu() -> None:
     """Nav lives in the unified header — keep for non-shell call sites."""
     _render_main_navigation()
 
 
 def _render_dispatch_app_shell() -> None:
-    """Unified header: brand · centered nav tabs · clock · operator · settings."""
+    """Unified 56px topbar: brand left · nav + clock + operator + actions on one midline."""
     op = _session_operator_id() or _session_dashboard_username() or "—"
     op_display = html.escape(str(op).lstrip("@") or "—")
+    is_admin = _is_dashboard_admin()
+    is_legacy = _is_legacy_session()
+    chip = _get_operator_chip_data(op_display, is_admin, is_legacy)
     now = datetime.now(LOCAL_TZ)
-    now_label = now.strftime("%a %d %b") + " · " + now.strftime("%H:%M UTC+5")
+    now_label = now.strftime("%a %d %b · %H:%M UTC+5")
 
     with st.container(key="disp_header_shell"):
-        hl, hr = st.columns([2.6, 1.15], gap="small", vertical_alignment="center")
-        with hl:
-            with st.container(key="disp_header_left"):
-                bc, nc = st.columns([1.15, 4], gap="small", vertical_alignment="center")
-                with bc:
-                    st.markdown(
-                        '<p class="disp-brand" style="margin:0">'
-                        "NetOps · Coverage Eye"
-                        '<span class="disp-header-divider">|</span>'
-                        "</p>",
-                        unsafe_allow_html=True,
-                    )
-                with nc:
+        c_brand, c_mid = st.columns([0.95, 4.05], gap="small", vertical_alignment="center")
+        with c_brand:
+            st.markdown(
+                """
+            <div class="disp-brand-stack" style="
+              display:flex;flex-direction:column;justify-content:center;
+              padding-right:16px;border-right:0.5px solid #1a2035;height:56px;
+            ">
+              <span style="font-size:9px;font-weight:600;color:#5b7fb5;
+                letter-spacing:.12em;text-transform:uppercase;line-height:1">NetOps</span>
+              <span style="font-size:13px;font-weight:500;color:#e2e8f8;
+                letter-spacing:-.01em;margin-top:2px;line-height:1.2">Coverage Eye</span>
+            </div>
+            """,
+                unsafe_allow_html=True,
+            )
+        with c_mid:
+            with st.container(key="disp_header_mid"):
+                c_nav, c_right = st.columns(
+                    [1.25, 2.75], gap="small", vertical_alignment="center"
+                )
+                with c_nav:
                     with st.container(key="disp_main_nav_tabs"):
                         _render_main_navigation()
-        with hr:
-            with st.container(key="disp_header_right"):
-                _render_dispatch_header_right(now_label, op_display)
+                with c_right:
+                    with st.container(key="disp_header_right"):
+                        _render_dispatch_header_right(now_label=now_label, chip=chip)
     if bool(st.session_state.get("show_lookup", False)):
         render_lookup_popover()
 
 
-def _render_dispatch_header_right(now_label: str, op_display: str) -> None:
-    """Clock, operator, lookup, and settings — separate header slots (no overlap)."""
+def _render_dispatch_header_right(*, now_label: str, chip: dict[str, str]) -> None:
+    """Clock, operator, lookup, settings — same vertical midline as nav tabs."""
     _init_lookup_state()
-    c_clock, c_lookup, c_settings = st.columns(
-        [2.4, 0.75, 0.75],
+    c_clock, c_op, c_lookup, c_settings = st.columns(
+        [1.4, 1.2, 0.9, 0.55],
         gap="small",
         vertical_alignment="center",
     )
     with c_clock:
         st.markdown(
-            f'<div class="disp-header-right-cluster">'
-            f'<span class="disp-header-clock">{html.escape(now_label)}</span>'
-            f'<span class="disp-header-op">'
-            f'<span class="disp-header-op-dot"></span>'
-            f"{op_display}</span>"
+            f'<div class="disp-header-mid-item">'
+            f'<span class="disp-header-clock-pill">{html.escape(now_label)}</span>'
             f"</div>",
+            unsafe_allow_html=True,
+        )
+    with c_op:
+        st.markdown(
+            f"""
+        <div class="disp-header-mid-item disp-header-op-chip">
+          <div style="
+            width:28px;height:28px;border-radius:50%;
+            background:{chip["av_bg"]};border:0.5px solid {chip["av_border"]};
+            display:flex;align-items:center;justify-content:center;
+            font-size:10px;font-weight:600;color:{chip["av_color"]};
+            flex-shrink:0;
+          ">{html.escape(chip["initials"])}</div>
+          <div style="min-width:0">
+            <div style="font-size:13px;color:#8a9ac0;line-height:1.1;white-space:nowrap;
+              overflow:hidden;text-overflow:ellipsis">{html.escape(chip["name"])}</div>
+            <div style="font-size:10px;color:{chip["role_color"]};margin-top:2px;line-height:1">
+              {html.escape(chip["role"])}</div>
+          </div>
+        </div>
+        """,
             unsafe_allow_html=True,
         )
     with c_lookup:
         with st.container(key="disp_header_lookup"):
-            if st.button("🔍 Lookup", key="topbar_lookup_btn", use_container_width=False):
-                st.session_state.show_lookup = True
+            if st.button(
+                "🔍 Lookup",
+                key="topbar_lookup_btn",
+                use_container_width=True,
+            ):
+                st.session_state.show_lookup = not bool(
+                    st.session_state.get("show_lookup", False)
+                )
                 st.rerun()
     with c_settings:
         with st.container(key="disp_header_settings"):
@@ -16875,7 +17018,7 @@ def _sync_dashboard_nav_state(
 
 
 def _render_main_navigation() -> str:
-    """Top row: Ticket | Log | Performance."""
+    """Top row: Ticket · Performance · Log."""
     current = _normalize_dash_main_nav(
         st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM)
     )
@@ -21067,6 +21210,7 @@ def _get_performance_snapshot_counts(
         "investigation": len(investigation_f),
         "unattended": len(unattended_f),
         "resort": resort_n,
+        "combined": total + resort_n,
     }
 
 
@@ -21091,7 +21235,7 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
     row1 = st.columns(4)
     row2 = st.columns(4)
     metrics_row1 = [
-        ("TOTAL", counts["total"], "#8a9ac0"),
+        ("RESIDENTIAL", counts["total"], "#8a9ac0"),
         ("DAILY TASK", counts["daily_task"], "#8a9ac0"),
         ("REVIEW", counts["review"], "#8a9ac0"),
         ("ON HOLD", counts["on_hold"], "#8a9ac0"),
@@ -21132,6 +21276,19 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
             """,
                 unsafe_allow_html=True,
             )
+    combined = int(counts.get("combined", counts["total"] + counts["resort"]))
+    st.caption(
+        f"**Combined backlog:** {combined} cases "
+        f"(Residential {counts['total']} + Resort {counts['resort']}). "
+        "Queue cards are residential only."
+    )
+
+
+def _perf_overview_df_for_solo_shared(df_all: pd.DataFrame) -> pd.DataFrame:
+    """Residential tickets eligible for Overview solo/shared (excludes unattended tag)."""
+    if df_all.empty:
+        return df_all
+    return df_all.loc[~_ticket_marked_unattended_mask(df_all)].copy()
 
 
 def _perf_overview_ticket_numbers(df_all: pd.DataFrame) -> list[str]:
@@ -21387,6 +21544,7 @@ def _get_solo_shared_data(
     del sales_all, range_start, range_end
 
     visits_history = _perf_load_overview_visits_history(df_all)
+    df_res_credit = _perf_overview_df_for_solo_shared(df_all)
 
     engineers = _perf_overview_people(
         focus=focus,
@@ -21402,7 +21560,7 @@ def _get_solo_shared_data(
         solo, shared = _perf_overview_visit_solo_shared_counts(
             visits_history,
             credit_key=credit_key,
-            df_all=df_all,
+            df_all=df_res_credit,
         )
         if solo > 0 or shared > 0:
             results.append(
@@ -21515,8 +21673,9 @@ def _render_combined_overview_legend() -> None:
         background:#ef4444;display:inline-block;margin-right:4px"></span>Unattended</span>
     </div>
     <p style="font-size:11px;color:#4a5a7a;margin:0 0 8px;line-height:1.4">
-      <strong>Residential</strong> = all tickets · visit fair credit (full snapshot) ·
-      <strong>Resort</strong> = all cases · assignment credit (full snapshot).</p>
+      <strong>Residential</strong> = visit fair credit (full snapshot; unattended excluded) ·
+      <strong>Resort</strong> = assignment credit (full snapshot) ·
+      <strong>Unattended</strong> = separate accountability count.</p>
     """,
         unsafe_allow_html=True,
     )
@@ -21565,12 +21724,13 @@ def _render_combined_overview_row(
     stat_parts: list[str] = []
     if res_solo or res_shared:
         stat_parts.append(f"Res {res_solo} solo / {res_shared} shared")
-    rsr_line = (
-        f'<span style="color:#a78bfa">Rsr {rsr_solo} solo / {rsr_shared} shared</span>'
-        f' / <span style="color:#ef4444">Unatt {unattended}</span>'
-    )
-    stat_parts.append(rsr_line)
-    stats_line = " · ".join(stat_parts)
+    if rsr_solo or rsr_shared:
+        stat_parts.append(
+            f'<span style="color:#a78bfa">Rsr {rsr_solo} solo / {rsr_shared} shared</span>'
+        )
+    if unattended > 0:
+        stat_parts.append(f'<span style="color:#ef4444">Unatt {unattended}</span>')
+    stats_line = " · ".join(stat_parts) if stat_parts else "—"
 
     col_btn, col_bar = st.columns([1, 4])
     with col_btn:
@@ -21673,15 +21833,30 @@ def _get_engineer_performance_detail(
 ) -> dict[str, object]:
     """Breakdown for one engineer in the Performance detail panel."""
     credit_key = _perf_resolve_overview_credit_key(engineer)
-    resort_count = _perf_overview_sales_count(
-        sales_all, credit_key=credit_key, focus="All"
+    df_res_credit = _perf_overview_df_for_solo_shared(df_all)
+    visits_history = _perf_load_overview_visits_history(df_all)
+
+    solo, shared = _perf_overview_visit_solo_shared_counts(
+        visits_history,
+        credit_key=credit_key,
+        df_all=df_res_credit,
     )
 
-    solo, shared = _perf_visit_solo_shared_counts(
-        _perf_load_overview_visits_history(df_all),
-        credit_key=credit_key,
-        df_all=df_all,
-    )
+    rsr_solo = rsr_shared = 0
+    if not sales_all.empty and credit_key not in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+        for _, row in sales_all.iterrows():
+            if _perf_sales_credited_person(row) != credit_key:
+                continue
+            if get_credit_type(row) == "shared":
+                rsr_shared += 1
+            else:
+                rsr_solo += 1
+    resort_count = rsr_solo + rsr_shared
+
+    overview_unattended = 0
+    credited_all = _perf_overview_field_tickets(df_all, person=credit_key)
+    if not credited_all.empty:
+        overview_unattended = int(_ticket_marked_unattended_mask(credited_all).sum())
 
     in_range = pd.DataFrame()
     if not df_all.empty and credit_key != _SC_SALES_OVERVIEW_ADMIN_LABEL:
@@ -21701,7 +21876,7 @@ def _get_engineer_performance_detail(
     if not credited.empty and "status" in credited.columns:
         status_col = credited["status"].astype(str)
         resolved = int(status_col.eq(STATUS_RESOLVED).sum())
-        unattended = int(status_col.eq("Unattended").sum())
+        unattended = int(_ticket_marked_unattended_mask(credited).sum())
 
     recent = credited.copy()
     if not recent.empty and "updated_at" in recent.columns:
@@ -21771,10 +21946,13 @@ def _get_engineer_performance_detail(
             )
 
     return {
-        "total": solo + shared + resort_count,
+        "total": solo + shared + resort_count + overview_unattended,
         "solo": solo,
         "shared": shared,
         "resort_count": resort_count,
+        "rsr_solo": rsr_solo,
+        "rsr_shared": rsr_shared,
+        "overview_unattended": overview_unattended,
         "resolved": resolved,
         "unattended": unattended,
         "avg_response": avg_response,
@@ -21821,7 +21999,7 @@ def _render_performance_detail_panel(
     <div style="padding-bottom:11px;border-bottom:0.5px solid #1a2035;margin-bottom:11px">
       <div style="font-size:16px;font-weight:500;color:#e2e8f8">{html.escape(display_name)}</div>
       <span style="font-size:11px;color:#2a3a5a">
-        {html.escape(range_label)} · {detail['total']} items</span>
+        Full snapshot · {detail['total']} credited · {html.escape(range_label)} for range KPIs</span>
     </div>
     """,
         unsafe_allow_html=True,
@@ -21832,13 +22010,19 @@ def _render_performance_detail_panel(
         unsafe_allow_html=True,
     )
     rows = [
-        ("Solo tickets", detail["solo"], "#8a9ac0"),
-        ("Shared tickets", detail["shared"], "#8a9ac0"),
-        ("Resort cases", detail["resort_count"], "#a78bfa"),
-        ("Resolved", detail["resolved"], "#8a9ac0"),
-        ("Avg response time", detail["avg_response"], "#8a9ac0"),
+        ("Res solo (snapshot)", detail["solo"], "#8a9ac0"),
+        ("Res shared (snapshot)", detail["shared"], "#8a9ac0"),
+        ("Resort solo (snapshot)", detail.get("rsr_solo", 0), "#a78bfa"),
+        ("Resort shared (snapshot)", detail.get("rsr_shared", 0), "#a78bfa"),
         (
-            "Unattended",
+            "Unattended (snapshot)",
+            detail.get("overview_unattended", 0),
+            "#ef4444" if int(detail.get("overview_unattended", 0)) > 0 else "#22c55e",
+        ),
+        ("Resolved (in range)", detail["resolved"], "#8a9ac0"),
+        ("Avg response (in range)", detail["avg_response"], "#8a9ac0"),
+        (
+            "Unattended marked (in range)",
             detail["unattended"],
             "#ef4444" if int(detail["unattended"]) > 0 else "#22c55e",
         ),
@@ -22489,7 +22673,7 @@ def _render_perf_unattended_tab(
         unsafe_allow_html=True,
     )
     st.caption(
-        "Excluded from Overview credit, Handled, and Weekly — accountability only"
+        "Overview red segment matches snapshot unattended. Excluded from solo/shared credit."
     )
     data = _get_unattended_by_assignee(
         unattended, focus=focus, range_start=range_start, range_end=range_end
