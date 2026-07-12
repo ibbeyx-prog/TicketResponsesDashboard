@@ -1390,6 +1390,54 @@ div.st-key-disp_assign_panel div.sales-btn [data-testid="stVerticalBlock"],
 div.st-key-disp_sales_assign_panel div.sales-btn [data-testid="stVerticalBlock"] {{
   padding-top: 22px !important;
 }}
+div.st-key-disp_assign_panel .assign-id-status {{
+  font-size: 11px !important;
+  margin: 2px 0 8px !important;
+  line-height: 1.35 !important;
+}}
+div.st-key-disp_assign_panel .assign-id-muted {{ color: #4a5a7a !important; }}
+div.st-key-disp_assign_panel .assign-id-warn {{ color: #b8954f !important; }}
+div.st-key-disp_assign_panel .assign-id-danger {{ color: #c06868 !important; }}
+div.st-key-disp_assign_panel .assign-id-ok {{ color: #5a9c7a !important; }}
+div.st-key-disp_assign_panel .assign-impact {{
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+  margin: 8px 0 10px !important;
+  padding: 9px 11px !important;
+  border-radius: 6px !important;
+  border: 0.5px solid #1a2035 !important;
+  background: #0d1220 !important;
+  color: #8a9ac0 !important;
+}}
+div.st-key-disp_assign_panel .assign-impact-warn {{
+  border-color: #3a2020 !important;
+  background: #140d0d !important;
+  color: #c06868 !important;
+}}
+div.st-key-disp_assign_panel .assign-impact-info {{
+  border-color: #1a2035 !important;
+}}
+div.st-key-disp_assign_panel .assign-eng-picker .stButton > button {{
+  font-size: 12px !important;
+  font-weight: 400 !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+  min-height: 30px !important;
+  height: auto !important;
+  padding: 6px 10px !important;
+  white-space: normal !important;
+}}
+div.st-key-disp_assign_panel .assign-eng-picker .stButton > button[kind="primary"],
+div.st-key-disp_assign_panel .assign-eng-picker .stButton > button[data-testid="stBaseButton-primary"] {{
+  background: #0d1e3a !important;
+  border-color: #1a3460 !important;
+  color: #5b7fb5 !important;
+}}
+div.st-key-disp_assign_panel .assign-eng-selected {{
+  font-size: 11px !important;
+  color: #5b7fb5 !important;
+  margin: 4px 0 8px !important;
+}}
 div.st-key-disp_assign_panel div.disp-manage-btn .stButton > button {{
   font-size:11px !important;
   font-weight: 400 !important;

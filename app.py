@@ -770,6 +770,23 @@ _DISP_ASSIGN_MODE_QUEUE = "queue_only"
 _DISP_CLEAR_ASSIGN_KEY = "_disp_clear_assign_form"
 _DISP_CLEAR_SALES_ASSIGN_KEY = "_disp_clear_sales_assign_form"
 
+# Redesigned Ticket-assign entry (unified Ticket floor — create/first-dispatch only).
+_ASSIGN_ID_WIDGET_KEY = "assign_id_raw"
+_ASSIGN_ID_STATUS_KEY = "assign_id_status"
+_ASSIGN_DUP_OWNER_KEY = "assign_duplicate_owner"
+_ASSIGN_SKIP_ENG_KEY = "assign_skip_engineer"
+_ASSIGN_SELECTED_ENGS_KEY = "assign_selected_engineers"
+_ASSIGN_DISPATCH_CH_KEY = "assign_dispatch_channel"
+_ASSIGN_NOTES_KEY = "assign_notes"
+_ASSIGN_TASK_CAT_KEY = "assign_task_category"
+_ASSIGN_ACCOUNT_KEY = "assign_account_name"
+_ASSIGN_REGION_KEY = "assign_account_region"
+_ASSIGN_SALES_CAT_KEY = "assign_sales_category"
+_ASSIGN_CLEAR_KEY = "_assign_entry_clear"
+_ASSIGN_DISPATCH_TELEGRAM = "telegram"
+_ASSIGN_DISPATCH_SILENT = "silent"
+_ASSIGN_ENGINEER_WORKLOAD_TTL_SEC = 60
+
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
 STATUS_RESOLVED = "Resolved"
@@ -11884,6 +11901,7 @@ def _cc_insert_assignment(
     additional_info: str | None = None,
     operator_id: str,
     assigned_to_2: str | None = None,
+    log_note_suffix: str | None = None,
 ) -> None:
     now_iso = _cc_utc_now_iso()
     row: dict = {
@@ -11916,12 +11934,16 @@ def _cc_insert_assignment(
             f"insert into {TICKETS_TABLE} failed: too many missing-column retries"
         )
 
+    note = _cc_assignment_log_note(additional_info, operator_id)
+    suffix = (log_note_suffix or "").strip()
+    if suffix:
+        note = f"{note}\n\n{suffix}".strip() if note else suffix
     _cc_insert_attendance_log(
         client,
         ticket_number=ticket_number,
         member_username=assigned_to,
         action_type="Assignment",
-        note=_cc_assignment_log_note(additional_info, operator_id),
+        note=note,
     )
     # Phase 2: open a new visit cycle for this assignment
     _visits_open_new(client, ticket_number, assigned_to, visit_start=now_iso)
@@ -20014,12 +20036,588 @@ def _render_dispatch_right_rail(
                 _render_dispatch_case_info_panel(ticket)
 
 
-def _render_unified_assign_panel(
+def _assign_id_digits(raw: object) -> str:
+    return re.sub(r"\D", "", str(raw or ""))
+
+
+def _assign_validate_id_format(raw: object) -> bool:
+    return bool(_ASSIGNMENT_ID_PATTERN.fullmatch(_assign_id_digits(raw)))
+
+
+def _is_unique_violation(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "23505" in msg
+        or "duplicate key" in msg
+        or "unique constraint" in msg
+        or "already exists" in msg
+    )
+
+
+def _check_ticket_duplicate(id_value: str) -> str | None:
+    """Live duplicate check across residential + resort. Returns assigned_to or None."""
+    client = _get_supabase_client()
+    tid = str(id_value or "").strip()
+    if not tid:
+        return None
+    residential = (
+        client.table(TICKETS_TABLE)
+        .select("ticket_number, assigned_to")
+        .eq("ticket_number", tid)
+        .limit(1)
+        .execute()
+    )
+    if residential.data:
+        return residential.data[0].get("assigned_to") or "unassigned"
+    resort = (
+        client.table(SALES_CASES_TABLE)
+        .select("case_ref, assigned_to")
+        .eq("case_ref", tid)
+        .limit(1)
+        .execute()
+    )
+    if resort.data:
+        return resort.data[0].get("assigned_to") or "unassigned"
+    return None
+
+
+def _on_assign_id_change() -> None:
+    """Streamlit on_change: format gate, then live duplicate query."""
+    digits = _assign_id_digits(st.session_state.get(_ASSIGN_ID_WIDGET_KEY))
+    if not digits:
+        st.session_state[_ASSIGN_ID_STATUS_KEY] = "empty"
+        st.session_state[_ASSIGN_DUP_OWNER_KEY] = None
+        return
+    if not _ASSIGNMENT_ID_PATTERN.fullmatch(digits):
+        st.session_state[_ASSIGN_ID_STATUS_KEY] = "invalid_format"
+        st.session_state[_ASSIGN_DUP_OWNER_KEY] = None
+        return
+    try:
+        owner = _check_ticket_duplicate(digits)
+    except Exception:
+        # Don't block typing on transient read errors — submit will re-check.
+        st.session_state[_ASSIGN_ID_STATUS_KEY] = "valid"
+        st.session_state[_ASSIGN_DUP_OWNER_KEY] = None
+        return
+    if owner is not None:
+        st.session_state[_ASSIGN_ID_STATUS_KEY] = "duplicate"
+        st.session_state[_ASSIGN_DUP_OWNER_KEY] = owner
+    else:
+        st.session_state[_ASSIGN_ID_STATUS_KEY] = "valid"
+        st.session_state[_ASSIGN_DUP_OWNER_KEY] = None
+
+
+@st.cache_data(ttl=_ASSIGN_ENGINEER_WORKLOAD_TTL_SEC, show_spinner=False)
+def _get_engineer_workload() -> dict[str, dict[str, int]]:
+    """Advisory open + unattended counts per @handle (60s TTL, separate from board cache)."""
+    client = _get_supabase_client()
+    try:
+        engineers = (
+            client.table(FIELD_ENGINEERS_TABLE)
+            .select("username")
+            .eq("is_active", True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return {}
+
+    workload: dict[str, dict[str, int]] = {}
+    for e in engineers:
+        stem = _canonical_username_stem(str(e.get("username") or ""))
+        if stem:
+            workload[f"@{stem}"] = {"open": 0, "unattended": 0}
+    if not workload:
+        return workload
+
+    def _bump(handle: object, key: str) -> None:
+        h = str(handle or "").strip()
+        if not h:
+            return
+        norm = f"@{_canonical_username_stem(h)}"
+        if norm in workload:
+            workload[norm][key] += 1
+
+    try:
+        open_rows = (
+            client.table(TICKETS_TABLE)
+            .select("assigned_to, assigned_to_2, status")
+            .neq("status", STATUS_RESOLVED)
+            .execute()
+            .data
+            or []
+        )
+        for row in open_rows:
+            _bump(row.get("assigned_to"), "open")
+            _bump(row.get("assigned_to_2"), "open")
+    except Exception:
+        pass
+
+    try:
+        unattended_rows = (
+            client.table(TICKETS_TABLE)
+            .select("assigned_to, assigned_to_2")
+            .not_.is_("marked_unattended_at", "null")
+            .execute()
+            .data
+            or []
+        )
+        for row in unattended_rows:
+            _bump(row.get("assigned_to"), "unattended")
+            _bump(row.get("assigned_to_2"), "unattended")
+    except Exception:
+        pass
+
+    return workload
+
+
+def _build_assign_impact_lines(
     *,
-    on_submit: Callable[[str, str, str, str, str], None],
-    layout: str = "rail",
+    case_type: str,
+    id_status: str,
+    duplicate_owner: str | None,
+    skip_engineer: bool,
+    selected_engineers: list[str],
+    dispatch_channel: str,
+) -> list[str]:
+    if id_status in ("empty", "invalid_format"):
+        return ["Enter a valid ticket number to get started."]
+    if id_status == "duplicate":
+        owner = duplicate_owner or "no one yet"
+        return [
+            f"This number is already active (assigned to {owner}). "
+            "Open the existing row and use Reassign there instead."
+        ]
+
+    noun = "ticket" if case_type == CASE_TYPE_RESIDENTIAL else "case"
+    lines = [f"Creates a new {noun} in Daily task."]
+    if skip_engineer or not selected_engineers:
+        lines.append(
+            "No engineer assigned yet — sits in the queue for later dispatch."
+        )
+        return lines
+
+    names = " and ".join(selected_engineers)
+    lines.append(f"Opens a visit for {names}.")
+    if len(selected_engineers) == 2:
+        lines.append("Both engineers get shared credit in Performance.")
+    lines.append(
+        "Sends a Telegram assignment now."
+        if dispatch_channel == _ASSIGN_DISPATCH_TELEGRAM
+        else "Assigns in system — no Telegram message sent."
+    )
+    return lines
+
+
+def _reset_ticket_assign_entry() -> None:
+    """Clear assign-entry widgets — call only before those widgets render."""
+    st.session_state[_ASSIGN_ID_WIDGET_KEY] = ""
+    st.session_state[_ASSIGN_ID_STATUS_KEY] = "empty"
+    st.session_state[_ASSIGN_DUP_OWNER_KEY] = None
+    st.session_state[_ASSIGN_SKIP_ENG_KEY] = False
+    st.session_state[_ASSIGN_SELECTED_ENGS_KEY] = []
+    st.session_state[_ASSIGN_DISPATCH_CH_KEY] = _ASSIGN_DISPATCH_TELEGRAM
+    st.session_state[_ASSIGN_NOTES_KEY] = ""
+    st.session_state[_ASSIGN_ACCOUNT_KEY] = ""
+    for k in (
+        _ASSIGN_TASK_CAT_KEY,
+        _ASSIGN_REGION_KEY,
+        _ASSIGN_SALES_CAT_KEY,
+    ):
+        st.session_state.pop(k, None)
+
+
+def _schedule_ticket_assign_entry_clear() -> None:
+    st.session_state[_ASSIGN_CLEAR_KEY] = True
+
+
+def _init_ticket_assign_entry_state() -> None:
+    if _ASSIGN_ID_STATUS_KEY not in st.session_state:
+        st.session_state[_ASSIGN_ID_STATUS_KEY] = "empty"
+    if _ASSIGN_DUP_OWNER_KEY not in st.session_state:
+        st.session_state[_ASSIGN_DUP_OWNER_KEY] = None
+    if _ASSIGN_SKIP_ENG_KEY not in st.session_state:
+        st.session_state[_ASSIGN_SKIP_ENG_KEY] = False
+    if _ASSIGN_SELECTED_ENGS_KEY not in st.session_state:
+        st.session_state[_ASSIGN_SELECTED_ENGS_KEY] = []
+    if _ASSIGN_DISPATCH_CH_KEY not in st.session_state:
+        st.session_state[_ASSIGN_DISPATCH_CH_KEY] = _ASSIGN_DISPATCH_TELEGRAM
+
+
+def _toggle_assign_engineer(handle: str) -> None:
+    selected = list(st.session_state.get(_ASSIGN_SELECTED_ENGS_KEY) or [])
+    if handle in selected:
+        selected = [h for h in selected if h != handle]
+    else:
+        selected.append(handle)
+        if len(selected) > 2:
+            selected = selected[-2:]
+    st.session_state[_ASSIGN_SELECTED_ENGS_KEY] = selected
+
+
+def _assign_submit_label(
+    *,
+    case_type: str,
+    id_status: str,
+    skip_engineer: bool,
+    selected: list[str],
+    channel: str,
+) -> str:
+    noun = "ticket" if case_type == CASE_TYPE_RESIDENTIAL else "case"
+    if id_status == "duplicate":
+        return f"Blocked, duplicate {noun}"
+    if id_status != "valid":
+        return f"Create {noun}"
+    if skip_engineer or not selected:
+        return f"Queue {noun}"
+    if channel == _ASSIGN_DISPATCH_TELEGRAM:
+        return "Create & dispatch"
+    return "Create & assign"
+
+
+def _handle_ticket_assign_entry_submit(
+    *,
+    case_type: str,
+    id_raw: str,
+    id_status: str,
+    skip_engineer: bool,
+    selected_engineers: list[str],
+    dispatch_channel: str,
+    notes: str,
+    task_category: str | None,
+    account_name: str,
+    account_region: str,
+    sales_category: str | None,
 ) -> None:
-    """Ticket assign panel adapts to active case type filter."""
+    digits = _assign_id_digits(id_raw)
+    if id_status in ("empty", "invalid_format") or not _ASSIGNMENT_ID_PATTERN.fullmatch(
+        digits
+    ):
+        st.toast("Enter a valid 9 or 16-digit number", icon="⚠️")
+        return
+    if id_status == "duplicate":
+        owner = st.session_state.get(_ASSIGN_DUP_OWNER_KEY) or "no one yet"
+        st.toast(
+            f"Already active (assigned to {owner}). Use Reassign on the existing row.",
+            icon="⚠️",
+        )
+        return
+
+    # Race-safe re-check at submit time.
+    try:
+        owner = _check_ticket_duplicate(digits)
+    except Exception as exc:
+        st.toast(f"Could not verify uniqueness: {exc}", icon="❌")
+        return
+    if owner is not None:
+        st.session_state[_ASSIGN_ID_STATUS_KEY] = "duplicate"
+        st.session_state[_ASSIGN_DUP_OWNER_KEY] = owner
+        st.toast(
+            f"Already active (assigned to {owner}). Use Reassign on the existing row.",
+            icon="⚠️",
+        )
+        return
+
+    op = _session_operator_id()
+    if not op:
+        st.toast("Sign in again", icon="⚠️")
+        return
+
+    notes_clean = (notes or "").strip() or None
+    # Empty selection behaves like queue-only (matches impact preview).
+    want_engineers = bool(selected_engineers) and not skip_engineer
+    handles: list[str] = []
+    if want_engineers:
+        try:
+            handles = [_cc_normalize_handle(h) for h in selected_engineers[:2]]
+        except ValueError as exc:
+            st.toast(str(exc), icon="⚠️")
+            return
+        if not handles:
+            st.toast("Select an engineer", icon="⚠️")
+            return
+
+    handle1 = handles[0] if handles else None
+    handle2 = handles[1] if len(handles) > 1 else None
+    post_telegram = (
+        want_engineers and dispatch_channel == _ASSIGN_DISPATCH_TELEGRAM
+    )
+    silent_suffix = (
+        "assigned without Telegram"
+        if want_engineers and dispatch_channel == _ASSIGN_DISPATCH_SILENT
+        else None
+    )
+
+    try:
+        if case_type == CASE_TYPE_RESIDENTIAL:
+            cat = canonical_task_category(str(task_category or "").strip()) or str(
+                task_category or ""
+            ).strip()
+            if not cat or cat == "—":
+                st.toast("Category is required", icon="⚠️")
+                return
+            if not want_engineers:
+                summary = _cc_queue_pending_unassigned(
+                    digits,
+                    cat,
+                    additional_info=notes_clean,
+                    operator_id=op,
+                )
+                _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+                _schedule_ticket_assign_entry_clear()
+                st.toast(summary.replace("**", ""), icon="✅")
+                st.rerun()
+                return
+
+            additional = _coassignee_telegram_note(handle2, notes_clean)
+            client = _get_supabase_client()
+            _cc_insert_assignment(
+                client,
+                digits,
+                handle1 or "",
+                cat,
+                additional_info=additional,
+                operator_id=op,
+                assigned_to_2=handle2,
+                log_note_suffix=silent_suffix,
+            )
+            tg_ok = True
+            tg_err: str | None = None
+            if post_telegram:
+                token, chat_id, chat_warn = _cc_resolve_telegram_credentials_for_form()
+                if chat_warn:
+                    tg_ok = False
+                    tg_err = chat_warn
+                elif not token or chat_id is None:
+                    tg_ok = False
+                    tg_err = "Telegram is not configured"
+                else:
+                    try:
+                        tg_ref = asyncio.run(
+                            notify_telegram_group(
+                                handle1 or "",
+                                digits,
+                                cat,
+                                additional_info=additional,
+                                assigned_by=op,
+                                api_id=_read_setting("TG_API_ID")
+                                or _read_setting("TELEGRAM_API_ID")
+                                or None,
+                                api_hash=_read_setting("TG_API_HASH")
+                                or _read_setting("TELEGRAM_API_HASH")
+                                or None,
+                                bot_token=token or None,
+                                group_id=chat_id,
+                            )
+                        )
+                        _cc_save_assignment_telegram_ref(client, digits, tg_ref)
+                    except Exception as exc:
+                        tg_ok = False
+                        tg_err = str(exc)
+            _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+            _schedule_ticket_assign_entry_clear()
+            if post_telegram and not tg_ok:
+                st.warning(
+                    "Ticket created but the Telegram message failed to send — "
+                    f"retry from the ticket row. ({tg_err})"
+                )
+            else:
+                st.toast(
+                    f"Ticket {digits} created"
+                    + (" & dispatched" if post_telegram else " & assigned"),
+                    icon="✅",
+                )
+            st.rerun()
+            return
+
+        # Resort
+        acc = (account_name or "").strip()
+        if not acc:
+            st.toast("Account name is required", icon="⚠️")
+            return
+        scat = canonical_task_category(str(sales_category or "").strip()) or str(
+            sales_category or ""
+        ).strip()
+        if not scat or scat == "—":
+            st.toast("Category is required", icon="⚠️")
+            return
+        region = (
+            account_region
+            if account_region in SALES_REGION_CODES
+            else SALES_REGION_CODES[0]
+        )
+        row: dict[str, object] = {
+            "case_ref": digits,
+            "account_name": acc,
+            "account_region": region,
+            "sales_category": scat,
+            "sales_priority": "Standard",
+            "status": SC_STATUS_SALES_TICKET,
+            "attended_by": op,
+            "admin_owner": op,
+        }
+        if notes_clean:
+            row["description"] = notes_clean
+            row["additional_info"] = notes_clean
+        if want_engineers and handle1:
+            row["assigned_to"] = handle1
+            if handle2:
+                row["assigned_to_2"] = handle2
+            row["field_task_category"] = scat
+            row["dispatch_region"] = region
+            row["last_assigned_at"] = _cc_utc_now_iso()
+
+        try:
+            _sales_cases_insert_row(row)
+        except Exception as exc:
+            if _is_unique_violation(exc):
+                st.toast(
+                    "Already active. Open the existing row and use Reassign.",
+                    icon="⚠️",
+                )
+                return
+            raise
+
+        if want_engineers and handle1:
+            note_for_log = notes_clean
+            if silent_suffix:
+                note_for_log = (
+                    f"{silent_suffix}\n\n{notes_clean}"
+                    if notes_clean
+                    else silent_suffix
+                )
+            _sc_log_sales_assignment_activity(
+                case_ref=digits,
+                assignee=handle1,
+                operator_id=op,
+                note=note_for_log,
+            )
+            if post_telegram:
+                token, chat_id, chat_warn = _cc_resolve_telegram_credentials_for_form()
+                tg_ok = True
+                tg_err: str | None = None
+                if chat_warn or not token or chat_id is None:
+                    tg_ok = False
+                    tg_err = chat_warn or "Telegram is not configured"
+                else:
+                    try:
+                        additional = _coassignee_telegram_note(handle2, notes_clean)
+                        asyncio.run(
+                            notify_telegram_group(
+                                handle1.lstrip("@"),
+                                digits,
+                                scat,
+                                additional_info=additional,
+                                assigned_by=op,
+                                api_id=_read_setting("TG_API_ID")
+                                or _read_setting("TELEGRAM_API_ID")
+                                or None,
+                                api_hash=_read_setting("TG_API_HASH")
+                                or _read_setting("TELEGRAM_API_HASH")
+                                or None,
+                                bot_token=token,
+                                group_id=chat_id,
+                            )
+                        )
+                    except Exception as exc:
+                        tg_ok = False
+                        tg_err = str(exc)
+                _invalidate_dashboard_data_cache()
+                _schedule_ticket_assign_entry_clear()
+                if not tg_ok:
+                    st.warning(
+                        "Case created but the Telegram message failed to send — "
+                        f"retry from the ticket row. ({tg_err})"
+                    )
+                else:
+                    st.toast(f"Resort case {digits} created & dispatched", icon="✅")
+                st.rerun()
+                return
+
+        _invalidate_dashboard_data_cache()
+        _schedule_ticket_assign_entry_clear()
+        st.toast(
+            f"Resort case {digits} "
+            + ("created & assigned" if want_engineers else "queued"),
+            icon="✅",
+        )
+        st.rerun()
+    except Exception as exc:
+        if _is_unique_violation(exc):
+            st.toast(
+                "Already active. Open the existing row and use Reassign.",
+                icon="⚠️",
+            )
+            return
+        st.toast(f"Submit failed: {exc}", icon="❌")
+
+
+def _render_assign_engineer_picker(engineers: list[str]) -> None:
+    """Toggleable engineer rows with inline open / unattended workload."""
+    selected = list(st.session_state.get(_ASSIGN_SELECTED_ENGS_KEY) or [])
+    try:
+        workload = _get_engineer_workload()
+    except Exception:
+        workload = {}
+
+    hdr, mgr = st.columns([5, 1], gap="small")
+    with hdr:
+        st.markdown(
+            '<p class="disp-field-label" style="margin:0">Engineers '
+            '<span style="color:#4a5a7a;font-weight:400">(max 2)</span></p>',
+            unsafe_allow_html=True,
+        )
+    with mgr:
+        _render_assign_manage_icon_btn(
+            manage_key="btn_assign_manage_eng",
+            manage_help="Manage engineers",
+            on_manage=manage_engineers_dialog,
+        )
+
+    if not engineers:
+        st.caption("No active engineers — add some via Manage.")
+        return
+
+    st.markdown('<div class="assign-eng-picker">', unsafe_allow_html=True)
+    for handle in engineers:
+        wl = workload.get(handle) or workload.get(
+            f"@{_canonical_username_stem(handle)}"
+        ) or {"open": 0, "unattended": 0}
+        open_n = int(wl.get("open") or 0)
+        unatt_n = int(wl.get("unattended") or 0)
+        is_on = handle in selected
+        mark = "●" if is_on else "○"
+        label = f"{mark} {handle}   · {open_n} open · {unatt_n} unattended"
+        hkey = hashlib.sha256(handle.encode("utf-8")).hexdigest()[:12]
+        if st.button(
+            label,
+            key=f"assign_eng_pick_{hkey}",
+            use_container_width=True,
+            type="primary" if is_on else "secondary",
+        ):
+            _toggle_assign_engineer(handle)
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if selected:
+        st.markdown(
+            f'<p class="assign-eng-selected">Selected: '
+            f"{html.escape(' · '.join(selected))}</p>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_ticket_assign_entry(
+    *,
+    on_submit: Callable[[str, str, str, str, str], None] | None = None,
+) -> None:
+    """Redesigned create/first-dispatch entry for the unified Ticket floor."""
+    del on_submit  # submit is handled locally; signature kept for call-site compat
+    _init_ticket_assign_entry_state()
+    if st.session_state.pop(_ASSIGN_CLEAR_KEY, False):
+        _reset_ticket_assign_entry()
+
     if _DISP_ASSIGN_CASE_TYPE_KEY not in st.session_state:
         st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
     case_type_filter = _init_case_type_filter()
@@ -20034,50 +20632,266 @@ def _render_unified_assign_panel(
     elif case_type_filter == CASE_TYPE_RESORT:
         cur = CASE_TYPE_RESORT
         st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = cur
-    else:
-        st.markdown(
-            t_section_label("Case type", spacing=".06em", margin="margin:0 0 6px"),
-            unsafe_allow_html=True,
+
+    engineers = get_engineer_handles()
+    categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
+
+    with st.container(key="disp_assign_panel"):
+        # --- Type toggle ---
+        if case_type_filter == _CASE_TYPE_FILTER_ALL:
+            _render_assign_plain_label("Type")
+            st.markdown(
+                '<div class="disp-mode-toggle sales-mode-toggle">',
+                unsafe_allow_html=True,
+            )
+            c1, c2 = st.columns(2, gap="small")
+            with c1:
+                if st.button(
+                    "Residential",
+                    key="disp_assign_type_residential",
+                    use_container_width=True,
+                    type="primary" if cur == CASE_TYPE_RESIDENTIAL else "secondary",
+                ):
+                    st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
+                    st.rerun()
+            with c2:
+                if st.button(
+                    "Resort",
+                    key="disp_assign_type_resort",
+                    use_container_width=True,
+                    type="primary" if cur == CASE_TYPE_RESORT else "secondary",
+                ):
+                    st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESORT
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            cur = str(
+                st.session_state.get(_DISP_ASSIGN_CASE_TYPE_KEY) or CASE_TYPE_RESIDENTIAL
+            )
+
+        # --- ID input + live status ---
+        id_label = "Ticket #" if cur == CASE_TYPE_RESIDENTIAL else "Case ref"
+        id_ph = (
+            "9 or 16-digit ticket number"
+            if cur == CASE_TYPE_RESIDENTIAL
+            else "Case ref (9 or 16 digits)"
         )
-        c1, c2 = st.columns(2, gap="small")
-        with c1:
-            if st.button(
-                "🔧 Residential",
-                key="disp_assign_type_residential",
-                use_container_width=True,
-                type="primary" if cur == CASE_TYPE_RESIDENTIAL else "secondary",
-            ):
-                st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
-                st.rerun()
-        with c2:
-            if st.button(
-                "🏢 Resort",
-                key="disp_assign_type_resort",
-                use_container_width=True,
-                type="primary" if cur == CASE_TYPE_RESORT else "secondary",
-            ):
-                st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESORT
-                st.rerun()
-        cur = str(st.session_state.get(_DISP_ASSIGN_CASE_TYPE_KEY) or CASE_TYPE_RESIDENTIAL)
+        _render_assign_plain_label(id_label)
+        st.text_input(
+            id_label,
+            placeholder=id_ph,
+            key=_ASSIGN_ID_WIDGET_KEY,
+            label_visibility="collapsed",
+            on_change=_on_assign_id_change,
+        )
+        id_status = str(st.session_state.get(_ASSIGN_ID_STATUS_KEY) or "empty")
+        dup_owner = st.session_state.get(_ASSIGN_DUP_OWNER_KEY)
+        if id_status == "empty":
+            status_html = (
+                '<p class="assign-id-status assign-id-muted">Enter a 9 or 16-digit number</p>'
+            )
+        elif id_status == "invalid_format":
+            status_html = (
+                '<p class="assign-id-status assign-id-warn">Must be exactly 9 or 16 digits</p>'
+            )
+        elif id_status == "duplicate":
+            owner_disp = html.escape(str(dup_owner or "unassigned"))
+            status_html = (
+                f'<p class="assign-id-status assign-id-danger">'
+                f"Already active — assigned to {owner_disp}. Use Reassign.</p>"
+            )
+        else:
+            status_html = (
+                '<p class="assign-id-status assign-id-ok">Number is clear — ready to create</p>'
+            )
+        st.markdown(status_html, unsafe_allow_html=True)
 
-    hint_dot = "#5b7fb5" if cur == CASE_TYPE_RESIDENTIAL else "#a78bfa"
-    hint_text = (
-        "Creates a residential ticket, assigns engineer, posts Telegram."
-        if cur == CASE_TYPE_RESIDENTIAL
-        else "Creates a resort case in intake flow."
-    )
-    st.markdown(
-        f'<p style="font-size:12px;color:#4a5a7a;margin:0 0 10px;'
-        f'background:#0d1220;border:0.5px solid #1a2035;border-radius:6px;'
-        f'padding:9px 11px"><span style="color:{hint_dot}">●</span> '
-        f"{html.escape(hint_text)}</p>",
-        unsafe_allow_html=True,
-    )
+        # --- Conditional fields ---
+        if cur == CASE_TYPE_RESIDENTIAL:
+            _render_assign_plain_label("Category")
+            cat_row, cat_mgr = _assign_field_btn_columns()
+            with cat_row:
+                _render_category_selectbox(
+                    "Category",
+                    categories,
+                    key=_ASSIGN_TASK_CAT_KEY,
+                    label_visibility="collapsed",
+                )
+            with cat_mgr:
+                _render_assign_manage_icon_btn(
+                    manage_key="btn_assign_manage_cat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
+        else:
+            _render_assign_plain_label("Account")
+            st.text_input(
+                "Account",
+                placeholder="Resort / company",
+                key=_ASSIGN_ACCOUNT_KEY,
+                label_visibility="collapsed",
+            )
+            _render_assign_plain_label("Region")
+            st.selectbox(
+                "Region",
+                list(SALES_REGION_CODES),
+                key=_ASSIGN_REGION_KEY,
+                label_visibility="collapsed",
+            )
+            _render_assign_plain_label("Category")
+            scat_row, scat_mgr = _assign_field_btn_columns()
+            with scat_row:
+                _render_category_selectbox(
+                    "Category",
+                    categories,
+                    key=_ASSIGN_SALES_CAT_KEY,
+                    label_visibility="collapsed",
+                )
+            with scat_mgr:
+                _render_assign_manage_icon_btn(
+                    manage_key="btn_assign_manage_scat",
+                    manage_help="Manage categories",
+                    on_manage=manage_categories_dialog,
+                )
 
-    if cur == CASE_TYPE_RESORT:
-        _render_sales_assign_panel(layout=layout)
-    else:
-        render_assign_panel(on_submit=on_submit, layout=layout)
+        # --- Assign engineer + queue-only ---
+        skip_col, _pad = st.columns([3, 1], gap="small")
+        with skip_col:
+            st.markdown(
+                '<p class="disp-field-label" style="margin:8px 0 4px">Assign engineer</p>',
+                unsafe_allow_html=True,
+            )
+        skip_engineer = st.checkbox(
+            "Queue only, skip for now",
+            key=_ASSIGN_SKIP_ENG_KEY,
+            help="Creates the row with no engineer and no Telegram.",
+        )
+
+        selected = list(st.session_state.get(_ASSIGN_SELECTED_ENGS_KEY) or [])
+        if not skip_engineer:
+            _render_assign_engineer_picker(engineers)
+            selected = list(st.session_state.get(_ASSIGN_SELECTED_ENGS_KEY) or [])
+            if selected:
+                _render_assign_plain_label("Dispatch")
+                st.markdown(
+                    '<div class="disp-mode-toggle sales-mode-toggle">',
+                    unsafe_allow_html=True,
+                )
+                ch = str(
+                    st.session_state.get(_ASSIGN_DISPATCH_CH_KEY)
+                    or _ASSIGN_DISPATCH_TELEGRAM
+                )
+                d1, d2 = st.columns(2, gap="small")
+                with d1:
+                    if st.button(
+                        "Telegram now",
+                        key="assign_ch_telegram",
+                        use_container_width=True,
+                        type="primary"
+                        if ch == _ASSIGN_DISPATCH_TELEGRAM
+                        else "secondary",
+                    ):
+                        st.session_state[_ASSIGN_DISPATCH_CH_KEY] = (
+                            _ASSIGN_DISPATCH_TELEGRAM
+                        )
+                        st.rerun()
+                with d2:
+                    if st.button(
+                        "Assign only",
+                        key="assign_ch_silent",
+                        use_container_width=True,
+                        type="primary"
+                        if ch == _ASSIGN_DISPATCH_SILENT
+                        else "secondary",
+                    ):
+                        st.session_state[_ASSIGN_DISPATCH_CH_KEY] = (
+                            _ASSIGN_DISPATCH_SILENT
+                        )
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.session_state[_ASSIGN_SELECTED_ENGS_KEY] = []
+            selected = []
+
+        channel = str(
+            st.session_state.get(_ASSIGN_DISPATCH_CH_KEY) or _ASSIGN_DISPATCH_TELEGRAM
+        )
+
+        # --- Notes ---
+        _render_assign_plain_label("Notes")
+        st.text_area(
+            "Notes",
+            placeholder="Optional notes…",
+            key=_ASSIGN_NOTES_KEY,
+            height=72,
+            label_visibility="collapsed",
+        )
+
+        # --- Impact preview ---
+        impact = _build_assign_impact_lines(
+            case_type=cur,
+            id_status=id_status,
+            duplicate_owner=str(dup_owner) if dup_owner else None,
+            skip_engineer=bool(skip_engineer),
+            selected_engineers=selected,
+            dispatch_channel=channel,
+        )
+        impact_body = "<br/>".join(html.escape(line) for line in impact)
+        if id_status == "duplicate":
+            st.markdown(
+                f'<div class="assign-impact assign-impact-warn">{impact_body}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div class="assign-impact assign-impact-info">{impact_body}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # --- Submit ---
+        submit_label = _assign_submit_label(
+            case_type=cur,
+            id_status=id_status,
+            skip_engineer=bool(skip_engineer),
+            selected=selected,
+            channel=channel,
+        )
+        blocked = id_status == "duplicate"
+        st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
+        clicked = st.button(
+            submit_label,
+            key="assign_entry_submit",
+            use_container_width=True,
+            disabled=blocked,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+        if clicked:
+            _handle_ticket_assign_entry_submit(
+                case_type=cur,
+                id_raw=str(st.session_state.get(_ASSIGN_ID_WIDGET_KEY) or ""),
+                id_status=id_status,
+                skip_engineer=bool(skip_engineer),
+                selected_engineers=selected,
+                dispatch_channel=channel,
+                notes=str(st.session_state.get(_ASSIGN_NOTES_KEY) or ""),
+                task_category=st.session_state.get(_ASSIGN_TASK_CAT_KEY),
+                account_name=str(st.session_state.get(_ASSIGN_ACCOUNT_KEY) or ""),
+                account_region=str(st.session_state.get(_ASSIGN_REGION_KEY) or ""),
+                sales_category=st.session_state.get(_ASSIGN_SALES_CAT_KEY),
+            )
+
+
+def _render_unified_assign_panel(
+    *,
+    on_submit: Callable[[str, str, str, str, str], None],
+    layout: str = "rail",
+) -> None:
+    """Ticket assign panel — redesigned create/first-dispatch entry.
+
+    Reassign (row ⋯ menu) uses ``_render_reassign_editor`` / sales reassign
+    editors and is intentionally separate from this path.
+    """
+    del layout  # always stacked rail layout for the redesigned entry
+    _render_ticket_assign_entry(on_submit=on_submit)
 
 
 def render_assign_panel(
@@ -20085,7 +20899,7 @@ def render_assign_panel(
     on_submit: Callable[[str, str, str, str, str], None],
     layout: str = "bar",
 ) -> None:
-    """Assign panel — ``bar`` = horizontal (legacy), ``rail`` = right sidebar stack."""
+    """Legacy residential assign panel (kept for non-unified callers)."""
     engineers = get_engineer_handles()
     categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
     none_label = "- none -"
