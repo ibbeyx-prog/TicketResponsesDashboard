@@ -2973,7 +2973,7 @@ def _perf_sales_credited_person(row: object) -> str:
     """
     Sales case performance credit.
 
-    Field engineer when ``assigned_to`` is set; otherwise **Admin** (queue credit).
+    Field engineer when ``assigned_to`` is set; otherwise **Admin**.
     ``admin_owner`` is operational metadata only — it does not receive performance credit.
     """
     if isinstance(row, pd.Series):
@@ -2983,6 +2983,11 @@ def _perf_sales_credited_person(row: object) -> str:
     assigned = data.get("assigned_to")
     if _sc_sales_has_field_assignee(assigned):
         return _perf_person_credit_key(assigned)
+    return _SC_SALES_OVERVIEW_ADMIN_LABEL
+
+
+def _perf_undispatched_credit_label() -> str:
+    """Shared Admin bucket for work with no field engineer (residential or resort)."""
     return _SC_SALES_OVERVIEW_ADMIN_LABEL
 
 
@@ -6482,7 +6487,7 @@ def get_credit_type(row: object) -> str:
 
 
 def _perf_ticket_credit_assignees(row: object) -> list[str]:
-    """Normalized ``@handle`` list credited on assignment (``assigned_to`` + ``assigned_to_2``)."""
+    """Credited people for a ticket/case: field engineers, else **Admin** if undispatched."""
     if isinstance(row, pd.Series):
         data = row
     else:
@@ -6499,14 +6504,19 @@ def _perf_ticket_credit_assignees(row: object) -> list[str]:
             assignees.append(eng)
     if assignees:
         return assignees
-    if "case_ref" in data.index or "case_ref" in data:
-        return [_perf_sales_credited_person(data)]
+
+    # No field engineer — Admin queue credit (residential + resort).
+    has_case = "case_ref" in data.index
+    has_ticket = "ticket_number" in data.index
+    if has_case or has_ticket:
+        return [_perf_undispatched_credit_label()]
+
     staff = data.get("staff")
-    if staff and str(staff).strip() and str(staff).strip() != "(unknown)":
+    if staff and str(staff).strip() and str(staff).strip() not in (
+        "(unknown)",
+        _SC_SALES_OVERVIEW_ADMIN_LABEL,
+    ):
         return [_perf_norm_member(staff)]
-    assigned = data.get("assigned_to")
-    if assigned and str(assigned).strip():
-        return [_perf_norm_member(assigned)]
     return []
 
 
@@ -22286,8 +22296,11 @@ def _perf_overview_assignment_solo_shared_counts(
     *,
     credit_key: str,
 ) -> tuple[int, int]:
-    """Solo vs shared on assignment for all snapshot tickets credited to this person."""
-    if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+    """Solo vs shared on assignment for snapshot tickets credited to this person.
+
+    Used for Admin (undispatched residential) and as a visit-history fallback.
+    """
+    if credit_key in ("", "(unknown)") or df_all.empty:
         return 0, 0
     credited = _perf_overview_field_tickets(df_all, person=credit_key)
     solo = shared = 0
@@ -22496,7 +22509,11 @@ def _get_solo_shared_data(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> list[dict[str, object]]:
-    """Visit-cycle solo/shared fair credit per engineer (all residential tickets)."""
+    """Visit-cycle solo/shared fair credit per engineer (all residential tickets).
+
+    Undispatched residential tickets (no field assignee) credit **Admin** via
+    assignment counts — visit history does not apply.
+    """
     del sales_all, range_start, range_end
 
     visits_history = _perf_load_overview_visits_history(df_all)
@@ -22511,13 +22528,18 @@ def _get_solo_shared_data(
 
     results: list[dict[str, object]] = []
     for credit_key in engineers:
-        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+        if credit_key in ("", "(unknown)"):
             continue
-        solo, shared = _perf_overview_visit_solo_shared_counts(
-            visits_history,
-            credit_key=credit_key,
-            df_all=df_res_credit,
-        )
+        if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+            solo, shared = _perf_overview_assignment_solo_shared_counts(
+                df_res_credit, credit_key=credit_key
+            )
+        else:
+            solo, shared = _perf_overview_visit_solo_shared_counts(
+                visits_history,
+                credit_key=credit_key,
+                df_all=df_res_credit,
+            )
         if solo > 0 or shared > 0:
             results.append(
                 {
@@ -22526,6 +22548,7 @@ def _get_solo_shared_data(
                     "label": _perf_overview_row_label(credit_key),
                     "solo": solo,
                     "shared": shared,
+                    "is_admin_credit": credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL,
                 }
             )
     return sorted(results, key=lambda r: int(r["solo"]) + int(r["shared"]), reverse=True)
@@ -22631,6 +22654,7 @@ def _render_combined_overview_legend() -> None:
     <p style="font-size:11px;color:#4a5a7a;margin:0 0 8px;line-height:1.4">
       <strong>Residential</strong> = visit fair credit (full snapshot; unattended excluded) ·
       <strong>Resort</strong> = assignment credit (full snapshot) ·
+      <strong>Admin</strong> = no field engineer (residential or resort) ·
       <strong>Unattended</strong> = separate accountability count.</p>
     """,
         unsafe_allow_html=True,
@@ -22657,7 +22681,7 @@ def _render_combined_overview_row(
     source = res or rsr or {}
     btn_id = str(source.get("engineer") or _perf_overview_button_key(credit_key))
     label = str(source.get("label") or _perf_overview_row_label(credit_key))
-    if (rsr or {}).get("is_admin_credit") and not res:
+    if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
         label = f"🔒 {label.lstrip('🔒 ')}"
     key_suffix = _perf_overview_button_key(credit_key)
 
@@ -22792,14 +22816,19 @@ def _get_engineer_performance_detail(
     df_res_credit = _perf_overview_df_for_solo_shared(df_all)
     visits_history = _perf_load_overview_visits_history(df_all)
 
-    solo, shared = _perf_overview_visit_solo_shared_counts(
-        visits_history,
-        credit_key=credit_key,
-        df_all=df_res_credit,
-    )
+    if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        solo, shared = _perf_overview_assignment_solo_shared_counts(
+            df_res_credit, credit_key=credit_key
+        )
+    else:
+        solo, shared = _perf_overview_visit_solo_shared_counts(
+            visits_history,
+            credit_key=credit_key,
+            df_all=df_res_credit,
+        )
 
     rsr_solo = rsr_shared = 0
-    if not sales_all.empty and credit_key not in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+    if not sales_all.empty and credit_key not in ("", "(unknown)"):
         for _, row in sales_all.iterrows():
             if _perf_sales_credited_person(row) != credit_key:
                 continue
@@ -22815,7 +22844,7 @@ def _get_engineer_performance_detail(
         overview_unattended = int(_ticket_marked_unattended_mask(credited_all).sum())
 
     in_range = pd.DataFrame()
-    if not df_all.empty and credit_key != _SC_SALES_OVERVIEW_ADMIN_LABEL:
+    if not df_all.empty and credit_key not in ("", "(unknown)"):
         if "updated_at" in df_all.columns:
             ref = _parse_ts(df_all["updated_at"])
         else:
