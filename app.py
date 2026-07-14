@@ -984,8 +984,10 @@ SC_STATUS_REGIONAL = "Regional for site visit"
 SC_STATUS_DESIGN = "Design"
 SC_STATUS_RESOLVED = STATUS_RESOLVED
 # Map resort-case statuses onto the residential queue sidebar (unified Ticket screen).
+# ``Open`` = field responded, awaiting admin review (Needs Review) — same as CSM.
 _RESORT_STATUS_TO_UNIFIED_QUEUE: dict[str, str] = {
     SC_STATUS_SALES_TICKET: "Daily Task",
+    "Open": "Needs Review",
     SC_STATUS_INVESTIGATION: "Under Investigation",
     SC_STATUS_REGIONAL: "Under Investigation",
     SC_STATUS_DESIGN: "On Hold",
@@ -993,6 +995,7 @@ _RESORT_STATUS_TO_UNIFIED_QUEUE: dict[str, str] = {
 }
 _UNIFIED_QUEUE_TO_RESORT_STATUSES: dict[str, list[str]] = {
     "Daily Task": [SC_STATUS_SALES_TICKET],
+    "Needs Review": ["Open"],
     "Under Investigation": [SC_STATUS_INVESTIGATION, SC_STATUS_REGIONAL],
     "On Hold": [SC_STATUS_DESIGN],
     "Resolved": [SC_STATUS_RESOLVED],
@@ -1005,6 +1008,7 @@ _SC_INVESTIGATION_QUEUE_STATUSES: tuple[str, ...] = (
 _SC_ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
     {
         SC_STATUS_SALES_TICKET,
+        "Open",
         SC_STATUS_INVESTIGATION,
         SC_STATUS_REGIONAL,
         SC_STATUS_DESIGN,
@@ -1099,6 +1103,12 @@ def _sc_row_text(val: object) -> str:
 def _sc_status_actions_for_queue(queue_status: str) -> tuple[tuple[str, str], ...]:
     """(Action menu label, target status) for the active sales queue toolbar."""
     if queue_status == SC_STATUS_SALES_TICKET:
+        return (
+            ("Investigation", SC_STATUS_INVESTIGATION),
+            ("Design", SC_STATUS_DESIGN),
+            ("Mark Resolved", SC_STATUS_RESOLVED),
+        )
+    if queue_status == "Open":
         return (
             ("Investigation", SC_STATUS_INVESTIGATION),
             ("Design", SC_STATUS_DESIGN),
@@ -9040,7 +9050,10 @@ def _lookup_ref(query: str) -> dict[str, object] | None:
     if digits_only:
         result = (
             client.table(TICKETS_TABLE)
-            .select("ticket_number, status, assigned_to, assigned_to_2, task_category")
+            .select(
+                "ticket_number, status, assigned_to, assigned_to_2, task_category, "
+                "marked_unattended_at, follow_up_at"
+            )
             .eq("ticket_number", digits_only)
             .limit(1)
             .execute()
@@ -9048,10 +9061,15 @@ def _lookup_ref(query: str) -> dict[str, object] | None:
         if result.data:
             return {"type": CASE_TYPE_RESIDENTIAL, "data": dict(result.data[0])}
 
+    # Prefer exact digit match for resort case_ref (16-digit IDs are common).
+    resort_key = digits_only or raw
     result = (
         client.table(SALES_CASES_TABLE)
-        .select("case_ref, status, assigned_to, account_name, account_region, sales_priority")
-        .eq("case_ref", raw)
+        .select(
+            "case_ref, status, assigned_to, account_name, account_region, "
+            "sales_priority, field_response, responded_at, last_assigned_at"
+        )
+        .eq("case_ref", resort_key)
         .limit(1)
         .execute()
     )
@@ -9061,7 +9079,10 @@ def _lookup_ref(query: str) -> dict[str, object] | None:
     if digits_only and digits_only != raw:
         result = (
             client.table(SALES_CASES_TABLE)
-            .select("case_ref, status, assigned_to, account_name, account_region, sales_priority")
+            .select(
+                "case_ref, status, assigned_to, account_name, account_region, "
+                "sales_priority, field_response, responded_at, last_assigned_at"
+            )
             .ilike("case_ref", f"%{digits_only}%")
             .limit(1)
             .execute()
@@ -9072,16 +9093,60 @@ def _lookup_ref(query: str) -> dict[str, object] | None:
     return None
 
 
+def _unified_queue_for_lookup(rtype: str, data: dict[str, object]) -> str:
+    """Map a looked-up row to the Ticket sidebar queue that contains it."""
+    if rtype == CASE_TYPE_RESORT:
+        status = _sc_effective_status(data.get("status"))
+        if _resort_status_has_pending_field_review(
+            status=status,
+            field_response=str(data.get("field_response") or ""),
+            responded_at=str(data.get("responded_at") or ""),
+            last_assigned_at=str(data.get("last_assigned_at") or ""),
+        ):
+            return "Needs Review"
+        return _RESORT_STATUS_TO_UNIFIED_QUEUE.get(status, "Daily Task")
+
+    def _ts_present(value: object) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "nat", "nan", "null"}:
+            return False
+        return True
+
+    if _ts_present(data.get("marked_unattended_at")):
+        return "Unattended"
+    if _ts_present(data.get("follow_up_at")):
+        return "Follow up"
+    status = _normalize_ticket_status_value(data.get("status"))
+    return {
+        STATUS_DAILY_TASK: "Daily Task",
+        "Open": "Needs Review",
+        STATUS_ON_HOLD: "On Hold",
+        STATUS_UNDER_INVESTIGATION: "Under Investigation",
+        STATUS_RESOLVED: "Resolved",
+    }.get(status or "", "Daily Task")
+
+
 def _lookup_navigate(rtype: str, data: dict[str, object]) -> None:
-    """Use pending nav keys so Ticket tab opens with the selected case."""
+    """Use pending nav keys so Ticket tab opens on the queue that holds the case."""
+    queue = _unified_queue_for_lookup(rtype, data)
     st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state[_DASH_PENDING_CASE_TYPE_FILTER_KEY] = _CASE_TYPE_FILTER_ALL
+    st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = queue
+    # Prevent queue-change sync from wiping the selection we are about to apply.
+    st.session_state["_disp_active_queue_prev"] = queue
     if rtype == CASE_TYPE_RESIDENTIAL:
         st.session_state[_DASH_PENDING_TICKET_SELECT_KEY] = str(
             data.get("ticket_number") or ""
         )
+        st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
     else:
         st.session_state[_DASH_PENDING_SALES_SELECT_KEY] = str(data.get("case_ref") or "")
+        st.session_state[_DASH_PENDING_SALES_QUEUE_KEY] = str(
+            data.get("status") or SC_STATUS_SALES_TICKET
+        )
+        st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
     st.session_state.show_lookup = False
     st.session_state.lookup_result = None
     st.session_state.lookup_query = ""
@@ -13135,6 +13200,9 @@ def _sc_dashboard_reassign_case(
         "field_responded_by": None,
         "responded_at": None,
     }
+    # Leave Needs Review (Open) and put the case back in field work.
+    if status == "Open":
+        patch["status"] = SC_STATUS_INVESTIGATION
     if additional_info is not None:
         patch["additional_info"] = additional_info
     _sc_stamp_last_assigned_at(patch)
@@ -16720,6 +16788,7 @@ def _queue_segment_base(label: str | None) -> str:
         "Open",
         STATUS_ON_HOLD,
         "Under Investigation",
+        "Follow up",
         STATUS_RESOLVED,
         "Unattended",
         "Log",
@@ -16781,6 +16850,7 @@ def _apply_pending_dashboard_nav() -> None:
             STATUS_RESOLVED: "Resolved",
         }
         st.session_state[aq_key] = queue_map.get(base_q, base_q)
+        st.session_state["_disp_active_queue_prev"] = st.session_state[aq_key]
         _clear_dispatch_row_modal_keys()
     if pending_sales_queue is not None:
         base = _sc_queue_segment_base(pending_sales_queue)
@@ -16788,6 +16858,7 @@ def _apply_pending_dashboard_nav() -> None:
         st.session_state[_DASH_SALES_QUEUE_KEY] = pending_sales_queue
     if pending_ticket is not None:
         st.session_state[_DISP_SELECTED_KEY] = str(pending_ticket)
+        st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
     if pending_engineer is not None:
         st.session_state[_DISP_ENGINEER_FILTER_KEY] = _perf_norm_member(pending_engineer)
     if pending_case_type:
@@ -18462,6 +18533,13 @@ def _sales_move_destinations(status: str) -> list[tuple[str, str]]:
             ("Design", SC_STATUS_DESIGN),
             ("Resolved", SC_STATUS_RESOLVED),
         ]
+    if eff == "Open":
+        # Field replied — Needs Review (same destinations as investigation triage).
+        return [
+            ("Investigation", SC_STATUS_INVESTIGATION),
+            ("Design", SC_STATUS_DESIGN),
+            ("Resolved", SC_STATUS_RESOLVED),
+        ]
     if eff in _SC_INVESTIGATION_QUEUE_STATUSES:
         return [
             ("Design", SC_STATUS_DESIGN),
@@ -18902,6 +18980,7 @@ def _dispatch_today_metrics(
     df_all: pd.DataFrame,
     *,
     df_in_view: pd.DataFrame,
+    sales_df: pd.DataFrame | None = None,
 ) -> tuple[int, int, int, int]:
     today = datetime.now(OPS_TZ).date()
     start = _local_date_start(today)
@@ -18914,6 +18993,14 @@ def _dispatch_today_metrics(
         if "responded_at" in df_all.columns:
             rp = _parse_ts(df_all["responded_at"])
             responded_today = int(((rp >= start) & (rp <= end)).sum())
+    # Resort reassigns stamp dashboard_sales_cases.last_assigned_at — include them.
+    if sales_df is not None and not sales_df.empty:
+        if "last_assigned_at" in sales_df.columns:
+            la_s = _parse_ts(sales_df["last_assigned_at"])
+            assigned_today += int(((la_s >= start) & (la_s <= end)).sum())
+        if "responded_at" in sales_df.columns:
+            rp_s = _parse_ts(sales_df["responded_at"])
+            responded_today += int(((rp_s >= start) & (rp_s <= end)).sum())
     masks = _ticket_queue_count_masks(df_in_view)
     daily_task_count = int(masks["pending"].sum())
     unattended_count = int(masks["unattended"].sum())
@@ -19004,11 +19091,11 @@ def _unified_row_updated_ts(row: dict[str, object]) -> float:
 
 def _sales_rows_for_resort_bundle(
     sales_df: pd.DataFrame | None,
-) -> tuple[tuple[str, str, str, str, str, str, str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str, str, str, str, str, str, str, str], ...]:
     """Compact hashable rows — one pass input for the resort unified cache."""
     if sales_df is None or sales_df.empty:
         return ()
-    out: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+    out: list[tuple[str, str, str, str, str, str, str, str, str, str, str]] = []
     for rec in sales_df.to_dict("records"):
         out.append(
             (
@@ -19021,30 +19108,83 @@ def _sales_rows_for_resort_bundle(
                 str(rec.get("description") or rec.get("additional_info") or ""),
                 str(rec.get("updated_at") or ""),
                 str(rec.get("last_assigned_at") or ""),
+                str(rec.get("field_response") or ""),
+                str(rec.get("responded_at") or ""),
             )
         )
     return tuple(out)
 
 
+def _resort_status_has_pending_field_review(
+    *,
+    status: str,
+    field_response: str,
+    responded_at: str,
+    last_assigned_at: str,
+) -> bool:
+    """True when a site-visit reply is waiting in Needs Review.
+
+    Older bot builds left status as Investigation/Regional after a reply; treat
+    those the same as status Open until backfilled.
+    """
+    if status == "Open":
+        return True
+    if status not in (SC_STATUS_INVESTIGATION, SC_STATUS_REGIONAL):
+        return False
+    if not (field_response or "").strip():
+        return False
+    if not (responded_at or "").strip():
+        return False
+    resp = _parse_ts_value(responded_at)
+    assigned = _parse_ts_value(last_assigned_at)
+    if resp is None:
+        return False
+    if assigned is None:
+        return True
+    return resp >= assigned
+
+
 @st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
 def _cached_resort_unified_bundle(
-    rows: tuple[tuple[str, str, str, str, str, str, str, str, str], ...],
+    rows: tuple[tuple[str, str, str, str, str, str, str, str, str, str, str], ...],
 ) -> dict[str, object]:
     """Queue counts + pre-built resort rows keyed by unified sidebar queue."""
     counts = {q: 0 for q in QUEUE_ORDER}
     by_queue: dict[str, list[dict[str, object]]] = {q: [] for q in QUEUE_ORDER}
-    for rid, ref, status_raw, cat, eng, eng2, notes, updated, last_assigned in rows:
+    for (
+        rid,
+        ref,
+        status_raw,
+        cat,
+        eng,
+        eng2,
+        notes,
+        updated,
+        last_assigned,
+        field_response,
+        responded_at,
+    ) in rows:
         if not ref:
             continue
         status = _sc_effective_status(status_raw)
-        queue = _RESORT_STATUS_TO_UNIFIED_QUEUE.get(status)
-        if not queue:
-            continue
+        if _resort_status_has_pending_field_review(
+            status=status,
+            field_response=field_response,
+            responded_at=responded_at,
+            last_assigned_at=last_assigned,
+        ):
+            queue = "Needs Review"
+            display_status = "Open"
+        else:
+            queue = _RESORT_STATUS_TO_UNIFIED_QUEUE.get(status)
+            display_status = status_raw
+            if not queue:
+                continue
         counts[queue] += 1
         rec: dict[str, object] = {
             "id": rid,
             "case_ref": ref,
-            "status": status_raw,
+            "status": display_status,
             "field_task_category": cat,
             "sales_category": cat,
             "assigned_to": eng,
@@ -19052,6 +19192,8 @@ def _cached_resort_unified_bundle(
             "description": notes,
             "updated_at": updated or None,
             "last_assigned_at": last_assigned or None,
+            "field_response": field_response or None,
+            "responded_at": responded_at or None,
         }
         by_queue[queue].append(_resort_row_to_unified_dict(rec))
     for queue in QUEUE_ORDER:
@@ -21522,7 +21664,7 @@ def _render_dispatch_csm_dashboard(
         st.session_state[aq_key] = "Daily Task"
 
     assigned_today, responded_today, daily_task_count, unattended_count = (
-        _dispatch_today_metrics(df_all, df_in_view=df)
+        _dispatch_today_metrics(df_all, df_in_view=df, sales_df=sales_df)
     )
     residential_queue_counts = {
         "Daily Task": int(masks["pending"].sum()),
