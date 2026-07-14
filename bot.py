@@ -1754,7 +1754,9 @@ def _db_complete_ticket_field_response(
                 ticket_number,
             )
             return
+        # Mirror residential: field reply lands in admin Needs Review (status Open).
         payload: dict[str, Any] = {
+            "status": "Open",
             "updated_at": responded_at,
             "responded_at": responded_at,
             "field_response": field_response,
@@ -1766,7 +1768,7 @@ def _db_complete_ticket_field_response(
         _execute_sales_update(payload, ticket_number)
         row = sales_row
         log.info(
-            "field response saved sales case=%s photo=%s",
+            "field response saved sales case=%s status=Open(Needs Review) photo=%s",
             ticket_number,
             bool(update_photo_url and photo_url),
         )
