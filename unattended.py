@@ -171,7 +171,12 @@ async def run_unattended_nudges(
     attendance_table: str,
     send_telegram: Any | None = None,
 ) -> dict[str, int]:
-    """Send nudges for eligible Pending tickets. ``send_telegram`` is async ``(row) -> None``."""
+    """Send nudges for eligible Pending tickets.
+
+    ``send_telegram`` is async ``(row) -> None`` or
+    ``(row) -> (chat_id, message_id) | None`` so the nudge Telegram message
+    can be stored for field-reply capture.
+    """
     pending = _fetch_daily_task_tickets(
         client, tickets_table=tickets_table, nudge_not_sent=True
     )
@@ -188,16 +193,50 @@ async def run_unattended_nudges(
         ticket = str(row.get("ticket_number") or "")
         if not ticket:
             continue
+        tg_ref: tuple[int, int] | None = None
         if send_telegram is not None:
             try:
-                await send_telegram(row)
+                result = await send_telegram(row)
+                if (
+                    isinstance(result, tuple)
+                    and len(result) == 2
+                    and result[0] is not None
+                    and result[1] is not None
+                ):
+                    tg_ref = (int(result[0]), int(result[1]))
             except Exception:
                 log.exception("nudge telegram failed for %s", ticket)
                 continue
+        payload: dict[str, object] = {
+            "unattended_nudge_sent_at": now_iso,
+            "updated_at": now_iso,
+        }
+        if tg_ref is not None:
+            payload["nudge_telegram_chat_id"] = tg_ref[0]
+            payload["nudge_telegram_message_id"] = tg_ref[1]
         try:
-            client.table(tickets_table).update(
-                {"unattended_nudge_sent_at": now_iso, "updated_at": now_iso}
-            ).eq("ticket_number", ticket).execute()
+            client.table(tickets_table).update(payload).eq(
+                "ticket_number", ticket
+            ).execute()
+        except Exception as exc:
+            # Pre-migration DBs may lack nudge_telegram_* — retry without them.
+            msg = str(exc).lower()
+            if tg_ref is not None and (
+                "nudge_telegram_" in msg or "pgrst204" in msg or "42703" in msg
+            ):
+                payload.pop("nudge_telegram_chat_id", None)
+                payload.pop("nudge_telegram_message_id", None)
+                try:
+                    client.table(tickets_table).update(payload).eq(
+                        "ticket_number", ticket
+                    ).execute()
+                except Exception:
+                    log.exception("nudge db update failed for %s", ticket)
+                    continue
+            else:
+                log.exception("nudge db update failed for %s", ticket)
+                continue
+        try:
             client.table(attendance_table).insert(
                 {
                     "ticket_number": ticket,
@@ -212,8 +251,8 @@ async def run_unattended_nudges(
                 }
             ).execute()
         except Exception:
-            log.exception("nudge db update failed for %s", ticket)
-            continue
+            log.exception("nudge attendance log failed for %s", ticket)
+            # Ticket already marked nudged; count as sent.
         sent += 1
     return {"sent": sent, "skipped": skipped, "scanned": len(pending)}
 

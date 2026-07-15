@@ -3113,6 +3113,8 @@ _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
     "updated_at",
     "marked_unattended_at",
     "unattended_nudge_sent_at",
+    "nudge_telegram_chat_id",
+    "nudge_telegram_message_id",
     "assignment_telegram_chat_id",
     "assignment_telegram_message_id",
     "dashboard_assigned_by",
@@ -3492,6 +3494,8 @@ def _move_to_on_hold(ticket_number: str, *, operator_id: str) -> None:
             "photo_url": None,
             "responded_at": None,
             "unattended_nudge_sent_at": None,
+            "nudge_telegram_chat_id": None,
+            "nudge_telegram_message_id": None,
             "follow_up_at": None,
             "follow_up_note": None,
             "updated_at": now_iso,
@@ -3930,6 +3934,8 @@ def _set_ticket_status(
     payload: dict[str, object] = {"status": new_status, "updated_at": now_iso}
     if new_status == STATUS_DAILY_TASK:
         payload["unattended_nudge_sent_at"] = None
+        payload["nudge_telegram_chat_id"] = None
+        payload["nudge_telegram_message_id"] = None
     if new_status != STATUS_UNDER_INVESTIGATION:
         payload["follow_up_at"] = None
         payload["follow_up_note"] = None
@@ -11989,12 +11995,14 @@ def _cc_insert_assignment(
         "photo_url": None,
         "last_assigned_at": now_iso,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
     if assigned_to_2:
         row["assigned_to_2"] = assigned_to_2
-    for _ in range(4):
+    for _ in range(6):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
             break
@@ -12043,10 +12051,12 @@ def _cc_insert_pending_unassigned(
         "photo_url": None,
         "last_assigned_at": None,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
-    for _ in range(4):
+    for _ in range(6):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
             break
@@ -12107,11 +12117,13 @@ def _cc_insert_transferred_ticket(
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
     }
     if handle:
         la = last_assigned_at if last_assigned_at else None
         row["last_assigned_at"] = la if la else now_iso
-    for _ in range(4):
+    for _ in range(6):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
             break
@@ -12188,6 +12200,8 @@ def _cc_reassign_ticket(
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
         "assigned_to_2": assigned_to_2,
@@ -12343,6 +12357,8 @@ def _cc_patch_assignment_fields(
     if first_assignee or assignee_changed:
         updates["last_assigned_at"] = now_iso
         updates["unattended_nudge_sent_at"] = None
+        updates["nudge_telegram_chat_id"] = None
+        updates["nudge_telegram_message_id"] = None
     _cc_execute_ticket_update(client, updates, ticket_number)
     _cc_insert_attendance_log(
         client,
@@ -19547,6 +19563,8 @@ def _reopen_ticket_to_daily_task(
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
