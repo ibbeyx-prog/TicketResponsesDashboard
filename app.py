@@ -3113,6 +3113,8 @@ _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
     "updated_at",
     "marked_unattended_at",
     "unattended_nudge_sent_at",
+    "nudge_telegram_chat_id",
+    "nudge_telegram_message_id",
     "assignment_telegram_chat_id",
     "assignment_telegram_message_id",
     "dashboard_assigned_by",
@@ -3492,6 +3494,8 @@ def _move_to_on_hold(ticket_number: str, *, operator_id: str) -> None:
             "photo_url": None,
             "responded_at": None,
             "unattended_nudge_sent_at": None,
+            "nudge_telegram_chat_id": None,
+            "nudge_telegram_message_id": None,
             "follow_up_at": None,
             "follow_up_note": None,
             "updated_at": now_iso,
@@ -3930,6 +3934,8 @@ def _set_ticket_status(
     payload: dict[str, object] = {"status": new_status, "updated_at": now_iso}
     if new_status == STATUS_DAILY_TASK:
         payload["unattended_nudge_sent_at"] = None
+        payload["nudge_telegram_chat_id"] = None
+        payload["nudge_telegram_message_id"] = None
     if new_status != STATUS_UNDER_INVESTIGATION:
         payload["follow_up_at"] = None
         payload["follow_up_note"] = None
@@ -8796,12 +8802,22 @@ def _sync_perf_weekly_pick_from_sidebar(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    """Keep Weekly date picker aligned with the Performance sidebar range."""
+    """Keep Weekly date picker aligned with the Performance sidebar range.
+
+    When the sidebar window overlaps the current Sun–Sat week, default to
+    **this week** (not range start) so recent Resolves / Admin closes show up.
+    """
     sig = f"{range_start.isoformat()}|{range_end.isoformat()}"
     if st.session_state.get(_PERF_WEEKLY_SIDEBAR_SIG_KEY) == sig:
         return
     st.session_state[_PERF_WEEKLY_SIDEBAR_SIG_KEY] = sig
-    st.session_state[_PERF_WEEKLY_DATE_KEY] = range_start.tz_convert(LOCAL_TZ).date()
+    rs_local = range_start.tz_convert(LOCAL_TZ).date()
+    re_local = range_end.tz_convert(LOCAL_TZ).date()
+    _, _, this_start, this_end = _perf_calendar_week_range_utc(week_offset=0)
+    if this_start <= re_local and this_end >= rs_local:
+        st.session_state[_PERF_WEEKLY_DATE_KEY] = this_start
+    else:
+        st.session_state[_PERF_WEEKLY_DATE_KEY] = rs_local
 
 
 def _init_perf_session_state() -> None:
@@ -10241,18 +10257,20 @@ def _perf_csm_attended_in_week(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> pd.DataFrame:
-    """CSM tickets in On Hold / Resolved / Investigation with activity in the week."""
+    """CSM tickets in On Hold / Resolved / Investigation with activity in the week.
+
+    Includes tickets that were earlier auto-unattended (``marked_unattended_at``)
+    if they later reached an attended status — credit still goes to the assignee
+    (or Admin when undispatched). The permanent unattended flag remains for the
+    Unattended tab / Overview metric only.
+    """
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
-    blocked = _perf_unattended_ticket_numbers(df_all)
     masks = _ticket_queue_count_masks(df_all)
     attended_mask = pd.Series(False, index=df_all.index)
     for key in _CSM_WEEKLY_ATTENDED_KEYS:
         attended_mask |= masks[key]
     part = df_all.loc[attended_mask].copy()
-    if part.empty:
-        return pd.DataFrame()
-    part = _perf_drop_unattended_tickets(part, blocked)
     if part.empty:
         return pd.DataFrame()
     norm = _normalized_status_series(part)
@@ -10270,27 +10288,6 @@ def _perf_csm_attended_in_week(
     part["track"] = "CSM"
     part["_ts"] = _perf_weekly_attended_ts(part)
     return part
-
-
-def _perf_unattended_ticket_numbers(df_all: pd.DataFrame) -> frozenset[str]:
-    """Ticket IDs ever auto-unattended — excluded from attended / credit totals."""
-    if df_all.empty or "ticket_number" not in df_all.columns:
-        return frozenset()
-    mask = _ticket_marked_unattended_mask(df_all)
-    if not mask.any():
-        return frozenset()
-    ids = df_all.loc[mask, "ticket_number"].astype(str).str.strip()
-    return frozenset(t for t in ids.tolist() if t)
-
-
-def _perf_drop_unattended_tickets(
-    df: pd.DataFrame,
-    blocked: frozenset[str],
-) -> pd.DataFrame:
-    if df.empty or not blocked or "ticket_number" not in df.columns:
-        return df
-    keep = ~df["ticket_number"].astype(str).str.strip().isin(blocked)
-    return df.loc[keep].copy()
 
 
 def _perf_sales_attended_in_week(
@@ -10953,7 +10950,7 @@ def _render_perf_weekly_attended_report(
             "Weekly Operational Report",
             key=_PERF_WEEKLY_DATE_KEY,
             help=f"Pick any date in the week — report uses Sun–Sat ({LOCAL_TZ_LABEL}). "
-            "Week defaults from the Performance **Range** sidebar.",
+            "Defaults to the **current** week when it overlaps the Performance Range.",
         )
         range_start, range_end, d0, d1 = _perf_calendar_week_for_date(picked)
         week_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
@@ -11017,7 +11014,7 @@ def _render_perf_weekly_attended_report(
             key=f"perf_weekly_detail_csv_{file_stamp}",
         )
 
-    with st.expander(f"Case list ({len(detail)})", expanded=False):
+    with st.expander(f"Case list ({len(detail)})", expanded=True):
         _render_perf_dataframe(detail)
 
 
@@ -11989,12 +11986,14 @@ def _cc_insert_assignment(
         "photo_url": None,
         "last_assigned_at": now_iso,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
     if assigned_to_2:
         row["assigned_to_2"] = assigned_to_2
-    for _ in range(4):
+    for _ in range(6):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
             break
@@ -12043,10 +12042,12 @@ def _cc_insert_pending_unassigned(
         "photo_url": None,
         "last_assigned_at": None,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
     }
-    for _ in range(4):
+    for _ in range(6):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
             break
@@ -12107,11 +12108,13 @@ def _cc_insert_transferred_ticket(
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
     }
     if handle:
         la = last_assigned_at if last_assigned_at else None
         row["last_assigned_at"] = la if la else now_iso
-    for _ in range(4):
+    for _ in range(6):
         try:
             client.table(TICKETS_TABLE).insert(row).execute()
             break
@@ -12188,6 +12191,8 @@ def _cc_reassign_ticket(
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "additional_info": additional_info,
         "dashboard_assigned_by": operator_id,
         "assigned_to_2": assigned_to_2,
@@ -12343,6 +12348,8 @@ def _cc_patch_assignment_fields(
     if first_assignee or assignee_changed:
         updates["last_assigned_at"] = now_iso
         updates["unattended_nudge_sent_at"] = None
+        updates["nudge_telegram_chat_id"] = None
+        updates["nudge_telegram_message_id"] = None
     _cc_execute_ticket_update(client, updates, ticket_number)
     _cc_insert_attendance_log(
         client,
@@ -19547,6 +19554,8 @@ def _reopen_ticket_to_daily_task(
         "updated_at": now_iso,
         "last_assigned_at": now_iso,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
         "field_response": None,
         "field_responded_by": None,
         "photo_url": None,
@@ -22251,10 +22260,22 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
 
 
 def _perf_overview_df_for_solo_shared(df_all: pd.DataFrame) -> pd.DataFrame:
-    """Residential tickets eligible for Overview solo/shared (excludes unattended tag)."""
+    """Residential tickets eligible for Overview solo/shared credit.
+
+    Drops pure auto-unattended backlog, but keeps tickets that later reached
+    On Hold / Resolved / Investigation so the attendee still receives credit.
+    """
     if df_all.empty:
         return df_all
-    return df_all.loc[~_ticket_marked_unattended_mask(df_all)].copy()
+    marked = _ticket_marked_unattended_mask(df_all)
+    if not marked.any():
+        return df_all
+    status = _normalized_status_series(df_all)
+    later_attended = status.isin(
+        [STATUS_ON_HOLD, STATUS_RESOLVED, STATUS_UNDER_INVESTIGATION]
+    )
+    drop = marked & ~later_attended
+    return df_all.loc[~drop].copy()
 
 
 def _perf_overview_ticket_numbers(df_all: pd.DataFrame) -> list[str]:

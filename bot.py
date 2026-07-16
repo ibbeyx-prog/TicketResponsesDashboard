@@ -1811,6 +1811,47 @@ def _assignment_telegram_refs(update: Update) -> tuple[int | None, int | None]:
     return int(msg.chat_id), int(msg.message_id)
 
 
+def _db_ticket_by_nudge_telegram_message(
+    chat_id: int | None, message_id: int | None
+) -> str | None:
+    """Resolve a Daily Task ticket from a swipe-reply to the 6h nudge message.
+
+    Works even when Telegram delivers the parent as ``InaccessibleMessage``
+    (no text) — only ``message_id`` is required.
+    """
+    if chat_id is None or message_id is None:
+        return None
+    try:
+        res = (
+            supabase.table(TICKETS_TABLE)
+            .select("ticket_number, status")
+            .eq("nudge_telegram_chat_id", int(chat_id))
+            .eq("nudge_telegram_message_id", int(message_id))
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        col = _parse_missing_column(str(exc))
+        if col and col.startswith("nudge_telegram_"):
+            _TICKETS_MISSING_COLUMNS.add(col)
+            return None
+        log.exception(
+            "nudge telegram message lookup failed chat=%s msg=%s",
+            chat_id,
+            message_id,
+        )
+        return None
+    rows = res.data or []
+    if not rows:
+        return None
+    ticket = str(rows[0].get("ticket_number") or "").strip()
+    if not ticket:
+        return None
+    if not _ticket_field_reply_eligible(ticket):
+        return None
+    return ticket
+
+
 def _db_insert_assignment(
     ticket_number: str,
     assigned_to: str,
@@ -1833,6 +1874,8 @@ def _db_insert_assignment(
         "additional_info": additional_info,
         "dashboard_assigned_by": None,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
     }
     if assignment_telegram_chat_id is not None:
         row["assignment_telegram_chat_id"] = int(assignment_telegram_chat_id)
@@ -1842,7 +1885,7 @@ def _db_insert_assignment(
     # column hasn't been migrated yet on a given environment, drop it and
     # retry. Each missing column gets one strip-and-retry, so we cope with
     # both being absent without an infinite loop.
-    for _ in range(4):
+    for _ in range(6):
         try:
             supabase.table(TICKETS_TABLE).insert(row).execute()
             break
@@ -1971,6 +2014,8 @@ def _db_reassign_ticket(
         "additional_info": additional_info,
         "dashboard_assigned_by": None,
         "unattended_nudge_sent_at": None,
+        "nudge_telegram_chat_id": None,
+        "nudge_telegram_message_id": None,
     }
     if assignment_telegram_chat_id is not None:
         updates["assignment_telegram_chat_id"] = int(assignment_telegram_chat_id)
@@ -2048,17 +2093,21 @@ def _resolve_field_group_chat_id() -> int | str | None:
         return raw
 
 
-async def _send_unattended_nudge_telegram(row: dict) -> None:
+async def _send_unattended_nudge_telegram(
+    row: dict,
+) -> tuple[int, int] | None:
+    """Post the 6h reminder; return ``(chat_id, message_id)`` for reply capture."""
     chat_id = _resolve_field_group_chat_id()
     if chat_id is None:
         log.warning("skip telegram nudge: TELEGRAM_GROUP_CHAT_ID not set")
-        return
+        return None
     text = nudge_message(
         assigned_to=str(row.get("assigned_to") or ""),
         ticket_number=str(row.get("ticket_number") or ""),
         task_category=str(row.get("task_category") or ""),
     )
-    await bot_app.bot.send_message(chat_id=chat_id, text=text)
+    sent = await bot_app.bot.send_message(chat_id=chat_id, text=text)
+    return int(chat_id), int(sent.message_id)
 
 
 def _verify_cron_secret(request: Request) -> None:
@@ -2590,13 +2639,28 @@ async def ingest_telethon_field_media_reply(event: object) -> bool:
         user_id=int(getattr(sender, "id", 0)) if sender else None,
     )
     reply_text = (getattr(msg, "message", None) or "").strip() or None
-    ticket_number = _resolve_ticket_for_media_reply(parent_blob, username, reply_text)
+    chat_id = int(getattr(event, "chat_id", 0) or 0) or None
+    parent_msg_id = int(getattr(parent, "id", 0) or 0) or None
+    nudge_ticket = _db_ticket_by_nudge_telegram_message(chat_id, parent_msg_id)
+    if nudge_ticket:
+        ticket_number = nudge_ticket
+        log.info(
+            "telethon media reply matched ticket %s via nudge message id=%s",
+            ticket_number,
+            parent_msg_id,
+        )
+    else:
+        ticket_number = _resolve_ticket_for_media_reply(
+            parent_blob, username, reply_text
+        )
     if not ticket_number:
         log.warning(
-            "telethon media reply: no ticket match user=%s parent=%r caption=%r",
+            "telethon media reply: no ticket match user=%s parent=%r caption=%r "
+            "parent_msg=%s",
             replier_label,
             parent_blob[:200],
             (reply_text or "")[:80],
+            parent_msg_id,
         )
         return False
 
@@ -2754,7 +2818,9 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Assignee completes by replying to the assignment message (original group flow).
 
     Works for assignments posted by a coordinator in the group **or** by the
-  dashboard (bot account). Not gated on ``TELEGRAM_ALLOWED_USERNAMES``.
+  dashboard (bot account). Also accepts swipe-replies to the 6h unattended
+  nudge when ``nudge_telegram_message_id`` is stored. Not gated on
+  ``TELEGRAM_ALLOWED_USERNAMES``.
     """
     msg = update.effective_message
     if not msg or not msg.reply_to_message:
@@ -2764,14 +2830,26 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     parent = msg.reply_to_message
     parent_blob = _parent_assignment_blob(parent) if isinstance(parent, Message) else ""
     reply_text = (msg.caption or msg.text or "").strip() or None
+    parent_msg_id = getattr(parent, "message_id", None)
+    try:
+        parent_msg_id_int = int(parent_msg_id) if parent_msg_id is not None else None
+    except (TypeError, ValueError):
+        parent_msg_id_int = None
+    nudge_ticket = _db_ticket_by_nudge_telegram_message(
+        int(msg.chat_id) if msg.chat_id is not None else None,
+        parent_msg_id_int,
+    )
+    trust_nudge = bool(nudge_ticket)
 
     log.info(
-        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r trust_assignee_line=%s",
+        "handle_field_reply fired: chat=%s user=@%s text=%r parent=%r "
+        "trust_assignee_line=%s trust_nudge=%s",
         _chat_id(update),
         username,
         (reply_text[:120] if reply_text else None),
         parent_blob[:160],
         _looks_like_coordinator_assignment(_normalize_assignment_blob(parent_blob)),
+        trust_nudge,
     )
 
     trust_assignment = _looks_like_coordinator_assignment(
@@ -2781,7 +2859,14 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         msg.document
         and (msg.document.mime_type or "").startswith("image/")
     )
-    if has_reply_photo:
+    if trust_nudge:
+        ticket_number = nudge_ticket
+        log.info(
+            "field_reply matched ticket %s via nudge telegram message id=%s",
+            ticket_number,
+            parent_msg_id_int,
+        )
+    elif has_reply_photo:
         ticket_number = _resolve_ticket_for_media_reply(
             parent_blob, username, reply_text
         )
@@ -2791,10 +2876,11 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     if not ticket_number:
         log.warning(
-            "field_reply no ticket match chat=%s user=@%s parent_head=%r",
+            "field_reply no ticket match chat=%s user=@%s parent_head=%r parent_msg=%s",
             _chat_id(update),
             username,
             parent_blob[:400],
+            parent_msg_id_int,
         )
         if _is_group_chat(update):
             await _group_field_nudge(
@@ -2836,7 +2922,10 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ids_in_reply = _extract_ticket_ids(reply_text) if reply_text else []
     explicit_ticket_in_reply = ticket_number in ids_in_reply
     allow_any_phone = (
-        trust_assignment or explicit_ticket_in_reply or has_reply_photo
+        trust_assignment
+        or trust_nudge
+        or explicit_ticket_in_reply
+        or has_reply_photo
     )
     if not allow_any_phone and not _sender_matches_assigned_to(
         row.get("assigned_to"), username
