@@ -8802,12 +8802,22 @@ def _sync_perf_weekly_pick_from_sidebar(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    """Keep Weekly date picker aligned with the Performance sidebar range."""
+    """Keep Weekly date picker aligned with the Performance sidebar range.
+
+    When the sidebar window overlaps the current Sun–Sat week, default to
+    **this week** (not range start) so recent Resolves / Admin closes show up.
+    """
     sig = f"{range_start.isoformat()}|{range_end.isoformat()}"
     if st.session_state.get(_PERF_WEEKLY_SIDEBAR_SIG_KEY) == sig:
         return
     st.session_state[_PERF_WEEKLY_SIDEBAR_SIG_KEY] = sig
-    st.session_state[_PERF_WEEKLY_DATE_KEY] = range_start.tz_convert(LOCAL_TZ).date()
+    rs_local = range_start.tz_convert(LOCAL_TZ).date()
+    re_local = range_end.tz_convert(LOCAL_TZ).date()
+    _, _, this_start, this_end = _perf_calendar_week_range_utc(week_offset=0)
+    if this_start <= re_local and this_end >= rs_local:
+        st.session_state[_PERF_WEEKLY_DATE_KEY] = this_start
+    else:
+        st.session_state[_PERF_WEEKLY_DATE_KEY] = rs_local
 
 
 def _init_perf_session_state() -> None:
@@ -10247,18 +10257,20 @@ def _perf_csm_attended_in_week(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> pd.DataFrame:
-    """CSM tickets in On Hold / Resolved / Investigation with activity in the week."""
+    """CSM tickets in On Hold / Resolved / Investigation with activity in the week.
+
+    Includes tickets that were earlier auto-unattended (``marked_unattended_at``)
+    if they later reached an attended status — credit still goes to the assignee
+    (or Admin when undispatched). The permanent unattended flag remains for the
+    Unattended tab / Overview metric only.
+    """
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
-    blocked = _perf_unattended_ticket_numbers(df_all)
     masks = _ticket_queue_count_masks(df_all)
     attended_mask = pd.Series(False, index=df_all.index)
     for key in _CSM_WEEKLY_ATTENDED_KEYS:
         attended_mask |= masks[key]
     part = df_all.loc[attended_mask].copy()
-    if part.empty:
-        return pd.DataFrame()
-    part = _perf_drop_unattended_tickets(part, blocked)
     if part.empty:
         return pd.DataFrame()
     norm = _normalized_status_series(part)
@@ -10276,27 +10288,6 @@ def _perf_csm_attended_in_week(
     part["track"] = "CSM"
     part["_ts"] = _perf_weekly_attended_ts(part)
     return part
-
-
-def _perf_unattended_ticket_numbers(df_all: pd.DataFrame) -> frozenset[str]:
-    """Ticket IDs ever auto-unattended — excluded from attended / credit totals."""
-    if df_all.empty or "ticket_number" not in df_all.columns:
-        return frozenset()
-    mask = _ticket_marked_unattended_mask(df_all)
-    if not mask.any():
-        return frozenset()
-    ids = df_all.loc[mask, "ticket_number"].astype(str).str.strip()
-    return frozenset(t for t in ids.tolist() if t)
-
-
-def _perf_drop_unattended_tickets(
-    df: pd.DataFrame,
-    blocked: frozenset[str],
-) -> pd.DataFrame:
-    if df.empty or not blocked or "ticket_number" not in df.columns:
-        return df
-    keep = ~df["ticket_number"].astype(str).str.strip().isin(blocked)
-    return df.loc[keep].copy()
 
 
 def _perf_sales_attended_in_week(
@@ -10959,7 +10950,7 @@ def _render_perf_weekly_attended_report(
             "Weekly Operational Report",
             key=_PERF_WEEKLY_DATE_KEY,
             help=f"Pick any date in the week — report uses Sun–Sat ({LOCAL_TZ_LABEL}). "
-            "Week defaults from the Performance **Range** sidebar.",
+            "Defaults to the **current** week when it overlaps the Performance Range.",
         )
         range_start, range_end, d0, d1 = _perf_calendar_week_for_date(picked)
         week_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
@@ -11023,7 +11014,7 @@ def _render_perf_weekly_attended_report(
             key=f"perf_weekly_detail_csv_{file_stamp}",
         )
 
-    with st.expander(f"Case list ({len(detail)})", expanded=False):
+    with st.expander(f"Case list ({len(detail)})", expanded=True):
         _render_perf_dataframe(detail)
 
 
@@ -22269,10 +22260,22 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
 
 
 def _perf_overview_df_for_solo_shared(df_all: pd.DataFrame) -> pd.DataFrame:
-    """Residential tickets eligible for Overview solo/shared (excludes unattended tag)."""
+    """Residential tickets eligible for Overview solo/shared credit.
+
+    Drops pure auto-unattended backlog, but keeps tickets that later reached
+    On Hold / Resolved / Investigation so the attendee still receives credit.
+    """
     if df_all.empty:
         return df_all
-    return df_all.loc[~_ticket_marked_unattended_mask(df_all)].copy()
+    marked = _ticket_marked_unattended_mask(df_all)
+    if not marked.any():
+        return df_all
+    status = _normalized_status_series(df_all)
+    later_attended = status.isin(
+        [STATUS_ON_HOLD, STATUS_RESOLVED, STATUS_UNDER_INVESTIGATION]
+    )
+    drop = marked & ~later_attended
+    return df_all.loc[~drop].copy()
 
 
 def _perf_overview_ticket_numbers(df_all: pd.DataFrame) -> list[str]:
