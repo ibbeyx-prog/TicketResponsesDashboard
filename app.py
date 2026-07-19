@@ -73,6 +73,7 @@ import re
 from collections import Counter
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
+from calendar import monthrange
 from pathlib import Path
 
 import pandas as pd
@@ -1022,9 +1023,6 @@ _SC_ATTENDED_STATUSES: frozenset[str] = frozenset(
         SC_STATUS_RESOLVED,
     }
 )
-_PERF_WEEKLY_DATE_KEY = "perf_weekly_pick_date"
-_PERF_WEEKLY_WEEK_KEY = _PERF_WEEKLY_DATE_KEY  # legacy alias (old selectbox key name)
-_PERF_WEEKLY_SIDEBAR_SIG_KEY = "_perf_weekly_sidebar_sig"
 # CSM rows counted in Weekly attended (excludes Daily Task / Open / Unattended).
 _CSM_WEEKLY_ATTENDED_KEYS: tuple[str, ...] = (
     "on_hold",
@@ -1518,6 +1516,7 @@ _DASH_TIME_PRESET_KEY = "_dash_time_preset"
 _DASH_TIME_PRESET_OPTIONS: tuple[str, ...] = (
     "Today",
     "This week",
+    "This month",
     "Last 30 days",
     "Pick dates",
 )
@@ -1525,10 +1524,16 @@ _DASH_SEARCH_FROM_DATE_KEY = "_dash_search_from_date"
 _DASH_SEARCH_TO_DATE_KEY = "_dash_search_to_date"
 _DASH_PREV_PRESET_KEY = "_dash_prev_preset"
 _DASH_RANGE_CUSTOM_OPEN_KEY = "_dash_range_custom_open"
-_DASH_TIME_PRESET_MENU: tuple[str, ...] = ("Today", "This week", "Last 30 days")
+_DASH_TIME_PRESET_MENU: tuple[str, ...] = (
+    "Today",
+    "This week",
+    "This month",
+    "Last 30 days",
+)
 _DASH_TIME_PRESET_PILL_KEYS: dict[str, str] = {
     "Today": "bon_dash_range_pill_today",
     "This week": "bon_dash_range_pill_week",
+    "This month": "bon_dash_range_pill_month",
     "Last 30 days": "bon_dash_range_pill_30d",
 }
 _LEGACY_TIME_PRESET_MAP: dict[str, str] = {
@@ -1563,7 +1568,7 @@ _PERF_RANGE_FROM_KEY = "_perf_range_from_utc"
 _PERF_RANGE_TO_KEY = "_perf_range_to_utc"
 _PERF_VIEW_OPTIONS: tuple[str, ...] = (
     "Overview",
-    "Weekly",
+    "Summary",
     "Case info",
     "Handled",
     "On hold",
@@ -8718,6 +8723,12 @@ def _preset_range_utc(preset: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     if preset == "This week":
         start, end, _, _ = _perf_calendar_week_range_utc(week_offset=0)
         return start, end
+    if preset == "This month":
+        start, end, _, _ = _perf_calendar_month_range_utc(month_offset=0)
+        return start, end
+    if preset == "Last month":
+        start, end, _, _ = _perf_calendar_month_range_utc(month_offset=-1)
+        return start, end
     if preset == "Last 30 days":
         return now - pd.Timedelta(days=30), now
     start, end, _, _ = _perf_calendar_week_range_utc(week_offset=0)
@@ -8783,6 +8794,8 @@ def _sync_perf_range_from_ui(range_val: str) -> None:
     preset_map = {
         "Today": "Today",
         "This week": "This week",
+        "This month": "This month",
+        "Last month": "Last month",
         "Last 30 days": "Last 30 days",
     }
     start, end = _preset_range_utc(preset_map.get(range_val, "This week"))
@@ -8798,28 +8811,6 @@ def _ensure_perf_custom_range_widgets() -> None:
     st.session_state["perf_custom_to"] = end.tz_convert(LOCAL_TZ).date()
 
 
-def _sync_perf_weekly_pick_from_sidebar(
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> None:
-    """Keep Weekly date picker aligned with the Performance sidebar range.
-
-    When the sidebar window overlaps the current Sun–Sat week, default to
-    **this week** (not range start) so recent Resolves / Admin closes show up.
-    """
-    sig = f"{range_start.isoformat()}|{range_end.isoformat()}"
-    if st.session_state.get(_PERF_WEEKLY_SIDEBAR_SIG_KEY) == sig:
-        return
-    st.session_state[_PERF_WEEKLY_SIDEBAR_SIG_KEY] = sig
-    rs_local = range_start.tz_convert(LOCAL_TZ).date()
-    re_local = range_end.tz_convert(LOCAL_TZ).date()
-    _, _, this_start, this_end = _perf_calendar_week_range_utc(week_offset=0)
-    if this_start <= re_local and this_end >= rs_local:
-        st.session_state[_PERF_WEEKLY_DATE_KEY] = this_start
-    else:
-        st.session_state[_PERF_WEEKLY_DATE_KEY] = rs_local
-
-
 def _init_perf_session_state() -> None:
     legacy_focus = st.session_state.pop("perf_focus_person", None)
     if _PERF_FOCUS_ASSIGNEE_KEY not in st.session_state:
@@ -8831,6 +8822,9 @@ def _init_perf_session_state() -> None:
         st.session_state[_PERF_RANGE_PRESET_KEY] = "This week"
     if _PERF_ACTIVE_VIEW_KEY not in st.session_state:
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Overview"
+    # Rename legacy "Weekly" nav label → "Summary"
+    if st.session_state.get(_PERF_ACTIVE_VIEW_KEY) == "Weekly":
+        st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
     if _PERF_SELECTED_ENGINEER_KEY not in st.session_state:
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
     if _PERF_RANGE_FROM_KEY not in st.session_state:
@@ -8858,6 +8852,7 @@ def _dash_time_preset_display(preset: str) -> str:
     labels = {
         "Today": "Today",
         "This week": "This week",
+        "This month": "This month",
         "Last 30 days": "Last 30 Days",
         "Pick dates": "Custom Date Range",
     }
@@ -8869,6 +8864,7 @@ def _dash_time_preset_trigger_label(preset: str) -> str:
     labels = {
         "Today": "Today",
         "This week": "This week",
+        "This month": "This month",
         "Last 30 days": "Last 30 Days",
         "Pick dates": "Custom",
     }
@@ -10159,6 +10155,61 @@ def _perf_calendar_week_range_utc(
     )
 
 
+def _add_calendar_months(d: date, months: int) -> date:
+    """Shift ``d`` by ``months``, clamping the day to the target month length."""
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    last = monthrange(y, m)[1]
+    return date(y, m, min(d.day, last))
+
+
+def _perf_calendar_month_range_utc(
+    *,
+    month_offset: int = 0,
+) -> tuple[pd.Timestamp, pd.Timestamp, date, date]:
+    """Calendar month in ``LOCAL_TZ``. ``month_offset`` 0 = this month."""
+    today = pd.Timestamp.now(tz=LOCAL_TZ).date()
+    month_start = _add_calendar_months(date(today.year, today.month, 1), month_offset)
+    month_end = date(
+        month_start.year,
+        month_start.month,
+        monthrange(month_start.year, month_start.month)[1],
+    )
+    return (
+        _local_date_start(month_start),
+        _local_date_end(month_end),
+        month_start,
+        month_end,
+    )
+
+
+def _perf_calendar_month_for_date(
+    any_date: date,
+) -> tuple[pd.Timestamp, pd.Timestamp, date, date]:
+    """Calendar month containing ``any_date`` in ``LOCAL_TZ``."""
+    month_start = date(any_date.year, any_date.month, 1)
+    month_end = date(
+        month_start.year,
+        month_start.month,
+        monthrange(month_start.year, month_start.month)[1],
+    )
+    return (
+        _local_date_start(month_start),
+        _local_date_end(month_end),
+        month_start,
+        month_end,
+    )
+
+
+def _perf_month_offset_for_date(any_date: date) -> int:
+    """Month offset from the current calendar month (0 = this month)."""
+    _, _, this_start, _ = _perf_calendar_month_range_utc(month_offset=0)
+    _, _, pick_start, _ = _perf_calendar_month_for_date(any_date)
+    return (pick_start.year - this_start.year) * 12 + (
+        pick_start.month - this_start.month
+    )
+
+
 def _perf_calendar_week_for_date(any_date: date) -> tuple[pd.Timestamp, pd.Timestamp, date, date]:
     """Sun–Sat calendar week containing ``any_date`` in ``LOCAL_TZ``."""
     days_since_sun = (any_date.weekday() + 1) % 7
@@ -10765,14 +10816,20 @@ def _render_perf_weekly_executive_dashboard(
     week_start: date,
     week_end: date,
     week_offset: int,
+    period: str = "Weekly",
 ) -> None:
     """Executive summary layout — Streamlit + Altair (no React)."""
     detail = bundle.get("detail")
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
     metrics = _perf_weekly_executive_metrics(detail_df)
-    metrics["trend_df"] = _perf_weekly_resolution_trend(
-        df_all, sales_all, end_week_offset=week_offset, weeks=4
-    )
+    if period == "Monthly":
+        metrics["trend_df"] = _perf_monthly_resolution_trend(
+            df_all, sales_all, end_month_offset=week_offset, months=4
+        )
+    else:
+        metrics["trend_df"] = _perf_weekly_resolution_trend(
+            df_all, sales_all, end_week_offset=week_offset, weeks=4
+        )
 
     st.markdown("#### KPI Overview & Outcome Breakdown")
     left, right = st.columns([1.35, 1])
@@ -10891,36 +10948,57 @@ def _render_perf_weekly_executive_dashboard(
             )
 
 
-def _perf_weekly_quick_options() -> list[tuple[str, date]]:
-    """This week + last 3 Sun–Sat weeks for one-click navigation."""
-    options: list[tuple[str, date]] = []
-    for offset in (0, -1, -2, -3):
-        _, _, ws, we = _perf_calendar_week_range_utc(week_offset=offset)
-        span = f"{ws.strftime('%d %b')} – {we.strftime('%d %b')}"
-        if offset == 0:
-            label = f"This week ({span})"
-        elif offset == -1:
-            label = f"Last week ({span})"
+def _perf_monthly_resolution_trend(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    end_month_offset: int = 0,
+    months: int = 4,
+) -> pd.DataFrame:
+    """Resolution rate for the last ``months`` calendar months."""
+    rows: list[dict[str, object]] = []
+    for offset in range(end_month_offset - months + 1, end_month_offset + 1):
+        rs, re, d0, _d1 = _perf_calendar_month_range_utc(month_offset=offset)
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all if sales_all is not None else pd.DataFrame(),
+            range_start=rs,
+            range_end=re,
+        )
+        detail = bundle.get("detail")
+        detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+        total = int(bundle.get("total") or 0)
+        if total == 0 or detail_df.empty:
+            rate = 0
         else:
-            label = f"{abs(offset)} weeks ago ({span})"
-        options.append((label, ws))
-    return options
-
-
-def _apply_perf_weekly_nav_actions() -> None:
-    """Apply pending ◀/▶ or quick-week jumps before the date widget renders."""
-    shift = st.session_state.pop("_perf_weekly_shift", None)
-    jump = st.session_state.pop("_perf_weekly_jump", None)
-    if jump is not None:
-        st.session_state[_PERF_WEEKLY_DATE_KEY] = jump
-        return
-    if shift is None:
-        return
-    current = st.session_state.get(_PERF_WEEKLY_DATE_KEY)
-    if not isinstance(current, date):
-        _, _, current, _ = _perf_calendar_week_range_utc(week_offset=0)
-    _, _, ws, _ = _perf_calendar_week_for_date(current)
-    st.session_state[_PERF_WEEKLY_DATE_KEY] = ws + timedelta(weeks=int(shift))
+            resolved = int(
+                detail_df["Status"]
+                .astype(str)
+                .str.strip()
+                .isin([STATUS_RESOLVED, SC_STATUS_RESOLVED])
+                .sum()
+            )
+            # Unique cases: Status is per credit row; use ID when present.
+            if "ID" in detail_df.columns:
+                id_first = detail_df.drop_duplicates(subset=["ID"], keep="first")
+                total = int(id_first["ID"].astype(str).nunique())
+                resolved = int(
+                    id_first["Status"]
+                    .astype(str)
+                    .str.strip()
+                    .isin([STATUS_RESOLVED, SC_STATUS_RESOLVED])
+                    .sum()
+                )
+            rate = int(round(100 * resolved / total)) if total else 0
+        rows.append(
+            {
+                "week": d0.strftime("%b %Y"),
+                "rate": rate,
+                "total": total,
+                "sort": offset,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("sort")
 
 
 def _render_perf_weekly_attended_report(
@@ -10931,17 +11009,22 @@ def _render_perf_weekly_attended_report(
     sidebar_range_end: pd.Timestamp | None = None,
     this_week_bundle: dict[str, object] | None = None,
 ) -> None:
-    """Sun–Sat weekly attended counts — CSM (assignee) + Sales (attended_by)."""
-    if sidebar_range_start is not None:
-        _sync_perf_weekly_pick_from_sidebar(
-            sidebar_range_start,
-            sidebar_range_end or sidebar_range_start,
-        )
-    elif _PERF_WEEKLY_DATE_KEY not in st.session_state:
-        _, _, default_week_start, _ = _perf_calendar_week_range_utc(week_offset=0)
-        st.session_state[_PERF_WEEKLY_DATE_KEY] = default_week_start
+    """Executive attended report for the Performance sidebar Range only."""
+    if sidebar_range_start is None or sidebar_range_end is None:
+        range_start, range_end = _get_perf_range()
+    else:
+        range_start, range_end = sidebar_range_start, sidebar_range_end
 
-    _apply_perf_weekly_nav_actions()
+    d0 = range_start.tz_convert(LOCAL_TZ).date()
+    d1 = range_end.tz_convert(LOCAL_TZ).date()
+    period_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
+    span_days = max(0, (d1 - d0).days) + 1
+    # Drive efficiency trend grain from the sidebar window size.
+    period = "Monthly" if span_days >= 28 else "Weekly"
+    if period == "Monthly":
+        period_offset = _perf_month_offset_for_date(d1)
+    else:
+        period_offset = _perf_week_offset_for_date(d1)
 
     st.markdown(
         """
@@ -10953,16 +11036,11 @@ def _render_perf_weekly_attended_report(
 }
 .weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e8e6e3; margin: 0; }
 .weekly-exec-sub { font-size: 0.85rem; color: #a39e97; margin: 0.15rem 0 0; }
-.weekly-date-wrap [data-testid="stDateInput"] label {
-  font-size: 0.85rem !important; color: #a39e97 !important;
-}
-.weekly-date-wrap [data-testid="stDateInput"] > div {
-  background: #141414 !important;
-  border: 1px solid #374151 !important;
-  border-radius: 8px !important;
-}
 .weekly-date-range {
-  font-size: 0.78rem; color: #D7B491; margin: 0.25rem 0 0; text-align: right;
+  font-size: 0.9rem; color: #D7B491; margin: 0; text-align: right; font-weight: 500;
+}
+.weekly-date-hint {
+  font-size: 0.75rem; color: #a39e97; margin: 0.2rem 0 0; text-align: right;
 }
 </style>
         """,
@@ -10979,75 +11057,9 @@ def _render_perf_weekly_attended_report(
             unsafe_allow_html=True,
         )
     with h_right:
-        st.markdown('<div class="weekly-date-wrap">', unsafe_allow_html=True)
-        quick = _perf_weekly_quick_options()
-        quick_labels = [label for label, _ws in quick]
-        quick_by_label = {label: ws for label, ws in quick}
-        current_pick = st.session_state.get(_PERF_WEEKLY_DATE_KEY)
-        if isinstance(current_pick, date):
-            _, _, cur_start, _ = _perf_calendar_week_for_date(current_pick)
-        else:
-            _, _, cur_start, _ = _perf_calendar_week_range_utc(week_offset=0)
-
-        older_label = "Older week (use date / ◀ ▶)"
-        match_label = next(
-            (label for label, ws in quick if ws == cur_start),
-            older_label,
-        )
-        select_options = [*quick_labels, older_label]
-        # If the active week changed (◀ ▶ / date), resync the Week dropdown.
-        # Do not overwrite when the user just picked a different Week option.
-        if st.session_state.get("_perf_weekly_synced_start") != cur_start:
-            st.session_state["_perf_weekly_quick_select"] = match_label
-            st.session_state["_perf_weekly_synced_start"] = cur_start
-        elif "_perf_weekly_quick_select" not in st.session_state:
-            st.session_state["_perf_weekly_quick_select"] = match_label
-
-        chosen = st.selectbox(
-            "Week",
-            options=select_options,
-            key="_perf_weekly_quick_select",
-            help="This week or any of the previous 3 weeks. "
-            "Use ◀ ▶ or the date for older weeks.",
-        )
-        if chosen != older_label and chosen in quick_by_label:
-            chosen_ws = quick_by_label[chosen]
-            if chosen_ws != cur_start:
-                st.session_state[_PERF_WEEKLY_DATE_KEY] = chosen_ws
-                st.session_state["_perf_weekly_synced_start"] = chosen_ws
-                st.rerun()
-
-        nav_prev, nav_date, nav_next = st.columns([0.45, 2.1, 0.45])
-        with nav_prev:
-            if st.button(
-                "◀",
-                key="perf_weekly_prev",
-                help="Previous week",
-                use_container_width=True,
-            ):
-                st.session_state["_perf_weekly_shift"] = -1
-                st.rerun()
-        with nav_date:
-            picked = st.date_input(
-                "Weekly Operational Report",
-                key=_PERF_WEEKLY_DATE_KEY,
-                help=f"Pick any date — report snaps to that Sun–Sat week ({LOCAL_TZ_LABEL}). "
-                "Not limited to the sidebar range.",
-            )
-        with nav_next:
-            if st.button(
-                "▶",
-                key="perf_weekly_next",
-                help="Next week",
-                use_container_width=True,
-            ):
-                st.session_state["_perf_weekly_shift"] = 1
-                st.rerun()
-
-        range_start, range_end, d0, d1 = _perf_calendar_week_for_date(picked)
-        week_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
         st.markdown(
-            f'<p class="weekly-date-range">{week_label}</p></div>',
+            f'<p class="weekly-date-range">Report period: {period_label}</p>'
+            f'<p class="weekly-date-hint">From sidebar Range</p>',
             unsafe_allow_html=True,
         )
 
@@ -11057,9 +11069,12 @@ def _render_perf_weekly_attended_report(
         unsafe_allow_html=True,
     )
 
-    week_offset = _perf_week_offset_for_date(picked)
-    _, _, this_start, _ = _perf_calendar_week_range_utc(week_offset=0)
-    if d0 == this_start and this_week_bundle is not None:
+    _, _, this_week_start, this_week_end = _perf_calendar_week_range_utc(week_offset=0)
+    if (
+        this_week_bundle is not None
+        and d0 == this_week_start
+        and d1 == this_week_end
+    ):
         bundle = this_week_bundle
     else:
         bundle = _perf_weekly_attended_bundle(
@@ -11077,11 +11092,12 @@ def _render_perf_weekly_attended_report(
         bundle,
         week_start=d0,
         week_end=d1,
-        week_offset=week_offset,
+        week_offset=period_offset,
+        period=period,
     )
 
     if summary.empty:
-        st.info("No attended residential tickets or resort cases in this week.")
+        st.info("No attended residential tickets or resort cases in this range.")
         return
 
     st.subheader("Staff breakdown")
@@ -11093,21 +11109,22 @@ def _render_perf_weekly_attended_report(
         st.download_button(
             "Download summary CSV",
             data=summary.to_csv(index=False).encode("utf-8"),
-            file_name=f"weekly_attended_{file_stamp}_summary.csv",
+            file_name=f"exec_attended_{file_stamp}_summary.csv",
             mime="text/csv",
-            key=f"perf_weekly_summary_csv_{file_stamp}",
+            key=f"perf_exec_summary_csv_{file_stamp}",
         )
     with dl2:
         st.download_button(
             "Download detail CSV",
             data=detail.to_csv(index=False).encode("utf-8"),
-            file_name=f"weekly_attended_{file_stamp}_detail.csv",
+            file_name=f"exec_attended_{file_stamp}_detail.csv",
             mime="text/csv",
-            key=f"perf_weekly_detail_csv_{file_stamp}",
+            key=f"perf_exec_detail_csv_{file_stamp}",
         )
 
     with st.expander(f"Case list ({len(detail)})", expanded=True):
         _render_perf_dataframe(detail)
+
 
 
 def _perf_combine_work(
@@ -23658,15 +23675,8 @@ def _render_perf_weekly_tab(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    """Executive weekly report with KPI cards, Altair charts, and staff breakdown."""
+    """Executive Summary — same sidebar Range as other Performance views."""
     del focus  # full report; use sidebar Focus assignee on other views
-    range_caption = _format_perf_range_caption()
-    if range_caption:
-        st.caption(
-            f"Sidebar range: **{range_caption}** (used by Overview / Handled). "
-            "Weekly report is always one Sun–Sat week — use **Week** / ◀ ▶ to open "
-            "this week or the previous 2–3 weeks (any older week via the date)."
-        )
     _render_perf_weekly_attended_report(
         df_all,
         sales_all,
@@ -23839,7 +23849,14 @@ def _render_performance_sidebar() -> None:
         st.markdown('<div style="margin-bottom:14px"></div>', unsafe_allow_html=True)
 
     st.markdown(t_section_label("Range"), unsafe_allow_html=True)
-    range_options = ["Today", "This week", "Last 30 days", "Custom"]
+    range_options = [
+        "Today",
+        "This week",
+        "This month",
+        "Last month",
+        "Last 30 days",
+        "Custom",
+    ]
     cur_range = str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week"))
     range_val = st.selectbox(
         "Range",
@@ -23847,6 +23864,7 @@ def _render_performance_sidebar() -> None:
         index=range_options.index(cur_range) if cur_range in range_options else 1,
         label_visibility="collapsed",
         key="perf_range_select",
+        help="Applies to all Performance views, including Summary (executive report).",
     )
     prev_range = st.session_state.get("_perf_prev_range")
     st.session_state[_PERF_RANGE_PRESET_KEY] = range_val
@@ -24065,7 +24083,7 @@ def _render_performance_tab(*, lookback_days: int) -> None:
                     range_start=range_start,
                     range_end=range_end,
                 )
-            elif view == "Weekly":
+            elif view == "Summary":
                 _render_perf_weekly_tab(
                     df_all,
                     sales_all,
