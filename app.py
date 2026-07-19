@@ -10891,6 +10891,38 @@ def _render_perf_weekly_executive_dashboard(
             )
 
 
+def _perf_weekly_quick_options() -> list[tuple[str, date]]:
+    """This week + last 3 Sun–Sat weeks for one-click navigation."""
+    options: list[tuple[str, date]] = []
+    for offset in (0, -1, -2, -3):
+        _, _, ws, we = _perf_calendar_week_range_utc(week_offset=offset)
+        span = f"{ws.strftime('%d %b')} – {we.strftime('%d %b')}"
+        if offset == 0:
+            label = f"This week ({span})"
+        elif offset == -1:
+            label = f"Last week ({span})"
+        else:
+            label = f"{abs(offset)} weeks ago ({span})"
+        options.append((label, ws))
+    return options
+
+
+def _apply_perf_weekly_nav_actions() -> None:
+    """Apply pending ◀/▶ or quick-week jumps before the date widget renders."""
+    shift = st.session_state.pop("_perf_weekly_shift", None)
+    jump = st.session_state.pop("_perf_weekly_jump", None)
+    if jump is not None:
+        st.session_state[_PERF_WEEKLY_DATE_KEY] = jump
+        return
+    if shift is None:
+        return
+    current = st.session_state.get(_PERF_WEEKLY_DATE_KEY)
+    if not isinstance(current, date):
+        _, _, current, _ = _perf_calendar_week_range_utc(week_offset=0)
+    _, _, ws, _ = _perf_calendar_week_for_date(current)
+    st.session_state[_PERF_WEEKLY_DATE_KEY] = ws + timedelta(weeks=int(shift))
+
+
 def _render_perf_weekly_attended_report(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
@@ -10908,6 +10940,8 @@ def _render_perf_weekly_attended_report(
     elif _PERF_WEEKLY_DATE_KEY not in st.session_state:
         _, _, default_week_start, _ = _perf_calendar_week_range_utc(week_offset=0)
         st.session_state[_PERF_WEEKLY_DATE_KEY] = default_week_start
+
+    _apply_perf_weekly_nav_actions()
 
     st.markdown(
         """
@@ -10946,12 +10980,70 @@ def _render_perf_weekly_attended_report(
         )
     with h_right:
         st.markdown('<div class="weekly-date-wrap">', unsafe_allow_html=True)
-        picked = st.date_input(
-            "Weekly Operational Report",
-            key=_PERF_WEEKLY_DATE_KEY,
-            help=f"Pick any date in the week — report uses Sun–Sat ({LOCAL_TZ_LABEL}). "
-            "Defaults to the **current** week when it overlaps the Performance Range.",
+        quick = _perf_weekly_quick_options()
+        quick_labels = [label for label, _ws in quick]
+        quick_by_label = {label: ws for label, ws in quick}
+        current_pick = st.session_state.get(_PERF_WEEKLY_DATE_KEY)
+        if isinstance(current_pick, date):
+            _, _, cur_start, _ = _perf_calendar_week_for_date(current_pick)
+        else:
+            _, _, cur_start, _ = _perf_calendar_week_range_utc(week_offset=0)
+
+        older_label = "Older week (use date / ◀ ▶)"
+        match_label = next(
+            (label for label, ws in quick if ws == cur_start),
+            older_label,
         )
+        select_options = [*quick_labels, older_label]
+        # If the active week changed (◀ ▶ / date), resync the Week dropdown.
+        # Do not overwrite when the user just picked a different Week option.
+        if st.session_state.get("_perf_weekly_synced_start") != cur_start:
+            st.session_state["_perf_weekly_quick_select"] = match_label
+            st.session_state["_perf_weekly_synced_start"] = cur_start
+        elif "_perf_weekly_quick_select" not in st.session_state:
+            st.session_state["_perf_weekly_quick_select"] = match_label
+
+        chosen = st.selectbox(
+            "Week",
+            options=select_options,
+            key="_perf_weekly_quick_select",
+            help="This week or any of the previous 3 weeks. "
+            "Use ◀ ▶ or the date for older weeks.",
+        )
+        if chosen != older_label and chosen in quick_by_label:
+            chosen_ws = quick_by_label[chosen]
+            if chosen_ws != cur_start:
+                st.session_state[_PERF_WEEKLY_DATE_KEY] = chosen_ws
+                st.session_state["_perf_weekly_synced_start"] = chosen_ws
+                st.rerun()
+
+        nav_prev, nav_date, nav_next = st.columns([0.45, 2.1, 0.45])
+        with nav_prev:
+            if st.button(
+                "◀",
+                key="perf_weekly_prev",
+                help="Previous week",
+                use_container_width=True,
+            ):
+                st.session_state["_perf_weekly_shift"] = -1
+                st.rerun()
+        with nav_date:
+            picked = st.date_input(
+                "Weekly Operational Report",
+                key=_PERF_WEEKLY_DATE_KEY,
+                help=f"Pick any date — report snaps to that Sun–Sat week ({LOCAL_TZ_LABEL}). "
+                "Not limited to the sidebar range.",
+            )
+        with nav_next:
+            if st.button(
+                "▶",
+                key="perf_weekly_next",
+                help="Next week",
+                use_container_width=True,
+            ):
+                st.session_state["_perf_weekly_shift"] = 1
+                st.rerun()
+
         range_start, range_end, d0, d1 = _perf_calendar_week_for_date(picked)
         week_label = f"{d0.strftime('%d %b')} – {d1.strftime('%d %b %Y')}"
         st.markdown(
@@ -23571,8 +23663,9 @@ def _render_perf_weekly_tab(
     range_caption = _format_perf_range_caption()
     if range_caption:
         st.caption(
-            f"Sidebar range: **{range_caption}** — week picker below selects Sun–Sat "
-            "within that window (defaults to range start)."
+            f"Sidebar range: **{range_caption}** (used by Overview / Handled). "
+            "Weekly report is always one Sun–Sat week — use **Week** / ◀ ▶ to open "
+            "this week or the previous 2–3 weeks (any older week via the date)."
         )
     _render_perf_weekly_attended_report(
         df_all,
