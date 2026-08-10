@@ -2658,6 +2658,120 @@ def render_ticket_table(
                     )
 
 
+DISPATCH_TICKET_PAGE_SIZE = 20
+_DISP_TICKET_PAGE_KEY = "disp_ticket_page"
+_DISP_TICKET_PAGE_SIG_KEY = "disp_ticket_page_sig"
+
+
+def paginate_ticket_rows(
+    rows: list[dict[str, Any]],
+    *,
+    page: int,
+    page_size: int = DISPATCH_TICKET_PAGE_SIZE,
+) -> tuple[list[dict[str, Any]], int, int, int, int, int]:
+    """Return (page_rows, page, total_pages, total, range_start, range_end) — 1-based page."""
+    total = len(rows)
+    if total == 0:
+        return [], 1, 1, 0, 0, 0
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(int(page), total_pages))
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+    return rows[start:end], page, total_pages, total, start + 1, end
+
+
+def ticket_page_for_index(index: int, *, page_size: int = DISPATCH_TICKET_PAGE_SIZE) -> int:
+    """1-based page number for a zero-based row index."""
+    if index < 0:
+        return 1
+    return index // page_size + 1
+
+
+def render_ticket_table_pager(
+    *,
+    page: int,
+    total_pages: int,
+    total: int,
+    range_start: int,
+    range_end: int,
+    page_size: int = DISPATCH_TICKET_PAGE_SIZE,
+    key_prefix: str = "disp_ticket",
+) -> None:
+    """Prev / Next controls below the ticket table."""
+    if total <= page_size:
+        return
+    c_prev, c_label, c_next = st.columns([1, 2, 1], gap="small")
+    with c_prev:
+        if st.button(
+            "◀ Prev",
+            key=f"{key_prefix}_page_prev",
+            disabled=page <= 1,
+            use_container_width=True,
+        ):
+            st.session_state[_DISP_TICKET_PAGE_KEY] = page - 1
+            st.rerun()
+    with c_label:
+        st.markdown(
+            f'<p style="text-align:center;font-size:12px;color:#4a5a7a;margin:8px 0 0">'
+            f"Page **{page}** of **{total_pages}** · "
+            f"**{range_start}–{range_end}** of **{total}**</p>",
+            unsafe_allow_html=True,
+        )
+    with c_next:
+        if st.button(
+            "Next ▶",
+            key=f"{key_prefix}_page_next",
+            disabled=page >= total_pages,
+            use_container_width=True,
+        ):
+            st.session_state[_DISP_TICKET_PAGE_KEY] = page + 1
+            st.rerun()
+
+
+def prepare_dispatch_ticket_page(
+    rows: list[dict[str, Any]],
+    *,
+    context_sig: str,
+    selected: str | None = None,
+    jump_to_selection: bool = False,
+    page_size: int = DISPATCH_TICKET_PAGE_SIZE,
+) -> tuple[list[dict[str, Any]], int, int, int, int, int]:
+    """Reset or jump page on filter change / lookup; return paginated slice."""
+    if st.session_state.get(_DISP_TICKET_PAGE_SIG_KEY) != context_sig:
+        st.session_state[_DISP_TICKET_PAGE_SIG_KEY] = context_sig
+        st.session_state[_DISP_TICKET_PAGE_KEY] = 1
+
+    sel = str(selected or "").strip()
+    if sel and jump_to_selection:
+        ids = [str(r.get("ticket_number") or "") for r in rows]
+        if sel in ids:
+            st.session_state[_DISP_TICKET_PAGE_KEY] = ticket_page_for_index(
+                ids.index(sel),
+                page_size=page_size,
+            )
+
+    page = int(st.session_state.get(_DISP_TICKET_PAGE_KEY, 1))
+    page_rows, page, total_pages, total, range_start, range_end = paginate_ticket_rows(
+        rows,
+        page=page,
+        page_size=page_size,
+    )
+    st.session_state[_DISP_TICKET_PAGE_KEY] = page
+
+    if sel and sel not in {str(r.get("ticket_number") or "") for r in page_rows}:
+        ids = [str(r.get("ticket_number") or "") for r in rows]
+        if sel in ids:
+            page = ticket_page_for_index(ids.index(sel), page_size=page_size)
+            st.session_state[_DISP_TICKET_PAGE_KEY] = page
+            page_rows, page, total_pages, total, range_start, range_end = paginate_ticket_rows(
+                rows,
+                page=page,
+                page_size=page_size,
+            )
+
+    return page_rows, page, total_pages, total, range_start, range_end
+
+
 def render_nudge_banner(tickets: list[dict[str, Any]]) -> None:
     from unattended import should_show_dashboard_cutoff_warning
 

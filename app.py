@@ -129,9 +129,12 @@ from dispatch_console import (
     render_settings_popover,
     render_sidebar_today_grid,
     render_ticket_table,
+    render_ticket_table_pager,
     render_timeline_entry,
     render_topbar,
     status_pill,
+    prepare_dispatch_ticket_page,
+    DISPATCH_TICKET_PAGE_SIZE,
 )
 from unattended import (
     OPS_TZ,
@@ -22008,6 +22011,9 @@ def _render_dispatch_csm_dashboard(
                 for t in ticket_rows
                 if t.get("ticket_number")
             ]
+            jump_page_to_selection = bool(
+                st.session_state.get("_disp_preserve_lookup_selection")
+            )
             _sync_dispatch_queue_view_state(
                 selected_queue=selected_queue,
                 ticket_nums=ticket_nums,
@@ -22030,14 +22036,33 @@ def _render_dispatch_csm_dashboard(
                 if t.get("ticket_number")
             ]
 
+            page_context = "|".join(
+                (
+                    selected_queue,
+                    search_num.strip(),
+                    case_type_filter,
+                    str(eng_filter or ""),
+                    str(investigation_subtab or ""),
+                )
+            )
+            sel = st.session_state.get(_DISP_SELECTED_KEY)
+            page_rows, page, total_pages, total_rows, range_start, range_end = (
+                prepare_dispatch_ticket_page(
+                    ticket_rows,
+                    context_sig=page_context,
+                    selected=str(sel) if sel else None,
+                    jump_to_selection=jump_page_to_selection,
+                    page_size=DISPATCH_TICKET_PAGE_SIZE,
+                )
+            )
+
             if selected_queue == "Daily Task":
                 render_nudge_banner(
                     [t for t in ticket_rows if t.get("case_type") == CASE_TYPE_RESIDENTIAL]
                 )
 
-            sel = st.session_state.get(_DISP_SELECTED_KEY)
             render_ticket_table(
-                ticket_rows,
+                page_rows,
                 selected=sel,
                 selected_key=_DISP_SELECTED_KEY,
                 show_case_type=True,
@@ -22045,6 +22070,14 @@ def _render_dispatch_csm_dashboard(
                 row_actions_fn=lambda t, rk: _render_unified_row_actions(
                     t, rk, is_admin=is_admin, queue_name=selected_queue
                 ),
+            )
+            render_ticket_table_pager(
+                page=page,
+                total_pages=total_pages,
+                total=total_rows,
+                range_start=range_start,
+                range_end=range_end,
+                page_size=DISPATCH_TICKET_PAGE_SIZE,
             )
 
             residential_nums = [
