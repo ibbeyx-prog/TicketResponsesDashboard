@@ -129,9 +129,12 @@ from dispatch_console import (
     render_settings_popover,
     render_sidebar_today_grid,
     render_ticket_table,
+    render_ticket_table_pager,
     render_timeline_entry,
     render_topbar,
     status_pill,
+    prepare_dispatch_ticket_page,
+    DISPATCH_TICKET_PAGE_SIZE,
 )
 from unattended import (
     OPS_TZ,
@@ -6278,6 +6281,7 @@ def _perf_matrix_sync_lookup_from_component() -> str:
     ret = st.session_state.get(_PERF_MATRIX_COMPONENT_KEY)
     if isinstance(ret, dict) and "lookup" in ret:
         raw = str(ret.get("lookup") or "").strip()
+        st.session_state.pop(_PERF_MATRIX_COMPONENT_KEY, None)
         if not raw:
             st.session_state.pop(_PERF_MATRIX_LOOKUP_KEY, None)
             return ""
@@ -6286,6 +6290,7 @@ def _perf_matrix_sync_lookup_from_component() -> str:
             st.session_state[_PERF_MATRIX_LOOKUP_KEY] = normalized
             return normalized
     elif isinstance(ret, str) and ret.strip():
+        st.session_state.pop(_PERF_MATRIX_COMPONENT_KEY, None)
         normalized = _perf_normalize_matrix_lookup(ret.strip())
         if normalized:
             st.session_state[_PERF_MATRIX_LOOKUP_KEY] = normalized
@@ -9156,8 +9161,7 @@ def _lookup_navigate(rtype: str, data: dict[str, object]) -> None:
     st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state[_DASH_PENDING_CASE_TYPE_FILTER_KEY] = _CASE_TYPE_FILTER_ALL
     st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = queue
-    # Prevent queue-change sync from wiping the selection we are about to apply.
-    st.session_state["_disp_active_queue_prev"] = queue
+    st.session_state["_skip_open_count_redirect"] = True
     if rtype == CASE_TYPE_RESIDENTIAL:
         st.session_state[_DASH_PENDING_TICKET_SELECT_KEY] = str(
             data.get("ticket_number") or ""
@@ -9172,6 +9176,7 @@ def _lookup_navigate(rtype: str, data: dict[str, object]) -> None:
     st.session_state.show_lookup = False
     st.session_state.lookup_result = None
     st.session_state.lookup_query = ""
+    _schedule_deferred_widget_clears("lookup_input")
     st.rerun()
 
 
@@ -9184,14 +9189,17 @@ def render_lookup_popover() -> None:
         "Search by 9 or 16-digit ticket number or case ref.</p>",
         unsafe_allow_html=True,
     )
+    if "lookup_input" not in st.session_state:
+        st.session_state["lookup_input"] = str(
+            st.session_state.get("lookup_query") or ""
+        )
     query = st.text_input(
         "Ref",
         placeholder="e.g. 100652041 or SC-2206-014",
-        value=str(st.session_state.get("lookup_query") or ""),
         label_visibility="collapsed",
         key="lookup_input",
     )
-    st.session_state.lookup_query = query.strip()
+    st.session_state.lookup_query = str(query or "").strip()
     col_search, col_clear = st.columns([3, 1])
     with col_search:
         search_clicked = st.button(
@@ -9201,6 +9209,7 @@ def render_lookup_popover() -> None:
         if st.button("Clear", key="lookup_clear_btn", use_container_width=True):
             st.session_state.lookup_query = ""
             st.session_state.lookup_result = None
+            _schedule_deferred_widget_clears("lookup_input")
             st.rerun()
 
     if search_clicked and query.strip():
@@ -16909,6 +16918,8 @@ def _queue_segment_base(label: str | None) -> str:
         return STATUS_DAILY_TASK
     if label == "Completed" or label.startswith("Completed ("):
         return STATUS_RESOLVED
+    if label == "Needs Review" or label.startswith("Needs Review ("):
+        return "Needs Review"
     for base in (
         STATUS_DAILY_TASK,
         "Open",
@@ -16969,14 +16980,16 @@ def _apply_pending_dashboard_nav() -> None:
         queue_map = {
             STATUS_DAILY_TASK: "Daily Task",
             "Open": "Needs Review",
+            "Needs Review": "Needs Review",
             STATUS_ON_HOLD: "On Hold",
             STATUS_UNDER_INVESTIGATION: "Under Investigation",
             "Follow up": "Follow up",
             "Unattended": "Unattended",
             STATUS_RESOLVED: "Resolved",
         }
-        st.session_state[aq_key] = queue_map.get(base_q, base_q)
-        st.session_state["_disp_active_queue_prev"] = st.session_state[aq_key]
+        mapped_queue = queue_map.get(base_q, base_q)
+        st.session_state[aq_key] = mapped_queue
+        st.session_state["_disp_active_queue_prev"] = mapped_queue
         _clear_dispatch_row_modal_keys()
     if pending_sales_queue is not None:
         base = _sc_queue_segment_base(pending_sales_queue)
@@ -16985,6 +16998,7 @@ def _apply_pending_dashboard_nav() -> None:
     if pending_ticket is not None:
         st.session_state[_DISP_SELECTED_KEY] = str(pending_ticket)
         st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
+        st.session_state["_disp_preserve_lookup_selection"] = True
     if pending_engineer is not None:
         st.session_state[_DISP_ENGINEER_FILTER_KEY] = _perf_norm_member(pending_engineer)
     if pending_case_type:
@@ -16996,6 +17010,7 @@ def _apply_pending_dashboard_nav() -> None:
         st.session_state[_DISP_SELECTED_KEY] = cref
         st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
         st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = _CASE_TYPE_FILTER_ALL
+        st.session_state["_disp_preserve_lookup_selection"] = True
 
 
 def _render_clickable_queue_metric(
@@ -17148,12 +17163,46 @@ def _clear_dispatch_row_modal_keys() -> None:
         st.session_state.pop(k, None)
 
 
+
+
+def _dispatch_append_selected_lookup_ticket(
+    ticket_rows: list[dict[str, object]],
+    *,
+    sales_df: pd.DataFrame | None,
+) -> list[dict[str, object]]:
+    """Ensure a lookup-selected case appears even outside the sidebar date range."""
+    sel = str(st.session_state.get(_DISP_SELECTED_KEY) or "").strip()
+    if not sel:
+        return ticket_rows
+    if any(str(t.get("ticket_number") or "") == sel for t in ticket_rows):
+        return ticket_rows
+    case_type = str(st.session_state.get(_DISP_SELECTED_CASE_TYPE_KEY) or "")
+    if case_type == CASE_TYPE_RESORT and sales_df is not None and not sales_df.empty:
+        if "case_ref" in sales_df.columns:
+            match = sales_df.loc[sales_df["case_ref"].astype(str) == sel]
+            if not match.empty:
+                return [_resort_row_to_unified_dict(dict(match.iloc[0])), *ticket_rows]
+        row = _lookup_ref(sel)
+        if row and str(row.get("type") or "") == CASE_TYPE_RESORT:
+            data = row.get("data")
+            if isinstance(data, dict):
+                return [_resort_row_to_unified_dict(data), *ticket_rows]
+        return ticket_rows
+    row = _fetch_ticket_row(sel)
+    if row:
+        return [_residential_row_to_unified_dict(pd.Series(row)), *ticket_rows]
+    return ticket_rows
+
+
 def _sync_dispatch_queue_view_state(
     *,
     selected_queue: str,
     ticket_nums: list[str],
 ) -> None:
     """Drop stale row modals/selection when the operator changes queue."""
+    if st.session_state.pop("_disp_preserve_lookup_selection", False):
+        st.session_state["_disp_active_queue_prev"] = selected_queue
+        return
     prev = st.session_state.get("_disp_active_queue_prev")
     if prev != selected_queue:
         _clear_dispatch_row_modal_keys()
@@ -17222,7 +17271,10 @@ def _sync_dashboard_nav_state(
 
     prev_open = int(st.session_state.get("_dash_prev_open_count", 0))
     st.session_state["_dash_prev_open_count"] = total_open
-    if total_open > prev_open:
+    if (
+        not st.session_state.pop("_skip_open_count_redirect", False)
+        and total_open > prev_open
+    ):
         st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
         st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = open_label
         st.rerun()
@@ -21950,11 +22002,18 @@ def _render_dispatch_csm_dashboard(
                     if isinstance(resort_rows, list):
                         ticket_rows.extend(resort_rows)
             ticket_rows = _apply_unified_case_type_filter(ticket_rows, case_type_filter)
+            ticket_rows = _dispatch_append_selected_lookup_ticket(
+                ticket_rows,
+                sales_df=sales_df,
+            )
             ticket_nums = [
                 str(t.get("ticket_number") or "")
                 for t in ticket_rows
                 if t.get("ticket_number")
             ]
+            jump_page_to_selection = bool(
+                st.session_state.get("_disp_preserve_lookup_selection")
+            )
             _sync_dispatch_queue_view_state(
                 selected_queue=selected_queue,
                 ticket_nums=ticket_nums,
@@ -21977,14 +22036,33 @@ def _render_dispatch_csm_dashboard(
                 if t.get("ticket_number")
             ]
 
+            page_context = "|".join(
+                (
+                    selected_queue,
+                    search_num.strip(),
+                    case_type_filter,
+                    str(eng_filter or ""),
+                    str(investigation_subtab or ""),
+                )
+            )
+            sel = st.session_state.get(_DISP_SELECTED_KEY)
+            page_rows, page, total_pages, total_rows, range_start, range_end = (
+                prepare_dispatch_ticket_page(
+                    ticket_rows,
+                    context_sig=page_context,
+                    selected=str(sel) if sel else None,
+                    jump_to_selection=jump_page_to_selection,
+                    page_size=DISPATCH_TICKET_PAGE_SIZE,
+                )
+            )
+
             if selected_queue == "Daily Task":
                 render_nudge_banner(
                     [t for t in ticket_rows if t.get("case_type") == CASE_TYPE_RESIDENTIAL]
                 )
 
-            sel = st.session_state.get(_DISP_SELECTED_KEY)
             render_ticket_table(
-                ticket_rows,
+                page_rows,
                 selected=sel,
                 selected_key=_DISP_SELECTED_KEY,
                 show_case_type=True,
@@ -21992,6 +22070,14 @@ def _render_dispatch_csm_dashboard(
                 row_actions_fn=lambda t, rk: _render_unified_row_actions(
                     t, rk, is_admin=is_admin, queue_name=selected_queue
                 ),
+            )
+            render_ticket_table_pager(
+                page=page,
+                total_pages=total_pages,
+                total=total_rows,
+                range_start=range_start,
+                range_end=range_end,
+                page_size=DISPATCH_TICKET_PAGE_SIZE,
             )
 
             residential_nums = [
@@ -22036,6 +22122,7 @@ def _render_dashboard(
 ) -> None:
     day_word = "day" if lookback_days == 1 else "days"
     refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    _apply_deferred_widget_clears()
     _apply_pending_dashboard_nav()
     _migrate_legacy_queue_nav()
     nav_intent = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET))
