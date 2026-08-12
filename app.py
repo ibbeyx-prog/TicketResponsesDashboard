@@ -457,8 +457,16 @@ PERF_OVERVIEW_CSS = """
 """
 
 
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied"
+_LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
+
+
 def apply_theme(*, login: bool = False) -> None:
     """Global typography + colour system for the dispatch dashboard."""
+    theme_key = _LOGIN_THEME_APPLIED_KEY if login else _DASH_THEME_APPLIED_KEY
+    if st.session_state.get(theme_key):
+        return
+    st.session_state[theme_key] = True
     st.markdown(
         f"""
     <style>
@@ -3098,7 +3106,7 @@ _DASH_UNATTENDED_TICK_KEY = "_dash_unattended_last_tick"
 _DASH_MISMATCH_CACHE_KEY = "_dash_pending_mismatch_cache"
 _DASH_ATTENDANCE_POLL_KEY = "_dash_attendance_poll_ts"
 _DASH_ATTENDANCE_POLL_SEC = max(
-    15, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "30") or "30"))
+    30, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "60") or "60"))
 )
 _DASH_DATA_CACHE_TTL_SEC = max(
     15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "120") or "120"))
@@ -3828,7 +3836,7 @@ def _fetch_pending_with_response_mismatch() -> list[str]:
     """Throttled in session; backed by ``cache_data`` to avoid duplicate HTTP per rerun."""
     now = datetime.now(timezone.utc).timestamp()
     cached = st.session_state.get(_DASH_MISMATCH_CACHE_KEY)
-    if cached and (now - float(cached[0])) < 90:
+    if cached and (now - float(cached[0])) < 120:
         return list(cached[1])
     mismatches = list(_fetch_pending_mismatch_cached())
     st.session_state[_DASH_MISMATCH_CACHE_KEY] = (now, tuple(mismatches))
@@ -14962,13 +14970,13 @@ def main() -> None:
         return
 
     _init_dash_date_range_state()
+    apply_theme()
 
     auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
     @st.fragment(run_every=run_every)
     def _dashboard_body_fragment() -> None:
-        apply_theme()
         _render_dispatch_app_shell()
         _sync_dash_range_from_ui(
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
@@ -18769,6 +18777,18 @@ def _sales_floor_move(case_ref: str, destination: str) -> None:
 def _render_sales_row_actions(case: dict, row_key: str) -> None:
     status = str(case.get("status") or "")
     case_ref = str(case.get("case_ref") or "")
+    selected = str(st.session_state.get(_DISP_SELECTED_KEY) or "").strip() == case_ref
+    if not selected and not _sales_row_has_active_modal(case_ref):
+        if st.button(
+            "⋮",
+            key=f"row_menu_sc_{row_key}",
+            help="Select row to open actions",
+            use_container_width=False,
+        ):
+            _sales_prepare_row_selection(case_ref)
+            st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
+            st.rerun()
+        return
 
     with st.popover("⋮", use_container_width=False):
         st.markdown(
@@ -19873,6 +19893,35 @@ def _dispatch_ticket_move_to_sales(ticket_number: str) -> None:
         st.toast(f"Move to Resort failed: {exc}", icon="❌")
 
 
+def _dispatch_row_has_active_modal(ticket_number: str) -> bool:
+    """True when a row-level modal is open for this ticket."""
+    tnum = str(ticket_number or "").strip()
+    if not tnum:
+        return False
+    return any(
+        str(st.session_state.get(k) or "").strip() == tnum
+        for k in (
+            _DISP_ROW_EDIT,
+            _DISP_ROW_REASSIGN,
+            _DISP_ROW_RECORD,
+            _DISP_ROW_CLOSE,
+            _DISP_ROW_RESOLVE,
+            _DISP_ROW_PHOTOS,
+            _DISP_ROW_FOLLOW_UP,
+        )
+    )
+
+
+def _sales_row_has_active_modal(case_ref: str) -> bool:
+    ref = str(case_ref or "").strip()
+    if not ref:
+        return False
+    return any(
+        str(st.session_state.get(k) or "").strip() == ref
+        for k in (_SALES_ROW_EDIT, _SALES_ROW_REASSIGN, _SALES_ROW_RESOLVE)
+    )
+
+
 def _render_dispatch_row_actions(
     ticket: dict,
     is_admin: bool,
@@ -19883,6 +19932,18 @@ def _render_dispatch_row_actions(
     """Per-row ⋯ popover with status-aware actions."""
     status = _dispatch_effective_action_status(ticket, queue_name=queue_name)
     tnum = str(ticket.get("ticket_number") or row_key)
+    selected = str(st.session_state.get(_DISP_SELECTED_KEY) or "").strip() == tnum
+    if not selected and not _dispatch_row_has_active_modal(tnum):
+        if st.button(
+            "⋮",
+            key=f"row_menu_{row_key}",
+            help="Select row to open actions",
+            use_container_width=False,
+        ):
+            _dispatch_prepare_row_selection(tnum)
+            st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
+            st.rerun()
+        return
 
     with st.popover("⋮", use_container_width=False):
         move_options: list[str] = []
@@ -21993,7 +22054,8 @@ def _render_dispatch_csm_dashboard(
             ticket_rows: list[dict[str, object]] = []
             if case_type_filter != CASE_TYPE_RESORT:
                 ticket_rows = [
-                    _residential_row_to_unified_dict(r) for _, r in display_df.iterrows()
+                    _residential_row_to_unified_dict(pd.Series(rec))
+                    for rec in display_df.to_dict("records")
                 ]
             if include_resort:
                 by_queue = resort_bundle.get("by_queue") or {}
