@@ -163,18 +163,18 @@ def tx(
 
 
 def t_heading(text: object) -> str:
-    return tx(text, "15px", "500", "#e2e8f8")
+    return tx(text, "16px", "600", "#fafafa")
 
 
 def t_section_label(
     text: object,
     *,
-    spacing: str = ".06em",
-    margin: str = "margin-bottom:7px",
+    spacing: str = ".08em",
+    margin: str = "margin-bottom:6px",
 ) -> str:
     safe = html.escape(str(text))
     return (
-        f'<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        f'<p style="font-size:10px;font-weight:600;color:#71717a;'
         f"text-transform:uppercase;letter-spacing:{spacing};{margin}\">"
         f"{safe}</p>"
     )
@@ -199,8 +199,8 @@ def t_secondary(text: object) -> str:
 
 
 def t_queue_sub(text: object) -> str:
-    """Queue ticket count — 13px 400 #2a3a5a."""
-    return tx(text, "13px", "400", "#2a3a5a")
+    """Queue ticket count — muted inline suffix."""
+    return tx(text, "12px", "400", "#71717a")
 
 
 def t_body(text: object) -> str:
@@ -457,7 +457,7 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v4"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
 
 
@@ -470,26 +470,24 @@ def apply_theme(*, login: bool = False) -> None:
     st.markdown(
         f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
     /* ── Base ── */
-    [data-testid="stAppViewContainer"] {{ background: #0b0f18; }}
-    [data-testid="stSidebar"]          {{ background: #080b14; border-right: 0.5px solid #1a2035; }}
+    [data-testid="stAppViewContainer"] {{ background: #0c0c0e; }}
+    [data-testid="stSidebar"]          {{ background: #101014; border-right: 1px solid #27272a; }}
     [data-testid="block-container"],
     [data-testid="stMainBlockContainer"]    {{ padding: 0 !important; max-width: 100% !important; width: 100% !important; }}
 
     html, body, [class*="css"] {{
-      font-family: 'Inter', 'system-ui', sans-serif;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       font-size:14px;
       font-weight: 400;
-      color: #8a9ac0;
+      color: #a1a1aa;
     }}
 
     /* ── Headings — only two heading sizes used ── */
     h1, h2, h3 {{
-      font-family: 'Inter', 'system-ui', sans-serif !important;
-      font-weight: 500 !important;
-      color: #e2e8f8 !important;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
+      font-weight: 600 !important;
+      color: #fafafa !important;
       letter-spacing: 0 !important;
     }}
 
@@ -598,7 +596,7 @@ def apply_theme(*, login: bool = False) -> None:
 
     /* ── All buttons base ── */
     .stButton > button {{
-      font-family: 'Inter', 'system-ui', sans-serif !important;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
       font-size:13px !important;
       font-weight: 400 !important;
       background: transparent;
@@ -657,7 +655,7 @@ def apply_theme(*, login: bool = False) -> None:
     .stSelectbox > div > div,
     .stTextArea > div > textarea,
     .stNumberInput > div > div > input {{
-      font-family: 'Inter', 'system-ui', sans-serif !important;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
       font-size:13px !important;
       font-weight: 400 !important;
       color: #8a9ac0 !important;
@@ -18782,7 +18780,7 @@ def _render_sales_row_actions(case: dict, row_key: str) -> None:
         if st.button(
             "⋮",
             key=f"row_menu_sc_{row_key}",
-            help="Select row to open actions",
+            help="Select row, then open actions menu",
             use_container_width=False,
         ):
             _sales_prepare_row_selection(case_ref)
@@ -19465,7 +19463,6 @@ def _render_unified_queue_list(
             rsr = int(resort_counts.get(q, 0))
             total = res + rsr
             is_active = q == picked
-            dot = QUEUE_DOTS.get(q, "#4a5a7a")
             row_key = q.replace(" ", "_")
             btn_key = f"uqueue_{row_key}"
             if case_type_filter == _CASE_TYPE_FILTER_ALL and res > 0 and rsr > 0:
@@ -19481,20 +19478,9 @@ def _render_unified_queue_list(
                 if q == "Follow up":
                     bg, fg = "#1a1030", "#a78bfa"
                 badge = (
-                    f'<span style="font-size:11px;padding:2px 6px;border-radius:3px;'
-                    f'background:{bg};color:{fg}">{total}</span>'
+                    f'<span style="font-size:11px;padding:3px 8px;border-radius:999px;'
+                    f'background:{bg};color:{fg};font-weight:500">{total}</span>'
                 )
-            st.markdown(
-                f"<style>"
-                f"div.st-key-{btn_key} .stButton > button::before {{"
-                f"color: {dot} !important;"
-                f"}}"
-                f"div.st-key-{btn_key} .stButton > button::after {{"
-                f"content: \"\";"
-                f"}}"
-                f"</style>",
-                unsafe_allow_html=True,
-            )
             c_label, c_badge = st.columns([4, 1.6], gap="small", vertical_alignment="center")
             with c_label:
                 if st.button(
@@ -19937,7 +19923,7 @@ def _render_dispatch_row_actions(
         if st.button(
             "⋮",
             key=f"row_menu_{row_key}",
-            help="Select row to open actions",
+            help="Select row, then open actions menu",
             use_container_width=False,
         ):
             _dispatch_prepare_row_selection(tnum)

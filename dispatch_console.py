@@ -19,20 +19,26 @@ UI_MIN_FONT_PX = 11
 _DISPATCH_VARS = f"""
 :root {{
   --disp-min-font: {UI_MIN_FONT_PX}px;
-  --disp-bg: #0b0f18;
-  --disp-panel: #080b14;
-  --disp-card: #0d1220;
-  --disp-border: #1a2035;
-  --disp-text: #e2e8f8;
-  --disp-muted: #8a9ac0;
-  --disp-dim: #2a3a5a;
-  --disp-accent: #3b82f6;
-  --disp-accent-bg: #0d1e3a;
-  --disp-green: #22c55e;
-  --disp-amber: #f59e0b;
-  --disp-red: #ef4444;
-  --disp-purple: #a78bfa;
+  --disp-bg: #0c0c0e;
+  --disp-panel: #101014;
+  --disp-card: #141419;
+  --disp-card-hover: #18181f;
+  --disp-row-alt: #121216;
+  --disp-row-sel: #0f2a2a;
+  --disp-border: #27272a;
+  --disp-border-strong: #3f3f46;
+  --disp-text: #fafafa;
+  --disp-muted: #a1a1aa;
+  --disp-dim: #71717a;
+  --disp-accent: #2dd4bf;
+  --disp-accent-bg: #134e4a;
+  --disp-green: #4ade80;
+  --disp-amber: #fbbf24;
+  --disp-red: #f87171;
+  --disp-purple: #c084fc;
   --disp-header-h: {_DISP_HEADER_H};
+  --disp-radius: 4px;
+  --disp-radius-sm: 3px;
 }}
 """
 
@@ -104,8 +110,9 @@ html, body {{ background: var(--disp-bg) !important; overflow-x: hidden !importa
 
 /* ── Header shell ── */
 div.st-key-disp_header_shell {{
-  background: #0b0f18 !important;
-  border-bottom: 0.5px solid var(--disp-border) !important;
+  background: var(--disp-panel) !important;
+  border-bottom: 1px solid var(--disp-border) !important;
+  box-shadow: none !important;
   padding: 0 20px 0 {_DISP_INSET} !important;
   margin: 0 !important;
   width: 100% !important;
@@ -270,7 +277,7 @@ div.st-key-disp_main_nav_tabs .stButton > button[data-testid="baseButton-primary
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"] {{
   color: #e2e8f8 !important;
   font-weight: 500 !important;
-  border-bottom-color: #5b7fb5 !important;
+  border-bottom-color: var(--disp-accent) !important;
   background: transparent !important;
   background-color: transparent !important;
 }}
@@ -287,7 +294,7 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"]:hover
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"]:hover,
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"]:hover {{
   color: #e2e8f8 !important;
-  border-bottom-color: #5b7fb5 !important;
+  border-bottom-color: var(--disp-accent) !important;
   background: transparent !important;
   background-color: transparent !important;
 }}
@@ -666,7 +673,7 @@ div.st-key-disp_right_rail .stTabs [data-baseweb="tab"] {{
 div.st-key-disp_right_rail .stTabs [aria-selected="true"] {{
   color: #e2e8f8 !important;
   font-weight: 500 !important;
-  border-bottom-color: #3b82f6 !important;
+  border-bottom-color: var(--disp-accent) !important;
 }}
 div.st-key-disp_right_rail [data-testid="stTabContent"] {{
   padding: 0 !important;
@@ -755,42 +762,66 @@ div.st-key-disp_right_rail div.st-key-disp_assign_panel .disp-mode-caption {{
   line-height: 1.4 !important;
 }}
 div.st-key-disp_sidebar_inner {{
-  padding: 0 2px 0 0 !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 0 4px 0 0 !important;
+  box-sizing: border-box !important;
 }}
 div.st-key-disp_sidebar_queues {{
-  margin-top: 2px !important;
+  margin-top: 10px !important;
   margin-bottom: 4px !important;
+  border-top: 1px solid var(--disp-border) !important;
+  padding-top: 8px !important;
 }}
 div.st-key-disp_sidebar_queues [data-testid="stVerticalBlock"] {{
-  gap: 3px !important;
+  gap: 1px !important;
 }}
 div.st-key-disp_sidebar_queues .stButton {{
   margin: 0 !important;
   width: 100% !important;
 }}
-.disp-today-grid {{
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 8px;
-  margin: 0 0 2px 0;
+.disp-today-grid,
+.disp-today-strip {{
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  margin: 0 0 0 0;
   padding: 0;
+  border: 1px solid var(--disp-border);
+  border-radius: var(--disp-radius);
+  overflow: hidden;
+  background: var(--disp-panel);
 }}
 .disp-today-cell {{
+  flex: 1 1 0;
   min-width: 0;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--disp-border);
+  border-radius: 0;
+  padding: 8px 6px 7px;
+  box-sizing: border-box;
+  text-align: center;
+}}
+.disp-today-cell:last-child {{
+  border-right: none;
 }}
 .disp-today-label {{
-  font-size: 11px;
-  font-weight: 400;
-  color: #2a3a5a;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--disp-dim);
   line-height: 1.2;
-  margin-bottom: 2px;
+  margin-bottom: 3px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }}
 .disp-today-value {{
-  font-size: 20px;
-  font-weight: 500;
+  font-size: 17px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }}
@@ -953,11 +984,11 @@ div.st-key-disp_assign_panel [data-testid="stVerticalBlockBorderWrapper"] {{
   margin: 0 !important;
 }}
 .disp-brand {{
-  font-size:22px;
+  font-size: 15px;
   font-weight: 600;
-  color: #3b82f6;
-  letter-spacing: .06em;
-  text-transform: uppercase;
+  color: var(--disp-text);
+  letter-spacing: 0.02em;
+  text-transform: none;
   line-height: 1;
   white-space: nowrap;
   margin: 0;
@@ -965,6 +996,11 @@ div.st-key-disp_assign_panel [data-testid="stVerticalBlockBorderWrapper"] {{
   display: inline-flex;
   align-items: center;
   height: var(--disp-header-h);
+  gap: 0;
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+}}
+.disp-brand::before {{
+  display: none;
 }}
 .disp-header-divider {{
   color: #2a3a5a;
@@ -1081,53 +1117,75 @@ div.st-key-disp_header_right [data-testid="stMarkdownContainer"] span {{
   text-align: right;
 }}
 [class*="st-key-disp_queue_"] .stButton > button,
-[class*="st-key-sales_queue_"] .stButton > button {{
+[class*="st-key-sales_queue_"] .stButton > button,
+[class*="st-key-uqueue_"] .stButton > button {{
   font-size: 12px !important;
   font-weight: 400 !important;
   text-align: left !important;
   display: flex !important;
   align-items: center !important;
   justify-content: flex-start !important;
-  padding: 5px 8px !important;
+  padding: 6px 8px !important;
   min-height: 30px !important;
   height: 30px !important;
   white-space: nowrap !important;
   overflow: hidden !important;
-  border-radius: 5px !important;
+  border-radius: 0 !important;
   width: 100% !important;
+  border: none !important;
+  border-left: 2px solid transparent !important;
+  background: transparent !important;
+  color: var(--disp-muted) !important;
+  transition: background 0.1s, color 0.1s, border-color 0.1s !important;
+}}
+[class*="st-key-disp_queue_"] .stButton > button:hover,
+[class*="st-key-sales_queue_"] .stButton > button:hover,
+[class*="st-key-uqueue_"] .stButton > button:hover {{
+  background: var(--disp-row-alt) !important;
+  color: var(--disp-text) !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button::before,
-[class*="st-key-sales_queue_"] .stButton > button::before {{
+[class*="st-key-sales_queue_"] .stButton > button::before,
+[class*="st-key-uqueue_"] .stButton > button::before {{
   content: "●" !important;
-  font-size: 7px !important;
+  font-size: 8px !important;
   line-height: 1 !important;
   flex: 0 0 auto !important;
-  margin-right: 7px !important;
+  margin-right: 8px !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button::after,
 [class*="st-key-sales_queue_"] .stButton > button::after {{
   font-size: var(--disp-min-font) !important;
-  font-weight: 400 !important;
-  color: #8a9ac0 !important;
+  font-weight: 500 !important;
+  color: var(--disp-muted) !important;
   font-variant-numeric: tabular-nums !important;
   flex: 0 0 auto !important;
   margin-left: auto !important;
   padding-left: 8px !important;
   line-height: 1 !important;
 }}
+[class*="st-key-uqueue_"] .stButton > button::after {{
+  content: "" !important;
+}}
 [class*="st-key-disp_queue_"].disp-queue-active .stButton > button,
 [class*="st-key-sales_queue_"].disp-queue-active .stButton > button {{
-  background: #0d1e3a !important;
-  border-color: #1a3460 !important;
-  color: #e2e8f8 !important;
+  background: var(--disp-row-alt) !important;
+  border-left-color: var(--disp-accent) !important;
+  color: var(--disp-text) !important;
+  font-weight: 500 !important;
+  box-shadow: none !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button[kind="primary"],
 [class*="st-key-disp_queue_"] .stButton > button[data-testid="stBaseButton-primary"],
 [class*="st-key-sales_queue_"] .stButton > button[kind="primary"],
-[class*="st-key-sales_queue_"] .stButton > button[data-testid="stBaseButton-primary"] {{
-  background: #0d1e3a !important;
-  border-color: #1a3460 !important;
-  color: #e2e8f8 !important;
+[class*="st-key-sales_queue_"] .stButton > button[data-testid="stBaseButton-primary"],
+[class*="st-key-uqueue_"] .stButton > button[kind="primary"],
+[class*="st-key-uqueue_"] .stButton > button[data-testid="stBaseButton-primary"] {{
+  background: var(--disp-row-alt) !important;
+  border-left-color: var(--disp-accent) !important;
+  color: var(--disp-text) !important;
+  font-weight: 500 !important;
+  box-shadow: none !important;
 }}
 
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"],
@@ -1175,7 +1233,7 @@ div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radio
 }}
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label:has(input:checked),
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label:has(input:checked) {{
-  border-bottom-color: #3b82f6 !important;
+  border-bottom-color: var(--disp-accent) !important;
   box-shadow: none !important;
 }}
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label:has(input:checked) span,
@@ -1501,9 +1559,40 @@ div.st-key-disp_sales_assign_panel div.disp-manage-btn [data-testid="stVerticalB
   min-width: 0 !important;
 }}
 
-/* Ticket / sales table — rows + action buttons (● select + ⋮ menu) */
+/* Ticket / sales table — flat zebra grid + action buttons (● select + ⋮ menu) */
+div.st-key-disp_ticket_table {{
+  background: var(--disp-panel) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius) !important;
+  padding: 0 !important;
+  margin-top: 6px !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+}}
 div.st-key-disp_ticket_table > [data-testid="stVerticalBlock"] {{
-  gap: 8px !important;
+  gap: 0 !important;
+}}
+div.st-key-disp_ticket_table [data-testid="element-container"]:has(div[class*="st-key-disp_ticket_row_"]):nth-child(even) div[class*="st-key-disp_ticket_row_"] {{
+  background: var(--disp-row-alt) !important;
+}}
+div[class*="st-key-disp_ticket_row_"] {{
+  background: var(--disp-card) !important;
+  border: none !important;
+  border-bottom: 1px solid var(--disp-border) !important;
+  border-radius: 0 !important;
+  padding: 0 6px !important;
+  margin: 0 !important;
+  transition: background 0.1s !important;
+}}
+div.st-key-disp_ticket_table [data-testid="element-container"]:has(div[class*="st-key-disp_ticket_row_"]):last-child div[class*="st-key-disp_ticket_row_"] {{
+  border-bottom: none !important;
+}}
+div[class*="st-key-disp_ticket_row_"]:hover {{
+  background: var(--disp-card-hover) !important;
+}}
+div[class*="st-key-disp_ticket_row_"]:has([data-testid="stBaseButton-primary"]) {{
+  background: var(--disp-row-sel) !important;
+  box-shadow: inset 2px 0 0 var(--disp-accent) !important;
 }}
 div[class*="st-key-disp_ticket_row_"] [data-testid="element-container"] {{
   margin: 0 !important;
@@ -1512,14 +1601,14 @@ div[class*="st-key-disp_ticket_row_"] [data-testid="element-container"] {{
 div[class*="st-key-disp_ticket_row_"] [data-testid="stHorizontalBlock"] {{
   align-items: center !important;
   flex-wrap: nowrap !important;
-  gap: 6px !important;
+  gap: 4px !important;
 }}
 div[class*="st-key-disp_ticket_row_"] [data-testid="column"] {{
   display: flex !important;
   align-items: center !important;
   align-self: center !important;
-  min-height: 34px !important;
-  max-height: 34px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
   padding: 0 !important;
   overflow: hidden !important;
 }}
@@ -1533,19 +1622,20 @@ div[class*="st-key-disp_row_actions_"] {{
   flex-wrap: nowrap !important;
   align-items: center !important;
   justify-content: flex-end !important;
-  gap: 10px !important;
+  gap: 4px !important;
   width: 100% !important;
-  min-height: 34px !important;
-  max-height: 34px !important;
-  padding: 5px 4px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  padding: 2px 0 !important;
   margin: 0 !important;
   box-sizing: border-box !important;
-  border: 0.5px solid transparent !important;
-  border-radius: 4px !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
 }}
 div[class*="st-key-disp_ticket_row_"]:has([data-testid="stBaseButton-primary"]) div[class*="st-key-disp_row_actions_"] {{
-  background: #0d1e3a !important;
-  border-color: #1a3460 !important;
+  background: transparent !important;
+  border-color: transparent !important;
 }}
 div[class*="st-key-disp_row_actions_"] [data-testid="element-container"] {{
   margin: 0 !important;
@@ -1562,20 +1652,20 @@ div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] {{
 }}
 div[class*="st-key-disp_row_actions_"] .stButton > button,
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
-  font-size: 12px !important;
+  font-size: 10px !important;
   font-weight: 600 !important;
-  color: #6b7280 !important;
+  color: var(--disp-dim) !important;
   line-height: 1 !important;
-  width: 30px !important;
-  height: 30px !important;
-  min-height: 30px !important;
-  min-width: 30px !important;
-  max-width: 30px !important;
+  width: 24px !important;
+  height: 24px !important;
+  min-height: 24px !important;
+  min-width: 24px !important;
+  max-width: 24px !important;
   padding: 0 !important;
   margin: 0 !important;
-  border: 0.5px solid #2a3548 !important;
-  border-radius: 5px !important;
-  background: #0d1220 !important;
+  border: none !important;
+  border-radius: var(--disp-radius-sm) !important;
+  background: transparent !important;
   box-shadow: none !important;
   display: inline-flex !important;
   align-items: center !important;
@@ -1584,15 +1674,17 @@ div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
 }}
 div[class*="st-key-disp_row_actions_"] .stButton > button[kind="primary"],
 div[class*="st-key-disp_row_actions_"] .stButton > button[data-testid="stBaseButton-primary"] {{
-  color: #3b82f6 !important;
-  border-color: #1a3460 !important;
-  background: #0d1e3a !important;
+  color: var(--disp-accent) !important;
+  background: rgba(45, 212, 191, 0.12) !important;
+}}
+div[class*="st-key-disp_ticket_row_"]:not(:has([data-testid="stBaseButton-primary"])) div[class*="st-key-disp_row_actions_"] .stButton:last-child > button {{
+  opacity: 0.4 !important;
 }}
 div[class*="st-key-disp_row_actions_"] .stButton > button:hover,
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button:hover {{
-  color: #8a9ac0 !important;
-  border-color: #3b465c !important;
-  background: #121a2a !important;
+  color: var(--disp-text) !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  opacity: 1 !important;
 }}
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
   font-size: 16px !important;
@@ -1677,6 +1769,84 @@ div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radio
 }}
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label {{
   gap: 0 !important;
+}}
+
+/* Ticket table typography + pager + case-type chips */
+.disp-col-head {{
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  color: var(--disp-dim) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.08em !important;
+  margin: 0 !important;
+}}
+.disp-ticket-num {{
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: var(--disp-accent) !important;
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace !important;
+  font-variant-numeric: tabular-nums !important;
+}}
+.disp-table-empty {{
+  padding: 36px 20px !important;
+  text-align: center !important;
+  color: var(--disp-dim) !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  background: var(--disp-panel) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius) !important;
+  margin-top: 6px !important;
+}}
+div.st-key-disp_table_header {{
+  margin-top: 6px !important;
+  padding: 7px 10px !important;
+  background: var(--disp-panel) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-bottom: none !important;
+  border-radius: var(--disp-radius) var(--disp-radius) 0 0 !important;
+}}
+div.st-key-disp_ticket_pager {{
+  margin-top: 8px !important;
+  padding: 4px 0 !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+}}
+div.st-key-disp_ticket_pager .stButton > button {{
+  min-height: 28px !important;
+  height: 28px !important;
+  font-size: 11px !important;
+  border: 1px solid var(--disp-border) !important;
+  background: var(--disp-panel) !important;
+}}
+.disp-pager-label {{
+  text-align: center !important;
+  font-size: 11px !important;
+  color: var(--disp-dim) !important;
+  margin: 4px 0 0 !important;
+  font-variant-numeric: tabular-nums !important;
+}}
+.disp-pager-label strong {{
+  color: var(--disp-muted) !important;
+  font-weight: 500 !important;
+}}
+[class*="st-key-disp_case_type_"] .stButton > button {{
+  font-size: 11px !important;
+  min-height: 28px !important;
+  height: 28px !important;
+  border-radius: var(--disp-radius-sm) !important;
+  border: 1px solid var(--disp-border) !important;
+  background: var(--disp-panel) !important;
+  color: var(--disp-muted) !important;
+  margin: 0 !important;
+}}
+[class*="st-key-disp_case_type_"] .stButton > button[kind="primary"],
+[class*="st-key-disp_case_type_"] .stButton > button[data-testid="stBaseButton-primary"] {{
+  background: var(--disp-accent-bg) !important;
+  border-color: var(--disp-accent) !important;
+  color: var(--disp-text) !important;
+  font-weight: 500 !important;
 }}
 """
 
@@ -2039,6 +2209,26 @@ SALES_QUEUE_DOTS: dict[str, str] = {
 
 SALES_QUEUE_ORDER: tuple[str, ...] = tuple(SALES_QUEUE_DOTS.keys())
 
+
+def _build_queue_dot_css(prefix: str, dots: dict[str, str]) -> str:
+    """Static queue-dot colours (avoids per-rerun inline style blocks)."""
+    rules: list[str] = []
+    for q, color in dots.items():
+        key = q.replace(" ", "_")
+        rules.append(
+            f"div.st-key-{prefix}_{key} .stButton > button::before {{"
+            f"color: {color} !important;}}"
+        )
+    return "\n".join(rules)
+
+
+DISPATCH_LAYOUT_RULES = (
+    DISPATCH_LAYOUT_RULES
+    + _build_queue_dot_css("uqueue", QUEUE_DOTS)
+    + _build_queue_dot_css("disp_queue", QUEUE_DOTS)
+    + _build_queue_dot_css("sales_queue", SALES_QUEUE_DOTS)
+)
+
 TIMELINE_DOT: dict[str, str] = {
     "Assignment": "#3b82f6",
     "Response": "#22c55e",
@@ -2065,16 +2255,20 @@ def inject_dispatch_theme(*, login: bool = False) -> None:
 
 def status_pill(status: str) -> str:
     label = display_status(status)
-    if label == "Unattended":
-        return (
-            f'<span style="font-size:11px;font-weight:500;padding:2px 6px;'
-            f'border-radius:3px;background:#2d1515;color:#ef4444;'
-            f'white-space:nowrap">{html.escape(label)}</span>'
-        )
+    palette = {
+        "Unattended": ("#3f1515", "#f87171"),
+        "Needs Review": ("#14291a", "#4ade80"),
+        "Daily Task": ("#0f2438", "#60a5fa"),
+        "On Hold": ("#2a2008", "#fbbf24"),
+        "Under Investigation": ("#1f1530", "#c084fc"),
+        "Follow up": ("#2a1030", "#f472b6"),
+        "Resolved": ("#142018", "#86efac"),
+    }
+    bg, fg = palette.get(label, ("#1a1a1f", "#a1a1aa"))
     safe = html.escape(label)
     return (
-        f'<span style="font-size:11px;font-weight:500;padding:2px 6px;'
-        f'border-radius:3px;background:#1a2035;color:#8a9ac0;'
+        f'<span style="font-size:10px;font-weight:500;padding:2px 5px;'
+        f'border-radius:2px;background:{bg};color:{fg};'
         f'white-space:nowrap">{safe}</span>'
     )
 
@@ -2153,7 +2347,7 @@ def render_topbar(
 def render_sidebar_today_grid(
     items: tuple[tuple[str, int | str, str], ...],
 ) -> None:
-    """Compact 2×2 today stats — aligned with queue buttons below."""
+    """Horizontal today stats strip — aligned with queue list below."""
     cells: list[str] = []
     for label, value, colour in items:
         cells.append(
@@ -2163,7 +2357,7 @@ def render_sidebar_today_grid(
             f"{html.escape(str(value))}</div></div>"
         )
     st.markdown(
-        f'<div class="disp-today-grid">{"".join(cells)}</div>',
+        f'<div class="disp-today-strip">{"".join(cells)}</div>',
         unsafe_allow_html=True,
     )
 
@@ -2183,20 +2377,13 @@ def render_queue_list(
     picked = selected
     with st.container(key="disp_sidebar_queues"):
         for q in order:
-            dot = dots.get(q, "#4a5a7a")
             cnt = counts.get(q, 0)
             is_active = q == selected
             row_key = q.replace(" ", "_")
             btn_key = f"{button_key_prefix}_{row_key}"
             st.markdown(
-                f"<style>"
-                f"div.st-key-{btn_key} .stButton > button::before {{"
-                f"color: {dot} !important;"
-                f"}}"
-                f"div.st-key-{btn_key} .stButton > button::after {{"
-                f'content: "{cnt}";'
-                f"}}"
-                f"</style>",
+                f"<style>div.st-key-{btn_key} .stButton > button::after {{"
+                f'content: "{cnt}";}}</style>',
                 unsafe_allow_html=True,
             )
             if st.button(
@@ -2428,15 +2615,11 @@ _CASE_TYPE_PILL_COLORS: dict[str, str] = {
 
 
 def _table_cell_style(*, is_sel: bool) -> str:
-    """Shared row cell chrome for ticket/sales tables."""
-    row_bg = "#0d1e3a" if is_sel else "transparent"
-    row_pad = "5px 8px" if is_sel else "5px 6px"
-    row_radius = "4px" if is_sel else "0"
-    border = "0.5px solid #1a3460" if is_sel else "0.5px solid transparent"
+    """Shared row cell chrome for ticket/sales tables (selection via row CSS)."""
+    del is_sel
     return (
-        f"padding:{row_pad};background:{row_bg};border-radius:{row_radius};"
-        f"min-height:34px;display:flex;align-items:center;box-sizing:border-box;"
-        f"width:100%;border:{border};white-space:nowrap;overflow:hidden;"
+        "padding:4px 6px;min-height:32px;display:flex;align-items:center;"
+        "box-sizing:border-box;width:100%;white-space:nowrap;overflow:hidden;"
     )
 
 
@@ -2501,9 +2684,7 @@ def render_ticket_table(
     """Render ticket rows as Streamlit columns (supports per-row popovers)."""
     if not tickets:
         st.markdown(
-            '<div style="padding:40px;text-align:center;color:#2a3a5a;'
-            'font-size:13px;font-weight:400">'
-            "No tickets in this queue</div>",
+            '<div class="disp-table-empty">No tickets in this queue</div>',
             unsafe_allow_html=True,
         )
         return
@@ -2518,19 +2699,14 @@ def render_ticket_table(
         if show_case_type
         else ["Ticket", "Category", "Engineer", "Notes", "Elapsed", "Status"]
     )
-    header_cols = st.columns(col_ratios, gap="small")
-    for col, label in zip(header_cols[:-1], header_labels):
-        with col:
-            st.markdown(
-                f'<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
-                f'text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px">'
-                f"{html.escape(label)}</p>",
-                unsafe_allow_html=True,
-            )
-    st.markdown(
-        '<hr style="border-color:#1a2035;margin:0 0 4px">',
-        unsafe_allow_html=True,
-    )
+    with st.container(key="disp_table_header"):
+        header_cols = st.columns(col_ratios, gap="small")
+        for col, label in zip(header_cols[:-1], header_labels):
+            with col:
+                st.markdown(
+                    f'<p class="disp-col-head">{html.escape(label)}</p>',
+                    unsafe_allow_html=True,
+                )
 
     with st.container(key="disp_ticket_table"):
         for t in tickets:
@@ -2554,8 +2730,7 @@ def render_ticket_table(
                     ):
                         fu_dot = '<span style="font-size:12px;color:#a78bfa;margin-left:4px">●</span>'
                     st.markdown(
-                        f'<div style="{cell}"><span style="font-size:13px;font-weight:500;'
-                        f'color:#8a9ac0;font-variant-numeric:tabular-nums">'
+                        f'<div style="{cell}"><span class="disp-ticket-num">'
                         f"{html.escape(tnum)}{fu_dot}</span></div>",
                         unsafe_allow_html=True,
                     )
@@ -2700,32 +2875,33 @@ def render_ticket_table_pager(
     """Prev / Next controls below the ticket table."""
     if total <= page_size:
         return
-    c_prev, c_label, c_next = st.columns([1, 2, 1], gap="small")
-    with c_prev:
-        if st.button(
-            "◀ Prev",
-            key=f"{key_prefix}_page_prev",
-            disabled=page <= 1,
-            use_container_width=True,
-        ):
-            st.session_state[_DISP_TICKET_PAGE_KEY] = page - 1
-            st.rerun()
-    with c_label:
-        st.markdown(
-            f'<p style="text-align:center;font-size:12px;color:#4a5a7a;margin:8px 0 0">'
-            f"Page **{page}** of **{total_pages}** · "
-            f"**{range_start}–{range_end}** of **{total}**</p>",
-            unsafe_allow_html=True,
-        )
-    with c_next:
-        if st.button(
-            "Next ▶",
-            key=f"{key_prefix}_page_next",
-            disabled=page >= total_pages,
-            use_container_width=True,
-        ):
-            st.session_state[_DISP_TICKET_PAGE_KEY] = page + 1
-            st.rerun()
+    with st.container(key="disp_ticket_pager"):
+        c_prev, c_label, c_next = st.columns([1, 2, 1], gap="small")
+        with c_prev:
+            if st.button(
+                "◀ Prev",
+                key=f"{key_prefix}_page_prev",
+                disabled=page <= 1,
+                use_container_width=True,
+            ):
+                st.session_state[_DISP_TICKET_PAGE_KEY] = page - 1
+                st.rerun()
+        with c_label:
+            st.markdown(
+                f'<p class="disp-pager-label">'
+                f"Page <strong>{page}</strong> of <strong>{total_pages}</strong> · "
+                f"<strong>{range_start}–{range_end}</strong> of <strong>{total}</strong></p>",
+                unsafe_allow_html=True,
+            )
+        with c_next:
+            if st.button(
+                "Next ▶",
+                key=f"{key_prefix}_page_next",
+                disabled=page >= total_pages,
+                use_container_width=True,
+            ):
+                st.session_state[_DISP_TICKET_PAGE_KEY] = page + 1
+                st.rerun()
 
 
 def prepare_dispatch_ticket_page(
