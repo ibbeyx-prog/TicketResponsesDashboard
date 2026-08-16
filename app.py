@@ -110,33 +110,46 @@ from task_categories import (
     task_categories_table,
     upsert_task_category,
 )
-from dispatch_console import (
-    DISPATCH_FULL_DARK_CSS,
-    DISPATCH_LAYOUT_RULES,
-    DISPATCH_LOGIN_CSS,
-    QUEUE_DOTS,
-    QUEUE_ORDER,
-    SALES_QUEUE_DOTS,
-    SALES_QUEUE_ORDER,
-    active_queue_key,
-    display_status,
-    format_utc5,
-    render_engineer_row,
-    render_nudge_banner,
-    render_queue_list,
-    render_refresh_caption,
-    render_sales_case_table,
-    render_settings_popover,
-    render_sidebar_today_grid,
-    render_ticket_table,
-    render_ticket_table_fast,
-    render_ticket_table_pager,
-    render_timeline_entry,
-    render_topbar,
-    status_pill,
-    prepare_dispatch_ticket_page,
-    DISPATCH_TICKET_PAGE_SIZE,
-)
+try:
+    from dispatch_console import (
+        DISPATCH_FULL_DARK_CSS,
+        DISPATCH_LAYOUT_RULES,
+        DISPATCH_LOGIN_CSS,
+        QUEUE_DOTS,
+        QUEUE_ORDER,
+        SALES_QUEUE_DOTS,
+        SALES_QUEUE_ORDER,
+        active_queue_key,
+        display_status,
+        format_utc5,
+        render_engineer_row,
+        render_nudge_banner,
+        render_queue_list,
+        render_refresh_caption,
+        render_sales_case_table,
+        render_settings_popover,
+        render_sidebar_today_grid,
+        render_ticket_table,
+        render_ticket_table_pager,
+        render_timeline_entry,
+        render_topbar,
+        status_pill,
+        prepare_dispatch_ticket_page,
+        DISPATCH_TICKET_PAGE_SIZE,
+    )
+    try:
+        from dispatch_console import render_ticket_table_fast
+    except ImportError:
+        render_ticket_table_fast = render_ticket_table
+except ImportError as _dispatch_import_err:
+    import traceback
+
+    traceback.print_exc()
+    raise ImportError(
+        "dispatch_console failed to import — redeploy/reboot the Streamlit app "
+        "so app.py and dispatch_console.py are the same commit. "
+        f"Original error: {_dispatch_import_err!r}"
+    ) from _dispatch_import_err
 from unattended import (
     OPS_TZ,
     STATUS_DAILY_TASK,
