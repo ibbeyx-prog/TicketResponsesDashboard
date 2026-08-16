@@ -129,6 +129,7 @@ from dispatch_console import (
     render_settings_popover,
     render_sidebar_today_grid,
     render_ticket_table,
+    render_ticket_table_fast,
     render_ticket_table_pager,
     render_timeline_entry,
     render_topbar,
@@ -163,18 +164,18 @@ def tx(
 
 
 def t_heading(text: object) -> str:
-    return tx(text, "15px", "500", "#e2e8f8")
+    return tx(text, "18px", "600", "#f0f4fc")
 
 
 def t_section_label(
     text: object,
     *,
-    spacing: str = ".06em",
-    margin: str = "margin-bottom:7px",
+    spacing: str = ".07em",
+    margin: str = "margin-bottom:8px",
 ) -> str:
     safe = html.escape(str(text))
     return (
-        f'<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
+        f'<p style="font-size:11px;font-weight:600;color:#6b7a99;'
         f"text-transform:uppercase;letter-spacing:{spacing};{margin}\">"
         f"{safe}</p>"
     )
@@ -199,8 +200,8 @@ def t_secondary(text: object) -> str:
 
 
 def t_queue_sub(text: object) -> str:
-    """Queue ticket count — 13px 400 #2a3a5a."""
-    return tx(text, "13px", "400", "#2a3a5a")
+    """Queue ticket count — muted inline suffix."""
+    return tx(text, "13px", "400", "#6b7a99")
 
 
 def t_body(text: object) -> str:
@@ -371,6 +372,26 @@ PERF_OVERVIEW_CSS = """
       text-transform: lowercase;
       letter-spacing: 0.02em;
     }
+    table.perf-fast-table tbody td {
+      font-size: 13px !important;
+      color: #8a9ac0 !important;
+    }
+    table.perf-ov-table tbody td.perf-ov-bar {
+      padding-top: 2px !important;
+      padding-bottom: 2px !important;
+      white-space: normal !important;
+    }
+    div.st-key-perf_table_actions .stButton > button,
+    div.st-key-perf_ov_actions .stButton > button {
+      min-height: 36px !important;
+      height: 36px !important;
+      width: 100% !important;
+      font-size: 12px !important;
+    }
+    div.st-key-perf_table_actions [data-testid="stVerticalBlock"],
+    div.st-key-perf_ov_actions [data-testid="stVerticalBlock"] {
+      gap: 0 !important;
+    }
     .perf-ss-seg.solo {
       border-right: 0.5px solid #1a2035;
       color: #e2e8f8;
@@ -457,7 +478,7 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v7"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
 
 
@@ -470,26 +491,24 @@ def apply_theme(*, login: bool = False) -> None:
     st.markdown(
         f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
     /* ── Base ── */
-    [data-testid="stAppViewContainer"] {{ background: #0b0f18; }}
-    [data-testid="stSidebar"]          {{ background: #080b14; border-right: 0.5px solid #1a2035; }}
+    [data-testid="stAppViewContainer"] {{ background: #0a0f1a; }}
+    [data-testid="stSidebar"]          {{ background: #0f1629; border-right: 1px solid #243047; }}
     [data-testid="block-container"],
     [data-testid="stMainBlockContainer"]    {{ padding: 0 !important; max-width: 100% !important; width: 100% !important; }}
 
     html, body, [class*="css"] {{
-      font-family: 'Inter', 'system-ui', sans-serif;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       font-size:14px;
       font-weight: 400;
-      color: #8a9ac0;
+      color: #9aa8c4;
     }}
 
     /* ── Headings — only two heading sizes used ── */
     h1, h2, h3 {{
-      font-family: 'Inter', 'system-ui', sans-serif !important;
-      font-weight: 500 !important;
-      color: #e2e8f8 !important;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
+      font-weight: 600 !important;
+      color: #f0f4fc !important;
       letter-spacing: 0 !important;
     }}
 
@@ -592,13 +611,45 @@ def apply_theme(*, login: bool = False) -> None:
     div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
     div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3),
     div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(4) {{
-      border-left: 0.5px solid #1a2035;
-      padding-left: 10px !important;
+      border-left: 1px solid #243047;
+      padding-left: 12px !important;
     }}
 
-    /* ── All buttons base ── */
+    div.st-key-disp_header_lookup .stButton > button,
+    div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
+      background: #141e32 !important;
+      border: 1px solid #243047 !important;
+      color: #9aa8c4 !important;
+      font-size: 12px !important;
+      font-weight: 500 !important;
+      height: 32px !important;
+      min-height: 32px !important;
+      max-height: 32px !important;
+      padding: 0 12px !important;
+      border-radius: 8px !important;
+    }}
+    div.st-key-disp_header_lookup .stButton > button:hover,
+    div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
+      border-color: #334766 !important;
+      color: #f0f4fc !important;
+      background: #1a2740 !important;
+    }}
+    span.disp-header-clock-pill {{
+      font-size: 12px;
+      color: #818cf8;
+      background: #141e32;
+      border: 1px solid #243047;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      height: 32px;
+      box-sizing: border-box;
+    }}
     .stButton > button {{
-      font-family: 'Inter', 'system-ui', sans-serif !important;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
       font-size:13px !important;
       font-weight: 400 !important;
       background: transparent;
@@ -657,7 +708,7 @@ def apply_theme(*, login: bool = False) -> None:
     .stSelectbox > div > div,
     .stTextArea > div > textarea,
     .stNumberInput > div > div > input {{
-      font-family: 'Inter', 'system-ui', sans-serif !important;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
       font-size:13px !important;
       font-weight: 400 !important;
       color: #8a9ac0 !important;
@@ -775,6 +826,7 @@ _DISP_ROW_RESOLVE = "disp_row_resolve_ticket"
 _DISP_ROW_PHOTOS = "disp_row_photo_ticket"
 _DISP_ROW_FOLLOW_UP = "disp_row_follow_up_ticket"
 _DISP_INVESTIGATION_SUBTAB_KEY = "disp_investigation_subtab"
+_DISP_DETAIL_TAB_KEY = "disp_detail_tab"
 _INVESTIGATION_SUBTABS: tuple[str, ...] = ("All", "General")
 _DISP_ASSIGN_MODE_KEY = "disp_assign_mode"
 _DISP_ASSIGN_MODE_TELEGRAM = "telegram"
@@ -7136,7 +7188,9 @@ def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
 
 _PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
 _PERF_MATRIX_COMPONENT_KEY = "perf_staff_matrix"
-_PERF_MATRIX_MAX_TICKETS = 40
+_PERF_MATRIX_MAX_TICKETS = max(
+    15, int(float(os.getenv("PERF_MATRIX_MAX_TICKETS", "40") or "40"))
+)
 _CASE_INFO_MAX_COMMENTS = 40
 _CASE_INFO_MAX_PHOTOS = 25
 _CASE_INFO_COMMENT_SCROLL_MAX_PX = 220
@@ -7219,11 +7273,11 @@ def _perf_tickets_bipartite_data(
     if tickets.empty or "ticket_number" not in tickets.columns:
         return None
     ticket_engineers: dict[str, set[str]] = {}
-    for _, row in tickets.iterrows():
-        tn = str(row.get("ticket_number") or "").strip()
+    for rec in tickets.to_dict("records"):
+        tn = str(rec.get("ticket_number") or "").strip()
         if not tn:
             continue
-        ticket_engineers[tn] = set(_perf_ticket_credit_assignees(row))
+        ticket_engineers[tn] = set(_perf_ticket_credit_assignees(rec))
     if not ticket_engineers:
         return None
     focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
@@ -7337,11 +7391,11 @@ def _perf_sales_case_bipartite_data(
     if sales.empty or "case_ref" not in sales.columns:
         return None
     ticket_engineers: dict[str, set[str]] = {}
-    for _, row in sales.iterrows():
-        ref = str(row.get("case_ref") or "").strip()
+    for rec in sales.to_dict("records"):
+        ref = str(rec.get("case_ref") or "").strip()
         if not ref:
             continue
-        ticket_engineers[ref] = set(_perf_sales_case_matrix_staff(row).keys())
+        ticket_engineers[ref] = set(_perf_sales_case_matrix_staff(rec).keys())
     if not ticket_engineers:
         return None
     focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
@@ -7442,14 +7496,34 @@ def _perf_matrix_merge_sales_lookup(
 
 def _perf_sales_cases_by_ref(sales: pd.DataFrame) -> dict[str, pd.Series]:
     """Index sales rows by ``case_ref`` for matrix payload building."""
-    out: dict[str, pd.Series] = {}
     if sales.empty or "case_ref" not in sales.columns:
-        return out
-    for _, row in sales.iterrows():
-        ref = str(row.get("case_ref") or "").strip()
-        if ref:
-            out[ref] = row
-    return out
+        return {}
+    view = sales.copy()
+    view["_ref"] = view["case_ref"].astype(str).str.strip()
+    view = view.loc[view["_ref"].ne("")]
+    if view.empty:
+        return {}
+    view = view.drop_duplicates(subset=["_ref"], keep="last")
+    return {str(row["_ref"]): row for _, row in view.iterrows()}
+
+
+def _perf_tickets_by_number(
+    tickets_df: pd.DataFrame,
+    *,
+    ticket_ids: set[str] | None = None,
+) -> dict[str, pd.Series]:
+    """Index ticket rows by ``ticket_number`` (optional subset filter)."""
+    if tickets_df.empty or "ticket_number" not in tickets_df.columns:
+        return {}
+    view = tickets_df.copy()
+    view["_tn"] = view["ticket_number"].astype(str).str.strip()
+    view = view.loc[view["_tn"].ne("")]
+    if ticket_ids:
+        view = view.loc[view["_tn"].isin(ticket_ids)]
+    if view.empty:
+        return {}
+    view = view.drop_duplicates(subset=["_tn"], keep="last")
+    return {str(row["_tn"]): row for _, row in view.iterrows()}
 
 
 def _perf_case_info_ticket_ids(
@@ -8074,6 +8148,37 @@ def _perf_matrix_case_info_by_ticket(
     return _perf_matrix_case_info_finalize(bucket, ids)
 
 
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_matrix_case_info_for_display_cached(
+    ticket_numbers_key: str,
+    range_start_iso: str,
+    range_end_iso: str,
+) -> dict[str, dict[str, list[dict[str, object]]]]:
+    """Cached comments/photos — only for the visible matrix page (not full backlog)."""
+    ids = [x.strip() for x in ticket_numbers_key.split("\n") if x.strip()]
+    if not ids:
+        return {}
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    try:
+        visits_all = _fetch_visits_in_range(range_start, range_end)
+    except Exception:
+        visits_all = pd.DataFrame()
+    sales_all = pd.DataFrame()
+    try:
+        raw = _fetch_sales_cases_cached()
+        sales_all = raw if raw is not None else pd.DataFrame()
+    except Exception:
+        pass
+    id_set = set(ids)
+    sales_subset = (
+        sales_all[sales_all["case_ref"].astype(str).str.strip().isin(id_set)]
+        if not sales_all.empty and "case_ref" in sales_all.columns
+        else pd.DataFrame()
+    )
+    return _perf_matrix_case_info_by_ticket(visits_all, ids, sales_cases=sales_subset)
+
+
 def _perf_comment_kind_label(kind: object) -> str:
     return {
         "visit": "Visit",
@@ -8234,6 +8339,8 @@ def _perf_build_staff_matrix_payload(
     lookup_ticket: str = "",
     sales_cases: pd.DataFrame | None = None,
     tickets_df: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> dict[str, object]:
     """JSON payload for the React Multi-Staff Case Management Matrix."""
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
@@ -8241,27 +8348,31 @@ def _perf_build_staff_matrix_payload(
         search=search,
         lookup_ticket=lookup_ticket,
     )
-    # Matrix rows/search use the focus-filtered pool; summary counts match visible scope.
     pool_total = len(pool)
+    display_pool = pool[:_PERF_MATRIX_MAX_TICKETS]
+    pool_truncated = pool_total > len(display_pool)
+    display_set = set(display_pool)
+
     prepared = _perf_prepare_visits_df(visits_all)
     sales_by_ref = _perf_sales_cases_by_ref(
         sales_cases if sales_cases is not None else pd.DataFrame()
     )
-    tickets_by_num: dict[str, pd.Series] = {}
+    if display_set and sales_by_ref:
+        sales_by_ref = {k: v for k, v in sales_by_ref.items() if k in display_set}
     tdf = tickets_df if tickets_df is not None else pd.DataFrame()
-    if not tdf.empty and "ticket_number" in tdf.columns:
-        for _, row in tdf.iterrows():
-            tn = str(row.get("ticket_number") or "").strip()
-            if tn:
-                tickets_by_num[tn] = row
+    tickets_by_num = _perf_tickets_by_number(tdf, ticket_ids=display_set or None)
     eng_colors = _perf_engineer_color_map(all_engineers)
-    case_info_by_ticket = _perf_matrix_case_info_by_ticket(
-        visits_all,
-        pool,
-        sales_cases=sales_cases,
-    )
+
+    case_info_by_ticket: dict[str, dict[str, list[dict[str, object]]]] = {}
+    if display_pool and range_start is not None and range_end is not None:
+        case_info_by_ticket = _perf_matrix_case_info_for_display_cached(
+            "\n".join(display_pool),
+            range_start.isoformat(),
+            range_end.isoformat(),
+        )
+
     tickets: list[dict[str, object]] = []
-    for seq, tn in enumerate(pool, start=1):
+    for seq, tn in enumerate(display_pool, start=1):
         assigned = sorted(ticket_engineers.get(tn, set()), key=str.lower)
         staff_assignments: dict[str, dict[str, str]] = {}
         sales_row = sales_by_ref.get(tn)
@@ -8325,16 +8436,16 @@ def _perf_build_staff_matrix_payload(
     top_ticket = tickets[top_idx] if total else {}
     residential_ids = set(tickets_by_num)
     resort_ids = set(sales_by_ref)
-    residential_cases = sum(1 for tid in pool if tid in residential_ids)
-    resort_cases = sum(1 for tid in pool if tid in resort_ids)
-    backlog_total = len(pool)
+    residential_cases = sum(1 for tid in display_pool if tid in residential_ids)
+    resort_cases = sum(1 for tid in display_pool if tid in resort_ids)
+    backlog_total = len(display_pool)
     return {
         "tickets": tickets,
         "staffMembers": all_engineers,
         "staffColors": eng_colors,
         "lookupTicket": lookup_ticket or "",
         "poolTotal": pool_total,
-        "poolTruncated": False,
+        "poolTruncated": pool_truncated,
         "summary": {
             "totalCases": backlog_total,
             "residentialCases": residential_cases,
@@ -8344,6 +8455,26 @@ def _perf_build_staff_matrix_payload(
             "topCollaborativeStaffCount": int(staff_counts[top_idx]) if total else 0,
         },
     }
+
+
+def _render_perf_staff_matrix_from_payload(payload: dict[str, object]) -> bool:
+    """Render React matrix when built. Returns True if the payload was shown."""
+    tickets = payload.get("tickets") or []
+    if not tickets:
+        st.caption("No tickets to show in the matrix.")
+        return True
+
+    pool_total = int(payload.get("poolTotal") or len(tickets))
+    if payload.get("poolTruncated") or pool_total > len(tickets):
+        st.caption(
+            f"Showing first **{len(tickets)}** of **{pool_total}** cases. "
+            "Use **Ticket ID** lookup (9 or 16 digits) to jump to a specific case."
+        )
+
+    if _staff_matrix_component is not None and _HAS_STAFF_MATRIX:
+        _staff_matrix_component(payload, height=720, key=_PERF_MATRIX_COMPONENT_KEY)
+        return True
+    return False
 
 
 def _perf_visit_matrix_cell(
@@ -8371,6 +8502,8 @@ def _render_perf_visit_staff_matrix(
     lookup_ticket: str = "",
     sales_cases: pd.DataFrame | None = None,
     tickets_df: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> None:
     """Tickets × staff grid — virtualized React matrix when build is present."""
     payload = _perf_build_staff_matrix_payload(
@@ -8380,26 +8513,16 @@ def _render_perf_visit_staff_matrix(
         lookup_ticket=lookup_ticket,
         sales_cases=sales_cases,
         tickets_df=tickets_df,
+        range_start=range_start,
+        range_end=range_end,
     )
-    tickets = payload.get("tickets") or []
-    if not tickets:
-        st.caption("No tickets to show in the matrix.")
-        return
-
-    pool_total = int(payload.get("poolTotal") or len(tickets))
-    if payload.get("poolTruncated") or pool_total > len(tickets):
-        st.caption(
-            f"Showing first **{len(tickets)}** of **{pool_total}** tickets in the matrix. "
-            "Narrow the date range or use Ticket ID lookup to find a specific case."
-        )
-
-    if _staff_matrix_component is not None and _HAS_STAFF_MATRIX:
-        _staff_matrix_component(payload, height=720, key=_PERF_MATRIX_COMPONENT_KEY)
+    if _render_perf_staff_matrix_from_payload(payload):
         return
 
     all_engineers, pool, ticket_engineers, _focus_key, _total_all = _perf_visit_ticket_pool(
         data,
         search=search,
+        lookup_ticket=lookup_ticket,
     )
     tickets_pool = pool[:_PERF_MATRIX_MAX_TICKETS]
     if len(pool) > _PERF_MATRIX_MAX_TICKETS:
@@ -8531,6 +8654,185 @@ th.perf-matrix-ticket.shared-col {{ color: #60a5fa; }}
     components.html(matrix_html, height=min(560, 80 + 28 * max(len(tickets_pool), 1)), scrolling=True)
 
 
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _build_perf_case_info_payload_cached(
+    focus: str,
+    lookup_raw: str,
+    range_start_iso: str,
+    range_end_iso: str,
+) -> dict[str, object]:
+    """Build matrix payload for the visible page only (cached 120s)."""
+    lookup_tid = _perf_normalize_matrix_lookup(lookup_raw)
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    try:
+        visits_all = _fetch_visits_in_range(range_start, range_end)
+    except Exception:
+        visits_all = pd.DataFrame()
+    visits_matrix = _perf_matrix_merge_ticket_lookup(visits_all, lookup_raw)
+    try:
+        sales_full = _fetch_sales_cases_cached() or pd.DataFrame()
+    except Exception:
+        sales_full = pd.DataFrame()
+    sales_matrix = _perf_matrix_merge_sales_lookup(sales_full, lookup_raw)
+    try:
+        tickets_full = _fetch_tickets_cached()
+    except Exception:
+        tickets_full = pd.DataFrame()
+
+    tickets_data = _perf_tickets_bipartite_data(tickets_full, focus=focus)
+    sales_data = _perf_sales_case_bipartite_data(sales_matrix, focus=focus)
+    visits_data = _perf_visit_bipartite_data(visits_matrix, focus=focus)
+    data_matrix = _perf_merge_case_info_bipartite_data(tickets_data, sales_data)
+    data_matrix = _perf_merge_case_info_bipartite_data(data_matrix, visits_data)
+    if data_matrix is None:
+        return {"empty": True, "lookup_tid": lookup_tid}
+
+    return _perf_build_staff_matrix_payload(
+        visits_matrix,
+        data=data_matrix,
+        search=lookup_tid,
+        lookup_ticket=lookup_tid,
+        sales_cases=sales_matrix,
+        tickets_df=tickets_full,
+        range_start=range_start,
+        range_end=range_end,
+    )
+
+
+@st.fragment
+def _render_perf_case_info_tab_fragment(
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Case Info — cached matrix build; isolated partial reruns."""
+    lookup_raw = _perf_matrix_sync_lookup_from_component()
+    lookup_tid = _perf_normalize_matrix_lookup(lookup_raw)
+    st.caption(
+        "Rows = residential + resort cases · columns = staff · "
+        f"visit dots = activity in **{_format_perf_range_caption() or 'sidebar range'}**. "
+        f"Matrix shows up to **{_PERF_MATRIX_MAX_TICKETS}** cases at once — "
+        "use **Ticket ID** lookup for a specific ref."
+    )
+    with st.spinner("Loading case matrix…"):
+        payload = _build_perf_case_info_payload_cached(
+            focus,
+            lookup_raw,
+            range_start.isoformat(),
+            range_end.isoformat(),
+        )
+    if payload.get("empty"):
+        if lookup_tid:
+            st.warning(
+                f"No field visits or sales case found for **{lookup_tid}**. "
+                "Check the ID or confirm it exists in tickets_active / sales cases."
+            )
+        else:
+            st.info(
+                "No cases match the current focus filter. Set **Focus assignee** to "
+                "**All engineers**, or enter a **Ticket ID** / **case ref** in the matrix filter."
+            )
+        return
+    if lookup_tid and lookup_tid not in [
+        str(t.get("id") or "") for t in (payload.get("tickets") or [])
+    ]:
+        pool_total = int(payload.get("poolTotal") or 0)
+        if pool_total > len(payload.get("tickets") or []):
+            st.warning(
+                f"**{lookup_tid}** is in the backlog but not on the first "
+                f"**{_PERF_MATRIX_MAX_TICKETS}** rows — matrix is paginated by filter order."
+            )
+        else:
+            st.warning(
+                f"**{lookup_tid}** was not found in tickets_active or resort cases — "
+                "check the ID."
+            )
+    if _render_perf_staff_matrix_from_payload(payload):
+        return
+    _render_perf_matrix_html_from_payload(payload)
+
+
+def _render_perf_matrix_html_from_payload(payload: dict[str, object]) -> None:
+    """HTML matrix grid from cached payload — no extra Supabase fetches."""
+    tickets = payload.get("tickets") or []
+    all_engineers = payload.get("staffMembers") or []
+    eng_colors = payload.get("staffColors") or {}
+    if not tickets or not all_engineers:
+        st.caption("No matrix data to display.")
+        return
+
+    header_cells = ['<th class="perf-matrix-sticky-col">Ticket</th>']
+    for eng in all_engineers:
+        eng_short = eng if len(str(eng)) <= 14 else str(eng)[:11] + "…"
+        col = eng_colors.get(eng, "#3b82f6")
+        header_cells.append(
+            f'<th class="perf-matrix-ticket" title="{html.escape(str(eng))}" '
+            f'style="color:{col}">{html.escape(eng_short)}</th>'
+        )
+
+    body_rows: list[str] = []
+    for ticket in tickets:
+        tn = str(ticket.get("id") or "")
+        assigned = list(ticket.get("assignedStaff") or [])
+        staff_assignments = ticket.get("staffAssignments") or {}
+        shared_cls = " shared-col" if ticket.get("isShared") or len(assigned) > 1 else ""
+        short = tn if len(tn) <= 14 else tn[:11] + "…"
+        cells = [
+            f'<td class="perf-matrix-sticky-col{shared_cls}" title="{html.escape(tn)}">'
+            f"{html.escape(short)}</td>"
+        ]
+        for eng in all_engineers:
+            cell = staff_assignments.get(eng) if isinstance(staff_assignments, dict) else None
+            if not cell:
+                cells.append('<td class="perf-matrix-empty">·</td>')
+                continue
+            outcome = str(cell.get("outcome") or "")
+            label = str(cell.get("label") or outcome)
+            if outcome == "active":
+                sym, sym_col = "●", eng_colors.get(eng, "#3b82f6")
+            else:
+                sym, sym_col = _PERF_MATRIX_OUTCOME_STYLE.get(outcome, ("·", "#a39e97"))
+            cells.append(
+                f'<td class="perf-matrix-cell" style="color:{sym_col}" '
+                f'title="{html.escape(label)}">{html.escape(sym)}</td>'
+            )
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    legend_bits = [
+        '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">●</i> Active</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#22c55e">✓</i> Responded</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#60a5fa">↪</i> Reassigned</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">A</i> Assigned</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#ef4444">U</i> Unattended</span>',
+    ]
+    matrix_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<style>
+html, body {{ margin: 0; padding: 0; background: #0b0f18; color: #e2e8f8; font-size:13px; }}
+.perf-matrix-shell {{ padding: 6px 8px 10px; }}
+.perf-matrix-legend {{ display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-bottom: 8px; color: #2a3a5a; font-size:11px; }}
+.perf-matrix-wrap {{ overflow: auto; max-height: 520px; border: 0.5px solid #1a2035; border-radius: 6px; }}
+table.perf-matrix {{ border-collapse: collapse; min-width: 100%; }}
+.perf-matrix th, .perf-matrix td {{ border: 0.5px solid #1a2035; padding: 4px 6px; text-align: center; white-space: nowrap; }}
+.perf-matrix th {{ background: #0d1220; position: sticky; top: 0; z-index: 2; }}
+.perf-matrix-sticky-col {{ position: sticky; left: 0; z-index: 3; background: #0b0f18; text-align: left !important; min-width: 108px; }}
+th.perf-matrix-sticky-col {{ z-index: 4; background: #0d1220; }}
+</style></head><body>
+<div class="perf-matrix-shell">
+<div class="perf-matrix-legend">{"".join(legend_bits)}</div>
+<div class="perf-matrix-wrap">
+<table class="perf-matrix"><thead><tr>{"".join(header_cells)}</tr></thead>
+<tbody>{"".join(body_rows)}</tbody></table>
+</div></div></body></html>"""
+    components.html(
+        matrix_html,
+        height=min(560, 80 + 28 * max(len(tickets), 1)),
+        scrolling=True,
+    )
+
+
 def _render_perf_case_info_tab(
     visits_all: pd.DataFrame,
     *,
@@ -8540,49 +8842,15 @@ def _render_perf_case_info_tab(
     range_start: pd.Timestamp | None = None,
     range_end: pd.Timestamp | None = None,
 ) -> None:
-    """Case Info tab — multi-staff case management matrix (field + sales)."""
-    lookup_raw = _perf_matrix_sync_lookup_from_component()
-    lookup_tid = _perf_normalize_matrix_lookup(lookup_raw)
-    visits_matrix = _perf_matrix_merge_ticket_lookup(visits_all, lookup_raw)
-    sales_full = sales_all if sales_all is not None else pd.DataFrame()
-    tickets_full = tickets_all if tickets_all is not None else pd.DataFrame()
-    sales_matrix = _perf_matrix_merge_sales_lookup(sales_full, lookup_raw)
-    tickets_data = _perf_tickets_bipartite_data(tickets_full, focus=focus)
-    sales_data = _perf_sales_case_bipartite_data(sales_matrix, focus=focus)
-    visits_data = _perf_visit_bipartite_data(visits_matrix, focus=focus)
-    data_matrix = _perf_merge_case_info_bipartite_data(tickets_data, sales_data)
-    data_matrix = _perf_merge_case_info_bipartite_data(data_matrix, visits_data)
-    data_matrix = _perf_apply_field_assignment_credits(data_matrix, tickets_full)
-    st.caption(
-        "Rows = **all residential tickets** and **all resort cases** (full backlog) · "
-        "columns = staff · visit dots reflect activity in the sidebar date range. "
-        "Use **Ticket ID** / **case ref** in the filter bar to search backlog "
-        "(9 or 16 digits loads history outside the date range). Case Info on the right."
+    """Case Info tab — delegates to cached fragment."""
+    del visits_all, sales_all, tickets_all
+    if range_start is None or range_end is None:
+        range_start, range_end = _get_perf_range()
+    _render_perf_case_info_tab_fragment(
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
     )
-    if lookup_tid and not data_matrix:
-        st.warning(
-            f"No field visits or sales case found for **{lookup_tid}**. "
-            "Check the ID or confirm it exists in tickets_active / sales cases."
-        )
-    elif not data_matrix:
-        st.info(
-            "No cases match the current focus filter. Set **Focus assignee** to **All**, "
-            "or enter a **Ticket ID** / **case ref** in the matrix filter bar."
-        )
-    else:
-        if lookup_tid and lookup_tid not in (data_matrix.get("all_tickets") or []):
-            st.warning(
-                f"**{lookup_tid}** was not found in tickets_active or resort cases — "
-                "check the ID."
-            )
-        _render_perf_visit_staff_matrix(
-            visits_matrix,
-            data=data_matrix,
-            search=lookup_tid,
-            lookup_ticket=lookup_tid,
-            sales_cases=sales_matrix,
-            tickets_df=tickets_all,
-        )
 
 
 def _render_visit_summary_table(visits: pd.DataFrame) -> None:
@@ -9292,7 +9560,7 @@ def _render_dash_filters_panel() -> None:
             step=1,
             key="bon_toolbar_refresh_interval",
         )
-    st.caption("Ticket lookup is in the header — **🔍 Lookup** next to Settings.")
+    st.caption("Ticket lookup is in the header — **Lookup** next to Settings.")
     if st.button("↻ Refresh now", key="bon_menu_refresh_btn", use_container_width=True):
         _invalidate_dashboard_data_cache()
         st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
@@ -9442,13 +9710,13 @@ def _get_operator_chip_data(
     """
     if is_legacy:
         return {
-            "av_bg": "#231a06",
+            "av_bg": "#2a2008",
             "av_border": "#4d3a10",
-            "av_color": "#f59e0b",
+            "av_color": "#fbbf24",
             "initials": "?",
             "name": "Shared session",
-            "role": "identity unverified",
-            "role_color": "#f59e0b",
+            "role": "Unverified",
+            "role_class": "disp-header-role-unverified",
         }
     if is_admin:
         initials = "".join(
@@ -9456,26 +9724,26 @@ def _get_operator_chip_data(
             for p in operator_id.replace("@", "").replace("_", " ").split()[:2]
         )
         return {
-            "av_bg": "#0d2218",
-            "av_border": "#14381e",
-            "av_color": "#22c55e",
+            "av_bg": "#14532d",
+            "av_border": "#166534",
+            "av_color": "#86efac",
             "initials": initials or "AD",
             "name": operator_id,
-            "role": "admin",
-            "role_color": "#2a3a5a",
+            "role": "Administrator",
+            "role_class": "disp-header-role-admin",
         }
     initials = "".join(
         p[0].upper()
         for p in operator_id.replace("@", "").replace("_", " ").split()[:2]
     )
     return {
-        "av_bg": "#0d1e3a",
-        "av_border": "#1a3460",
-        "av_color": "#5b7fb5",
+        "av_bg": "#1e1b4b",
+        "av_border": "#312e81",
+        "av_color": "#a5b4fc",
         "initials": initials or "OP",
         "name": operator_id,
-        "role": "operator",
-        "role_color": "#2a3a5a",
+        "role": "Operator",
+        "role_class": "disp-header-role-operator",
     }
 
 
@@ -9492,21 +9760,21 @@ def _render_dispatch_app_shell() -> None:
     is_legacy = _is_legacy_session()
     chip = _get_operator_chip_data(op_display, is_admin, is_legacy)
     now = datetime.now(LOCAL_TZ)
-    now_label = now.strftime("%a %d %b · %H:%M UTC+5")
+    now_date = now.strftime("%d %b %Y")
+    now_time = now.strftime("%H:%M")
 
     with st.container(key="disp_header_shell"):
         c_brand, c_mid = st.columns([0.95, 4.05], gap="small", vertical_alignment="center")
         with c_brand:
             st.markdown(
                 """
-            <div class="disp-brand-stack" style="
-              display:flex;flex-direction:column;justify-content:center;
-              padding-right:16px;border-right:0.5px solid #1a2035;height:56px;
-            ">
-              <span style="font-size:9px;font-weight:600;color:#5b7fb5;
-                letter-spacing:.12em;text-transform:uppercase;line-height:1">NetOps</span>
-              <span style="font-size:13px;font-weight:500;color:#e2e8f8;
-                letter-spacing:-.01em;margin-top:2px;line-height:1.2">Coverage Eye</span>
+            <div class="disp-brand-stack">
+              <div class="disp-brand-mark">
+                <span class="disp-brand-kicker">NetOps</span>
+                <span class="disp-brand-sep" aria-hidden="true"></span>
+                <span class="disp-brand-title">Coverage Eye</span>
+              </div>
+              <span class="disp-brand-sub">Field dispatch</span>
             </div>
             """,
                 unsafe_allow_html=True,
@@ -9521,42 +9789,47 @@ def _render_dispatch_app_shell() -> None:
                         _render_main_navigation()
                 with c_right:
                     with st.container(key="disp_header_right"):
-                        _render_dispatch_header_right(now_label=now_label, chip=chip)
+                        _render_dispatch_header_right(
+                            now_date=now_date,
+                            now_time=now_time,
+                            chip=chip,
+                        )
     if bool(st.session_state.get("show_lookup", False)):
         render_lookup_popover()
 
 
-def _render_dispatch_header_right(*, now_label: str, chip: dict[str, str]) -> None:
-    """Clock, operator, lookup, settings — same vertical midline as nav tabs."""
+def _render_dispatch_header_right(*, now_date: str, now_time: str, chip: dict[str, str]) -> None:
+    """Clock, operator, lookup, settings — aligned on the header midline."""
     _init_lookup_state()
     c_clock, c_op, c_lookup, c_settings = st.columns(
-        [1.4, 1.2, 0.9, 0.55],
+        [1.35, 1.35, 0.85, 0.7],
         gap="small",
         vertical_alignment="center",
     )
     with c_clock:
         st.markdown(
             f'<div class="disp-header-mid-item">'
-            f'<span class="disp-header-clock-pill">{html.escape(now_label)}</span>'
-            f"</div>",
+            f'<div class="disp-header-clock-pill">'
+            f'<span class="disp-header-clock-date">{html.escape(now_date)}</span>'
+            f'<span class="disp-header-clock-sep" aria-hidden="true"></span>'
+            f'<span class="disp-header-clock-time">{html.escape(now_time)}</span>'
+            f'<span class="disp-header-clock-tz">UTC+5</span>'
+            f"</div></div>",
             unsafe_allow_html=True,
         )
     with c_op:
+        role_class = html.escape(str(chip.get("role_class") or "disp-header-role-operator"))
         st.markdown(
             f"""
-        <div class="disp-header-mid-item disp-header-op-chip">
-          <div style="
-            width:28px;height:28px;border-radius:50%;
-            background:{chip["av_bg"]};border:0.5px solid {chip["av_border"]};
-            display:flex;align-items:center;justify-content:center;
-            font-size:10px;font-weight:600;color:{chip["av_color"]};
-            flex-shrink:0;
+        <div class="disp-header-mid-item disp-header-operator">
+          <div class="disp-header-avatar" style="
+            background:{html.escape(chip["av_bg"])};
+            border-color:{html.escape(chip["av_border"])};
+            color:{html.escape(chip["av_color"])};
           ">{html.escape(chip["initials"])}</div>
-          <div style="min-width:0">
-            <div style="font-size:13px;color:#8a9ac0;line-height:1.1;white-space:nowrap;
-              overflow:hidden;text-overflow:ellipsis">{html.escape(chip["name"])}</div>
-            <div style="font-size:10px;color:{chip["role_color"]};margin-top:2px;line-height:1">
-              {html.escape(chip["role"])}</div>
+          <div class="disp-header-operator-meta">
+            <span class="disp-header-operator-name">{html.escape(chip["name"])}</span>
+            <span class="disp-header-role-badge {role_class}">{html.escape(chip["role"])}</span>
           </div>
         </div>
         """,
@@ -9565,7 +9838,7 @@ def _render_dispatch_header_right(*, now_label: str, chip: dict[str, str]) -> No
     with c_lookup:
         with st.container(key="disp_header_lookup"):
             if st.button(
-                "🔍 Lookup",
+                "Lookup",
                 key="topbar_lookup_btn",
                 use_container_width=True,
             ):
@@ -18782,7 +19055,7 @@ def _render_sales_row_actions(case: dict, row_key: str) -> None:
         if st.button(
             "⋮",
             key=f"row_menu_sc_{row_key}",
-            help="Select row to open actions",
+            help="Select row · open again for actions",
             use_container_width=False,
         ):
             _sales_prepare_row_selection(case_ref)
@@ -19465,7 +19738,6 @@ def _render_unified_queue_list(
             rsr = int(resort_counts.get(q, 0))
             total = res + rsr
             is_active = q == picked
-            dot = QUEUE_DOTS.get(q, "#4a5a7a")
             row_key = q.replace(" ", "_")
             btn_key = f"uqueue_{row_key}"
             if case_type_filter == _CASE_TYPE_FILTER_ALL and res > 0 and rsr > 0:
@@ -19481,20 +19753,9 @@ def _render_unified_queue_list(
                 if q == "Follow up":
                     bg, fg = "#1a1030", "#a78bfa"
                 badge = (
-                    f'<span style="font-size:11px;padding:2px 6px;border-radius:3px;'
-                    f'background:{bg};color:{fg}">{total}</span>'
+                    f'<span style="font-size:11px;padding:3px 8px;border-radius:999px;'
+                    f'background:{bg};color:{fg};font-weight:500">{total}</span>'
                 )
-            st.markdown(
-                f"<style>"
-                f"div.st-key-{btn_key} .stButton > button::before {{"
-                f"color: {dot} !important;"
-                f"}}"
-                f"div.st-key-{btn_key} .stButton > button::after {{"
-                f"content: \"\";"
-                f"}}"
-                f"</style>",
-                unsafe_allow_html=True,
-            )
             c_label, c_badge = st.columns([4, 1.6], gap="small", vertical_alignment="center")
             with c_label:
                 if st.button(
@@ -19546,7 +19807,6 @@ def _render_unified_case_type_filter() -> str:
                 use_container_width=True,
             ):
                 st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = label
-                st.rerun()
     return cur
 
 
@@ -19619,7 +19879,6 @@ def _render_investigation_subtabs(df: pd.DataFrame) -> str:
                 use_container_width=True,
             ):
                 st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = name
-                st.rerun()
     subtab = str(st.session_state.get(_DISP_INVESTIGATION_SUBTAB_KEY) or cur)
     fu_count = int(_ticket_follow_up_mask(df).sum()) if not df.empty else 0
     if subtab == "All" and fu_count > 0:
@@ -19937,7 +20196,7 @@ def _render_dispatch_row_actions(
         if st.button(
             "⋮",
             key=f"row_menu_{row_key}",
-            help="Select row to open actions",
+            help="Select row · open again for actions",
             use_container_width=False,
         ):
             _dispatch_prepare_row_selection(tnum)
@@ -20257,6 +20516,8 @@ def _render_resort_reopen_actions(case: dict[str, object]) -> None:
 
 def _render_dispatch_case_info_panel(
     ticket: dict | None,
+    *,
+    load_heavy: bool = True,
 ) -> None:
     """Right-rail Case info tab — selected ticket detail + timeline."""
     with st.container(key="disp_detail_panel"):
@@ -20367,6 +20628,9 @@ def _render_dispatch_case_info_panel(
             )
         if detail_parts:
             st.markdown("".join(detail_parts), unsafe_allow_html=True)
+        if not load_heavy:
+            st.caption("Open **Case info** to load photos, activity, and timeline.")
+            return
         photo_url = _displayable_photo_url(t.get("photo_url"))
         if photo_url:
             st.markdown(
@@ -20391,7 +20655,7 @@ def _render_dispatch_right_rail(
     on_submit: Callable[[str, str, str, str, str], None],
     sales_df: pd.DataFrame | None = None,
 ) -> None:
-    """Right column — Ticket assign | Case info tabs (residential + resort)."""
+    """Right column — Ticket assign | Case info (lazy heavy loads on Case info tab)."""
     ticket = None
     if picked:
         sel_type = str(st.session_state.get(_DISP_SELECTED_CASE_TYPE_KEY) or "")
@@ -20403,20 +20667,41 @@ def _render_dispatch_right_rail(
             if not match.empty:
                 ticket = _dispatch_row_dict(match.iloc[0])
 
+    detail_tab = str(st.session_state.get(_DISP_DETAIL_TAB_KEY) or "assign")
+    if detail_tab not in ("assign", "info"):
+        detail_tab = "assign"
+        st.session_state[_DISP_DETAIL_TAB_KEY] = detail_tab
+
     with st.container(key="disp_right_rail"):
-        tab_assign, tab_info = st.tabs(["Ticket assign", "Case info"])
+        tab_assign, tab_info = st.columns(2, gap="small")
         with tab_assign:
-            _render_unified_assign_panel(on_submit=on_submit, layout="rail")
-        with tab_info:
-            if (
-                picked
-                and str(st.session_state.get(_DISP_SELECTED_CASE_TYPE_KEY) or "")
-                == CASE_TYPE_RESORT
+            if st.button(
+                "Ticket assign",
+                key="disp_detail_tab_assign",
+                type="primary" if detail_tab == "assign" else "secondary",
+                use_container_width=True,
             ):
-                with st.container(key="disp_detail_panel"):
-                    _render_sales_detail_panel()
-            else:
-                _render_dispatch_case_info_panel(ticket)
+                st.session_state[_DISP_DETAIL_TAB_KEY] = "assign"
+        with tab_info:
+            if st.button(
+                "Case info",
+                key="disp_detail_tab_info",
+                type="primary" if detail_tab == "info" else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[_DISP_DETAIL_TAB_KEY] = "info"
+
+        if detail_tab == "assign":
+            _render_unified_assign_panel(on_submit=on_submit, layout="rail")
+        elif (
+            picked
+            and str(st.session_state.get(_DISP_SELECTED_CASE_TYPE_KEY) or "")
+            == CASE_TYPE_RESORT
+        ):
+            with st.container(key="disp_detail_panel"):
+                _render_sales_detail_panel()
+        else:
+            _render_dispatch_case_info_panel(ticket, load_heavy=True)
 
 
 def _assign_id_digits(raw: object) -> str:
@@ -21891,22 +22176,193 @@ def _dispatch_run_action(
         st.error(str(exc))
 
 
-def _render_dispatch_csm_dashboard(
-    *,
-    df: pd.DataFrame,
-    df_all: pd.DataFrame,
-    masks: dict[str, pd.Series],
-    lookback_days: int,
-    sales_df: pd.DataFrame | None = None,
-) -> None:
-    """Three-column dispatch console — residential + resort cases on one Ticket screen."""
-    aq_key = active_queue_key()
-    if aq_key not in st.session_state:
-        st.session_state[aq_key] = "Daily Task"
-
+def _load_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
+    """Cached ticket-board context — safe to call from @st.fragment reruns."""
+    del lookback_days
+    df_all = _fetch_tickets_cached()
+    if df_all.empty or "status" not in df_all.columns:
+        df = pd.DataFrame({"status": pd.Series(dtype=str)})
+        masks = _ticket_queue_count_masks(df)
+    else:
+        range_start, range_end = _get_dash_range()
+        df, _ = _dashboard_tickets_in_view(
+            df_all, range_start=range_start, range_end=range_end
+        )
+        masks = _ticket_queue_count_masks(df)
+    case_type_filter = _init_case_type_filter()
+    sales_df = (
+        _fetch_sales_cases_cached()
+        if case_type_filter != CASE_TYPE_RESIDENTIAL
+        else None
+    )
+    include_resort = case_type_filter != CASE_TYPE_RESIDENTIAL and sales_df is not None
+    resort_bundle = (
+        _get_resort_unified_bundle(sales_df)
+        if include_resort
+        else _empty_resort_unified_bundle()
+    )
+    resort_counts = resort_bundle.get("counts") or {q: 0 for q in QUEUE_ORDER}
+    if not isinstance(resort_counts, dict):
+        resort_counts = {q: 0 for q in QUEUE_ORDER}
     assigned_today, responded_today, daily_task_count, unattended_count = (
         _dispatch_today_metrics(df_all, df_in_view=df, sales_df=sales_df)
     )
+    aq_key = active_queue_key()
+    if aq_key not in st.session_state:
+        st.session_state[aq_key] = "Daily Task"
+    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+    cat_names = get_task_categories() or _try_fetch_task_categories()[0]
+    return {
+        "df": df,
+        "df_all": df_all,
+        "masks": masks,
+        "sales_df": sales_df,
+        "resort_bundle": resort_bundle,
+        "resort_counts": resort_counts,
+        "case_type_filter": case_type_filter,
+        "assigned_today": assigned_today,
+        "responded_today": responded_today,
+        "daily_task_count": daily_task_count,
+        "unattended_count": unattended_count,
+        "aq_key": aq_key,
+        "is_admin": _is_dashboard_admin(),
+        "fe_names": fe_names,
+        "fe_missing": fe_missing,
+        "cat_names": cat_names,
+    }
+
+
+def _compute_dispatch_ticket_view(ctx: dict[str, object]) -> dict[str, object]:
+    """Derive queue table rows + selection from session UI state."""
+    df = ctx["df"]
+    masks = ctx["masks"]
+    sales_df = ctx.get("sales_df")
+    resort_bundle = ctx["resort_bundle"]
+    aq_key = str(ctx["aq_key"])
+    selected_queue = str(st.session_state.get(aq_key, "Daily Task"))
+    if selected_queue not in QUEUE_ORDER:
+        selected_queue = "Daily Task"
+    mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
+    queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
+    if selected_queue == "Follow up" and not queue_df.empty:
+        queue_df = _sort_investigation_by_follow_up(queue_df)
+    eng_filter = st.session_state.get(_DISP_ENGINEER_FILTER_KEY)
+    if eng_filter and not queue_df.empty:
+        queue_df = queue_df.loc[
+            queue_df.apply(
+                lambda r: _perf_row_credited_to_person(r, str(eng_filter)),
+                axis=1,
+            )
+        ].copy()
+    inv_base_df: pd.DataFrame | None = (
+        queue_df.copy() if selected_queue == "Under Investigation" else None
+    )
+    investigation_subtab: str | None = None
+    display_df = queue_df
+    search_num = str(st.session_state.get("disp_ticket_search") or "")
+    if inv_base_df is not None:
+        investigation_subtab = str(
+            st.session_state.get(_DISP_INVESTIGATION_SUBTAB_KEY) or "All"
+        )
+        if investigation_subtab not in _INVESTIGATION_SUBTABS:
+            investigation_subtab = "All"
+        display_df = _apply_investigation_subtab(inv_base_df, investigation_subtab)
+    case_type_filter = _init_case_type_filter()
+    include_resort = case_type_filter != CASE_TYPE_RESIDENTIAL and sales_df is not None
+    ticket_rows: list[dict[str, object]] = []
+    if case_type_filter != CASE_TYPE_RESORT:
+        ticket_rows = [
+            _residential_row_to_unified_dict(pd.Series(rec))
+            for rec in display_df.to_dict("records")
+        ]
+    if include_resort:
+        by_queue = resort_bundle.get("by_queue") or {}
+        if isinstance(by_queue, dict):
+            resort_rows = by_queue.get(selected_queue) or []
+            if isinstance(resort_rows, list):
+                ticket_rows.extend(resort_rows)
+    ticket_rows = _apply_unified_case_type_filter(ticket_rows, case_type_filter)
+    ticket_rows = _dispatch_append_selected_lookup_ticket(
+        ticket_rows,
+        sales_df=sales_df if isinstance(sales_df, pd.DataFrame) else None,
+    )
+    ticket_nums = [
+        str(t.get("ticket_number") or "")
+        for t in ticket_rows
+        if t.get("ticket_number")
+    ]
+    jump_page_to_selection = bool(st.session_state.get("_disp_preserve_lookup_selection"))
+    _sync_dispatch_queue_view_state(
+        selected_queue=selected_queue,
+        ticket_nums=ticket_nums,
+    )
+    if investigation_subtab is not None:
+        _sync_investigation_subtab_view_state(
+            subtab=investigation_subtab,
+            ticket_nums=ticket_nums,
+        )
+    if search_num.strip():
+        q = search_num.strip()
+        ticket_rows = [
+            t for t in ticket_rows if q in str(t.get("ticket_number") or "")
+        ]
+    ticket_nums = [
+        str(t.get("ticket_number") or "")
+        for t in ticket_rows
+        if t.get("ticket_number")
+    ]
+    page_context = "|".join(
+        (
+            selected_queue,
+            search_num.strip(),
+            case_type_filter,
+            str(eng_filter or ""),
+            str(investigation_subtab or ""),
+        )
+    )
+    sel = st.session_state.get(_DISP_SELECTED_KEY)
+    page_rows, page, total_pages, total_rows, range_start, range_end = (
+        prepare_dispatch_ticket_page(
+            ticket_rows,
+            context_sig=page_context,
+            selected=str(sel) if sel else None,
+            jump_to_selection=jump_page_to_selection,
+            page_size=DISPATCH_TICKET_PAGE_SIZE,
+        )
+    )
+    picked = sel if sel and sel in ticket_nums else None
+    residential_nums = [
+        str(t.get("ticket_number") or "")
+        for t in ticket_rows
+        if t.get("ticket_number") and t.get("case_type") == CASE_TYPE_RESIDENTIAL
+    ]
+    return {
+        "selected_queue": selected_queue,
+        "display_df": display_df,
+        "inv_base_df": inv_base_df,
+        "investigation_subtab": investigation_subtab,
+        "eng_filter": eng_filter,
+        "case_type_filter": case_type_filter,
+        "ticket_rows": ticket_rows,
+        "ticket_nums": ticket_nums,
+        "page_rows": page_rows,
+        "page": page,
+        "total_pages": total_pages,
+        "total_rows": total_rows,
+        "range_start": range_start,
+        "range_end": range_end,
+        "picked": picked,
+        "residential_nums": residential_nums,
+        "sel": sel,
+    }
+
+
+def _render_dispatch_board_sidebar(ctx: dict[str, object]) -> str:
+    masks = ctx["masks"]
+    df = ctx["df"]
+    aq_key = str(ctx["aq_key"])
+    case_type_filter = str(ctx["case_type_filter"])
+    resort_counts = ctx["resort_counts"]
     residential_queue_counts = {
         "Daily Task": int(masks["pending"].sum()),
         "Needs Review": int(masks["open"].sum()),
@@ -21916,16 +22372,197 @@ def _render_dispatch_csm_dashboard(
         "Unattended": int(masks["unattended"].sum()),
         "Resolved": int(masks["completed"].sum()),
     }
-    case_type_filter = _init_case_type_filter()
-    include_resort = (
-        case_type_filter != CASE_TYPE_RESIDENTIAL and sales_df is not None
+    with st.container(key="disp_sidebar_inner"):
+        st.markdown(t_section_label("Today"), unsafe_allow_html=True)
+        render_sidebar_today_grid(
+            (
+                ("Assigned", ctx["assigned_today"], "#3b82f6"),
+                ("Responded", ctx["responded_today"], "#22c55e"),
+                ("Daily task", ctx["daily_task_count"], "#3b82f6"),
+                ("Unattended", ctx["unattended_count"], "#ef4444"),
+            )
+        )
+        st.markdown(
+            t_section_label("Queues", margin="margin-top:14px;margin-bottom:8px"),
+            unsafe_allow_html=True,
+        )
+        cur = st.session_state.get(aq_key, "Daily Task")
+        if cur not in QUEUE_ORDER:
+            cur = "Daily Task"
+        selected_queue = _render_unified_queue_list(
+            selected=str(cur),
+            residential_counts=residential_queue_counts,
+            resort_counts={q: int(resort_counts.get(q, 0)) for q in QUEUE_ORDER},
+            session_key=aq_key,
+            case_type_filter=case_type_filter,
+        )
+        st.session_state[aq_key] = selected_queue
+    return selected_queue
+
+
+def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
+    df = ctx["df"]
+    masks = ctx["masks"]
+    aq_key = str(ctx["aq_key"])
+    is_admin = bool(ctx["is_admin"])
+    sales_df = ctx.get("sales_df")
+    selected_queue = str(st.session_state.get(aq_key, "Daily Task"))
+    if selected_queue not in QUEUE_ORDER:
+        selected_queue = "Daily Task"
+    mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
+    queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
+    if selected_queue == "Follow up" and not queue_df.empty:
+        queue_df = _sort_investigation_by_follow_up(queue_df)
+    eng_filter = st.session_state.get(_DISP_ENGINEER_FILTER_KEY)
+    if eng_filter and not queue_df.empty:
+        queue_df = queue_df.loc[
+            queue_df.apply(
+                lambda r: _perf_row_credited_to_person(r, str(eng_filter)),
+                axis=1,
+            )
+        ].copy()
+    inv_base_df: pd.DataFrame | None = (
+        queue_df.copy() if selected_queue == "Under Investigation" else None
     )
-    resort_bundle = (
-        _get_resort_unified_bundle(sales_df) if include_resort else _empty_resort_unified_bundle()
+
+    col_title, col_search = st.columns([3, 1])
+    with col_title:
+        n_preview = len(queue_df) if inv_base_df is None else len(inv_base_df)
+        qtitle = (
+            selected_queue.lower()
+            if selected_queue == "Daily Task"
+            else selected_queue
+        )
+        count_label = f"{n_preview} ticket{'s' if n_preview != 1 else ''}"
+        st.markdown(
+            f"{t_heading(html.escape(qtitle))} {t_queue_sub(count_label)}",
+            unsafe_allow_html=True,
+        )
+        if eng_filter:
+            fc1, fc2 = st.columns([4, 1], gap="small")
+            with fc1:
+                st.markdown(
+                    f'<div style="font-size:11px;color:#e2e8f8;background:#0d1e3a;'
+                    f'border:0.5px solid #1a3460;padding:2px 6px;border-radius:3px;'
+                    f'display:inline-block;margin-top:4px">● Engineer: {html.escape(str(eng_filter))}'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            with fc2:
+                if st.button("✕", key="disp_clear_eng_filter", help="Clear engineer filter"):
+                    st.session_state.pop(_DISP_ENGINEER_FILTER_KEY, None)
+                    st.rerun()
+    with col_search:
+        st.text_input(
+            "Search",
+            placeholder="Search ref...",
+            label_visibility="collapsed",
+            key="disp_ticket_search",
+        )
+
+    if inv_base_df is not None:
+        _render_investigation_subtabs(inv_base_df)
+    elif selected_queue == "Follow up":
+        st.caption(
+            "Oldest follow-up first — chase these before newer investigation cases."
+        )
+
+    _render_unified_case_type_filter()
+    view = _compute_dispatch_ticket_view(ctx)
+    selected_queue = str(view["selected_queue"])
+
+    if selected_queue == "Daily Task":
+        render_nudge_banner(
+            [
+                t
+                for t in view["ticket_rows"]
+                if t.get("case_type") == CASE_TYPE_RESIDENTIAL
+            ]
+        )
+
+    render_ticket_table_fast(
+        view["page_rows"],
+        selected=view["sel"],
+        selected_key=_DISP_SELECTED_KEY,
+        show_case_type=True,
+        case_type_session_key=_DISP_SELECTED_CASE_TYPE_KEY,
+        row_actions_fn=lambda t, rk: _render_unified_row_actions(
+            t, rk, is_admin=is_admin, queue_name=selected_queue
+        ),
     )
-    resort_counts = resort_bundle["counts"]
-    if not isinstance(resort_counts, dict):
-        resort_counts = {q: 0 for q in QUEUE_ORDER}
+    render_ticket_table_pager(
+        page=int(view["page"]),
+        total_pages=int(view["total_pages"]),
+        total=int(view["total_rows"]),
+        range_start=int(view["range_start"]),
+        range_end=int(view["range_end"]),
+        page_size=DISPATCH_TICKET_PAGE_SIZE,
+    )
+    if _sales_any_row_modal_active() and sales_df is not None:
+        _render_sales_floor_modals(df=sales_df)
+
+
+@st.fragment
+def _dispatch_detail_column_fragment(lookback_days: int) -> None:
+    """Assign panel + case info — partial rerun without rebuilding the ticket table."""
+    ctx = _load_dispatch_ticket_context(lookback_days)
+    _render_dispatch_detail_column(ctx)
+
+
+@st.fragment
+def _dispatch_board_column_fragment(lookback_days: int) -> None:
+    """Sidebar + ticket table — partial rerun on search, filter, and paging."""
+    ctx = _load_dispatch_ticket_context(lookback_days)
+    sb, main = st.columns([1.15, 7.35], gap="small")
+    with sb:
+        _render_dispatch_board_sidebar(ctx)
+    with main:
+        _render_dispatch_board_main(ctx)
+
+
+def _render_dispatch_detail_column(ctx: dict[str, object]) -> None:
+    view = _compute_dispatch_ticket_view(ctx)
+    is_admin = bool(ctx["is_admin"])
+    sales_df = ctx.get("sales_df")
+    if _dispatch_any_row_modal_active(
+        ticket_nums=view["residential_nums"], is_admin=is_admin
+    ):
+        with st.container(key="disp_row_action_panel"):
+            _render_dispatch_row_modals(
+                queue_df=view["display_df"],
+                ticket_nums=view["residential_nums"],
+                is_admin=is_admin,
+                fe_names=ctx["fe_names"],
+                fe_missing=bool(ctx["fe_missing"]),
+                cat_names=ctx["cat_names"],
+            )
+    else:
+        _render_dispatch_right_rail(
+            queue_df=view["display_df"],
+            picked=view["picked"],
+            sales_df=sales_df if isinstance(sales_df, pd.DataFrame) else None,
+            on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
+                tn,
+                eng,
+                eng2,
+                cat,
+                notes,
+                fe_names=ctx["fe_names"],
+                fe_missing=bool(ctx["fe_missing"]),
+            ),
+        )
+
+
+def _render_dispatch_csm_dashboard(
+    *,
+    df: pd.DataFrame,
+    df_all: pd.DataFrame,
+    masks: dict[str, pd.Series],
+    lookback_days: int,
+    sales_df: pd.DataFrame | None = None,
+) -> None:
+    """Three-column dispatch console — board fragment + detail column."""
+    del df, df_all, masks, sales_df
     _modal_pending = any(
         str(st.session_state.get(k) or "").strip()
         for k in (
@@ -21938,244 +22575,15 @@ def _render_dispatch_csm_dashboard(
             _DISP_ROW_CLOSE,
         )
     )
-    _body_col_ratios = [1.15, 4.35, 3.5] if _modal_pending else [1.15, 5.35, 2.5]
+    board_ratio = 6.5 if _modal_pending else 7.5
+    detail_ratio = 3.5 if _modal_pending else 2.5
 
     with st.container(key="disp_csm_body"):
-        sb, main, dp = st.columns(_body_col_ratios, gap="small")
-
-        with sb:
-            with st.container(key="disp_sidebar_inner"):
-                st.markdown(t_section_label("Today"), unsafe_allow_html=True)
-                render_sidebar_today_grid(
-                    (
-                        ("Assigned", assigned_today, "#3b82f6"),
-                        ("Responded", responded_today, "#22c55e"),
-                        ("Daily task", daily_task_count, "#3b82f6"),
-                        ("Unattended", unattended_count, "#ef4444"),
-                    )
-                )
-
-                st.markdown(
-                    t_section_label(
-                        "Queues", margin="margin-top:14px;margin-bottom:8px"
-                    ),
-                    unsafe_allow_html=True,
-                )
-                queue_options = list(QUEUE_ORDER)
-                cur = st.session_state.get(aq_key, "Daily Task")
-                if cur not in queue_options:
-                    cur = "Daily Task"
-                selected_queue = _render_unified_queue_list(
-                    selected=cur,
-                    residential_counts=residential_queue_counts,
-                    resort_counts={
-                        q: int(resort_counts.get(q, 0)) for q in QUEUE_ORDER
-                    },
-                    session_key=aq_key,
-                    case_type_filter=case_type_filter,
-                )
-                st.session_state[aq_key] = selected_queue
-
-        mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
-        queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
-        if selected_queue == "Follow up" and not queue_df.empty:
-            queue_df = _sort_investigation_by_follow_up(queue_df)
-        eng_filter = st.session_state.get(_DISP_ENGINEER_FILTER_KEY)
-        if eng_filter and not queue_df.empty:
-            queue_df = queue_df.loc[
-                queue_df.apply(
-                    lambda r: _perf_row_credited_to_person(r, str(eng_filter)),
-                    axis=1,
-                )
-            ].copy()
-        inv_base_df: pd.DataFrame | None = (
-            queue_df.copy()
-            if selected_queue == "Under Investigation"
-            else None
-        )
-        is_admin = _is_dashboard_admin()
-        fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-        cat_names = get_task_categories() or _try_fetch_task_categories()[0]
-        display_df = queue_df
-        picked: str | None = None
-
-        with main:
-            investigation_subtab: str | None = None
-            display_df = queue_df
-
-            col_title, col_search = st.columns([3, 1])
-            with col_title:
-                n_preview = len(display_df) if inv_base_df is None else len(inv_base_df)
-                qtitle = (
-                    selected_queue.lower()
-                    if selected_queue == "Daily Task"
-                    else selected_queue
-                )
-                count_label = f"{n_preview} ticket{'s' if n_preview != 1 else ''}"
-                st.markdown(
-                    f"{t_heading(html.escape(qtitle))} {t_queue_sub(count_label)}",
-                    unsafe_allow_html=True,
-                )
-                if eng_filter:
-                    fc1, fc2 = st.columns([4, 1], gap="small")
-                    with fc1:
-                        st.markdown(
-                            f'<div style="font-size:11px;color:#e2e8f8;background:#0d1e3a;'
-                            f'border:0.5px solid #1a3460;padding:2px 6px;border-radius:3px;'
-                            f'display:inline-block;margin-top:4px">● Engineer: {html.escape(str(eng_filter))}'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                    with fc2:
-                        if st.button("✕", key="disp_clear_eng_filter", help="Clear engineer filter"):
-                            st.session_state.pop(_DISP_ENGINEER_FILTER_KEY, None)
-                            st.rerun()
-            with col_search:
-                search_num = st.text_input(
-                    "Search",
-                    placeholder="Search ref...",
-                    label_visibility="collapsed",
-                    key="disp_ticket_search",
-                )
-
-            if inv_base_df is not None:
-                investigation_subtab = _render_investigation_subtabs(inv_base_df)
-                display_df = _apply_investigation_subtab(inv_base_df, investigation_subtab)
-            elif selected_queue == "Follow up":
-                st.caption(
-                    "Oldest follow-up first — chase these before newer investigation cases."
-                )
-
-            case_type_filter = _render_unified_case_type_filter()
-            include_resort = (
-                case_type_filter != CASE_TYPE_RESIDENTIAL and sales_df is not None
-            )
-
-            ticket_rows: list[dict[str, object]] = []
-            if case_type_filter != CASE_TYPE_RESORT:
-                ticket_rows = [
-                    _residential_row_to_unified_dict(pd.Series(rec))
-                    for rec in display_df.to_dict("records")
-                ]
-            if include_resort:
-                by_queue = resort_bundle.get("by_queue") or {}
-                if isinstance(by_queue, dict):
-                    resort_rows = by_queue.get(selected_queue) or []
-                    if isinstance(resort_rows, list):
-                        ticket_rows.extend(resort_rows)
-            ticket_rows = _apply_unified_case_type_filter(ticket_rows, case_type_filter)
-            ticket_rows = _dispatch_append_selected_lookup_ticket(
-                ticket_rows,
-                sales_df=sales_df,
-            )
-            ticket_nums = [
-                str(t.get("ticket_number") or "")
-                for t in ticket_rows
-                if t.get("ticket_number")
-            ]
-            jump_page_to_selection = bool(
-                st.session_state.get("_disp_preserve_lookup_selection")
-            )
-            _sync_dispatch_queue_view_state(
-                selected_queue=selected_queue,
-                ticket_nums=ticket_nums,
-            )
-            if investigation_subtab is not None:
-                _sync_investigation_subtab_view_state(
-                    subtab=investigation_subtab,
-                    ticket_nums=ticket_nums,
-                )
-
-            if search_num.strip():
-                q = search_num.strip()
-                ticket_rows = [
-                    t for t in ticket_rows if q in str(t.get("ticket_number") or "")
-                ]
-
-            ticket_nums = [
-                str(t.get("ticket_number") or "")
-                for t in ticket_rows
-                if t.get("ticket_number")
-            ]
-
-            page_context = "|".join(
-                (
-                    selected_queue,
-                    search_num.strip(),
-                    case_type_filter,
-                    str(eng_filter or ""),
-                    str(investigation_subtab or ""),
-                )
-            )
-            sel = st.session_state.get(_DISP_SELECTED_KEY)
-            page_rows, page, total_pages, total_rows, range_start, range_end = (
-                prepare_dispatch_ticket_page(
-                    ticket_rows,
-                    context_sig=page_context,
-                    selected=str(sel) if sel else None,
-                    jump_to_selection=jump_page_to_selection,
-                    page_size=DISPATCH_TICKET_PAGE_SIZE,
-                )
-            )
-
-            if selected_queue == "Daily Task":
-                render_nudge_banner(
-                    [t for t in ticket_rows if t.get("case_type") == CASE_TYPE_RESIDENTIAL]
-                )
-
-            render_ticket_table(
-                page_rows,
-                selected=sel,
-                selected_key=_DISP_SELECTED_KEY,
-                show_case_type=True,
-                case_type_session_key=_DISP_SELECTED_CASE_TYPE_KEY,
-                row_actions_fn=lambda t, rk: _render_unified_row_actions(
-                    t, rk, is_admin=is_admin, queue_name=selected_queue
-                ),
-            )
-            render_ticket_table_pager(
-                page=page,
-                total_pages=total_pages,
-                total=total_rows,
-                range_start=range_start,
-                range_end=range_end,
-                page_size=DISPATCH_TICKET_PAGE_SIZE,
-            )
-
-            residential_nums = [
-                str(t.get("ticket_number") or "")
-                for t in ticket_rows
-                if t.get("ticket_number")
-                and t.get("case_type") == CASE_TYPE_RESIDENTIAL
-            ]
-            if _sales_any_row_modal_active() and sales_df is not None:
-                _render_sales_floor_modals(df=sales_df)
-            sel = st.session_state.get(_DISP_SELECTED_KEY)
-            picked = sel if sel and sel in ticket_nums else None
-
-        with dp:
-            if _dispatch_any_row_modal_active(
-                ticket_nums=residential_nums, is_admin=is_admin
-            ):
-                with st.container(key="disp_row_action_panel"):
-                    _render_dispatch_row_modals(
-                        queue_df=display_df,
-                        ticket_nums=residential_nums,
-                        is_admin=is_admin,
-                        fe_names=fe_names,
-                        fe_missing=fe_missing,
-                        cat_names=cat_names,
-                    )
-            else:
-                _render_dispatch_right_rail(
-                    queue_df=display_df,
-                    picked=picked,
-                    sales_df=sales_df,
-                    on_submit=lambda tn, eng, eng2, cat, notes: _handle_dispatch_quick_assign_bar(
-                        tn, eng, eng2, cat, notes,
-                        fe_names=fe_names, fe_missing=fe_missing,
-                    ),
-                )
+        board_col, detail_col = st.columns([board_ratio, detail_ratio], gap="small")
+        with board_col:
+            _dispatch_board_column_fragment(lookback_days)
+        with detail_col:
+            _dispatch_detail_column_fragment(lookback_days)
 
 
 def _render_dashboard(
@@ -22940,6 +23348,157 @@ def _render_combined_overview_legend() -> None:
     )
 
 
+def _build_simple_html_table(
+    *,
+    headers: list[str],
+    rows: list[list[str]],
+    table_class: str = "disp-html-table perf-fast-table",
+) -> str:
+    head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+    body = "".join(
+        f"<tr>{''.join(f'<td>{cell}</td>' for cell in row)}</tr>" for row in rows
+    )
+    return (
+        f'<table class="{table_class}"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+def _render_perf_fast_table_with_actions(
+    *,
+    headers: list[str],
+    rows: list[list[str]],
+    action_keys: list[str],
+    action_label: str,
+    on_action: Callable[[str], None],
+    actions_container_key: str = "perf_table_actions",
+) -> None:
+    """HTML table + one action button per row (avoids st.columns per row)."""
+    if not rows:
+        return
+    table_html = _build_simple_html_table(headers=headers, rows=rows)
+    tbl_col, act_col = st.columns([11.35, 0.65], gap="small", vertical_alignment="top")
+    with tbl_col:
+        st.markdown(table_html, unsafe_allow_html=True)
+    with act_col:
+        with st.container(key=actions_container_key):
+            for row_key, _cells in zip(action_keys, rows, strict=True):
+                if st.button(action_label, key=f"perf_act_{row_key}", use_container_width=True):
+                    on_action(row_key)
+
+
+def _overview_row_bar_html(
+    *,
+    res_solo: int,
+    res_shared: int,
+    rsr_solo: int,
+    rsr_shared: int,
+    unattended: int,
+    stats_line: str,
+    total: int,
+) -> str:
+    def _pct(n: int) -> float:
+        return (n / total) * 100 if total else 0.0
+
+    segs = ""
+    for count, color in (
+        (res_solo, CHART_COLORS["solo"]),
+        (res_shared, CHART_COLORS["shared"]),
+        (rsr_solo, CHART_COLORS["resort_solo"]),
+        (rsr_shared, CHART_COLORS["resort_shared"]),
+        (unattended, "#ef4444"),
+    ):
+        if count > 0:
+            segs += f'<div style="background:{color};width:{_pct(count)}%"></div>'
+    if not segs:
+        segs = f'<div style="background:{CHART_COLORS["grid"]};width:100%"></div>'
+    return (
+        f'<div style="margin-top:2px">'
+        f'<div style="display:flex;height:16px;border-radius:3px;overflow:hidden;'
+        f'background:{CHART_COLORS["grid"]}">{segs}</div>'
+        f'<p style="font-size:11px;line-height:1.35;margin:4px 0 0;color:#8a9ac0">'
+        f"{stats_line}</p></div>"
+    )
+
+
+def _render_perf_overview_board_fast(
+    all_keys: list[str],
+    *,
+    res_map: dict[str, dict[str, object]],
+    rsr_map: dict[str, dict[str, object]],
+    unattended_map: dict[str, int],
+) -> None:
+    """Overview engineer rows — one HTML table + one select button per row."""
+    table_rows: list[list[str]] = []
+    action_specs: list[tuple[str, str, str]] = []
+    for credit_key in all_keys:
+        res = res_map.get(credit_key)
+        rsr = rsr_map.get(credit_key)
+        res_solo = int(res.get("solo", 0)) if res else 0
+        res_shared = int(res.get("shared", 0)) if res else 0
+        rsr_solo = int(rsr.get("solo", 0)) if rsr else 0
+        rsr_shared = int(rsr.get("shared", 0)) if rsr else 0
+        unattended = int(unattended_map.get(credit_key, 0))
+        total = res_solo + res_shared + rsr_solo + rsr_shared + unattended
+        if total <= 0:
+            continue
+        source = res or rsr or {}
+        btn_id = str(source.get("engineer") or _perf_overview_button_key(credit_key))
+        label = str(source.get("label") or _perf_overview_row_label(credit_key))
+        if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+            label = f"🔒 {label.lstrip('🔒 ')}"
+        key_suffix = _perf_overview_button_key(credit_key)
+        stat_parts: list[str] = []
+        if res_solo or res_shared:
+            stat_parts.append(f"Res {res_solo} solo / {res_shared} shared")
+        if rsr_solo or rsr_shared:
+            stat_parts.append(
+                f'<span style="color:#a78bfa">Rsr {rsr_solo} solo / {rsr_shared} shared</span>'
+            )
+        if unattended > 0:
+            stat_parts.append(f'<span style="color:#ef4444">Unatt {unattended}</span>')
+        stats_line = " · ".join(stat_parts) if stat_parts else "—"
+        bar_html = _overview_row_bar_html(
+            res_solo=res_solo,
+            res_shared=res_shared,
+            rsr_solo=rsr_solo,
+            rsr_shared=rsr_shared,
+            unattended=unattended,
+            stats_line=stats_line,
+            total=total,
+        )
+        table_rows.append(
+            [
+                f'<span style="font-size:13px;font-weight:500;color:#e2e8f8">'
+                f"{html.escape(label)}</span>",
+                bar_html,
+            ]
+        )
+        action_specs.append((key_suffix, btn_id, label))
+
+    if not table_rows:
+        return
+
+    head = "".join(f"<th>{html.escape(h)}</th>" for h in ("Engineer", "Breakdown"))
+    body = "".join(
+        f'<tr><td>{cells[0]}</td><td class="perf-ov-bar">{cells[1]}</td></tr>'
+        for cells in table_rows
+    )
+    table_html = (
+        f'<table class="disp-html-table perf-fast-table perf-ov-table">'
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    )
+    tbl_col, act_col = st.columns([11.35, 0.65], gap="small", vertical_alignment="top")
+    with tbl_col:
+        st.markdown(table_html, unsafe_allow_html=True)
+    with act_col:
+        with st.container(key="perf_ov_actions"):
+            for key_suffix, btn_id, label in action_specs:
+                if st.button("●", key=f"ov_all_{key_suffix}", help=label, use_container_width=True):
+                    st.session_state[_PERF_SELECTED_ENGINEER_KEY] = btn_id
+                    st.rerun()
+
+
 def _render_combined_overview_row(
     *,
     credit_key: str,
@@ -23065,13 +23624,12 @@ def _render_perf_overview_tab(
     )
     _render_combined_overview_legend()
 
-    for credit_key in all_keys:
-        _render_combined_overview_row(
-            credit_key=credit_key,
-            res=res_map.get(credit_key),
-            rsr=rsr_map.get(credit_key),
-            unattended_count=int(unattended_map.get(credit_key, 0)),
-        )
+    _render_perf_overview_board_fast(
+        all_keys,
+        res_map=res_map,
+        rsr_map=rsr_map,
+        unattended_map=unattended_map,
+    )
 
     st.markdown(
         '<p style="font-size:11px;color:#4a5a7a;margin:8px 0 0">'
@@ -23336,6 +23894,18 @@ def _render_performance_detail_panel(
                 use_container_width=True,
             ):
                 _perf_jump_to_sales_case(ref)
+
+
+def _perf_select_engineer(engineer: str) -> None:
+    st.session_state[_PERF_SELECTED_ENGINEER_KEY] = engineer
+    st.rerun()
+
+
+def _perf_jump_to_unattended_queue(engineer: str) -> None:
+    st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
+    st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = "Unattended"
+    st.session_state[_DASH_PENDING_ENGINEER_FILTER_KEY] = engineer
+    st.rerun()
 
 
 def _perf_jump_to_csm_ticket(ticket_number: str) -> None:
@@ -23704,29 +24274,21 @@ def _render_perf_handled_list_tab(
         unsafe_allow_html=True,
     )
     if field_handled:
-        for t in field_handled:
-            col_ref, col_cat, col_eng, col_btn = st.columns([1, 1.3, 1.2, 0.8])
-            tn = str(t["ticket_number"])
-            with col_ref:
-                st.markdown(
-                    f'<span style="font-size:13px;color:#8a9ac0">{html.escape(tn)}</span>',
-                    unsafe_allow_html=True,
-                )
-            with col_cat:
-                st.markdown(
-                    f'<span style="font-size:13px;color:#4a5a7a">'
-                    f'{html.escape(str(t.get("task_category", "—")))}</span>',
-                    unsafe_allow_html=True,
-                )
-            with col_eng:
-                st.markdown(
-                    f'<span style="font-size:11px;color:#2a3a5a">'
-                    f'{html.escape(str(t.get("assigned_to", "—")))}</span>',
-                    unsafe_allow_html=True,
-                )
-            with col_btn:
-                if st.button("View →", key=f"hd_field_{tn}", use_container_width=True):
-                    _perf_jump_to_csm_ticket(tn)
+        _render_perf_fast_table_with_actions(
+            headers=["Ticket", "Category", "Engineer"],
+            rows=[
+                [
+                    f'<span style="color:#8a9ac0">{html.escape(str(t["ticket_number"]))}</span>',
+                    html.escape(str(t.get("task_category", "—"))),
+                    html.escape(str(t.get("assigned_to", "—"))),
+                ]
+                for t in field_handled
+            ],
+            action_keys=[str(t["ticket_number"]) for t in field_handled],
+            action_label="→",
+            on_action=_perf_jump_to_csm_ticket,
+            actions_container_key="perf_handled_field_actions",
+        )
     else:
         st.caption("No residential tickets handled in this range")
 
@@ -23736,32 +24298,25 @@ def _render_perf_handled_list_tab(
         unsafe_allow_html=True,
     )
     if resort_handled:
-        for c in resort_handled:
-            col_ref, col_acc, col_eng, col_btn = st.columns([1, 1.3, 1.2, 0.8])
-            ref = str(c["case_ref"])
-            if _sc_sales_has_field_assignee(c.get("assigned_to")):
-                credited = str(_perf_norm_member(c.get("assigned_to")))
-            else:
-                credited = _SC_SALES_OVERVIEW_ADMIN_LABEL
-            with col_ref:
-                st.markdown(
-                    f'<span style="font-size:13px;color:#8a9ac0">{html.escape(ref)}</span>',
-                    unsafe_allow_html=True,
-                )
-            with col_acc:
-                st.markdown(
-                    f'<span style="font-size:13px;color:#4a5a7a">'
-                    f'{html.escape(str(c.get("account_name", "—")))}</span>',
-                    unsafe_allow_html=True,
-                )
-            with col_eng:
-                st.markdown(
-                    f'<span style="font-size:11px;color:#2a3a5a">{html.escape(credited)}</span>',
-                    unsafe_allow_html=True,
-                )
-            with col_btn:
-                if st.button("View →", key=f"hd_resort_{ref}", use_container_width=True):
-                    _perf_jump_to_sales_case(ref)
+        _render_perf_fast_table_with_actions(
+            headers=["Case", "Account", "Credited"],
+            rows=[
+                [
+                    f'<span style="color:#8a9ac0">{html.escape(str(c["case_ref"]))}</span>',
+                    html.escape(str(c.get("account_name", "—"))),
+                    html.escape(
+                        str(_perf_norm_member(c.get("assigned_to")))
+                        if _sc_sales_has_field_assignee(c.get("assigned_to"))
+                        else _SC_SALES_OVERVIEW_ADMIN_LABEL
+                    ),
+                ]
+                for c in resort_handled
+            ],
+            action_keys=[str(c["case_ref"]) for c in resort_handled],
+            action_label="→",
+            on_action=_perf_jump_to_sales_case,
+            actions_container_key="perf_handled_resort_actions",
+        )
     else:
         st.caption("No resort cases handled in this range")
 
@@ -23867,19 +24422,21 @@ def _render_perf_on_hold_tab(on_hold: pd.DataFrame, *, focus: str) -> None:
             unsafe_allow_html=True,
         )
         return
-    for row in data:
-        eng = str(row["assigned_to"])
-        col_btn, col_count = st.columns([3, 1])
-        with col_btn:
-            if st.button(f"@{eng}", key=f"oh_{eng}", use_container_width=True):
-                st.session_state[_PERF_SELECTED_ENGINEER_KEY] = eng
-                st.rerun()
-        with col_count:
-            st.markdown(
+    _render_perf_fast_table_with_actions(
+        headers=["Assignee", "On hold"],
+        rows=[
+            [
+                f"@{html.escape(str(row['assigned_to']))}",
                 f'<span style="font-size:16px;font-weight:600;color:#f59e0b;'
                 f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
-                unsafe_allow_html=True,
-            )
+            ]
+            for row in data
+        ],
+        action_keys=[str(row["assigned_to"]) for row in data],
+        action_label="●",
+        on_action=_perf_select_engineer,
+        actions_container_key="perf_on_hold_actions",
+    )
 
 
 def _get_unattended_by_assignee(
@@ -23943,30 +24500,21 @@ def _render_perf_unattended_tab(
             unsafe_allow_html=True,
         )
         return
-    for row in data:
-        eng = str(row["assigned_to"])
-        col_btn, col_count, col_jump = st.columns([2.2, 0.8, 1.4])
-        with col_btn:
-            st.markdown(
-                f'<span style="font-size:13px;color:#8a9ac0">@{html.escape(eng)}</span>',
-                unsafe_allow_html=True,
-            )
-        with col_count:
-            st.markdown(
+    _render_perf_fast_table_with_actions(
+        headers=["Engineer", "Unattended"],
+        rows=[
+            [
+                f'<span style="color:#8a9ac0">@{html.escape(str(row["assigned_to"]))}</span>',
                 f'<span style="font-size:16px;font-weight:600;color:#ef4444;'
                 f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
-                unsafe_allow_html=True,
-            )
-        with col_jump:
-            if st.button(
-                "View tickets →",
-                key=f"un_jump_{eng}",
-                use_container_width=True,
-            ):
-                st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
-                st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = "Unattended"
-                st.session_state[_DASH_PENDING_ENGINEER_FILTER_KEY] = eng
-                st.rerun()
+            ]
+            for row in data
+        ],
+        action_keys=[str(row["assigned_to"]) for row in data],
+        action_label="→",
+        on_action=_perf_jump_to_unattended_queue,
+        actions_container_key="perf_unattended_actions",
+    )
 
 
 def _render_performance_sidebar() -> None:
@@ -24171,112 +24719,148 @@ def _render_perf_handled_tab(
             _render_visit_detail_table(visits_f)
 
 
+def _load_perf_context(lookback_days: int) -> dict[str, object]:
+    """Cached Performance context — safe inside @st.fragment reruns."""
+    del lookback_days
+    _init_perf_session_state()
+    _sync_perf_range_from_ui(str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week")))
+    range_start, range_end = _get_perf_range()
+    focus = _perf_focus_for_filter()
+    try:
+        df_all = _fetch_tickets_cached()
+    except Exception:
+        df_all = pd.DataFrame()
+    field_has_data = not df_all.empty and "status" in df_all.columns
+    slices = _perf_prepare_snapshot_slices(
+        df_all if field_has_data else pd.DataFrame()
+    )
+    sales_all = pd.DataFrame()
+    try:
+        raw_sales = _fetch_sales_cases_cached()
+        sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
+    except Exception:
+        pass
+    counts = _get_performance_snapshot_counts(
+        slices=slices, sales_all=sales_all, focus=focus
+    )
+    view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+    needs_range_visits = view == "Handled" or bool(
+        st.session_state.get(_PERF_SELECTED_ENGINEER_KEY)
+    )
+    visits_all = pd.DataFrame()
+    if needs_range_visits:
+        try:
+            visits_all = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            pass
+    visits_f = _perf_filter_visits_by_person(visits_all, focus)
+    return {
+        "range_start": range_start,
+        "range_end": range_end,
+        "focus": focus,
+        "df_all": df_all,
+        "sales_all": sales_all,
+        "slices": slices,
+        "counts": counts,
+        "view": view,
+        "visits_all": visits_all,
+        "visits_f": visits_f,
+    }
+
+
+def _render_performance_main(ctx: dict[str, object]) -> None:
+    """Performance center column — charts and tables for the active view."""
+    df_all = ctx["df_all"]
+    sales_all = ctx["sales_all"]
+    slices = ctx["slices"]
+    counts = ctx["counts"]
+    view = str(ctx["view"])
+    focus = str(ctx["focus"])
+    range_start = ctx["range_start"]
+    range_end = ctx["range_end"]
+    visits_all = ctx["visits_all"]
+    visits_f = ctx["visits_f"]
+
+    _render_performance_metric_strip(counts=counts)
+    st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+    if view == "Overview":
+        _render_perf_overview_tab(
+            df_all,
+            sales_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    elif view == "Summary":
+        _render_perf_weekly_tab(
+            df_all,
+            sales_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    elif view == "Case info":
+        _render_perf_case_info_tab(
+            visits_all,
+            focus=focus,
+            sales_all=sales_all,
+            tickets_all=df_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    elif view == "Handled":
+        handled_ctx = _perf_handled_tab_context(
+            df_all,
+            sales_all,
+            visits_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
+        _render_perf_handled_tab(**handled_ctx)
+    elif view == "On hold":
+        _render_perf_on_hold_tab(slices["on_hold"], focus=focus)
+    elif view == "Unattended":
+        _render_perf_unattended_tab(
+            slices["unattended"],
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
+
+
+@st.fragment
+def _perf_board_column_fragment(lookback_days: int) -> None:
+    """Performance sidebar + main — partial rerun on filter / view controls."""
+    sb, main = st.columns([1.5, 7.0], gap="small")
+    with sb:
+        _render_performance_sidebar()
+    with main:
+        ctx = _load_perf_context(lookback_days)
+        _render_performance_main(ctx)
+
+
+@st.fragment
+def _perf_detail_column_fragment(lookback_days: int) -> None:
+    """Engineer detail panel — partial rerun when selecting an engineer row."""
+    ctx = _load_perf_context(lookback_days)
+    _render_performance_detail_panel(
+        df_all=ctx["df_all"],
+        sales_all=ctx["sales_all"],
+        visits_all=ctx["visits_f"],
+        range_start=ctx["range_start"],
+        range_end=ctx["range_end"],
+    )
+
+
 def _render_performance_tab(*, lookback_days: int) -> None:
     """Three-column Performance floor: sidebar / main / detail panel."""
-    _init_perf_session_state()
-
     with st.container(key="disp_perf_body"):
-        col_sb, col_main, col_dp = st.columns([1.5, 4.3, 2.4], gap="small")
-
-        with col_sb:
-            _render_performance_sidebar()
-
-        _sync_perf_range_from_ui(str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week")))
-        range_start, range_end = _get_perf_range()
-        focus = _perf_focus_for_filter()
-
-        try:
-            df_all = _fetch_tickets()
-        except Exception as exc:
-            st.error(f"Could not load tickets: {exc}")
-            df_all = pd.DataFrame()
-
-        field_has_data = not df_all.empty and "status" in df_all.columns
-        if field_has_data:
-            slices = _perf_prepare_snapshot_slices(df_all)
-        else:
-            slices = _perf_prepare_snapshot_slices(pd.DataFrame())
-
-        sales_all = pd.DataFrame()
-        try:
-            raw_sales = _fetch_sales_cases_cached()
-            sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
-        except Exception as exc:
-            st.warning(f"Could not load Resort cases for Performance: {exc}")
-
-        counts = _get_performance_snapshot_counts(
-            slices=slices, sales_all=sales_all, focus=focus
-        )
-
-        view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
-        needs_range_visits = view in ("Case info", "Handled") or bool(
-            st.session_state.get(_PERF_SELECTED_ENGINEER_KEY)
-        )
-        visits_all = pd.DataFrame()
-        if needs_range_visits:
-            try:
-                visits_all = _fetch_visits_in_range(range_start, range_end)
-            except Exception:
-                pass
-
-        visits_f = _perf_filter_visits_by_person(visits_all, focus)
-
-        with col_main:
-            _render_performance_metric_strip(counts=counts)
-            st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
-            if view == "Overview":
-                _render_perf_overview_tab(
-                    df_all,
-                    sales_all,
-                    focus=focus,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-            elif view == "Summary":
-                _render_perf_weekly_tab(
-                    df_all,
-                    sales_all,
-                    focus=focus,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-            elif view == "Case info":
-                _render_perf_case_info_tab(
-                    visits_all,
-                    focus=focus,
-                    sales_all=sales_all,
-                    tickets_all=df_all,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-            elif view == "Handled":
-                ctx = _perf_handled_tab_context(
-                    df_all,
-                    sales_all,
-                    visits_all,
-                    focus=focus,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-                _render_perf_handled_tab(**ctx)
-            elif view == "On hold":
-                _render_perf_on_hold_tab(slices["on_hold"], focus=focus)
-            elif view == "Unattended":
-                _render_perf_unattended_tab(
-                    slices["unattended"],
-                    focus=focus,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-
-        with col_dp:
-            _render_performance_detail_panel(
-                df_all=df_all,
-                sales_all=sales_all,
-                visits_all=visits_f,
-                range_start=range_start,
-                range_end=range_end,
-            )
+        board_col, detail_col = st.columns([6.8, 2.4], gap="small")
+        with board_col:
+            _perf_board_column_fragment(lookback_days)
+        with detail_col:
+            _perf_detail_column_fragment(lookback_days)
 
 
 def _render_field_performance_tab(*, lookback_days: int) -> None:
@@ -24309,92 +24893,99 @@ def _render_missing_table_help(table: str) -> None:
     )
 
 
+@st.fragment
+def _render_attendance_tab_fragment(*, lookback_days: int) -> None:
+    """Log filters + table — partial rerun without rebuilding the app shell."""
+    del lookback_days
+    range_start, range_end = _get_dash_range()
+    st.caption(
+        f"Attendance history · {_format_dash_range_caption() or 'sidebar time range'}"
+    )
+
+    f1, f2 = st.columns(2)
+    ticket_clean = f1.text_input(
+        "Ticket #",
+        placeholder="optional",
+        key="att_ticket_q",
+    ).strip()
+    member_clean = f2.text_input(
+        "Member",
+        placeholder="@username",
+        key="att_member_q",
+    ).strip()
+
+    try:
+        logs = _fetch_attendance(
+            ticket_number=ticket_clean if ticket_clean else None,
+            member_query=member_clean if member_clean else None,
+            since_utc=range_start,
+            until_utc=range_end,
+            limit=2000,
+        )
+    except _TableMissingError as missing:
+        _render_missing_table_help(missing.table)
+        return
+
+    if logs.empty:
+        st.info("No log entries for this time window. Widen **Time range** or clear filters.")
+        return
+
+    show_cols = [
+        c
+        for c in (
+            "timestamp",
+            "ticket_number",
+            "member_username",
+            "action_type",
+            "note",
+            "photo_url",
+        )
+        if c in logs.columns
+    ]
+    table = _format_local(logs[show_cols])
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True,
+        column_config=_dataframe_column_config(table),
+    )
+
+    with st.expander("Timeline (detail cards)", expanded=False):
+        for _, row in logs.iterrows():
+            member = row.get("member_username") or "unknown"
+            action = row.get("action_type") or "?"
+            tid = row.get("ticket_number") or "—"
+            when_local = ""
+            ts_raw = row.get("timestamp")
+            if pd.notna(ts_raw):
+                try:
+                    when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                except Exception:
+                    when_local = str(ts_raw)
+
+            with st.container(border=True):
+                st.markdown(
+                    f"**{member}** · `{action}` · ticket `{tid}` · "
+                    f"{when_local} {LOCAL_TZ_LABEL}"
+                )
+                note = row.get("note")
+                if isinstance(note, str) and note.strip():
+                    st.write(note)
+                photo = row.get("photo_url")
+                if isinstance(photo, str) and photo.startswith("http"):
+                    try:
+                        st.image(photo, width=PHOTO_THUMB_WIDTH)
+                    except Exception as exc:
+                        st.warning(f"Could not load image: {exc}")
+                    st.markdown(f"[Open photo in a new tab]({photo})")
+
+
 def _render_attendance_tab(*, lookback_days: int) -> None:
     """Attendance log table; optional filters; timeline in expander."""
     with st.container(key="disp_log_body"):
-        range_start, range_end = _get_dash_range()
-        st.caption(
-            f"Attendance history · {_format_dash_range_caption() or 'sidebar time range'}"
-        )
-
-        f1, f2 = st.columns(2)
-        ticket_clean = f1.text_input(
-            "Ticket #",
-            placeholder="optional",
-            key="att_ticket_q",
-        ).strip()
-        member_clean = f2.text_input(
-            "Member",
-            placeholder="@username",
-            key="att_member_q",
-        ).strip()
-
-        try:
-            logs = _fetch_attendance(
-                ticket_number=ticket_clean if ticket_clean else None,
-                member_query=member_clean if member_clean else None,
-                since_utc=range_start,
-                until_utc=range_end,
-                limit=2000,
-            )
-        except _TableMissingError as missing:
-            _render_missing_table_help(missing.table)
-            return
-
-        if logs.empty:
-            st.info("No log entries for this time window. Widen **Time range** or clear filters.")
-            return
-
-        show_cols = [
-            c
-            for c in (
-                "timestamp",
-                "ticket_number",
-                "member_username",
-                "action_type",
-                "note",
-                "photo_url",
-            )
-            if c in logs.columns
-        ]
-        table = _format_local(logs[show_cols])
-        st.dataframe(
-            table,
-            use_container_width=True,
-            hide_index=True,
-            column_config=_dataframe_column_config(table),
-        )
-
-        with st.expander("Timeline (detail cards)", expanded=False):
-            for _, row in logs.iterrows():
-                member = row.get("member_username") or "unknown"
-                action = row.get("action_type") or "?"
-                tid = row.get("ticket_number") or "—"
-                when_local = ""
-                ts_raw = row.get("timestamp")
-                if pd.notna(ts_raw):
-                    try:
-                        when_local = pd.Timestamp(ts_raw).tz_convert(LOCAL_TZ).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                    except Exception:
-                        when_local = str(ts_raw)
-
-                with st.container(border=True):
-                    st.markdown(
-                        f"**{member}** · `{action}` · ticket `{tid}` · "
-                        f"{when_local} {LOCAL_TZ_LABEL}"
-                    )
-                    note = row.get("note")
-                    if isinstance(note, str) and note.strip():
-                        st.write(note)
-                    photo = row.get("photo_url")
-                    if isinstance(photo, str) and photo.startswith("http"):
-                        try:
-                            st.image(photo, width=PHOTO_THUMB_WIDTH)
-                        except Exception as exc:
-                            st.warning(f"Could not load image: {exc}")
-                        st.markdown(f"[Open photo in a new tab]({photo})")
+        _render_attendance_tab_fragment(lookback_days=lookback_days)
 
 
 # Streamlit executes this file as the app script; do not hide ``main()`` behind

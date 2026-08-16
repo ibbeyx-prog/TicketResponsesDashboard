@@ -19,20 +19,29 @@ UI_MIN_FONT_PX = 11
 _DISPATCH_VARS = f"""
 :root {{
   --disp-min-font: {UI_MIN_FONT_PX}px;
-  --disp-bg: #0b0f18;
-  --disp-panel: #080b14;
-  --disp-card: #0d1220;
-  --disp-border: #1a2035;
-  --disp-text: #e2e8f8;
-  --disp-muted: #8a9ac0;
-  --disp-dim: #2a3a5a;
-  --disp-accent: #3b82f6;
-  --disp-accent-bg: #0d1e3a;
-  --disp-green: #22c55e;
-  --disp-amber: #f59e0b;
-  --disp-red: #ef4444;
+  --disp-bg: #0a0f1a;
+  --disp-panel: #0f1629;
+  --disp-card: #141e32;
+  --disp-card-hover: #1a2740;
+  --disp-row-alt: #121b2e;
+  --disp-row-sel: #1a2240;
+  --disp-border: #243047;
+  --disp-border-strong: #334766;
+  --disp-text: #f0f4fc;
+  --disp-muted: #9aa8c4;
+  --disp-dim: #6b7a99;
+  --disp-accent: #818cf8;
+  --disp-accent-strong: #6366f1;
+  --disp-accent-bg: #1e1b4b;
+  --disp-green: #34d399;
+  --disp-amber: #fbbf24;
+  --disp-red: #f87171;
   --disp-purple: #a78bfa;
   --disp-header-h: {_DISP_HEADER_H};
+  --disp-radius: 10px;
+  --disp-radius-sm: 8px;
+  --disp-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --disp-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.28);
 }}
 """
 
@@ -104,8 +113,11 @@ html, body {{ background: var(--disp-bg) !important; overflow-x: hidden !importa
 
 /* ── Header shell ── */
 div.st-key-disp_header_shell {{
-  background: #0b0f18 !important;
-  border-bottom: 0.5px solid var(--disp-border) !important;
+  background: rgba(15, 22, 41, 0.92) !important;
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+  border-bottom: 1px solid var(--disp-border) !important;
+  box-shadow: var(--disp-shadow) !important;
   padding: 0 20px 0 {_DISP_INSET} !important;
   margin: 0 !important;
   width: 100% !important;
@@ -255,11 +267,11 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {{
   border-bottom: 2px solid transparent !important;
   border-radius: 0 !important;
   box-shadow: none !important;
-  color: #6b7f9e !important;
-  font-size:14px !important;
-  font-weight: 400 !important;
-  letter-spacing: 0 !important;
-  padding: 0 18px !important;
+  color: var(--disp-dim) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.01em !important;
+  padding: 0 16px !important;
   min-height: var(--disp-header-h) !important;
   height: var(--disp-header-h) !important;
   line-height: 1.1 !important;
@@ -268,16 +280,16 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {{
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"],
 div.st-key-disp_main_nav_tabs .stButton > button[data-testid="baseButton-primary"],
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"] {{
-  color: #e2e8f8 !important;
-  font-weight: 500 !important;
-  border-bottom-color: #5b7fb5 !important;
+  color: var(--disp-text) !important;
+  font-weight: 600 !important;
+  border-bottom-color: var(--disp-accent-strong) !important;
   background: transparent !important;
   background-color: transparent !important;
 }}
 div.st-key-disp_main_nav_tabs .stButton > button:hover,
 div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"]:hover,
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"]:hover {{
-  color: #8a9ac0 !important;
+  color: var(--disp-muted) !important;
   background: transparent !important;
   background-color: transparent !important;
   border-color: transparent !important;
@@ -286,8 +298,8 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"]:hover
 }}
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"]:hover,
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"]:hover {{
-  color: #e2e8f8 !important;
-  border-bottom-color: #5b7fb5 !important;
+  color: var(--disp-text) !important;
+  border-bottom-color: var(--disp-accent) !important;
   background: transparent !important;
   background-color: transparent !important;
 }}
@@ -416,50 +428,187 @@ div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
 div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
 div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3),
 div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(4) {{
-  border-left: 0.5px solid #1a2035 !important;
-  padding-left: 10px !important;
+  border-left: 1px solid var(--disp-border) !important;
+  padding-left: 12px !important;
 }}
 div.disp-header-mid-item {{
   display: flex !important;
   align-items: center !important;
   height: var(--disp-header-h) !important;
-  gap: 9px;
+  gap: 10px;
+  min-width: 0;
 }}
-span.disp-header-clock-pill {{
-  font-size: 12px;
-  color: #5b7fb5;
-  background: #0d1e3a;
-  border: 0.5px solid #1a3460;
-  padding: 4px 10px;
-  border-radius: 20px;
-  font-variant-numeric: tabular-nums;
+.disp-brand-stack {{
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding-right: 18px;
+  margin-right: 4px;
+  border-right: 1px solid var(--disp-border);
+  height: var(--disp-header-h);
+  min-width: 0;
+}}
+.disp-brand-mark {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}}
+.disp-brand-kicker {{
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--disp-accent);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  line-height: 1;
   white-space: nowrap;
+}}
+.disp-brand-sep {{
+  width: 1px;
+  height: 12px;
+  background: var(--disp-border-strong);
+  flex-shrink: 0;
+}}
+.disp-brand-title {{
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--disp-text);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  white-space: nowrap;
+}}
+.disp-brand-sub {{
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--disp-dim);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  white-space: nowrap;
+}}
+.disp-header-clock-pill {{
   display: inline-flex;
   align-items: center;
-  height: 28px;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--disp-card);
+  border: 1px solid var(--disp-border);
   box-sizing: border-box;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}}
+.disp-header-clock-date {{
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--disp-muted);
+  letter-spacing: 0.01em;
+}}
+.disp-header-clock-sep {{
+  width: 1px;
+  height: 14px;
+  background: var(--disp-border-strong);
+  flex-shrink: 0;
+}}
+.disp-header-clock-time {{
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--disp-text);
+  letter-spacing: 0.02em;
+}}
+.disp-header-clock-tz {{
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--disp-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding-left: 2px;
+}}
+.disp-header-operator {{
+  gap: 10px !important;
+  min-width: 0;
+  max-width: 100%;
+}}
+.disp-header-avatar {{
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}}
+.disp-header-operator-meta {{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}}
+.disp-header-operator-name {{
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--disp-text);
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.disp-header-role-badge {{
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}}
+.disp-header-role-admin {{
+  color: #86efac;
+  background: rgba(20, 83, 45, 0.35);
+  border-color: #166534;
+}}
+.disp-header-role-operator {{
+  color: #a5b4fc;
+  background: rgba(49, 46, 129, 0.35);
+  border-color: #4338ca;
+}}
+.disp-header-role-unverified {{
+  color: #fcd34d;
+  background: rgba(120, 53, 15, 0.35);
+  border-color: #92400e;
 }}
 div.st-key-disp_header_lookup .stButton > button,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
-  background: transparent !important;
-  border: 0.5px solid #1a2035 !important;
-  color: #4a5a7a !important;
-  font-size: 13px !important;
-  height: 34px !important;
-  min-height: 34px !important;
-  max-height: 34px !important;
+  background: var(--disp-card) !important;
+  border: 1px solid var(--disp-border) !important;
+  color: var(--disp-muted) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
   padding: 0 12px !important;
-  border-radius: 6px !important;
+  border-radius: var(--disp-radius-sm) !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
   margin: 0 !important;
+  letter-spacing: 0.01em !important;
 }}
 div.st-key-disp_header_lookup .stButton > button:hover,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
-  border-color: #2a3a5a !important;
-  color: #8a9ac0 !important;
-  background: #0d1220 !important;
+  border-color: var(--disp-border-strong) !important;
+  color: var(--disp-text) !important;
+  background: var(--disp-card-hover) !important;
 }}
 div.st-key-disp_header_lookup,
 div.st-key-disp_header_settings,
@@ -634,9 +783,10 @@ div.st-key-disp_csm_body [data-testid="stHorizontalBlock"] > div[data-testid="co
   flex: 0 0 300px !important;
 }}
 div.st-key-disp_right_rail {{
-  background: #080b14 !important;
-  border: 0.5px solid var(--disp-border) !important;
-  border-radius: 6px !important;
+  background: var(--disp-panel) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius) !important;
+  box-shadow: var(--disp-shadow) !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   min-height: calc(100vh - var(--disp-header-h) - 20px) !important;
@@ -666,7 +816,7 @@ div.st-key-disp_right_rail .stTabs [data-baseweb="tab"] {{
 div.st-key-disp_right_rail .stTabs [aria-selected="true"] {{
   color: #e2e8f8 !important;
   font-weight: 500 !important;
-  border-bottom-color: #3b82f6 !important;
+  border-bottom-color: var(--disp-accent) !important;
 }}
 div.st-key-disp_right_rail [data-testid="stTabContent"] {{
   padding: 0 !important;
@@ -755,14 +905,21 @@ div.st-key-disp_right_rail div.st-key-disp_assign_panel .disp-mode-caption {{
   line-height: 1.4 !important;
 }}
 div.st-key-disp_sidebar_inner {{
-  padding: 0 2px 0 0 !important;
+  background: var(--disp-panel) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius) !important;
+  padding: 12px 10px 10px !important;
+  box-sizing: border-box !important;
+  box-shadow: var(--disp-shadow) !important;
 }}
 div.st-key-disp_sidebar_queues {{
-  margin-top: 2px !important;
+  margin-top: 8px !important;
   margin-bottom: 4px !important;
+  border-top: 1px solid var(--disp-border) !important;
+  padding-top: 10px !important;
 }}
 div.st-key-disp_sidebar_queues [data-testid="stVerticalBlock"] {{
-  gap: 3px !important;
+  gap: 5px !important;
 }}
 div.st-key-disp_sidebar_queues .stButton {{
   margin: 0 !important;
@@ -771,26 +928,41 @@ div.st-key-disp_sidebar_queues .stButton {{
 .disp-today-grid {{
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px 8px;
+  gap: 8px;
+  margin: 0 0 2px 0;
+  padding: 0;
+}}
+.disp-today-strip {{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
   margin: 0 0 2px 0;
   padding: 0;
 }}
 .disp-today-cell {{
   min-width: 0;
+  background: var(--disp-card);
+  border: 1px solid var(--disp-border);
+  border-radius: var(--disp-radius-sm);
+  padding: 10px 10px 8px;
+  box-sizing: border-box;
+  text-align: left;
 }}
 .disp-today-label {{
-  font-size: 11px;
-  font-weight: 400;
-  color: #2a3a5a;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--disp-dim);
   line-height: 1.2;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }}
 .disp-today-value {{
   font-size: 20px;
-  font-weight: 500;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }}
@@ -953,11 +1125,11 @@ div.st-key-disp_assign_panel [data-testid="stVerticalBlockBorderWrapper"] {{
   margin: 0 !important;
 }}
 .disp-brand {{
-  font-size:22px;
-  font-weight: 600;
-  color: #3b82f6;
-  letter-spacing: .06em;
-  text-transform: uppercase;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--disp-text);
+  letter-spacing: -0.01em;
+  text-transform: none;
   line-height: 1;
   white-space: nowrap;
   margin: 0;
@@ -965,6 +1137,52 @@ div.st-key-disp_assign_panel [data-testid="stVerticalBlockBorderWrapper"] {{
   display: inline-flex;
   align-items: center;
   height: var(--disp-header-h);
+  gap: 10px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}}
+.disp-brand::before {{
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--disp-accent-strong), var(--disp-accent));
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.55);
+  flex-shrink: 0;
+}}
+.disp-header-clock {{
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--disp-accent);
+  letter-spacing: .02em;
+  background: var(--disp-accent-bg);
+  border: 1px solid #312e81;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  line-height: 1.2;
+}}
+.disp-header-op {{
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--disp-muted);
+  background: transparent !important;
+  white-space: nowrap;
+  line-height: 1.2;
+  user-select: none;
+}}
+.disp-header-op-dot {{
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--disp-green);
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
 }}
 .disp-header-divider {{
   color: #2a3a5a;
@@ -982,40 +1200,6 @@ div.st-key-disp_assign_panel [data-testid="stVerticalBlockBorderWrapper"] {{
   gap: 8px;
   white-space: nowrap;
   line-height: 1.2;
-}}
-.disp-header-clock {{
-  display: inline-block;
-  font-size:14px;
-  font-weight: 400;
-  color: #3b82f6;
-  letter-spacing: .01em;
-  background: #0d1e3a;
-  border: 0.5px solid #1a3460;
-  padding: 6px 12px;
-  border-radius: 999px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  line-height: 1.2;
-}}
-.disp-header-op {{
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size:14px;
-  font-weight: 400;
-  color: #8a9ac0;
-  background: transparent !important;
-  white-space: nowrap;
-  line-height: 1.2;
-  user-select: none;
-}}
-.disp-header-op-dot {{
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #22c55e;
-  display: inline-block;
-  flex-shrink: 0;
 }}
 div.st-key-disp_header_right,
 div.st-key-disp_header_right [data-testid="stVerticalBlockBorderWrapper"],
@@ -1081,53 +1265,75 @@ div.st-key-disp_header_right [data-testid="stMarkdownContainer"] span {{
   text-align: right;
 }}
 [class*="st-key-disp_queue_"] .stButton > button,
-[class*="st-key-sales_queue_"] .stButton > button {{
+[class*="st-key-sales_queue_"] .stButton > button,
+[class*="st-key-uqueue_"] .stButton > button {{
   font-size: 12px !important;
-  font-weight: 400 !important;
+  font-weight: 500 !important;
   text-align: left !important;
   display: flex !important;
   align-items: center !important;
   justify-content: flex-start !important;
-  padding: 5px 8px !important;
-  min-height: 30px !important;
-  height: 30px !important;
+  padding: 7px 10px !important;
+  min-height: 32px !important;
+  height: 32px !important;
   white-space: nowrap !important;
   overflow: hidden !important;
-  border-radius: 5px !important;
+  border-radius: var(--disp-radius-sm) !important;
   width: 100% !important;
+  border: 1px solid transparent !important;
+  background: transparent !important;
+  color: var(--disp-muted) !important;
+  transition: background 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s !important;
+}}
+[class*="st-key-disp_queue_"] .stButton > button:hover,
+[class*="st-key-sales_queue_"] .stButton > button:hover,
+[class*="st-key-uqueue_"] .stButton > button:hover {{
+  background: var(--disp-card) !important;
+  border-color: var(--disp-border) !important;
+  color: var(--disp-text) !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button::before,
-[class*="st-key-sales_queue_"] .stButton > button::before {{
+[class*="st-key-sales_queue_"] .stButton > button::before,
+[class*="st-key-uqueue_"] .stButton > button::before {{
   content: "●" !important;
-  font-size: 7px !important;
+  font-size: 8px !important;
   line-height: 1 !important;
   flex: 0 0 auto !important;
-  margin-right: 7px !important;
+  margin-right: 8px !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button::after,
 [class*="st-key-sales_queue_"] .stButton > button::after {{
   font-size: var(--disp-min-font) !important;
-  font-weight: 400 !important;
-  color: #8a9ac0 !important;
+  font-weight: 500 !important;
+  color: var(--disp-muted) !important;
   font-variant-numeric: tabular-nums !important;
   flex: 0 0 auto !important;
   margin-left: auto !important;
   padding-left: 8px !important;
   line-height: 1 !important;
 }}
+[class*="st-key-uqueue_"] .stButton > button::after {{
+  content: "" !important;
+}}
 [class*="st-key-disp_queue_"].disp-queue-active .stButton > button,
 [class*="st-key-sales_queue_"].disp-queue-active .stButton > button {{
-  background: #0d1e3a !important;
-  border-color: #1a3460 !important;
-  color: #e2e8f8 !important;
+  background: var(--disp-accent-bg) !important;
+  border-color: #4338ca !important;
+  color: var(--disp-text) !important;
+  font-weight: 500 !important;
+  box-shadow: inset 3px 0 0 var(--disp-accent-strong) !important;
 }}
 [class*="st-key-disp_queue_"] .stButton > button[kind="primary"],
 [class*="st-key-disp_queue_"] .stButton > button[data-testid="stBaseButton-primary"],
 [class*="st-key-sales_queue_"] .stButton > button[kind="primary"],
-[class*="st-key-sales_queue_"] .stButton > button[data-testid="stBaseButton-primary"] {{
-  background: #0d1e3a !important;
-  border-color: #1a3460 !important;
-  color: #e2e8f8 !important;
+[class*="st-key-sales_queue_"] .stButton > button[data-testid="stBaseButton-primary"],
+[class*="st-key-uqueue_"] .stButton > button[kind="primary"],
+[class*="st-key-uqueue_"] .stButton > button[data-testid="stBaseButton-primary"] {{
+  background: var(--disp-accent-bg) !important;
+  border-color: #4338ca !important;
+  color: var(--disp-text) !important;
+  font-weight: 500 !important;
+  box-shadow: inset 3px 0 0 var(--disp-accent-strong) !important;
 }}
 
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"],
@@ -1175,7 +1381,7 @@ div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radio
 }}
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label:has(input:checked),
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label:has(input:checked) {{
-  border-bottom-color: #3b82f6 !important;
+  border-bottom-color: var(--disp-accent) !important;
   box-shadow: none !important;
 }}
 [data-testid="stMain"] div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label:has(input:checked) span,
@@ -1501,9 +1707,39 @@ div.st-key-disp_sales_assign_panel div.disp-manage-btn [data-testid="stVerticalB
   min-width: 0 !important;
 }}
 
-/* Ticket / sales table — rows + action buttons (● select + ⋮ menu) */
+/* Ticket / sales table — spaced card rows + action buttons */
+div.st-key-disp_ticket_table {{
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  margin-top: 8px !important;
+  box-sizing: border-box !important;
+  overflow: visible !important;
+}}
 div.st-key-disp_ticket_table > [data-testid="stVerticalBlock"] {{
-  gap: 8px !important;
+  gap: 6px !important;
+}}
+div[class*="st-key-disp_ticket_row_"] {{
+  background: var(--disp-card) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius-sm) !important;
+  padding: 0 8px !important;
+  margin: 0 !important;
+  box-shadow: var(--disp-shadow) !important;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s !important;
+}}
+div[class*="st-key-disp_ticket_row_"]:hover {{
+  background: var(--disp-card-hover) !important;
+  border-color: var(--disp-border-strong) !important;
+}}
+div[class*="st-key-disp_ticket_row_"]:has(.disp-row-selected) {{
+  background: var(--disp-row-sel) !important;
+  border-color: #4338ca !important;
+  box-shadow: inset 3px 0 0 var(--disp-accent-strong), var(--disp-shadow) !important;
+}}
+.disp-row-selected {{
+  display: none !important;
 }}
 div[class*="st-key-disp_ticket_row_"] [data-testid="element-container"] {{
   margin: 0 !important;
@@ -1512,14 +1748,14 @@ div[class*="st-key-disp_ticket_row_"] [data-testid="element-container"] {{
 div[class*="st-key-disp_ticket_row_"] [data-testid="stHorizontalBlock"] {{
   align-items: center !important;
   flex-wrap: nowrap !important;
-  gap: 6px !important;
+  gap: 4px !important;
 }}
 div[class*="st-key-disp_ticket_row_"] [data-testid="column"] {{
   display: flex !important;
   align-items: center !important;
   align-self: center !important;
-  min-height: 34px !important;
-  max-height: 34px !important;
+  min-height: 36px !important;
+  max-height: 36px !important;
   padding: 0 !important;
   overflow: hidden !important;
 }}
@@ -1532,72 +1768,69 @@ div[class*="st-key-disp_row_actions_"] {{
   flex-direction: row !important;
   flex-wrap: nowrap !important;
   align-items: center !important;
-  justify-content: flex-end !important;
-  gap: 10px !important;
+  justify-content: center !important;
+  gap: 0 !important;
   width: 100% !important;
-  min-height: 34px !important;
-  max-height: 34px !important;
-  padding: 5px 4px !important;
+  min-height: 36px !important;
+  max-height: 36px !important;
+  padding: 0 !important;
   margin: 0 !important;
   box-sizing: border-box !important;
-  border: 0.5px solid transparent !important;
-  border-radius: 4px !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  overflow: hidden !important;
 }}
-div[class*="st-key-disp_ticket_row_"]:has([data-testid="stBaseButton-primary"]) div[class*="st-key-disp_row_actions_"] {{
-  background: #0d1e3a !important;
-  border-color: #1a3460 !important;
-}}
-div[class*="st-key-disp_row_actions_"] [data-testid="element-container"] {{
-  margin: 0 !important;
-  padding: 0 !important;
-  flex: 0 0 auto !important;
+div[class*="st-key-disp_row_actions_"] [data-testid="stVerticalBlock"] {{
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  gap: 0 !important;
+  width: auto !important;
+  max-width: 100% !important;
 }}
 div[class*="st-key-disp_row_actions_"] .stButton,
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] {{
-  flex: 0 0 auto !important;
-  width: 30px !important;
-  min-width: 30px !important;
-  max-width: 30px !important;
+  flex: 0 0 32px !important;
+  width: 32px !important;
+  min-width: 32px !important;
+  max-width: 32px !important;
   margin: 0 !important;
 }}
 div[class*="st-key-disp_row_actions_"] .stButton > button,
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
-  font-size: 12px !important;
+  font-size: 14px !important;
   font-weight: 600 !important;
-  color: #6b7280 !important;
+  color: var(--disp-dim) !important;
   line-height: 1 !important;
-  width: 30px !important;
-  height: 30px !important;
-  min-height: 30px !important;
-  min-width: 30px !important;
-  max-width: 30px !important;
+  width: 32px !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  min-width: 32px !important;
+  max-width: 32px !important;
   padding: 0 !important;
   margin: 0 !important;
-  border: 0.5px solid #2a3548 !important;
-  border-radius: 5px !important;
-  background: #0d1220 !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius-sm) !important;
+  background: var(--disp-panel) !important;
   box-shadow: none !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
   overflow: hidden !important;
+  white-space: nowrap !important;
 }}
-div[class*="st-key-disp_row_actions_"] .stButton > button[kind="primary"],
-div[class*="st-key-disp_row_actions_"] .stButton > button[data-testid="stBaseButton-primary"] {{
-  color: #3b82f6 !important;
-  border-color: #1a3460 !important;
-  background: #0d1e3a !important;
+div[class*="st-key-disp_ticket_row_"]:has(.disp-row-selected) div[class*="st-key-disp_row_actions_"] .stButton > button,
+div[class*="st-key-disp_ticket_row_"]:has(.disp-row-selected) div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
+  color: var(--disp-accent) !important;
+  border-color: #4338ca !important;
+  background: var(--disp-accent-bg) !important;
 }}
 div[class*="st-key-disp_row_actions_"] .stButton > button:hover,
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button:hover {{
-  color: #8a9ac0 !important;
-  border-color: #3b465c !important;
-  background: #121a2a !important;
-}}
-div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
-  font-size: 16px !important;
-  font-weight: 500 !important;
-  letter-spacing: 0 !important;
+  color: var(--disp-text) !important;
+  border-color: var(--disp-border-strong) !important;
+  background: var(--disp-card-hover) !important;
 }}
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button svg,
 div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button [data-testid*="Icon"] {{
@@ -1677,6 +1910,170 @@ div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radio
 }}
 div.st-key-disp_header_shell div[class*="st-key-_dash_main_nav"] div[role="radiogroup"] label {{
   gap: 0 !important;
+}}
+
+/* Ticket table typography + pager + case-type chips */
+.disp-col-head {{
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: var(--disp-dim) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  margin: 0 !important;
+}}
+.disp-ticket-num {{
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: var(--disp-text) !important;
+  font-variant-numeric: tabular-nums !important;
+}}
+.disp-table-empty {{
+  padding: 44px 24px !important;
+  text-align: center !important;
+  color: var(--disp-dim) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  background: var(--disp-panel) !important;
+  border: 1px dashed var(--disp-border) !important;
+  border-radius: var(--disp-radius) !important;
+  margin-top: 8px !important;
+}}
+div.st-key-disp_table_header {{
+  margin-top: 8px !important;
+  padding: 0 4px 8px !important;
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 1px solid var(--disp-border) !important;
+  border-radius: 0 !important;
+}}
+table.disp-html-table {{
+  width: 100% !important;
+  border-collapse: collapse !important;
+  table-layout: fixed !important;
+  margin-top: 8px !important;
+  font-size: 13px !important;
+}}
+table.disp-html-table thead th {{
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: var(--disp-dim) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  text-align: left !important;
+  padding: 8px 8px 10px !important;
+  border-bottom: 1px solid var(--disp-border) !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+}}
+table.disp-html-table tbody td.disp-html-notes {{
+  max-width: 0 !important;
+}}
+table.disp-html-table tbody td.disp-html-notes span {{
+  display: block !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  min-width: 0 !important;
+}}
+table.disp-html-table tbody td {{
+  padding: 5px 8px !important;
+  height: 36px !important;
+  max-height: 36px !important;
+  vertical-align: middle !important;
+  border-bottom: 0.5px solid var(--disp-border) !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}}
+table.disp-html-table tbody tr:nth-child(even) td {{
+  background: var(--disp-row-alt) !important;
+}}
+table.disp-html-table tbody tr.disp-html-row-sel td {{
+  background: var(--disp-row-sel) !important;
+}}
+table.disp-html-table.disp-html-head-table {{
+  margin-top: 0 !important;
+}}
+table.disp-html-table.disp-html-row-table {{
+  margin: 0 !important;
+}}
+div.st-key-disp_ticket_table_fast {{
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  margin-top: 0 !important;
+  box-sizing: border-box !important;
+}}
+div.st-key-disp_ticket_table_fast [data-testid="stVerticalBlock"] {{
+  gap: 0 !important;
+}}
+div.st-key-disp_ticket_table_fast [data-testid="stHorizontalBlock"] {{
+  margin: 0 !important;
+  border-bottom: 0.5px solid var(--disp-border) !important;
+}}
+div.st-key-disp_ticket_table_fast [data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {{
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: 36px !important;
+}}
+div.st-key-disp_ticket_table_fast [data-testid="stMarkdownContainer"] {{
+  margin: 0 !important;
+}}
+div.st-key-disp_ticket_table_fast [data-testid="column"]:last-child .stButton > button {{
+  min-height: 28px !important;
+  height: 28px !important;
+  width: 100% !important;
+  padding: 0 4px !important;
+  font-size: 14px !important;
+  line-height: 1 !important;
+  margin: 0 !important;
+  border-radius: var(--disp-radius-sm) !important;
+}}
+div.st-key-disp_ticket_pager {{
+  margin-top: 12px !important;
+  padding: 8px 12px !important;
+  background: var(--disp-panel) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius) !important;
+  box-shadow: var(--disp-shadow) !important;
+}}
+div.st-key-disp_ticket_pager .stButton > button {{
+  min-height: 32px !important;
+  height: 32px !important;
+  font-size: 12px !important;
+  border-radius: var(--disp-radius-sm) !important;
+  border: 1px solid var(--disp-border) !important;
+  background: var(--disp-card) !important;
+}}
+.disp-pager-label {{
+  text-align: center !important;
+  font-size: 12px !important;
+  color: var(--disp-muted) !important;
+  margin: 6px 0 0 !important;
+  font-variant-numeric: tabular-nums !important;
+}}
+.disp-pager-label strong {{
+  color: var(--disp-text) !important;
+  font-weight: 600 !important;
+}}
+[class*="st-key-disp_case_type_"] .stButton > button {{
+  font-size: 12px !important;
+  min-height: 32px !important;
+  height: 32px !important;
+  border-radius: 999px !important;
+  border: 1px solid var(--disp-border) !important;
+  background: var(--disp-panel) !important;
+  color: var(--disp-muted) !important;
+  margin: 0 !important;
+}}
+[class*="st-key-disp_case_type_"] .stButton > button[kind="primary"],
+[class*="st-key-disp_case_type_"] .stButton > button[data-testid="stBaseButton-primary"] {{
+  background: var(--disp-accent-bg) !important;
+  border-color: #4338ca !important;
+  color: var(--disp-text) !important;
+  font-weight: 500 !important;
 }}
 """
 
@@ -2039,6 +2436,26 @@ SALES_QUEUE_DOTS: dict[str, str] = {
 
 SALES_QUEUE_ORDER: tuple[str, ...] = tuple(SALES_QUEUE_DOTS.keys())
 
+
+def _build_queue_dot_css(prefix: str, dots: dict[str, str]) -> str:
+    """Static queue-dot colours (avoids per-rerun inline style blocks)."""
+    rules: list[str] = []
+    for q, color in dots.items():
+        key = q.replace(" ", "_")
+        rules.append(
+            f"div.st-key-{prefix}_{key} .stButton > button::before {{"
+            f"color: {color} !important;}}"
+        )
+    return "\n".join(rules)
+
+
+DISPATCH_LAYOUT_RULES = (
+    DISPATCH_LAYOUT_RULES
+    + _build_queue_dot_css("uqueue", QUEUE_DOTS)
+    + _build_queue_dot_css("disp_queue", QUEUE_DOTS)
+    + _build_queue_dot_css("sales_queue", SALES_QUEUE_DOTS)
+)
+
 TIMELINE_DOT: dict[str, str] = {
     "Assignment": "#3b82f6",
     "Response": "#22c55e",
@@ -2065,16 +2482,20 @@ def inject_dispatch_theme(*, login: bool = False) -> None:
 
 def status_pill(status: str) -> str:
     label = display_status(status)
-    if label == "Unattended":
-        return (
-            f'<span style="font-size:11px;font-weight:500;padding:2px 6px;'
-            f'border-radius:3px;background:#2d1515;color:#ef4444;'
-            f'white-space:nowrap">{html.escape(label)}</span>'
-        )
+    palette = {
+        "Unattended": ("#3f1515", "#f87171"),
+        "Needs Review": ("#14291a", "#4ade80"),
+        "Daily Task": ("#0f2438", "#60a5fa"),
+        "On Hold": ("#2a2008", "#fbbf24"),
+        "Under Investigation": ("#1f1530", "#c084fc"),
+        "Follow up": ("#2a1030", "#f472b6"),
+        "Resolved": ("#142018", "#86efac"),
+    }
+    bg, fg = palette.get(label, ("#1a1a1f", "#a1a1aa"))
     safe = html.escape(label)
     return (
-        f'<span style="font-size:11px;font-weight:500;padding:2px 6px;'
-        f'border-radius:3px;background:#1a2035;color:#8a9ac0;'
+        f'<span style="font-size:10px;font-weight:500;padding:2px 5px;'
+        f'border-radius:2px;background:{bg};color:{fg};'
         f'white-space:nowrap">{safe}</span>'
     )
 
@@ -2153,7 +2574,7 @@ def render_topbar(
 def render_sidebar_today_grid(
     items: tuple[tuple[str, int | str, str], ...],
 ) -> None:
-    """Compact 2×2 today stats — aligned with queue buttons below."""
+    """Compact 2x2 today stats — aligned with queue list below."""
     cells: list[str] = []
     for label, value, colour in items:
         cells.append(
@@ -2183,20 +2604,13 @@ def render_queue_list(
     picked = selected
     with st.container(key="disp_sidebar_queues"):
         for q in order:
-            dot = dots.get(q, "#4a5a7a")
             cnt = counts.get(q, 0)
             is_active = q == selected
             row_key = q.replace(" ", "_")
             btn_key = f"{button_key_prefix}_{row_key}"
             st.markdown(
-                f"<style>"
-                f"div.st-key-{btn_key} .stButton > button::before {{"
-                f"color: {dot} !important;"
-                f"}}"
-                f"div.st-key-{btn_key} .stButton > button::after {{"
-                f'content: "{cnt}";'
-                f"}}"
-                f"</style>",
+                f"<style>div.st-key-{btn_key} .stButton > button::after {{"
+                f'content: "{cnt}";}}</style>',
                 unsafe_allow_html=True,
             )
             if st.button(
@@ -2287,7 +2701,7 @@ def render_settings_popover(
     range_caption: str = "",
 ) -> None:
     """Compact settings popover for the top bar."""
-    with st.popover("⚙", use_container_width=False):
+    with st.popover("Settings", use_container_width=False):
         st.markdown(
             '<p class="settings-section-label" style="margin-top:0">Refresh</p>',
             unsafe_allow_html=True,
@@ -2428,52 +2842,37 @@ _CASE_TYPE_PILL_COLORS: dict[str, str] = {
 
 
 def _table_cell_style(*, is_sel: bool) -> str:
-    """Shared row cell chrome for ticket/sales tables."""
-    row_bg = "#0d1e3a" if is_sel else "transparent"
-    row_pad = "5px 8px" if is_sel else "5px 6px"
-    row_radius = "4px" if is_sel else "0"
-    border = "0.5px solid #1a3460" if is_sel else "0.5px solid transparent"
+    """Shared row cell chrome for ticket/sales tables (selection via row CSS)."""
+    del is_sel
     return (
-        f"padding:{row_pad};background:{row_bg};border-radius:{row_radius};"
-        f"min-height:34px;display:flex;align-items:center;box-sizing:border-box;"
-        f"width:100%;border:{border};white-space:nowrap;overflow:hidden;"
+        "padding:5px 8px;min-height:36px;display:flex;align-items:center;"
+        "box-sizing:border-box;width:100%;white-space:nowrap;overflow:hidden;"
     )
+
+
+def _fast_row_cell_style(*, is_sel: bool, is_alt: bool) -> str:
+    style = _table_cell_style(is_sel=False)
+    if is_sel:
+        return f"{style}background:var(--disp-row-sel);"
+    if is_alt:
+        return f"{style}background:var(--disp-row-alt);"
+    return style
 
 
 def _render_table_row_actions(
     *,
     row_key: str,
-    is_sel: bool,
-    selected_key: str,
-    select_value: str,
-    select_button_key: str,
     row_data: dict[str, Any],
     row_id: str,
     row_actions_fn: Callable[[dict[str, Any], str], None] | None,
-    case_type_session_key: str | None = None,
+    **_: object,
 ) -> None:
-    """Select (●) + menu (⋮) in one horizontal action strip."""
+    """Single ⋮ control — selects row when unselected, opens menu when selected."""
     with st.container(
         horizontal=True,
         vertical_alignment="center",
         key=f"disp_row_actions_{row_key}",
     ):
-        if st.button(
-            "●",
-            key=select_button_key,
-            help="Select row",
-            type="primary" if is_sel else "secondary",
-        ):
-            st.session_state[selected_key] = select_value
-            if case_type_session_key:
-                selected_type = str(row_data.get("case_type") or "").strip()
-                st.session_state[case_type_session_key] = selected_type
-                if selected_type == "Resort":
-                    st.session_state["selected_sales_case"] = select_value
-                else:
-                    st.session_state["disp_selected_ticket"] = select_value
-                    st.session_state["selected_sales_case"] = None
-            st.rerun()
         if row_actions_fn:
             row_actions_fn(row_data, row_id)
 
@@ -2489,6 +2888,161 @@ def _case_type_pill_html(case_type: str) -> str:
     )
 
 
+def _ticket_row_notes_html(t: dict[str, Any]) -> str:
+    fu = html.escape(str(t.get("follow_up_label") or "").strip())
+    notes = html.escape(str(t.get("additional_info") or ""))
+    if fu:
+        inner = (
+            f'<span style="color:#a78bfa;font-weight:500">{fu}</span>'
+            + (f' <span style="color:#4a5a7a">{notes}</span>' if notes else "")
+        )
+    else:
+        inner = f'<span style="color:#4a5a7a">{notes}</span>' if notes else "—"
+    return f"<span>{inner}</span>"
+
+
+def _ticket_row_elapsed_html(t: dict[str, Any]) -> str:
+    if str(t.get("case_type") or "") == "Resort":
+        pri = str(t.get("sales_priority") or "Standard").strip() or "Standard"
+        style = {
+            "Strategic": ("#2d1515", "#ef4444"),
+            "Urgent": ("#231a06", "#f59e0b"),
+            "High": ("#231a06", "#b8954f"),
+            "Standard": ("#1a2035", "#4a5a7a"),
+        }
+        bg, fg = style.get(pri, ("#1a2035", "#4a5a7a"))
+        return (
+            f'<span style="font-size:11px;font-weight:500;padding:3px 7px;'
+            f'border-radius:3px;background:{bg};color:{fg}">'
+            f"{html.escape(pri)}</span>"
+        )
+    el_color, el_label = _row_elapsed(t)
+    return (
+        f'<span style="font-size:13px;font-weight:400;color:{el_color};'
+        f'font-variant-numeric:tabular-nums">{html.escape(el_label)}</span>'
+    )
+
+
+def _ticket_row_engineer_html(t: dict[str, Any]) -> str:
+    eng = str(t.get("assigned_to") or "—")
+    eng2 = str(t.get("assigned_to_2") or "").strip()
+    av = _avatar_html(eng)
+    if eng2:
+        av += _avatar_html(eng2, margin_left="-5px")
+        tag = (
+            ' <span style="font-size:11px;font-weight:400;color:#3b82f6">shared</span>'
+        )
+    else:
+        tag = (
+            f' <span style="font-size:13px;font-weight:400;color:#8a9ac0">'
+            f"{html.escape(eng)}</span>"
+        )
+    return f'<span style="display:inline-flex;align-items:center;gap:2px">{av}{tag}</span>'
+
+
+def _ticket_table_layout(show_case_type: bool) -> tuple[list[str], list[str]]:
+    headers = (
+        ["Ticket", "Type", "Category", "Engineer", "Notes", "Elapsed", "Status"]
+        if show_case_type
+        else ["Ticket", "Category", "Engineer", "Notes", "Elapsed", "Status"]
+    )
+    col_widths = (
+        ["14%", "5%", "12%", "10%", "34%", "10%", "9%"]
+        if show_case_type
+        else ["15%", "13%", "11%", "33%", "11%", "10%"]
+    )
+    return headers, col_widths
+
+
+def _build_ticket_row_cells_html(
+    t: dict[str, Any],
+    *,
+    selected: str | None,
+    show_case_type: bool,
+) -> str:
+    tnum = str(t.get("ticket_number") or "")
+    fu_dot = ""
+    if (
+        str(t.get("case_type") or "") == "Residential"
+        and str(t.get("follow_up_at") or "").strip()
+    ):
+        fu_dot = '<span style="font-size:12px;color:#a78bfa;margin-left:4px">●</span>'
+    cells = [
+        f'<td><span class="disp-ticket-num">{html.escape(tnum)}{fu_dot}</span></td>',
+    ]
+    if show_case_type:
+        cells.append(
+            f"<td>{_case_type_pill_html(str(t.get('case_type') or ''))}</td>"
+        )
+    cells.extend(
+        [
+            f'<td><span style="color:#4a5a7a">'
+            f'{html.escape(str(t.get("task_category") or "—"))}</span></td>',
+            f"<td>{_ticket_row_engineer_html(t)}</td>",
+            f'<td class="disp-html-notes">{_ticket_row_notes_html(t)}</td>',
+            f"<td>{_ticket_row_elapsed_html(t)}</td>",
+            f"<td>{status_pill(str(t.get('status') or ''))}</td>",
+        ]
+    )
+    return "".join(cells)
+
+
+def _build_ticket_table_head_html(*, show_case_type: bool) -> str:
+    headers, col_widths = _ticket_table_layout(show_case_type)
+    head = "".join(
+        f'<th style="width:{w}">{html.escape(label)}</th>'
+        for label, w in zip(headers, col_widths, strict=True)
+    )
+    return (
+        f'<table class="disp-html-table disp-html-head-table">'
+        f"<thead><tr>{head}</tr></thead></table>"
+    )
+
+
+def _build_ticket_table_row_html(
+    t: dict[str, Any],
+    *,
+    selected: str | None,
+    show_case_type: bool,
+) -> str:
+    tnum = str(t.get("ticket_number") or "")
+    is_sel = selected == tnum
+    row_cls = "disp-html-row-sel" if is_sel else ""
+    cells = _build_ticket_row_cells_html(
+        t, selected=selected, show_case_type=show_case_type
+    )
+    return (
+        f'<table class="disp-html-table disp-html-row-table">'
+        f'<tbody><tr class="{row_cls}">{cells}</tr></tbody></table>'
+    )
+
+
+def _build_ticket_table_html(
+    tickets: list[dict[str, Any]],
+    *,
+    selected: str | None,
+    show_case_type: bool,
+) -> str:
+    """Full table HTML (header + rows) — used for exports or previews."""
+    head = _build_ticket_table_head_html(show_case_type=show_case_type)
+    merged_rows: list[str] = []
+    for t in tickets:
+        row_html = _build_ticket_table_row_html(
+            t, selected=selected, show_case_type=show_case_type
+        )
+        start = row_html.find("<tr")
+        end = row_html.find("</tr>") + len("</tr>")
+        if start >= 0 and end > start:
+            merged_rows.append(row_html[start:end])
+    thead_start = head.find("<thead>")
+    thead_end = head.find("</thead>") + len("</thead>")
+    thead = head[thead_start:thead_end] if thead_start >= 0 else ""
+    return (
+        f'<table class="disp-html-table">{thead}'
+        f'<tbody>{"".join(merged_rows)}</tbody></table>'
+    )
+
+
 def render_ticket_table(
     tickets: list[dict[str, Any]],
     *,
@@ -2501,9 +3055,7 @@ def render_ticket_table(
     """Render ticket rows as Streamlit columns (supports per-row popovers)."""
     if not tickets:
         st.markdown(
-            '<div style="padding:40px;text-align:center;color:#2a3a5a;'
-            'font-size:13px;font-weight:400">'
-            "No tickets in this queue</div>",
+            '<div class="disp-table-empty">No tickets in this queue</div>',
             unsafe_allow_html=True,
         )
         return
@@ -2518,19 +3070,14 @@ def render_ticket_table(
         if show_case_type
         else ["Ticket", "Category", "Engineer", "Notes", "Elapsed", "Status"]
     )
-    header_cols = st.columns(col_ratios, gap="small")
-    for col, label in zip(header_cols[:-1], header_labels):
-        with col:
-            st.markdown(
-                f'<p style="font-size:11px;font-weight:600;color:#2a3a5a;'
-                f'text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px">'
-                f"{html.escape(label)}</p>",
-                unsafe_allow_html=True,
-            )
-    st.markdown(
-        '<hr style="border-color:#1a2035;margin:0 0 4px">',
-        unsafe_allow_html=True,
-    )
+    with st.container(key="disp_table_header"):
+        header_cols = st.columns(col_ratios, gap="small")
+        for col, label in zip(header_cols[:-1], header_labels):
+            with col:
+                st.markdown(
+                    f'<p class="disp-col-head">{html.escape(label)}</p>',
+                    unsafe_allow_html=True,
+                )
 
     with st.container(key="disp_ticket_table"):
         for t in tickets:
@@ -2539,6 +3086,11 @@ def render_ticket_table(
             cell = _table_cell_style(is_sel=is_sel)
 
             with st.container(key=f"disp_ticket_row_{tnum}"):
+                if is_sel:
+                    st.markdown(
+                        '<span class="disp-row-selected" aria-hidden="true"></span>',
+                        unsafe_allow_html=True,
+                    )
                 row_cols = st.columns(
                     col_ratios,
                     gap="small",
@@ -2554,8 +3106,7 @@ def render_ticket_table(
                     ):
                         fu_dot = '<span style="font-size:12px;color:#a78bfa;margin-left:4px">●</span>'
                     st.markdown(
-                        f'<div style="{cell}"><span style="font-size:13px;font-weight:500;'
-                        f'color:#8a9ac0;font-variant-numeric:tabular-nums">'
+                        f'<div style="{cell}"><span class="disp-ticket-num">'
                         f"{html.escape(tnum)}{fu_dot}</span></div>",
                         unsafe_allow_html=True,
                     )
@@ -2658,6 +3209,116 @@ def render_ticket_table(
                     )
 
 
+def render_ticket_table_fast(
+    tickets: list[dict[str, Any]],
+    *,
+    selected: str | None,
+    selected_key: str,
+    row_actions_fn: Callable[[dict[str, Any], str], None] | None = None,
+    show_case_type: bool = False,
+    case_type_session_key: str | None = None,
+) -> None:
+    """Ticket grid — same column ratios as the full table, without per-row card containers."""
+    del selected_key, case_type_session_key
+    if not tickets:
+        st.markdown(
+            '<div class="disp-table-empty">No tickets in this queue</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    col_ratios = (
+        list(_TICKET_TABLE_COLS_WITH_TYPE)
+        if show_case_type
+        else list(_TICKET_TABLE_COLS)
+    )
+    header_labels = (
+        ["Ticket", "Type", "Category", "Engineer", "Notes", "Elapsed", "Status"]
+        if show_case_type
+        else ["Ticket", "Category", "Engineer", "Notes", "Elapsed", "Status"]
+    )
+    with st.container(key="disp_table_header"):
+        header_cols = st.columns(col_ratios, gap="small")
+        for col, label in zip(header_cols[:-1], header_labels, strict=True):
+            with col:
+                st.markdown(
+                    f'<p class="disp-col-head">{html.escape(label)}</p>',
+                    unsafe_allow_html=True,
+                )
+
+    with st.container(key="disp_ticket_table_fast"):
+        for idx, t in enumerate(tickets):
+            tnum = str(t.get("ticket_number") or "")
+            is_sel = selected == tnum
+            cell = _fast_row_cell_style(is_sel=is_sel, is_alt=idx % 2 == 1)
+            row_cols = st.columns(
+                col_ratios, gap="small", vertical_alignment="center"
+            )
+            col_idx = 0
+
+            with row_cols[col_idx]:
+                fu_dot = ""
+                if (
+                    str(t.get("case_type") or "") == "Residential"
+                    and str(t.get("follow_up_at") or "").strip()
+                ):
+                    fu_dot = (
+                        '<span style="font-size:12px;color:#a78bfa;margin-left:4px">●</span>'
+                    )
+                st.markdown(
+                    f'<div style="{cell}"><span class="disp-ticket-num">'
+                    f"{html.escape(tnum)}{fu_dot}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            col_idx += 1
+
+            if show_case_type:
+                with row_cols[col_idx]:
+                    st.markdown(
+                        f'<div style="{cell}">'
+                        f"{_case_type_pill_html(str(t.get('case_type') or ''))}</div>",
+                        unsafe_allow_html=True,
+                    )
+                col_idx += 1
+
+            c_cat, c_eng, c_notes, c_elapsed, c_status, c_actions = row_cols[
+                col_idx : col_idx + 6
+            ]
+            with c_cat:
+                st.markdown(
+                    f'<div style="{cell}"><span style="font-size:13px;font-weight:400;'
+                    f'color:#4a5a7a">'
+                    f'{html.escape(str(t.get("task_category") or "—"))}</span></div>',
+                    unsafe_allow_html=True,
+                )
+            with c_eng:
+                st.markdown(
+                    f'<div style="{cell}">{_ticket_row_engineer_html(t)}</div>',
+                    unsafe_allow_html=True,
+                )
+            with c_notes:
+                st.markdown(
+                    f'<div style="{cell};min-width:0"><span style="font-size:13px;'
+                    f"font-weight:400;white-space:nowrap;overflow:hidden;"
+                    f'text-overflow:ellipsis;display:block;min-width:0">'
+                    f"{_ticket_row_notes_html(t)}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            with c_elapsed:
+                st.markdown(
+                    f'<div style="{cell}">{_ticket_row_elapsed_html(t)}</div>',
+                    unsafe_allow_html=True,
+                )
+            with c_status:
+                st.markdown(
+                    f'<div style="{cell}">{status_pill(str(t.get("status") or ""))}</div>',
+                    unsafe_allow_html=True,
+                )
+            with c_actions:
+                if row_actions_fn:
+                    row_actions_fn(t, tnum)
+
+
 DISPATCH_TICKET_PAGE_SIZE = 20
 _DISP_TICKET_PAGE_KEY = "disp_ticket_page"
 _DISP_TICKET_PAGE_SIG_KEY = "disp_ticket_page_sig"
@@ -2700,32 +3361,31 @@ def render_ticket_table_pager(
     """Prev / Next controls below the ticket table."""
     if total <= page_size:
         return
-    c_prev, c_label, c_next = st.columns([1, 2, 1], gap="small")
-    with c_prev:
-        if st.button(
-            "◀ Prev",
-            key=f"{key_prefix}_page_prev",
-            disabled=page <= 1,
-            use_container_width=True,
-        ):
-            st.session_state[_DISP_TICKET_PAGE_KEY] = page - 1
-            st.rerun()
-    with c_label:
-        st.markdown(
-            f'<p style="text-align:center;font-size:12px;color:#4a5a7a;margin:8px 0 0">'
-            f"Page **{page}** of **{total_pages}** · "
-            f"**{range_start}–{range_end}** of **{total}**</p>",
-            unsafe_allow_html=True,
-        )
-    with c_next:
-        if st.button(
-            "Next ▶",
-            key=f"{key_prefix}_page_next",
-            disabled=page >= total_pages,
-            use_container_width=True,
-        ):
-            st.session_state[_DISP_TICKET_PAGE_KEY] = page + 1
-            st.rerun()
+    with st.container(key="disp_ticket_pager"):
+        c_prev, c_label, c_next = st.columns([1, 2, 1], gap="small")
+        with c_prev:
+            if st.button(
+                "◀ Prev",
+                key=f"{key_prefix}_page_prev",
+                disabled=page <= 1,
+                use_container_width=True,
+            ):
+                st.session_state[_DISP_TICKET_PAGE_KEY] = page - 1
+        with c_label:
+            st.markdown(
+                f'<p class="disp-pager-label">'
+                f"Page <strong>{page}</strong> of <strong>{total_pages}</strong> · "
+                f"<strong>{range_start}–{range_end}</strong> of <strong>{total}</strong></p>",
+                unsafe_allow_html=True,
+            )
+        with c_next:
+            if st.button(
+                "Next ▶",
+                key=f"{key_prefix}_page_next",
+                disabled=page >= total_pages,
+                use_container_width=True,
+            ):
+                st.session_state[_DISP_TICKET_PAGE_KEY] = page + 1
 
 
 def prepare_dispatch_ticket_page(
@@ -2902,6 +3562,11 @@ def render_sales_case_table(
             cell = _table_cell_style(is_sel=is_sel)
 
             with st.container(key=f"disp_ticket_row_{row_id}"):
+                if is_sel:
+                    st.markdown(
+                        '<span class="disp-row-selected" aria-hidden="true"></span>',
+                        unsafe_allow_html=True,
+                    )
                 c1, c2, c3, c4, c5, c6, c7 = st.columns(
                     [1.25, 2.1, 1.0, 1.3, 1.2, 1.2, 0.72],
                     gap="small",
