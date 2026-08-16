@@ -130,7 +130,6 @@ try:
         render_settings_popover,
         render_sidebar_today_grid,
         render_ticket_table,
-        render_ticket_table_fast,
         render_ticket_table_pager,
         render_timeline_entry,
         render_topbar,
@@ -138,6 +137,10 @@ try:
         prepare_dispatch_ticket_page,
         DISPATCH_TICKET_PAGE_SIZE,
     )
+    try:
+        from dispatch_console import render_ticket_table_fast
+    except ImportError:
+        render_ticket_table_fast = render_ticket_table
 except ImportError as _dispatch_import_err:
     import traceback
 
