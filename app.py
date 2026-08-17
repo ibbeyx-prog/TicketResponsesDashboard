@@ -9355,6 +9355,15 @@ def _init_lookup_state() -> None:
         st.session_state.lookup_result = None
 
 
+def _close_lookup_dialog(*, clear_query: bool = False) -> None:
+    """Hide lookup dialog — call on dismiss, navigation, or tab change."""
+    st.session_state.show_lookup = False
+    st.session_state.lookup_result = None
+    if clear_query:
+        st.session_state.lookup_query = ""
+        _schedule_deferred_widget_clears("lookup_input")
+
+
 def _lookup_ref(query: str) -> dict[str, object] | None:
     """Search Residential first, then Resort by reference."""
     raw = str(query or "").strip()
@@ -9462,14 +9471,15 @@ def _lookup_navigate(rtype: str, data: dict[str, object]) -> None:
             data.get("status") or SC_STATUS_SALES_TICKET
         )
         st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
-    st.session_state.show_lookup = False
-    st.session_state.lookup_result = None
-    st.session_state.lookup_query = ""
-    _schedule_deferred_widget_clears("lookup_input")
+    _close_lookup_dialog(clear_query=True)
     st.rerun()
 
 
-@st.dialog("🔍 Ticket / Case Lookup", width="small")
+@st.dialog(
+    "🔍 Ticket / Case Lookup",
+    width="small",
+    on_dismiss=_close_lookup_dialog,
+)
 def render_lookup_popover() -> None:
     """Lookup dialog for Residential tickets and Resort cases."""
     _init_lookup_state()
@@ -13248,8 +13258,9 @@ def _render_reassign_editor(
         f"**{picked}** reassigned → **Daily Task** ({handle}, {cat})."
         + (f" {tg_note}" if tg_note else "")
     )
+    _navigate_dispatch_to_daily_task(picked)
     _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
-    st.rerun()
+    _rerun_dispatch_after_ticket_write()
 
 
 def _sc_log_sales_assignment_activity(
@@ -17264,6 +17275,7 @@ def _apply_pending_dashboard_nav() -> None:
     pending_engineer = st.session_state.pop(_DASH_PENDING_ENGINEER_FILTER_KEY, None)
     pending_case_type = st.session_state.pop(_DASH_PENDING_CASE_TYPE_FILTER_KEY, None)
     if pending_main is not None:
+        _close_lookup_dialog()
         st.session_state[_DASH_MAIN_NAV_KEY] = _normalize_dash_main_nav(
             _DASH_NAV_LEGACY_REDIRECT.get(str(pending_main), pending_main)
         )
@@ -17457,12 +17469,50 @@ def _clear_dispatch_row_modal_keys() -> None:
         st.session_state.pop(k, None)
 
 
+def _ticket_belongs_in_sidebar_queue(row: dict | pd.Series, queue: str) -> bool:
+    """True when a residential ticket should appear in the given dispatch sidebar queue."""
+    status = _normalize_ticket_status_value(row.get("status"))
+    follow_up = bool(str(row.get("follow_up_at") or "").strip())
+    marked_unatt = bool(str(row.get("marked_unattended_at") or "").strip())
+    if queue == "Unattended":
+        return marked_unatt
+    if queue == "Daily Task":
+        return status == STATUS_DAILY_TASK
+    if queue == "Needs Review":
+        return status == "Open"
+    if queue == "On Hold":
+        return status == STATUS_ON_HOLD
+    if queue == "Under Investigation":
+        return status == STATUS_UNDER_INVESTIGATION and not follow_up
+    if queue == "Follow up":
+        return status == STATUS_UNDER_INVESTIGATION and follow_up
+    if queue == "Resolved":
+        return status == STATUS_RESOLVED
+    return False
+
+
+def _navigate_dispatch_to_daily_task(ticket_number: str) -> None:
+    """Switch the dispatch board to Daily Task and keep the ticket selected."""
+    tid = str(ticket_number or "").strip()
+    aq_key = active_queue_key()
+    st.session_state[aq_key] = "Daily Task"
+    st.session_state["_disp_active_queue_prev"] = "Daily Task"
+    if tid:
+        st.session_state[_DISP_SELECTED_KEY] = tid
+        st.session_state.pop(_DISP_SELECTED_CASE_TYPE_KEY, None)
+    _clear_dispatch_row_modal_keys()
+
+
+def _rerun_dispatch_after_ticket_write() -> None:
+    """Rerun the full app so board and detail fragments both pick up ticket writes."""
+    st.rerun(scope="app")
 
 
 def _dispatch_append_selected_lookup_ticket(
     ticket_rows: list[dict[str, object]],
     *,
     sales_df: pd.DataFrame | None,
+    selected_queue: str | None = None,
 ) -> list[dict[str, object]]:
     """Ensure a lookup-selected case appears even outside the sidebar date range."""
     sel = str(st.session_state.get(_DISP_SELECTED_KEY) or "").strip()
@@ -17470,6 +17520,7 @@ def _dispatch_append_selected_lookup_ticket(
         return ticket_rows
     if any(str(t.get("ticket_number") or "") == sel for t in ticket_rows):
         return ticket_rows
+    preserve_lookup = bool(st.session_state.get("_disp_preserve_lookup_selection"))
     case_type = str(st.session_state.get(_DISP_SELECTED_CASE_TYPE_KEY) or "")
     if case_type == CASE_TYPE_RESORT and sales_df is not None and not sales_df.empty:
         if "case_ref" in sales_df.columns:
@@ -17484,6 +17535,12 @@ def _dispatch_append_selected_lookup_ticket(
         return ticket_rows
     row = _fetch_ticket_row(sel)
     if row:
+        if (
+            selected_queue
+            and not preserve_lookup
+            and not _ticket_belongs_in_sidebar_queue(row, selected_queue)
+        ):
+            return ticket_rows
         return [_residential_row_to_unified_dict(pd.Series(row)), *ticket_rows]
     return ticket_rows
 
@@ -17601,6 +17658,7 @@ def _render_main_navigation() -> str:
                 disabled=is_active,
             ):
                 st.session_state[_DASH_MAIN_NAV_KEY] = opt
+                _close_lookup_dialog()
                 st.rerun()
     return current
 
@@ -22298,6 +22356,7 @@ def _compute_dispatch_ticket_view(ctx: dict[str, object]) -> dict[str, object]:
     ticket_rows = _dispatch_append_selected_lookup_ticket(
         ticket_rows,
         sales_df=sales_df if isinstance(sales_df, pd.DataFrame) else None,
+        selected_queue=selected_queue,
     )
     ticket_nums = [
         str(t.get("ticket_number") or "")
