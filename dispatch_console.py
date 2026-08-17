@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import html
+import json
 from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 _UI_TZ_UTC5 = timezone(timedelta(hours=5))
 _DISP_INSET = "10px"
@@ -1790,7 +1792,8 @@ div[class*="st-key-disp_row_actions_"] [data-testid="stVerticalBlock"] {{
   max-width: 100% !important;
 }}
 div[class*="st-key-disp_row_actions_"] .stButton,
-div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] {{
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"],
+div[class*="st-key-disp_row_actions_"] [data-testid="stMenuButton"] {{
   flex: 0 0 32px !important;
   width: 32px !important;
   min-width: 32px !important;
@@ -1798,7 +1801,8 @@ div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] {{
   margin: 0 !important;
 }}
 div[class*="st-key-disp_row_actions_"] .stButton > button,
-div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button {{
+div[class*="st-key-disp_row_actions_"] [data-testid="stPopover"] > button,
+div[class*="st-key-disp_row_actions_"] [data-testid="stMenuButton"] > button {{
   font-size: 14px !important;
   font-weight: 600 !important;
   color: var(--disp-dim) !important;
@@ -1991,6 +1995,35 @@ table.disp-html-table tbody tr:nth-child(even) td {{
 table.disp-html-table tbody tr.disp-html-row-sel td {{
   background: var(--disp-row-sel) !important;
 }}
+.disp-ticket-num {{
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: var(--disp-text) !important;
+  font-variant-numeric: tabular-nums;
+}}
+.disp-col-meta {{
+  font-size: 11px !important;
+  color: var(--disp-dim) !important;
+}}
+.disp-empty-queue {{
+  margin: 12px 0;
+  padding: 18px 16px;
+  text-align: center;
+  background: var(--disp-panel);
+  border: 0.5px dashed var(--disp-border);
+  border-radius: var(--disp-radius-sm);
+}}
+.disp-empty-queue-title {{
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--disp-text);
+}}
+.disp-empty-queue-sub {{
+  margin: 0;
+  font-size: 11px;
+  color: var(--disp-dim);
+}}
 table.disp-html-table.disp-html-head-table {{
   margin-top: 0 !important;
 }}
@@ -2021,7 +2054,8 @@ div.st-key-disp_ticket_table_fast [data-testid="stHorizontalBlock"] > div[data-t
 div.st-key-disp_ticket_table_fast [data-testid="stMarkdownContainer"] {{
   margin: 0 !important;
 }}
-div.st-key-disp_ticket_table_fast [data-testid="column"]:last-child .stButton > button {{
+div.st-key-disp_ticket_table_fast [data-testid="column"]:last-child .stButton > button,
+div.st-key-disp_ticket_table_fast [data-testid="column"]:last-child [data-testid="stMenuButton"] > button {{
   min-height: 28px !important;
   height: 28px !important;
   width: 100% !important;
@@ -2234,6 +2268,54 @@ div[data-baseweb="menu"] li:hover {
   margin: 6px 0 !important;
 }
 
+/* Row ⋮ action menu — compact (must follow general popover rules above) */
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) {
+  min-width: 9rem !important;
+  max-width: 10rem !important;
+  padding: 2px 4px !important;
+}
+.disp-row-popover-label {
+  font-size: 9px !important;
+  font-weight: 500 !important;
+  color: #2a3a5a !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.04em !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  line-height: 1.05 !important;
+}
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="stVerticalBlock"],
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="stVerticalBlockBorderWrapper"] {
+  gap: 0 !important;
+  row-gap: 0 !important;
+}
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="element-container"],
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="stElementContainer"] {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="stMarkdownContainer"],
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) .stMarkdown {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) .stButton {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) .stButton > button {
+  font-size: 11px !important;
+  min-height: 22px !important;
+  height: 22px !important;
+  max-height: 22px !important;
+  padding: 0 5px !important;
+  margin: 0 !important;
+  line-height: 1 !important;
+}
+[data-testid="stPopoverBody"]:has(.disp-row-popover-label) hr {
+  margin: 1px 0 !important;
+}
+
 /* ── Data frames & editors ── */
 [data-testid="stDataFrame"],
 [data-testid="stDataEditor"] {
@@ -2382,6 +2464,50 @@ div.st-key-disp_log_body [data-testid="stVerticalBlockBorderWrapper"] {
 }
 """
 
+_DISPATCH_ROW_MENU_COMPACT_CSS = """
+div[data-baseweb="menu"] ul,
+div[data-baseweb="popover"] ul[role="listbox"] {
+  padding: 4px 0 !important;
+}
+div[data-baseweb="menu"] li,
+div[data-baseweb="popover"] ul[role="listbox"] li {
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+div[data-baseweb="menu"] li > div,
+div[data-baseweb="popover"] ul[role="listbox"] li > div {
+  min-height: 28px !important;
+  padding: 4px 12px !important;
+  font-size: 13px !important;
+  line-height: 1.2 !important;
+}
+"""
+
+
+def inject_dispatch_row_popover_compact_css() -> None:
+    """Inject compact row-action menu styles into the parent document head."""
+    css_json = json.dumps(_DISPATCH_ROW_MENU_COMPACT_CSS.strip())
+    components.html(
+        f"""
+        <script>
+        (function () {{
+          const doc = window.parent.document;
+          const css = {css_json};
+          let style = doc.getElementById("disp-row-popover-compact-css");
+          if (!style) {{
+            style = doc.createElement("style");
+            style.id = "disp-row-popover-compact-css";
+            doc.head.appendChild(style);
+          }}
+          style.textContent = css;
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 # Legacy alias — layout is merged into app.apply_theme()
 DISPATCH_THEME_CSS = f"<style>{DISPATCH_LAYOUT_RULES}</style>"
 
@@ -2494,9 +2620,10 @@ def status_pill(status: str) -> str:
     bg, fg = palette.get(label, ("#1a1a1f", "#a1a1aa"))
     safe = html.escape(label)
     return (
-        f'<span style="font-size:10px;font-weight:500;padding:2px 5px;'
+        f'<span style="font-size:11px;font-weight:500;padding:2px 6px;'
         f'border-radius:2px;background:{bg};color:{fg};'
-        f'white-space:nowrap">{safe}</span>'
+        f'white-space:nowrap;display:inline-block;min-width:4.5rem;text-align:center">'
+        f"{safe}</span>"
     )
 
 
@@ -2972,15 +3099,15 @@ def _build_ticket_row_cells_html(
     ]
     if show_case_type:
         cells.append(
-            f"<td>{_case_type_pill_html(str(t.get('case_type') or ''))}</td>"
+            f'<td class="disp-col-meta">{_case_type_pill_html(str(t.get("case_type") or ""))}</td>'
         )
     cells.extend(
         [
-            f'<td><span style="color:#4a5a7a">'
+            f'<td class="disp-col-meta"><span>'
             f'{html.escape(str(t.get("task_category") or "—"))}</span></td>',
             f"<td>{_ticket_row_engineer_html(t)}</td>",
             f'<td class="disp-html-notes">{_ticket_row_notes_html(t)}</td>',
-            f"<td>{_ticket_row_elapsed_html(t)}</td>",
+            f'<td class="disp-col-meta">{_ticket_row_elapsed_html(t)}</td>',
             f"<td>{status_pill(str(t.get('status') or ''))}</td>",
         ]
     )

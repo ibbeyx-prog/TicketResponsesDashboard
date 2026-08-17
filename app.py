@@ -136,6 +136,7 @@ try:
         status_pill,
         prepare_dispatch_ticket_page,
         DISPATCH_TICKET_PAGE_SIZE,
+        inject_dispatch_row_popover_compact_css,
     )
     try:
         from dispatch_console import render_ticket_table_fast
@@ -497,6 +498,9 @@ _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
 
 def apply_theme(*, login: bool = False) -> None:
     """Global typography + colour system for the dispatch dashboard."""
+    if not st.session_state.get("_disp_row_popover_compact_injected"):
+        inject_dispatch_row_popover_compact_css()
+        st.session_state["_disp_row_popover_compact_injected"] = True
     theme_key = _LOGIN_THEME_APPLIED_KEY if login else _DASH_THEME_APPLIED_KEY
     if st.session_state.get(theme_key):
         return
@@ -812,6 +816,37 @@ def apply_theme(*, login: bool = False) -> None:
     div.st-key-disp_perf_body h4,
     div.st-key-disp_perf_body h5 {{
       color: #e2e8f8 !important;
+    }}
+    div.st-key-disp_perf_body,
+    div.st-key-disp_log_body {{
+      background: #0a0f1a !important;
+      border: 0.5px solid #243047 !important;
+      border-radius: 8px !important;
+      padding: 8px 10px !important;
+    }}
+
+    /* Row ⋮ menu — override global button padding inside ticket action popovers */
+    [data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="stVerticalBlock"],
+    [data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="stVerticalBlockBorderWrapper"] {{
+      gap: 0 !important;
+      row-gap: 0 !important;
+    }}
+    [data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="element-container"],
+    [data-testid="stPopoverBody"]:has(.disp-row-popover-label) [data-testid="stElementContainer"] {{
+      margin: 0 !important;
+      padding: 0 !important;
+    }}
+    [data-testid="stPopoverBody"]:has(.disp-row-popover-label) .stButton > button {{
+      font-size: 11px !important;
+      min-height: 22px !important;
+      height: 22px !important;
+      max-height: 22px !important;
+      padding: 0 5px !important;
+      margin: 0 !important;
+      line-height: 1 !important;
+    }}
+    [data-testid="stPopoverBody"]:has(.disp-row-popover-label) hr {{
+      margin: 1px 0 !important;
     }}
     </style>
     """,
@@ -17491,16 +17526,34 @@ def _ticket_belongs_in_sidebar_queue(row: dict | pd.Series, queue: str) -> bool:
     return False
 
 
-def _navigate_dispatch_to_daily_task(ticket_number: str) -> None:
-    """Switch the dispatch board to Daily Task and keep the ticket selected."""
+def _navigate_dispatch_queue(queue_name: str, ticket_number: str) -> None:
+    """Switch dispatch board queue and keep the ticket selected."""
+    q = str(queue_name or "Daily Task").strip()
+    if q not in QUEUE_ORDER:
+        q = "Daily Task"
     tid = str(ticket_number or "").strip()
     aq_key = active_queue_key()
-    st.session_state[aq_key] = "Daily Task"
-    st.session_state["_disp_active_queue_prev"] = "Daily Task"
+    st.session_state[aq_key] = q
+    st.session_state["_disp_active_queue_prev"] = q
     if tid:
         st.session_state[_DISP_SELECTED_KEY] = tid
         st.session_state.pop(_DISP_SELECTED_CASE_TYPE_KEY, None)
     _clear_dispatch_row_modal_keys()
+
+
+def _navigate_dispatch_to_daily_task(ticket_number: str) -> None:
+    """Switch the dispatch board to Daily Task and keep the ticket selected."""
+    _navigate_dispatch_queue("Daily Task", ticket_number)
+
+
+_DISPATCH_MOVE_DESTINATION_QUEUE: dict[str, str] = {
+    "Investigation": "Under Investigation",
+    "Resolve": "Resolved",
+    "On hold": "On Hold",
+    "Daily task (reopen)": "Daily Task",
+    "Needs Review (reopen)": "Needs Review",
+    "Daily Task (reopen)": "Daily Task",
+}
 
 
 def _rerun_dispatch_after_ticket_write() -> None:
@@ -19113,79 +19166,21 @@ def _sales_floor_move(case_ref: str, destination: str) -> None:
     if err:
         st.toast(str(err).replace("**", ""), icon="⚠️")
         return
-    _invalidate_dashboard_data_cache()
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
     st.toast(f"{case_ref} → {destination}", icon="✅")
-    st.rerun()
+    _rerun_dispatch_after_ticket_write()
 
 
 def _render_sales_row_actions(case: dict, row_key: str) -> None:
     status = str(case.get("status") or "")
     case_ref = str(case.get("case_ref") or "")
-    selected = str(st.session_state.get(_DISP_SELECTED_KEY) or "").strip() == case_ref
-    if not selected and not _sales_row_has_active_modal(case_ref):
-        if st.button(
-            "⋮",
-            key=f"row_menu_sc_{row_key}",
-            help="Select row · open again for actions",
-            use_container_width=False,
-        ):
-            _sales_prepare_row_selection(case_ref)
-            st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
-            st.rerun()
-        return
-
-    with st.popover("⋮", use_container_width=False):
-        st.markdown(
-            '<p style="font-size:11px;color:#2a3a5a;text-transform:uppercase;'
-            'letter-spacing:.05em;margin-bottom:4px">Move to</p>',
-            unsafe_allow_html=True,
-        )
-        for label, dest in _sales_move_destinations(status):
-            if st.button(
-                label, key=f"move_sc_{dest}_{row_key}", use_container_width=True
-            ):
-                _sales_floor_move(case_ref, dest)
-
-        st.divider()
-        st.markdown(
-            '<p style="font-size:11px;color:#2a3a5a;text-transform:uppercase;'
-            'letter-spacing:.05em;margin-bottom:4px">Actions</p>',
-            unsafe_allow_html=True,
-        )
-
-        if st.button(
-            "✏ Edit details", key=f"edit_sc_{row_key}", use_container_width=True
-        ):
-            st.session_state[_SALES_ROW_EDIT] = case_ref
-            st.session_state[_SALES_SELECTED_KEY] = case_ref
-            st.rerun()
-
-        if _sc_effective_status(status) != SC_STATUS_RESOLVED:
-            if st.button(
-                "↩ Reassign",
-                key=f"reassign_sc_{row_key}",
-                use_container_width=True,
-            ):
-                _sales_prepare_row_selection(case_ref)
-                st.session_state[_SALES_ROW_REASSIGN] = case_ref
-                st.rerun()
-
-        if _sc_effective_status(status) == SC_STATUS_RESOLVED:
-            st.divider()
-            if st.button(
-                "✕ Delete", key=f"del_sc_{row_key}", use_container_width=True
-            ):
-                row_id = str(case.get("id") or "").strip()
-                if row_id:
-                    try:
-                        _sales_cases_delete_row(row_id)
-                        _invalidate_dashboard_data_cache()
-                        if st.session_state.get(_SALES_SELECTED_KEY) == case_ref:
-                            st.session_state.pop(_SALES_SELECTED_KEY, None)
-                        st.toast(f"{case_ref} deleted", icon="✅")
-                        st.rerun()
-                    except Exception as exc:
-                        st.toast(f"Delete failed: {exc}", icon="❌")
+    items = _build_sales_row_menu_items(case=case, case_ref=case_ref, status=status)
+    _render_row_action_menu(
+        items=items,
+        menu_key=f"row_menu_actions_sc_{row_key}",
+        focus_ticket=case_ref,
+        focus_case_type=CASE_TYPE_RESORT,
+    )
 
 
 def _render_sales_detail_panel() -> None:
@@ -19813,37 +19808,43 @@ def _render_unified_queue_list(
             btn_key = f"uqueue_{row_key}"
             if case_type_filter == _CASE_TYPE_FILTER_ALL and res > 0 and rsr > 0:
                 badge = (
-                    f'<span style="font-size:9px;background:#0d1e3a;color:#5b7fb5;'
-                    f'padding:1px 4px;border-radius:2px;margin-right:2px">R{res}</span>'
-                    f'<span style="font-size:9px;background:#1a1030;color:#a78bfa;'
-                    f'padding:1px 4px;border-radius:2px">S{rsr}</span>'
+                    f'<span style="font-size:11px;background:#0d1e3a;color:#5b7fb5;'
+                    f'padding:1px 5px;border-radius:2px;margin-right:2px">R{res}</span>'
+                    f'<span style="font-size:11px;background:#1a1030;color:#a78bfa;'
+                    f'padding:1px 5px;border-radius:2px">S{rsr}</span>'
                 )
             else:
                 bg = "#2d1515" if q == "Unattended" else "#1a2035"
                 fg = "#ef4444" if q == "Unattended" else "#4a5a7a"
                 if q == "Follow up":
                     bg, fg = "#1a1030", "#a78bfa"
+                if total > 0:
+                    bg = "#1e293b" if q != "Unattended" else bg
+                    fg = "#e2e8f8" if q != "Unattended" else fg
+                weight = "600" if total > 0 else "500"
                 badge = (
                     f'<span style="font-size:11px;padding:3px 8px;border-radius:999px;'
-                    f'background:{bg};color:{fg};font-weight:500">{total}</span>'
+                    f'background:{bg};color:{fg};font-weight:{weight}">{total}</span>'
                 )
-            c_label, c_badge = st.columns([4, 1.6], gap="small", vertical_alignment="center")
-            with c_label:
-                if st.button(
-                    q,
-                    key=btn_key,
-                    use_container_width=True,
-                    type="primary" if is_active else "secondary",
-                ):
-                    st.session_state[session_key] = q
-                    st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = "All"
-                    st.rerun()
-                    return q
-            with c_badge:
-                st.markdown(
-                    f'<div style="display:flex;justify-content:flex-end">{badge}</div>',
-                    unsafe_allow_html=True,
-                )
+            row_wrap_key = f"uqueue_row_{row_key}"
+            with st.container(key=row_wrap_key):
+                c_label, c_badge = st.columns([4, 1.6], gap="small", vertical_alignment="center")
+                with c_label:
+                    if st.button(
+                        q,
+                        key=btn_key,
+                        use_container_width=True,
+                        type="primary" if is_active else "secondary",
+                    ):
+                        st.session_state[session_key] = q
+                        st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = "All"
+                        st.rerun()
+                        return q
+                with c_badge:
+                    st.markdown(
+                        f'<div style="display:flex;justify-content:flex-end">{badge}</div>',
+                        unsafe_allow_html=True,
+                    )
     return str(st.session_state.get(session_key, picked))
 
 
@@ -19862,6 +19863,31 @@ def _init_case_type_filter() -> str:
         cur = _CASE_TYPE_FILTER_ALL
         st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = cur
     return cur
+
+
+def _render_empty_queue_state(selected_queue: str) -> None:
+    """Friendly empty state when the active queue has no tickets."""
+    q = html.escape(selected_queue)
+    st.markdown(
+        f'<div class="disp-empty-queue">'
+        f'<p class="disp-empty-queue-title">No tickets in {q}</p>'
+        f'<p class="disp-empty-queue-sub">Try another queue or widen the date range in Settings.</p>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if selected_queue != "Daily Task":
+        if st.button("Go to Daily Task", key="disp_empty_go_daily", use_container_width=False):
+            aq = active_queue_key()
+            st.session_state[aq] = "Daily Task"
+            st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = "All"
+            st.rerun()
+
+
+def _render_dispatch_row_modal_back_bar() -> None:
+    if st.button("← Back to assign", key="disp_row_modal_back", use_container_width=True):
+        _clear_dispatch_row_modal_keys()
+        st.session_state[_DISP_DETAIL_TAB_KEY] = "assign"
+        _rerun_dispatch_after_ticket_write()
 
 
 def _render_unified_case_type_filter() -> str:
@@ -20199,8 +20225,13 @@ def _dispatch_ticket_move(ticket_number: str, destination: str) -> None:
                 return
             _reopen_ticket_from_resolved_to_daily_task(ticket_number, operator_id=op)
         st.toast(f"Moved → {destination}", icon="✅")
+        target_queue = _DISPATCH_MOVE_DESTINATION_QUEUE.get(destination)
+        if target_queue:
+            _navigate_dispatch_queue(target_queue, ticket_number)
+        else:
+            _dispatch_prepare_row_selection(ticket_number)
         _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
-        st.rerun()
+        _rerun_dispatch_after_ticket_write()
     except Exception as exc:
         st.toast(f"Move failed: {exc}", icon="❌")
 
@@ -20216,9 +20247,10 @@ def _dispatch_ticket_move_to_sales(ticket_number: str) -> None:
             operator_id=op,
             account_region=SALES_REGION_CENTRAL,
         )
-        st.toast(f"Ticket {ticket_number} moved to Sales", icon="✅")
-        _invalidate_dashboard_data_cache()
-        st.rerun()
+        st.toast(f"Ticket {ticket_number} moved to Resort", icon="✅")
+        _navigate_dispatch_queue("Daily Task", ticket_number)
+        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+        _rerun_dispatch_after_ticket_write()
     except Exception as exc:
         st.toast(f"Move to Resort failed: {exc}", icon="❌")
 
@@ -20252,6 +20284,148 @@ def _sales_row_has_active_modal(case_ref: str) -> bool:
     )
 
 
+def _row_menu_on_open(ticket: str, case_type: str) -> None:
+    """Select row when ⋮ is clicked (one-click menu)."""
+    ref = str(ticket or "").strip()
+    if not ref:
+        return
+    if case_type == CASE_TYPE_RESORT:
+        _sales_prepare_row_selection(ref)
+        st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
+    else:
+        _dispatch_prepare_row_selection(ref)
+        st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
+
+
+def _build_dispatch_row_menu_items(
+    ticket: dict,
+    *,
+    status: str,
+    is_admin: bool,
+    tnum: str,
+) -> list[tuple[str, Callable[[], None]]]:
+    """Grouped compact menu items for residential row ⋮."""
+    items: list[tuple[str, Callable[[], None]]] = []
+
+    def _move(dest: str) -> Callable[[], None]:
+        return lambda d=dest: _dispatch_ticket_move(tnum, d)
+
+    def _open_modal(key: str) -> Callable[[], None]:
+        def _go() -> None:
+            _dispatch_prepare_row_selection(tnum)
+            st.session_state[key] = tnum
+            st.rerun()
+
+        return _go
+
+    if status in ("Daily Task", "On Hold"):
+        items.append(("Move › Investigation", _move("Investigation")))
+    if status in ("Needs Review", "Under Investigation"):
+        items.append(("Move › Resolve", _move("Resolve")))
+    if status == "Unattended":
+        items.append(("Move › Daily task (reopen)", _move("Daily task (reopen)")))
+    if is_admin and status == "Resolved":
+        if str(ticket.get("field_response") or "").strip():
+            items.append(("Move › Needs Review (reopen)", _move("Needs Review (reopen)")))
+        items.append(("Move › Daily Task (reopen)", _move("Daily Task (reopen)")))
+    if is_admin and status in ("Daily Task", "Needs Review", "Under Investigation"):
+        items.append(("Move › On hold", _move("On hold")))
+    if status == "Needs Review":
+        items.append(("Follow › Follow up", _open_modal(_DISP_ROW_FOLLOW_UP)))
+        items.append(("Follow › Investigation", _move("Investigation")))
+    if status not in ("Resolved", "Unattended"):
+        items.append(("Action › Edit assignment", _open_modal(_DISP_ROW_EDIT)))
+    can_reassign = (
+        is_admin
+        if status in ("Daily Task", "On Hold")
+        else status in ("Needs Review", "Under Investigation")
+    )
+    if can_reassign:
+        items.append(("Action › Reassign", _open_modal(_DISP_ROW_REASSIGN)))
+    if is_admin and status in ("Daily Task", "Needs Review", "On Hold"):
+        items.append(("Action › Record response", _open_modal(_DISP_ROW_RECORD)))
+    if status in ("Needs Review", "Under Investigation", "Unattended"):
+        items.append(("Action › View photos", _open_modal(_DISP_ROW_PHOTOS)))
+    if status not in ("Resolved", "Unattended"):
+        items.append(("Action › Move to Resort", lambda: _dispatch_ticket_move_to_sales(tnum)))
+    if is_admin:
+        items.append(("Action › Admin close", _open_modal(_DISP_ROW_CLOSE)))
+    return items
+
+
+def _build_sales_row_menu_items(
+    *,
+    case: dict,
+    case_ref: str,
+    status: str,
+) -> list[tuple[str, Callable[[], None]]]:
+    items: list[tuple[str, Callable[[], None]]] = []
+    for label, dest in _sales_move_destinations(status):
+        items.append((f"Move › {label}", lambda d=dest: _sales_floor_move(case_ref, d)))
+
+    def _open_edit() -> None:
+        st.session_state[_SALES_ROW_EDIT] = case_ref
+        st.session_state[_SALES_SELECTED_KEY] = case_ref
+        st.rerun()
+
+    def _open_reassign() -> None:
+        _sales_prepare_row_selection(case_ref)
+        st.session_state[_SALES_ROW_REASSIGN] = case_ref
+        st.rerun()
+
+    def _delete() -> None:
+        row_id = str(case.get("id") or "").strip()
+        if not row_id:
+            return
+        try:
+            _sales_cases_delete_row(row_id)
+            _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+            if st.session_state.get(_SALES_SELECTED_KEY) == case_ref:
+                st.session_state.pop(_SALES_SELECTED_KEY, None)
+            st.toast(f"{case_ref} deleted", icon="✅")
+            _rerun_dispatch_after_ticket_write()
+        except Exception as exc:
+            st.toast(f"Delete failed: {exc}", icon="❌")
+
+    items.append(("Action › Edit details", _open_edit))
+    if _sc_effective_status(status) != SC_STATUS_RESOLVED:
+        items.append(("Action › Reassign", _open_reassign))
+    if _sc_effective_status(status) == SC_STATUS_RESOLVED:
+        items.append(("Action › Delete", _delete))
+    return items
+
+
+def _render_row_action_menu(
+    *,
+    items: list[tuple[str, Callable[[], None]]],
+    menu_key: str,
+    focus_ticket: str,
+    focus_case_type: str,
+) -> None:
+    """Native compact dropdown menu (Streamlit 1.57+ ``menu_button``)."""
+    if not items:
+        return
+    menu_fn = getattr(st, "menu_button", None)
+    if menu_fn is None:
+        st.caption("Update Streamlit to enable row actions menu.")
+        return
+    labels = [label for label, _ in items]
+    handlers = dict(items)
+    choice = menu_fn(
+        "⋮",
+        labels,
+        key=menu_key,
+        help="Actions",
+        type="secondary",
+        width="content",
+    )
+    if choice:
+        _row_menu_on_open(focus_ticket, focus_case_type)
+        handler = handlers.get(str(choice))
+        if handler:
+            handler()
+
+
 def _render_dispatch_row_actions(
     ticket: dict,
     is_admin: bool,
@@ -20259,116 +20433,21 @@ def _render_dispatch_row_actions(
     *,
     queue_name: str,
 ) -> None:
-    """Per-row ⋯ popover with status-aware actions."""
+    """Per-row ⋮ menu with status-aware actions."""
     status = _dispatch_effective_action_status(ticket, queue_name=queue_name)
     tnum = str(ticket.get("ticket_number") or row_key)
-    selected = str(st.session_state.get(_DISP_SELECTED_KEY) or "").strip() == tnum
-    if not selected and not _dispatch_row_has_active_modal(tnum):
-        if st.button(
-            "⋮",
-            key=f"row_menu_{row_key}",
-            help="Select row · open again for actions",
-            use_container_width=False,
-        ):
-            _dispatch_prepare_row_selection(tnum)
-            st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
-            st.rerun()
-        return
-
-    with st.popover("⋮", use_container_width=False):
-        move_options: list[str] = []
-        if status in ("Daily Task", "On Hold"):
-            move_options.append("Investigation")
-        if status in ("Needs Review", "Under Investigation"):
-            move_options.append("Resolve")
-        if status == "Unattended":
-            move_options.append("Daily task (reopen)")
-        if is_admin and status == "Resolved":
-            if str(ticket.get("field_response") or "").strip():
-                move_options.append("Needs Review (reopen)")
-            move_options.append("Daily Task (reopen)")
-        if is_admin and status in ("Daily Task", "Needs Review", "Under Investigation"):
-            move_options.append("On hold")
-
-        if move_options:
-            st.markdown(
-                '<p style="font-size:11px;font-weight:400;color:#2a3a5a;'
-                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">'
-                "Move to</p>",
-                unsafe_allow_html=True,
-            )
-            for opt in move_options:
-                if st.button(opt, key=f"move_{opt}_{row_key}", use_container_width=True):
-                    _dispatch_ticket_move(tnum, opt)
-            st.divider()
-
-        if status == "Needs Review":
-            st.markdown(
-                '<p style="font-size:11px;font-weight:400;color:#2a3a5a;'
-                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">'
-                "Follow up &amp; Investigation</p>",
-                unsafe_allow_html=True,
-            )
-            if st.button("↻ Follow up", key=f"followup_{row_key}", use_container_width=True):
-                _dispatch_prepare_row_selection(tnum)
-                st.session_state[_DISP_ROW_FOLLOW_UP] = tnum
-                st.rerun()
-            if st.button(
-                "Investigation",
-                key=f"investigation_{row_key}",
-                use_container_width=True,
-            ):
-                _dispatch_ticket_move(tnum, "Investigation")
-            st.divider()
-
-        st.markdown(
-            '<p style="font-size:11px;font-weight:400;color:#2a3a5a;'
-            'text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">'
-            "Actions</p>",
-            unsafe_allow_html=True,
-        )
-
-        if status not in ("Resolved", "Unattended"):
-            if st.button("✏ Edit assignment", key=f"edit_{row_key}", use_container_width=True):
-                _dispatch_prepare_row_selection(tnum)
-                st.session_state[_DISP_ROW_EDIT] = tnum
-                st.rerun()
-
-        can_reassign = (
-            is_admin
-            if status in ("Daily Task", "On Hold")
-            else status in ("Needs Review", "Under Investigation")
-        )
-        if can_reassign:
-            if st.button("↩ Reassign", key=f"reassign_{row_key}", use_container_width=True):
-                _dispatch_prepare_row_selection(tnum)
-                st.session_state[_DISP_ROW_REASSIGN] = tnum
-                st.rerun()
-
-        if is_admin and status in ("Daily Task", "Needs Review", "On Hold"):
-            if st.button("📋 Record response", key=f"record_{row_key}", use_container_width=True):
-                _dispatch_prepare_row_selection(tnum)
-                st.session_state[_DISP_ROW_RECORD] = tnum
-                st.rerun()
-
-        if status in ("Needs Review", "Under Investigation", "Unattended"):
-            if st.button("📷 View photos", key=f"photos_{row_key}", use_container_width=True):
-                _dispatch_prepare_row_selection(tnum)
-                st.session_state[_DISP_ROW_PHOTOS] = tnum
-                st.rerun()
-
-        if status not in ("Resolved", "Unattended"):
-            if st.button("↗ Move to Resort", key=f"sales_{row_key}", use_container_width=True):
-                _dispatch_ticket_move_to_sales(tnum)
-
-        if is_admin:
-            st.divider()
-            st.markdown('<div class="danger-row">', unsafe_allow_html=True)
-            if st.button("✕ Admin close", key=f"close_{row_key}", use_container_width=True):
-                _dispatch_prepare_row_selection(tnum)
-                st.session_state[_DISP_ROW_CLOSE] = tnum
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+    items = _build_dispatch_row_menu_items(
+        ticket,
+        status=status,
+        is_admin=is_admin,
+        tnum=tnum,
+    )
+    _render_row_action_menu(
+        items=items,
+        menu_key=f"row_menu_actions_{row_key}",
+        focus_ticket=tnum,
+        focus_case_type=CASE_TYPE_RESIDENTIAL,
+    )
 
 
 _ASSIGN_FIELD_BTN_COLS: tuple[float, float] = (0.88, 0.12)
@@ -22552,24 +22631,27 @@ def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
             ]
         )
 
-    render_ticket_table_fast(
-        view["page_rows"],
-        selected=view["sel"],
-        selected_key=_DISP_SELECTED_KEY,
-        show_case_type=True,
-        case_type_session_key=_DISP_SELECTED_CASE_TYPE_KEY,
-        row_actions_fn=lambda t, rk: _render_unified_row_actions(
-            t, rk, is_admin=is_admin, queue_name=selected_queue
-        ),
-    )
-    render_ticket_table_pager(
-        page=int(view["page"]),
-        total_pages=int(view["total_pages"]),
-        total=int(view["total_rows"]),
-        range_start=int(view["range_start"]),
-        range_end=int(view["range_end"]),
-        page_size=DISPATCH_TICKET_PAGE_SIZE,
-    )
+    if int(view["total_rows"]) == 0:
+        _render_empty_queue_state(selected_queue)
+    else:
+        render_ticket_table_fast(
+            view["page_rows"],
+            selected=view["sel"],
+            selected_key=_DISP_SELECTED_KEY,
+            show_case_type=True,
+            case_type_session_key=_DISP_SELECTED_CASE_TYPE_KEY,
+            row_actions_fn=lambda t, rk: _render_unified_row_actions(
+                t, rk, is_admin=is_admin, queue_name=selected_queue
+            ),
+        )
+        render_ticket_table_pager(
+            page=int(view["page"]),
+            total_pages=int(view["total_pages"]),
+            total=int(view["total_rows"]),
+            range_start=int(view["range_start"]),
+            range_end=int(view["range_end"]),
+            page_size=DISPATCH_TICKET_PAGE_SIZE,
+        )
     if _sales_any_row_modal_active() and sales_df is not None:
         _render_sales_floor_modals(df=sales_df)
 
@@ -22600,6 +22682,7 @@ def _render_dispatch_detail_column(ctx: dict[str, object]) -> None:
         ticket_nums=view["residential_nums"], is_admin=is_admin
     ):
         with st.container(key="disp_row_action_panel"):
+            _render_dispatch_row_modal_back_bar()
             _render_dispatch_row_modals(
                 queue_df=view["display_df"],
                 ticket_nums=view["residential_nums"],
