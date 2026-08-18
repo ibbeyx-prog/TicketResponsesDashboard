@@ -2580,6 +2580,37 @@ div.st-key-disp_log_body [data-testid="stVerticalBlockBorderWrapper"] {
   background: var(--disp-card) !important;
   border: 0.5px solid var(--disp-border) !important;
 }
+.weekly-summary-context {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+  padding: 10px 14px; margin: 0 0 14px;
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  font-size: 12px; color: var(--disp-dim) !important;
+}
+.weekly-summary-context strong { color: var(--disp-text) !important; font-weight: 600; }
+.weekly-summary-context span { font-variant-numeric: tabular-nums; }
+.weekly-action-pill {
+  display: inline-block; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 999px; line-height: 1.4;
+}
+.weekly-pill-high {
+  color: #fbbf24 !important; background: rgba(245, 158, 11, 0.15);
+  border: 0.5px solid rgba(245, 158, 11, 0.35);
+}
+.weekly-pill-review {
+  color: #38bdf8 !important; background: rgba(56, 189, 248, 0.12);
+  border: 0.5px solid rgba(56, 189, 248, 0.3);
+}
+.weekly-pill-monitor {
+  color: #94a3b8 !important; background: rgba(100, 116, 139, 0.15);
+  border: 0.5px solid rgba(100, 116, 139, 0.35);
+}
+.weekly-section-label {
+  font-size: 13px; font-weight: 600; color: var(--disp-text) !important;
+  margin: 0 0 10px; letter-spacing: 0.02em;
+}
 """
 
 _DISPATCH_ROW_MENU_COMPACT_CSS = """
