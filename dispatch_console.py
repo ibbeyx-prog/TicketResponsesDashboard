@@ -14,7 +14,8 @@ import streamlit.components.v1 as components
 _UI_TZ_UTC5 = timezone(timedelta(hours=5))
 _DISP_INSET = "10px"
 _DISP_BODY_TOP = "6px"
-_DISP_HEADER_H = "56px"
+_DISP_HEADER_H = "48px"
+_DISP_CONTEXT_H = "32px"
 UI_MIN_FONT_PX = 11
 
 # Shared design tokens (CSS variables for embedded HTML components).
@@ -40,6 +41,7 @@ _DISPATCH_VARS = f"""
   --disp-red: #f87171;
   --disp-purple: #a78bfa;
   --disp-header-h: {_DISP_HEADER_H};
+  --disp-context-h: {_DISP_CONTEXT_H};
   --disp-radius: 10px;
   --disp-radius-sm: 8px;
   --disp-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
@@ -115,11 +117,9 @@ html, body {{ background: var(--disp-bg) !important; overflow-x: hidden !importa
 
 /* ── Header shell ── */
 div.st-key-disp_header_shell {{
-  background: rgba(15, 22, 41, 0.92) !important;
-  backdrop-filter: blur(10px) !important;
-  -webkit-backdrop-filter: blur(10px) !important;
+  background: var(--disp-bg) !important;
   border-bottom: 1px solid var(--disp-border) !important;
-  box-shadow: var(--disp-shadow) !important;
+  box-shadow: none !important;
   padding: 0 20px 0 {_DISP_INSET} !important;
   margin: 0 !important;
   width: 100% !important;
@@ -174,6 +174,14 @@ div.st-key-disp_header_shell [data-testid="stHorizontalBlock"] {{
 div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"],
 div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
   flex-wrap: nowrap !important;
+}}
+div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
+div.st-key-disp_header_shell [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
 }}
 div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child,
 div.st-key-disp_header_shell [data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {{
@@ -257,6 +265,16 @@ div.st-key-disp_main_nav_tabs [data-testid="stHorizontalBlock"] {{
   gap: 0 !important;
   overflow: visible !important;
 }}
+div.st-key-disp_main_nav_tabs [data-testid="stHorizontalBlock"] {{
+  background: var(--disp-card) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius-sm) !important;
+  padding: 2px !important;
+  gap: 2px !important;
+  width: fit-content !important;
+  max-width: 100% !important;
+  margin: 0 auto !important;
+}}
 div.st-key-disp_main_nav_tabs .stButton > button,
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"],
 div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"],
@@ -266,17 +284,17 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {{
   background-color: transparent !important;
   background-image: none !important;
   border: none !important;
-  border-bottom: 2px solid transparent !important;
-  border-radius: 0 !important;
+  border-radius: 6px !important;
   box-shadow: none !important;
   color: var(--disp-dim) !important;
   font-size: 13px !important;
   font-weight: 500 !important;
   letter-spacing: 0.01em !important;
-  padding: 0 16px !important;
-  min-height: var(--disp-header-h) !important;
-  height: var(--disp-header-h) !important;
-  line-height: 1.1 !important;
+  padding: 0 14px !important;
+  min-height: 28px !important;
+  height: 28px !important;
+  max-height: 28px !important;
+  line-height: 1 !important;
   white-space: nowrap !important;
 }}
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"],
@@ -284,26 +302,22 @@ div.st-key-disp_main_nav_tabs .stButton > button[data-testid="baseButton-primary
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"] {{
   color: var(--disp-text) !important;
   font-weight: 600 !important;
-  border-bottom-color: var(--disp-accent-strong) !important;
-  background: transparent !important;
-  background-color: transparent !important;
+  background: var(--disp-row-sel) !important;
+  background-color: var(--disp-row-sel) !important;
 }}
 div.st-key-disp_main_nav_tabs .stButton > button:hover,
 div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"]:hover,
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"]:hover {{
   color: var(--disp-muted) !important;
-  background: transparent !important;
-  background-color: transparent !important;
-  border-color: transparent !important;
-  border-bottom-color: transparent !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  background-color: rgba(255, 255, 255, 0.04) !important;
   box-shadow: none !important;
 }}
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"]:hover,
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"]:hover {{
   color: var(--disp-text) !important;
-  border-bottom-color: var(--disp-accent) !important;
-  background: transparent !important;
-  background-color: transparent !important;
+  background: var(--disp-row-sel) !important;
+  background-color: var(--disp-row-sel) !important;
 }}
 div.st-key-disp_main_nav_tabs [data-testid="column"] {{
   flex: 0 0 auto !important;
@@ -430,8 +444,8 @@ div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
 div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
 div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3),
 div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(4) {{
-  border-left: 1px solid var(--disp-border) !important;
-  padding-left: 12px !important;
+  border-left: none !important;
+  padding-left: 0 !important;
 }}
 div.disp-header-mid-item {{
   display: flex !important;
@@ -440,48 +454,33 @@ div.disp-header-mid-item {{
   gap: 10px;
   min-width: 0;
 }}
-.disp-brand-stack {{
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  padding-right: 18px;
-  margin-right: 4px;
-  border-right: 1px solid var(--disp-border);
-  height: var(--disp-header-h);
-  min-width: 0;
-}}
-.disp-brand-mark {{
+.disp-brand-line {{
   display: flex;
   align-items: center;
   gap: 8px;
+  height: var(--disp-header-h);
   min-width: 0;
+  padding-right: 16px;
+  margin-right: 4px;
+  border-right: 1px solid var(--disp-border);
 }}
-.disp-brand-kicker {{
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--disp-accent);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+.disp-brand-mark-dot {{
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--disp-accent-strong);
+  flex-shrink: 0;
+}}
+.disp-brand-line-title {{
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--disp-text);
+  letter-spacing: -0.01em;
   line-height: 1;
   white-space: nowrap;
 }}
-.disp-brand-sep {{
-  width: 1px;
-  height: 12px;
-  background: var(--disp-border-strong);
-  flex-shrink: 0;
-}}
-.disp-brand-title {{
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--disp-text);
-  letter-spacing: -0.02em;
-  line-height: 1.1;
-  white-space: nowrap;
-}}
-.disp-brand-sub {{
-  font-size: 10px;
+.disp-brand-line-org {{
+  font-size: 11px;
   font-weight: 500;
   color: var(--disp-dim);
   letter-spacing: 0.04em;
@@ -588,29 +587,149 @@ div.disp-header-mid-item {{
   background: rgba(120, 53, 15, 0.35);
   border-color: #92400e;
 }}
+div.st-key-disp_header_util [data-testid="stHorizontalBlock"] {{
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  width: 100% !important;
+  height: var(--disp-header-h) !important;
+  gap: 4px !important;
+}}
+div.st-key-disp_header_util [data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  height: var(--disp-header-h) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}}
 div.st-key-disp_header_lookup .stButton > button,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
-  background: var(--disp-card) !important;
-  border: 1px solid var(--disp-border) !important;
-  color: var(--disp-muted) !important;
-  font-size: 12px !important;
-  font-weight: 500 !important;
+  background: transparent !important;
+  border: none !important;
+  color: var(--disp-dim) !important;
+  font-size: 16px !important;
+  font-weight: 400 !important;
+  width: 32px !important;
+  min-width: 32px !important;
+  max-width: 32px !important;
   height: 32px !important;
   min-height: 32px !important;
   max-height: 32px !important;
-  padding: 0 12px !important;
-  border-radius: var(--disp-radius-sm) !important;
+  padding: 0 !important;
+  border-radius: 6px !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
   margin: 0 !important;
-  letter-spacing: 0.01em !important;
+  line-height: 1 !important;
 }}
 div.st-key-disp_header_lookup .stButton > button:hover,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
-  border-color: var(--disp-border-strong) !important;
+  color: var(--disp-text) !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+}}
+div.st-key-disp_header_user [data-testid="stPopover"] > button {{
+  width: 32px !important;
+  min-width: 32px !important;
+  max-width: 32px !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  border: 1px solid var(--disp-border-strong) !important;
+  background: var(--disp-card) !important;
+  color: var(--disp-muted) !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em !important;
+  line-height: 1 !important;
+  box-shadow: none !important;
+}}
+div.st-key-disp_header_user [data-testid="stPopover"] > button:hover {{
+  border-color: var(--disp-accent) !important;
   color: var(--disp-text) !important;
   background: var(--disp-card-hover) !important;
+}}
+div.st-key-disp_header_user [data-testid="stPopoverBody"] {{
+  min-width: 200px !important;
+  max-width: 260px !important;
+  padding: 10px 12px !important;
+}}
+.disp-user-menu-name {{
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--disp-text);
+  line-height: 1.2;
+  margin: 0 0 2px 0;
+}}
+.disp-user-menu-role {{
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--disp-dim);
+  line-height: 1.2;
+  margin: 0 0 8px 0;
+}}
+div.st-key-disp_context_strip {{
+  background: var(--disp-panel) !important;
+  border-bottom: 1px solid var(--disp-border) !important;
+  padding: 0 20px 0 {_DISP_INSET} !important;
+  margin: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: var(--disp-context-h) !important;
+  min-height: var(--disp-context-h) !important;
+  max-height: var(--disp-context-h) !important;
+  box-sizing: border-box !important;
+  position: sticky !important;
+  top: var(--disp-header-h) !important;
+  z-index: 998 !important;
+}}
+div.st-key-disp_context_strip [data-testid="stVerticalBlock"],
+div.st-key-disp_context_strip [data-testid="stHorizontalBlock"],
+div.st-key-disp_context_strip [data-testid="column"],
+div.st-key-disp_context_strip [data-testid="element-container"] {{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  height: var(--disp-context-h) !important;
+  min-height: var(--disp-context-h) !important;
+  max-height: var(--disp-context-h) !important;
+  align-items: center !important;
+}}
+.disp-context-meta {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--disp-context-h);
+  min-width: 0;
+  font-size: 11px;
+  color: var(--disp-dim);
+  line-height: 1;
+}}
+.disp-context-strong {{
+  color: var(--disp-muted);
+  font-weight: 500;
+}}
+.disp-context-sep {{
+  width: 1px;
+  height: 12px;
+  background: var(--disp-border);
+  flex-shrink: 0;
+}}
+.disp-context-open {{
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--disp-muted);
+  text-align: right;
+  line-height: 1;
+  white-space: nowrap;
 }}
 div.st-key-disp_header_lookup,
 div.st-key-disp_header_settings,
@@ -641,26 +760,25 @@ div.st-key-disp_header_shell [data-testid="stPopover"] {{
 }}
 div.st-key-disp_header_shell [data-testid="stPopover"] > button,
 div.st-key-disp_header_right [data-testid="stPopover"] > button {{
-  font-size:13px !important;
+  font-size: 16px !important;
   font-weight: 400 !important;
-  letter-spacing: .01em !important;
-  color: #4a5a7a !important;
+  letter-spacing: 0 !important;
+  color: var(--disp-dim) !important;
   white-space: nowrap !important;
-  padding: 0 12px !important;
-  min-height: 34px !important;
-  height: 34px !important;
-  min-width: max-content !important;
-  border: 0.5px solid #1a2035 !important;
+  padding: 0 !important;
+  min-height: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  border: none !important;
   border-radius: 6px !important;
   background: transparent !important;
-  line-height: 1.2 !important;
+  line-height: 1 !important;
   box-shadow: none !important;
 }}
 div.st-key-disp_header_shell [data-testid="stPopover"] > button:hover,
 div.st-key-disp_header_right [data-testid="stPopover"] > button:hover {{
-  border-color: #2a3a5a !important;
-  color: #8a9ac0 !important;
-  background: #0d1220 !important;
+  color: var(--disp-text) !important;
+  background: rgba(255, 255, 255, 0.05) !important;
 }}
 div.st-key-disp_header_lookup,
 div.st-key-disp_header_settings {{
@@ -2462,6 +2580,37 @@ div.st-key-disp_log_body [data-testid="stVerticalBlockBorderWrapper"] {
   background: var(--disp-card) !important;
   border: 0.5px solid var(--disp-border) !important;
 }
+.weekly-summary-context {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+  padding: 10px 14px; margin: 0 0 14px;
+  background: var(--disp-card) !important;
+  border: 0.5px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  font-size: 12px; color: var(--disp-dim) !important;
+}
+.weekly-summary-context strong { color: var(--disp-text) !important; font-weight: 600; }
+.weekly-summary-context span { font-variant-numeric: tabular-nums; }
+.weekly-action-pill {
+  display: inline-block; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 999px; line-height: 1.4;
+}
+.weekly-pill-high {
+  color: #fbbf24 !important; background: rgba(245, 158, 11, 0.15);
+  border: 0.5px solid rgba(245, 158, 11, 0.35);
+}
+.weekly-pill-review {
+  color: #38bdf8 !important; background: rgba(56, 189, 248, 0.12);
+  border: 0.5px solid rgba(56, 189, 248, 0.3);
+}
+.weekly-pill-monitor {
+  color: #94a3b8 !important; background: rgba(100, 116, 139, 0.15);
+  border: 0.5px solid rgba(100, 116, 139, 0.35);
+}
+.weekly-section-label {
+  font-size: 13px; font-weight: 600; color: var(--disp-text) !important;
+  margin: 0 0 10px; letter-spacing: 0.02em;
+}
 """
 
 _DISPATCH_ROW_MENU_COMPACT_CSS = """
@@ -2826,9 +2975,12 @@ def render_settings_popover(
     render_custom_dates: Callable[[], None] | None = None,
     render_admin: Callable[[], None] | None = None,
     range_caption: str = "",
+    trigger_label: str = "⚙",
+    trigger_help: str = "Settings",
+    show_signout: bool = True,
 ) -> None:
     """Compact settings popover for the top bar."""
-    with st.popover("Settings", use_container_width=False):
+    with st.popover(trigger_label, help=trigger_help, use_container_width=False):
         st.markdown(
             '<p class="settings-section-label" style="margin-top:0">Refresh</p>',
             unsafe_allow_html=True,
@@ -2902,15 +3054,15 @@ def render_settings_popover(
             with st.expander("Team accounts", expanded=False):
                 render_admin()
 
-        st.divider()
-
-        if st.button("Sign out", key="settings_signout", use_container_width=True):
-            if on_signout:
-                on_signout()
-            else:
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                st.rerun()
+        if show_signout:
+            st.divider()
+            if st.button("Sign out", key="settings_signout", use_container_width=True):
+                if on_signout:
+                    on_signout()
+                else:
+                    for key in list(st.session_state.keys()):
+                        del st.session_state[key]
+                    st.rerun()
 
 
 def menu_open_key() -> str:

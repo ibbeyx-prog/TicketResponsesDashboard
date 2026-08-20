@@ -580,90 +580,34 @@ def apply_theme(*, login: bool = False) -> None:
       border-bottom-color: #5b7fb5 !important;
     }}
 
-    /* ── Topbar: nav + clock + operator + actions on one midline ── */
+    /* ── Header: segmented nav + icon utilities ── */
     div.st-key-disp_main_nav_tabs [data-testid="stHorizontalBlock"] {{
-      justify-content: flex-start !important;
-      width: auto !important;
+      justify-content: center !important;
+      width: fit-content !important;
+      margin: 0 auto !important;
     }}
     div.st-key-disp_header_lookup .stButton > button,
     div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
       background: transparent !important;
-      border: 0.5px solid #1a2035 !important;
-      color: #4a5a7a !important;
-      font-size: 13px !important;
-      height: 34px !important;
-      min-height: 34px !important;
-      max-height: 34px !important;
-      padding: 0 12px !important;
-      border-radius: 6px !important;
-      display: inline-flex !important;
-      align-items: center !important;
-    }}
-    div.st-key-disp_header_lookup .stButton > button:hover,
-    div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
-      border-color: #2a3a5a !important;
-      color: #8a9ac0 !important;
-      background: #0d1220 !important;
-    }}
-    span.disp-header-clock-pill {{
-      font-size: 12px;
-      color: #5b7fb5;
-      background: #0d1e3a;
-      border: 0.5px solid #1a3460;
-      padding: 4px 10px;
-      border-radius: 20px;
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-      display: inline-flex;
-      align-items: center;
-      height: 28px;
-      box-sizing: border-box;
-    }}
-    div.disp-header-mid-item {{
-      display: flex !important;
-      align-items: center !important;
-      height: 56px !important;
-      gap: 9px;
-    }}
-    div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
-    div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3),
-    div.st-key-disp_header_right [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(4) {{
-      border-left: 1px solid #243047;
-      padding-left: 12px !important;
-    }}
-
-    div.st-key-disp_header_lookup .stButton > button,
-    div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
-      background: #141e32 !important;
-      border: 1px solid #243047 !important;
-      color: #9aa8c4 !important;
-      font-size: 12px !important;
-      font-weight: 500 !important;
+      border: none !important;
+      color: #6b7a99 !important;
+      font-size: 16px !important;
+      width: 32px !important;
+      min-width: 32px !important;
+      max-width: 32px !important;
       height: 32px !important;
       min-height: 32px !important;
       max-height: 32px !important;
-      padding: 0 12px !important;
-      border-radius: 8px !important;
+      padding: 0 !important;
+      border-radius: 6px !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
     }}
     div.st-key-disp_header_lookup .stButton > button:hover,
     div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
-      border-color: #334766 !important;
       color: #f0f4fc !important;
-      background: #1a2740 !important;
-    }}
-    span.disp-header-clock-pill {{
-      font-size: 12px;
-      color: #818cf8;
-      background: #141e32;
-      border: 1px solid #243047;
-      padding: 4px 10px;
-      border-radius: 999px;
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-      display: inline-flex;
-      align-items: center;
-      height: 32px;
-      box-sizing: border-box;
+      background: rgba(255, 255, 255, 0.05) !important;
     }}
     .stButton > button {{
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
@@ -902,6 +846,20 @@ _ASSIGN_ENGINEER_WORKLOAD_TTL_SEC = 60
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
 STATUS_RESOLVED = "Resolved"
+
+# Performance closure labels (residential resolve vs admin close × field response).
+_PERF_CLOSURE_FIELD = "Field resolved"
+_PERF_CLOSURE_ADMIN_RESP = "Admin closed (responded)"
+_PERF_CLOSURE_ADMIN_DESK = "Admin closed (no response)"
+_PERF_CLOSURE_INVESTIGATION = "Investigation"
+_PERF_CLOSURE_RESORT = "Resort resolved"
+_PERF_SUMMARY_COL_FIELD = f"CSM {_PERF_CLOSURE_FIELD}"
+_PERF_SUMMARY_COL_ADMIN_RESP = "CSM Admin closed (resp.)"
+_PERF_SUMMARY_COL_ADMIN_DESK = "CSM Admin closed (desk)"
+_PERF_CLOSURE_LOG_ACTIONS: frozenset[str] = frozenset({"Resolved", "AdminClosed"})
+_PERF_FIELD_RESOLVED_OUTCOMES: frozenset[str] = frozenset(
+    {_PERF_CLOSURE_FIELD, _PERF_CLOSURE_ADMIN_RESP, _PERF_CLOSURE_RESORT}
+)
 
 # Muted chart-fill palette — used ONLY for chart bars, never for buttons,
 # status pills, badges, or anything interactive/alert-driven.
@@ -3464,6 +3422,124 @@ def _fetch_ticket_row(ticket_number: str) -> dict | None:
         raise
 
 
+def _ticket_row_has_field_response(row: object) -> bool:
+    """True when the ticket row shows a field reply (text, time, or photo)."""
+    if row is None:
+        return False
+    if isinstance(row, pd.Series):
+        data = row.to_dict()
+    elif isinstance(row, dict):
+        data = row
+    else:
+        return False
+    if str(data.get("field_response") or "").strip():
+        return True
+    responded_at = data.get("responded_at")
+    if responded_at is not None:
+        try:
+            if not pd.isna(responded_at):
+                return True
+        except (TypeError, ValueError):
+            if str(responded_at).strip():
+                return True
+    photo = str(data.get("photo_url") or "").strip()
+    return photo.startswith("http")
+
+
+def _perf_classify_residential_closure(
+    row: object,
+    *,
+    log_action: str | None = None,
+) -> str:
+    """Residential Performance closure — split admin close by field response."""
+    action = str(log_action or "Resolved").strip()
+    if action == "AdminClosed":
+        return (
+            _PERF_CLOSURE_ADMIN_RESP
+            if _ticket_row_has_field_response(row)
+            else _PERF_CLOSURE_ADMIN_DESK
+        )
+    return _PERF_CLOSURE_FIELD
+
+
+def _fetch_closure_log_actions_uncached(ticket_numbers: list[str]) -> dict[str, str]:
+    """Latest ``Resolved`` or ``AdminClosed`` log per ticket (default ``Resolved``)."""
+    ids = sorted({str(t).strip() for t in ticket_numbers if str(t).strip()})
+    if not ids or not SUPABASE_URL or not SUPABASE_KEY:
+        return {}
+    client = _get_supabase_client()
+    frames: list[pd.DataFrame] = []
+    chunk = 150
+    for i in range(0, len(ids), chunk):
+        part = ids[i : i + chunk]
+        try:
+            resp = (
+                client.table(ATTENDANCE_LOGS_TABLE)
+                .select("ticket_number, action_type, timestamp")
+                .in_("ticket_number", part)
+                .in_("action_type", list(_PERF_CLOSURE_LOG_ACTIONS))
+                .execute()
+            )
+            if resp.data:
+                frames.append(pd.DataFrame(resp.data))
+        except Exception:
+            continue
+    out: dict[str, str] = {t: "Resolved" for t in ids}
+    if not frames:
+        return out
+    logs = pd.concat(frames, ignore_index=True)
+    if logs.empty:
+        return out
+    logs["timestamp"] = _parse_ts(logs["timestamp"])
+    logs = logs.sort_values("timestamp", ascending=False, na_position="last")
+    for tn, grp in logs.groupby(logs["ticket_number"].astype(str).str.strip()):
+        action = str(grp.iloc[0].get("action_type") or "Resolved").strip()
+        if action in _PERF_CLOSURE_LOG_ACTIONS:
+            out[str(tn).strip()] = action
+    return out
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_closure_log_actions_cached(ticket_numbers: tuple[str, ...]) -> dict[str, str]:
+    return _fetch_closure_log_actions_uncached(list(ticket_numbers))
+
+
+def _fetch_closure_log_actions(ticket_numbers: list[str]) -> dict[str, str]:
+    if not ticket_numbers:
+        return {}
+    return _fetch_closure_log_actions_cached(tuple(sorted(set(ticket_numbers))))
+
+
+def _perf_detail_outcome_series(detail_df: pd.DataFrame) -> pd.Series:
+    """Executive / trend outcome column — prefers ``Closure`` when present."""
+    if detail_df.empty:
+        return pd.Series(dtype=str)
+    if "Closure" in detail_df.columns:
+        closure = detail_df["Closure"].astype(str).str.strip()
+        has_closure = closure.ne("") & ~closure.str.lower().isin({"nan", "none"})
+        fallback = detail_df["Status"].astype(str).str.strip().map(_perf_weekly_outcome_group)
+        return closure.where(has_closure, fallback)
+    return detail_df["Status"].astype(str).str.strip().map(_perf_weekly_outcome_group)
+
+
+def _perf_field_resolution_rate(detail_df: pd.DataFrame) -> tuple[int, int, int]:
+    """Return ``(rate_pct, unique_cases, field_resolved_unique)`` for KPI / trends."""
+    if detail_df.empty:
+        return 0, 0, 0
+    if "ID" in detail_df.columns:
+        id_first = detail_df.drop_duplicates(subset=["ID"], keep="first")
+        total = int(id_first["ID"].astype(str).nunique())
+    else:
+        id_first = detail_df
+        total = len(id_first)
+    if total == 0:
+        return 0, 0, 0
+    outcomes = _perf_detail_outcome_series(id_first)
+    field_n = int(outcomes.isin(_PERF_FIELD_RESOLVED_OUTCOMES).sum())
+    rate = int(round(100 * field_n / total))
+    return rate, total, field_n
+
+
 def _apply_manual_field_response(
     ticket_number: str,
     *,
@@ -3800,7 +3876,7 @@ def _apply_admin_close_ticket(
     operator_id: str,
     outcome_category_input: str,
 ) -> None:
-    """Admin-only: close without field completion → **Resolved** with required note."""
+    """Admin-only: close from desk → **Resolved** with required note (visit outcome follows field response)."""
     text = (comment or "").strip()
     if not text:
         raise ValueError("A comment is required to close this ticket.")
@@ -3848,7 +3924,7 @@ def _apply_admin_close_ticket(
     _visits_close_open(
         client,
         ticket_number,
-        outcome="unattended",
+        outcome="responded" if _ticket_row_has_field_response(row) else "unattended",
         response_note=log_note,
         closed_by="dashboard",
         visit_end=now_iso,
@@ -5404,7 +5480,8 @@ def _render_admin_close_form_inline(
     extra = f" (+{len(picked_list) - 4} more)" if len(picked_list) > 4 else ""
     st.caption(
         f"**{len(picked_list)}** selected · {shown}{extra} · "
-        "for customer unavailable / no field visit — moves to **Resolved**."
+        "admin desk close — visit outcome follows field response when present · "
+        "moves to **Resolved** queue."
     )
     assigned_cats = _assigned_categories_for_tickets(df, picked_list)
     outcome_pick = _render_outcome_category_picker(
@@ -9154,6 +9231,8 @@ def _init_perf_session_state() -> None:
     # Rename legacy "Weekly" nav label → "Summary"
     if st.session_state.get(_PERF_ACTIVE_VIEW_KEY) == "Weekly":
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
+    if st.session_state.get(_PERF_ACTIVE_VIEW_KEY) == "Report":
+        st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
     if _PERF_SELECTED_ENGINEER_KEY not in st.session_state:
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
     if _PERF_RANGE_FROM_KEY not in st.session_state:
@@ -9811,7 +9890,7 @@ def _render_dispatch_app_menu() -> None:
 
 
 def _render_dispatch_app_shell() -> None:
-    """Unified 56px topbar: brand left · nav + clock + operator + actions on one midline."""
+    """48px header + 32px context strip: brand · nav · utilities."""
     op = _session_operator_id() or _session_dashboard_username() or "—"
     op_display = html.escape(str(op).lstrip("@") or "—")
     is_admin = _is_dashboard_admin()
@@ -9822,83 +9901,48 @@ def _render_dispatch_app_shell() -> None:
     now_time = now.strftime("%H:%M")
 
     with st.container(key="disp_header_shell"):
-        c_brand, c_mid = st.columns([0.95, 4.05], gap="small", vertical_alignment="center")
+        c_brand, c_nav, c_util = st.columns(
+            [1.05, 2.35, 1.1], gap="small", vertical_alignment="center"
+        )
         with c_brand:
             st.markdown(
                 """
-            <div class="disp-brand-stack">
-              <div class="disp-brand-mark">
-                <span class="disp-brand-kicker">NetOps</span>
-                <span class="disp-brand-sep" aria-hidden="true"></span>
-                <span class="disp-brand-title">Coverage Eye</span>
-              </div>
-              <span class="disp-brand-sub">Field dispatch</span>
+            <div class="disp-brand-line">
+              <span class="disp-brand-mark-dot" aria-hidden="true"></span>
+              <span class="disp-brand-line-title">Coverage Eye</span>
+              <span class="disp-brand-line-org">NetOps</span>
             </div>
             """,
                 unsafe_allow_html=True,
             )
-        with c_mid:
-            with st.container(key="disp_header_mid"):
-                c_nav, c_right = st.columns(
-                    [1.25, 2.75], gap="small", vertical_alignment="center"
-                )
-                with c_nav:
-                    with st.container(key="disp_main_nav_tabs"):
-                        _render_main_navigation()
-                with c_right:
-                    with st.container(key="disp_header_right"):
-                        _render_dispatch_header_right(
-                            now_date=now_date,
-                            now_time=now_time,
-                            chip=chip,
-                        )
+        with c_nav:
+            with st.container(key="disp_main_nav_tabs"):
+                _render_main_navigation()
+        with c_util:
+            with st.container(key="disp_header_util"):
+                _render_dispatch_header_utilities(chip=chip)
+
+    _render_dispatch_context_strip(now_date=now_date, now_time=now_time)
+
     if bool(st.session_state.get("show_lookup", False)):
         render_lookup_popover()
 
 
-def _render_dispatch_header_right(*, now_date: str, now_time: str, chip: dict[str, str]) -> None:
-    """Clock, operator, lookup, settings — aligned on the header midline."""
+def _render_dispatch_header_utilities(*, chip: dict[str, str]) -> None:
+    """Search, settings, and avatar menu — right side of header."""
     _init_lookup_state()
-    c_clock, c_op, c_lookup, c_settings = st.columns(
-        [1.35, 1.35, 0.85, 0.7],
+    c_lookup, c_settings, c_user = st.columns(
+        [0.55, 0.55, 0.65],
         gap="small",
         vertical_alignment="center",
     )
-    with c_clock:
-        st.markdown(
-            f'<div class="disp-header-mid-item">'
-            f'<div class="disp-header-clock-pill">'
-            f'<span class="disp-header-clock-date">{html.escape(now_date)}</span>'
-            f'<span class="disp-header-clock-sep" aria-hidden="true"></span>'
-            f'<span class="disp-header-clock-time">{html.escape(now_time)}</span>'
-            f'<span class="disp-header-clock-tz">UTC+5</span>'
-            f"</div></div>",
-            unsafe_allow_html=True,
-        )
-    with c_op:
-        role_class = html.escape(str(chip.get("role_class") or "disp-header-role-operator"))
-        st.markdown(
-            f"""
-        <div class="disp-header-mid-item disp-header-operator">
-          <div class="disp-header-avatar" style="
-            background:{html.escape(chip["av_bg"])};
-            border-color:{html.escape(chip["av_border"])};
-            color:{html.escape(chip["av_color"])};
-          ">{html.escape(chip["initials"])}</div>
-          <div class="disp-header-operator-meta">
-            <span class="disp-header-operator-name">{html.escape(chip["name"])}</span>
-            <span class="disp-header-role-badge {role_class}">{html.escape(chip["role"])}</span>
-          </div>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
     with c_lookup:
         with st.container(key="disp_header_lookup"):
             if st.button(
-                "Lookup",
+                "🔍",
                 key="topbar_lookup_btn",
-                use_container_width=True,
+                help="Ticket lookup",
+                use_container_width=False,
             ):
                 st.session_state.show_lookup = not bool(
                     st.session_state.get("show_lookup", False)
@@ -9906,11 +9950,78 @@ def _render_dispatch_header_right(*, now_date: str, now_time: str, chip: dict[st
                 st.rerun()
     with c_settings:
         with st.container(key="disp_header_settings"):
-            _render_dispatch_settings_popover()
+            _render_dispatch_settings_popover(show_signout=False)
+    with c_user:
+        _render_dispatch_user_menu(chip=chip)
 
 
-def _render_dispatch_settings_popover() -> None:
-    """Settings popover — refresh, date range, sign out."""
+def _render_dispatch_user_menu(*, chip: dict[str, str]) -> None:
+    """Avatar trigger — name, role, and sign out."""
+    initials = html.escape(str(chip.get("initials") or "?"))
+    name = html.escape(str(chip.get("name") or "—"))
+    role = html.escape(str(chip.get("role") or "Operator"))
+    help_text = html.escape(f"Signed in as {name}")
+
+    def _signout() -> None:
+        _clear_auth_session()
+        st.session_state.pop(_LOGIN_VIEW_KEY, None)
+        st.rerun()
+
+    with st.container(key="disp_header_user"):
+        with st.popover(initials, help=help_text, use_container_width=False):
+            st.markdown(
+                f'<p class="disp-user-menu-name">{name}</p>'
+                f'<p class="disp-user-menu-role">{role}</p>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Sign out", key="header_user_signout", use_container_width=True):
+                _signout()
+
+
+def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
+    """Operational context: time range, clock, and open backlog hint."""
+    _init_dash_date_range_state()
+    preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    if preset == "Pick dates":
+        preset_label = "Custom range"
+    else:
+        preset_label = preset
+    range_cap = _format_dash_range_caption()
+    open_count = int(st.session_state.get("_dash_prev_open_count", 0) or 0)
+
+    with st.container(key="disp_context_strip"):
+        c_left, c_right = st.columns([3.2, 1], gap="small", vertical_alignment="center")
+        with c_left:
+            parts = [
+                f'<span class="disp-context-strong">{html.escape(preset_label)}</span>',
+            ]
+            if range_cap:
+                parts.append('<span class="disp-context-sep" aria-hidden="true"></span>')
+                parts.append(f"<span>{html.escape(range_cap)}</span>")
+            parts.append('<span class="disp-context-sep" aria-hidden="true"></span>')
+            parts.append(
+                f"<span>{html.escape(now_date)} · {html.escape(now_time)}</span>"
+            )
+            st.markdown(
+                f'<div class="disp-context-meta">{"".join(parts)}</div>',
+                unsafe_allow_html=True,
+            )
+        with c_right:
+            if open_count > 0:
+                noun = "case" if open_count == 1 else "cases"
+                st.markdown(
+                    f'<div class="disp-context-open">{open_count} open {noun}</div>',
+                    unsafe_allow_html=True,
+                )
+
+
+def _render_dispatch_header_right(*, now_date: str, now_time: str, chip: dict[str, str]) -> None:
+    """Legacy hook — utilities moved to _render_dispatch_header_utilities."""
+    _render_dispatch_header_utilities(chip=chip)
+
+
+def _render_dispatch_settings_popover(*, show_signout: bool = True) -> None:
+    """Settings popover — refresh, date range, optional sign out."""
     _init_dash_date_range_state()
 
     def _refresh() -> None:
@@ -9934,6 +10045,8 @@ def _render_dispatch_settings_popover() -> None:
         "on_signout": _signout,
         "render_custom_dates": _custom_dates,
         "range_caption": _format_dash_range_caption(),
+        "trigger_label": "⚙",
+        "show_signout": show_signout,
         "render_admin": (
             _render_dispatch_settings_admin if _is_dashboard_admin() else None
         ),
@@ -10231,7 +10344,11 @@ def _perf_enrich_sales_handled(df: pd.DataFrame) -> pd.DataFrame:
         "_attended_status",
         view.get("status_eff", pd.Series("", index=view.index)),
     )
-    view["_outcome"] = status.astype(str).str.strip().map(_perf_weekly_outcome_group)
+    view["_outcome"] = status.astype(str).str.strip().map(
+        lambda s: _PERF_CLOSURE_RESORT
+        if s in (STATUS_RESOLVED, SC_STATUS_RESOLVED)
+        else _PERF_CLOSURE_INVESTIGATION
+    )
     if "case_ref" in view.columns:
         view["ticket_number"] = view["case_ref"].astype(str).str.strip()
     view["track"] = "Sales"
@@ -10245,7 +10362,15 @@ def _perf_prepare_handled_work_view(
 ) -> pd.DataFrame:
     """Field + Sales cases for the Handled tab (enriched, one row per case)."""
     parts: list[pd.DataFrame] = []
-    field = _perf_combine_work(completed, investigation)
+    log_map: dict[str, str] = {}
+    if not completed.empty and "ticket_number" in completed.columns:
+        tids = [
+            str(t).strip()
+            for t in completed["ticket_number"].astype(str).tolist()
+            if str(t).strip()
+        ]
+        log_map = _fetch_closure_log_actions(tids)
+    field = _perf_combine_work(completed, investigation, closure_log_map=log_map)
     if not field.empty:
         f = _perf_enrich_tickets(field)
         f["track"] = "Field"
@@ -10765,12 +10890,25 @@ def _perf_build_weekly_attended_tables(
         "Track",
         "ID",
         "Status",
+        "Closure",
         "Attended by",
         "Credit",
         "Category",
         "Activity (local)",
     ]
     detail_parts: list[pd.DataFrame] = []
+
+    csm_log_map: dict[str, str] = {}
+    if not csm_raw.empty and "ticket_number" in csm_raw.columns:
+        resolved_mask = csm_raw["_attended_status"].astype(str).eq(STATUS_RESOLVED) if "_attended_status" in csm_raw.columns else (
+            csm_raw["status"].astype(str).str.strip().eq(STATUS_RESOLVED)
+        )
+        resolved_ids = [
+            str(t).strip()
+            for t in csm_raw.loc[resolved_mask, "ticket_number"].astype(str).tolist()
+            if str(t).strip()
+        ]
+        csm_log_map = _fetch_closure_log_actions(resolved_ids)
 
     if not csm_raw.empty:
         csm = _perf_enrich_tickets(csm_raw)
@@ -10780,10 +10918,22 @@ def _perf_build_weekly_attended_tables(
             if not assignees:
                 assignees = [str(row.get("staff") or "(unknown)")]
             credit = get_credit_type(row)
+            attended_status = str(row.get("_attended_status") or row.get("status") or "")
+            if attended_status == STATUS_RESOLVED:
+                tn = str(row.get("ticket_number") or "").strip()
+                closure = _perf_classify_residential_closure(
+                    row,
+                    log_action=csm_log_map.get(tn, "Resolved"),
+                )
+            elif attended_status == STATUS_UNDER_INVESTIGATION:
+                closure = _PERF_CLOSURE_INVESTIGATION
+            else:
+                closure = attended_status
             base = {
                 "Track": "CSM",
                 "ID": str(row.get("ticket_number") or ""),
-                "Status": str(row.get("_attended_status") or row.get("status") or ""),
+                "Status": attended_status,
+                "Closure": closure,
                 "Category": str(row.get("category") or "(uncategorized)"),
                 "Activity (local)": row["_local"].strftime("%Y-%m-%d %H:%M"),
                 "Credit": credit,
@@ -10808,10 +10958,18 @@ def _perf_build_weekly_attended_tables(
             if not assignees:
                 assignees = [str(row.get("staff") or "(unknown)")]
             credit = get_credit_type(row)
+            attended_status = str(row.get("_attended_status") or row.get("status_eff") or "")
+            if attended_status in (STATUS_RESOLVED, SC_STATUS_RESOLVED):
+                closure = _PERF_CLOSURE_RESORT
+            elif attended_status == SC_STATUS_INVESTIGATION:
+                closure = _PERF_CLOSURE_INVESTIGATION
+            else:
+                closure = attended_status
             base = {
                 "Track": "Sales",
                 "ID": str(row.get("case_ref") or ""),
-                "Status": str(row.get("_attended_status") or row.get("status_eff") or ""),
+                "Status": attended_status,
+                "Closure": closure,
                 "Category": str(category.loc[idx] if idx in category.index else "(uncategorized)"),
                 "Activity (local)": row["_local"].strftime("%Y-%m-%d %H:%M"),
                 "Credit": credit,
@@ -10831,12 +10989,14 @@ def _perf_build_weekly_attended_tables(
             "Attended by",
             "CSM total",
             f"CSM {STATUS_ON_HOLD}",
-            f"CSM {STATUS_RESOLVED}",
+            _PERF_SUMMARY_COL_FIELD,
+            _PERF_SUMMARY_COL_ADMIN_RESP,
+            _PERF_SUMMARY_COL_ADMIN_DESK,
             "CSM Investigation",
             "Sales total",
             "Sales Investigation",
             "Sales Regional",
-            f"Sales {STATUS_RESOLVED}",
+            f"Sales {_PERF_CLOSURE_RESORT}",
             "Grand total",
         ]
     )
@@ -10867,19 +11027,43 @@ def _perf_build_weekly_attended_tables(
             .astype(int)
         )
 
+    def _count_closure(sub: pd.DataFrame, closure: str) -> pd.Series:
+        if sub.empty or "Closure" not in sub.columns:
+            return pd.Series(0, index=idx, dtype=int)
+        mask = sub["Closure"].astype(str).eq(closure)
+        return (
+            sub.loc[mask]
+            .groupby("Attended by")
+            .size()
+            .reindex(idx, fill_value=0)
+            .astype(int)
+        )
+
     summary = pd.DataFrame({"Attended by": people})
     summary["CSM total"] = (
         csm.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
     )
     summary[f"CSM {STATUS_ON_HOLD}"] = _count(csm, STATUS_ON_HOLD).values
-    summary[f"CSM {STATUS_RESOLVED}"] = _count(csm, STATUS_RESOLVED).values
-    summary["CSM Investigation"] = _count(csm, STATUS_UNDER_INVESTIGATION).values
+    summary[_PERF_SUMMARY_COL_FIELD] = _count_closure(csm, _PERF_CLOSURE_FIELD).values
+    summary[_PERF_SUMMARY_COL_ADMIN_RESP] = _count_closure(
+        csm, _PERF_CLOSURE_ADMIN_RESP
+    ).values
+    summary[_PERF_SUMMARY_COL_ADMIN_DESK] = _count_closure(
+        csm, _PERF_CLOSURE_ADMIN_DESK
+    ).values
+    summary["CSM Investigation"] = _count_closure(
+        csm, _PERF_CLOSURE_INVESTIGATION
+    ).values
     summary["Sales total"] = (
         sales.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
     )
-    summary["Sales Investigation"] = _count(sales, SC_STATUS_INVESTIGATION).values
+    summary["Sales Investigation"] = _count_closure(
+        sales, _PERF_CLOSURE_INVESTIGATION
+    ).values
     summary["Sales Regional"] = _count(sales, SC_STATUS_REGIONAL).values
-    summary[f"Sales {STATUS_RESOLVED}"] = _count(sales, SC_STATUS_RESOLVED).values
+    summary[f"Sales {_PERF_CLOSURE_RESORT}"] = _count_closure(
+        sales, _PERF_CLOSURE_RESORT
+    ).values
     summary["Grand total"] = (
         detail.groupby("Attended by").size().reindex(idx, fill_value=0).astype(int).values
     )
@@ -10893,31 +11077,49 @@ def _perf_build_weekly_attended_tables(
         if not csm.empty
         else 0
     )
-    totals[f"CSM {STATUS_RESOLVED}"] = (
-        int(csm.loc[csm["Status"].astype(str).eq(STATUS_RESOLVED), "ID"].astype(str).nunique())
-        if not csm.empty
+    totals[_PERF_SUMMARY_COL_FIELD] = (
+        int(csm.loc[csm["Closure"].astype(str).eq(_PERF_CLOSURE_FIELD), "ID"].astype(str).nunique())
+        if not csm.empty and "Closure" in csm.columns
+        else 0
+    )
+    totals[_PERF_SUMMARY_COL_ADMIN_RESP] = (
+        int(
+            csm.loc[csm["Closure"].astype(str).eq(_PERF_CLOSURE_ADMIN_RESP), "ID"]
+            .astype(str)
+            .nunique()
+        )
+        if not csm.empty and "Closure" in csm.columns
+        else 0
+    )
+    totals[_PERF_SUMMARY_COL_ADMIN_DESK] = (
+        int(
+            csm.loc[csm["Closure"].astype(str).eq(_PERF_CLOSURE_ADMIN_DESK), "ID"]
+            .astype(str)
+            .nunique()
+        )
+        if not csm.empty and "Closure" in csm.columns
         else 0
     )
     totals["CSM Investigation"] = (
         int(
             csm.loc[
-                csm["Status"].astype(str).eq(STATUS_UNDER_INVESTIGATION),
+                csm["Closure"].astype(str).eq(_PERF_CLOSURE_INVESTIGATION),
                 "ID",
             ]
             .astype(str)
             .nunique()
         )
-        if not csm.empty
+        if not csm.empty and "Closure" in csm.columns
         else 0
     )
     totals["Sales total"] = int(sales["ID"].astype(str).nunique()) if not sales.empty else 0
     totals["Sales Investigation"] = (
         int(
-            sales.loc[sales["Status"].astype(str).eq(SC_STATUS_INVESTIGATION), "ID"]
+            sales.loc[sales["Closure"].astype(str).eq(_PERF_CLOSURE_INVESTIGATION), "ID"]
             .astype(str)
             .nunique()
         )
-        if not sales.empty
+        if not sales.empty and "Closure" in sales.columns
         else 0
     )
     totals["Sales Regional"] = (
@@ -10929,13 +11131,13 @@ def _perf_build_weekly_attended_tables(
         if not sales.empty
         else 0
     )
-    totals[f"Sales {STATUS_RESOLVED}"] = (
+    totals[f"Sales {_PERF_CLOSURE_RESORT}"] = (
         int(
-            sales.loc[sales["Status"].astype(str).eq(SC_STATUS_RESOLVED), "ID"]
+            sales.loc[sales["Closure"].astype(str).eq(_PERF_CLOSURE_RESORT), "ID"]
             .astype(str)
             .nunique()
         )
-        if not sales.empty
+        if not sales.empty and "Closure" in sales.columns
         else 0
     )
     totals["Grand total"] = int(detail["ID"].astype(str).nunique())
@@ -10945,6 +11147,232 @@ def _perf_build_weekly_attended_tables(
 
 _WEEKLY_INV_COLOR = "#f59e0b"
 _WEEKLY_RESOLVED_COLOR = "#22c55e"
+_WEEKLY_ADMIN_RESP_COLOR = "#38bdf8"
+_WEEKLY_ADMIN_DESK_COLOR = "#64748b"
+_WEEKLY_RESORT_COLOR = "#a78bfa"
+_WEEKLY_EXEC_OUTCOME_ORDER: tuple[str, ...] = (
+    _PERF_CLOSURE_INVESTIGATION,
+    _PERF_CLOSURE_FIELD,
+    _PERF_CLOSURE_ADMIN_RESP,
+    _PERF_CLOSURE_ADMIN_DESK,
+    _PERF_CLOSURE_RESORT,
+)
+_WEEKLY_EXEC_OUTCOME_COLORS: dict[str, str] = {
+    _PERF_CLOSURE_INVESTIGATION: _WEEKLY_INV_COLOR,
+    _PERF_CLOSURE_FIELD: _WEEKLY_RESOLVED_COLOR,
+    _PERF_CLOSURE_ADMIN_RESP: _WEEKLY_ADMIN_RESP_COLOR,
+    _PERF_CLOSURE_ADMIN_DESK: _WEEKLY_ADMIN_DESK_COLOR,
+    _PERF_CLOSURE_RESORT: _WEEKLY_RESORT_COLOR,
+}
+
+
+def _perf_exec_outcome_color_scale(
+    outcomes: pd.Series | list[str],
+) -> tuple[list[str], list[str]]:
+    """Altair color domain/range for closure outcomes present in a frame."""
+    present = {str(o).strip() for o in outcomes if str(o).strip()}
+    domain = [o for o in _WEEKLY_EXEC_OUTCOME_ORDER if o in present]
+    colors = [_WEEKLY_EXEC_OUTCOME_COLORS.get(o, _WEEKLY_RESOLVED_COLOR) for o in domain]
+    return domain, colors
+
+
+def _perf_closure_totals_from_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
+    """Unique-case counts per closure outcome (Summary totals row)."""
+    if detail_df.empty or "ID" not in detail_df.columns:
+        return pd.DataFrame(columns=["Closure", "Cases"])
+    id_first = detail_df.drop_duplicates(subset=["ID"], keep="first")
+    outcomes = _perf_detail_outcome_series(id_first)
+    counts = (
+        outcomes.astype(str)
+        .value_counts()
+        .rename_axis("Closure")
+        .reset_index(name="Cases")
+    )
+    order = {label: idx for idx, label in enumerate(_WEEKLY_EXEC_OUTCOME_ORDER)}
+    counts["_sort"] = counts["Closure"].map(lambda o: order.get(str(o), 99))
+    return counts.sort_values(["_sort", "Closure"]).drop(columns=["_sort"])
+
+
+_WEEKLY_SUMMARY_TOP_CATEGORIES = 8
+_WEEKLY_SUMMARY_PRIORITY_ROWS = 5
+
+
+def _perf_rate_delta_from_trend(trend_df: pd.DataFrame, current_rate: int) -> str:
+    """Human-readable delta vs the prior trend bucket."""
+    if not isinstance(trend_df, pd.DataFrame) or len(trend_df) < 2:
+        return ""
+    try:
+        prior = int(trend_df.iloc[-2]["rate"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    delta = int(current_rate) - prior
+    if delta > 0:
+        return f"↑ {delta} pts vs prior period"
+    if delta < 0:
+        return f"↓ {abs(delta)} pts vs prior period"
+    return "Flat vs prior period"
+
+
+def _perf_category_chart_top_n(
+    category_df: pd.DataFrame,
+    *,
+    top_n: int = _WEEKLY_SUMMARY_TOP_CATEGORIES,
+) -> pd.DataFrame:
+    """Keep top categories by volume; roll the rest into Other."""
+    if category_df.empty or top_n <= 0:
+        return category_df
+    totals = (
+        category_df.groupby("category", as_index=False)["count"]
+        .sum()
+        .sort_values("count", ascending=False)
+    )
+    keep = set(totals.head(top_n)["category"].astype(str))
+    rolled = category_df.copy()
+    rolled["category"] = rolled["category"].astype(str).where(
+        rolled["category"].astype(str).isin(keep),
+        "Other",
+    )
+    return (
+        rolled.groupby(["category", "outcome"], as_index=False)["count"]
+        .sum()
+        .sort_values(["count", "category"], ascending=[False, True])
+    )
+
+
+def _perf_priority_action_pill(action: str) -> str:
+    pill_map = {
+        "High": ("weekly-pill-high", "High"),
+        "Review": ("weekly-pill-review", "Review"),
+        "Monitor": ("weekly-pill-monitor", "Monitor"),
+    }
+    cls, label = pill_map.get(str(action), ("weekly-pill-review", str(action)))
+    return f'<span class="weekly-action-pill {cls}">{html.escape(label)}</span>'
+
+
+def _perf_weekly_summary_metrics(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    bundle: dict[str, object],
+    *,
+    period: str,
+    week_offset: int,
+) -> dict[str, object]:
+    """Executive Summary metrics + trend frame for the selected period."""
+    detail = bundle.get("detail")
+    detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+    metrics = _perf_weekly_executive_metrics(detail_df)
+    if period == "Monthly":
+        metrics["trend_df"] = _perf_monthly_resolution_trend(
+            df_all, sales_all, end_month_offset=week_offset, months=4
+        )
+    else:
+        metrics["trend_df"] = _perf_weekly_resolution_trend(
+            df_all, sales_all, end_week_offset=week_offset, weeks=4
+        )
+    total = int(metrics.get("total") or 0)
+    investigation = int(metrics.get("investigation") or 0)
+    metrics["investigation_pct"] = int(round(100 * investigation / total)) if total else 0
+    metrics["rate_delta"] = _perf_rate_delta_from_trend(
+        metrics["trend_df"] if isinstance(metrics["trend_df"], pd.DataFrame) else pd.DataFrame(),
+        int(metrics.get("resolution_rate") or 0),
+    )
+    return metrics
+
+
+def _render_perf_summary_context_bar(metrics: dict[str, object], period_label: str) -> None:
+    total = int(metrics.get("total") or 0)
+    rate = int(metrics.get("resolution_rate") or 0)
+    st.markdown(
+        f'<div class="weekly-summary-context">'
+        f"<span><strong>Attended in range</strong> · {html.escape(period_label)}</span>"
+        f"<span><strong>{total}</strong> cases</span>"
+        f"<span><strong>{rate}%</strong> field resolution</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _perf_summary_staff_compact(summary: pd.DataFrame) -> pd.DataFrame:
+    """Default staff view — key closure columns only."""
+    if summary.empty:
+        return summary
+    compact_cols = [
+        "Attended by",
+        "Grand total",
+        _PERF_SUMMARY_COL_FIELD,
+        "CSM Investigation",
+        _PERF_SUMMARY_COL_ADMIN_DESK,
+        "Sales total",
+    ]
+    cols = [c for c in compact_cols if c in summary.columns]
+    view = summary[cols].copy()
+    return view.rename(
+        columns={
+            _PERF_SUMMARY_COL_FIELD: "Field resolved",
+            _PERF_SUMMARY_COL_ADMIN_DESK: "Admin desk",
+        }
+    )
+
+
+def _perf_summary_staff_pinned_total(summary: pd.DataFrame) -> pd.DataFrame:
+    """Pin TOTAL row first for scanability."""
+    if summary.empty or "Attended by" not in summary.columns:
+        return summary
+    total_mask = summary["Attended by"].astype(str).eq("TOTAL")
+    if not total_mask.any():
+        return summary
+    return pd.concat(
+        [summary.loc[total_mask], summary.loc[~total_mask]],
+        ignore_index=True,
+    )
+
+
+def _inject_weekly_summary_styles() -> None:
+    st.markdown(
+        """
+<style>
+.weekly-kpi-card {
+  background: #0d1220; border: 0.5px solid #1a2035;
+  border-radius: 6px; padding: 1rem 1.1rem; min-height: 88px;
+}
+.weekly-kpi-label { font-size: 0.78rem; color: #8a9ac0; margin: 0 0 0.35rem; }
+.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e2e8f8; margin: 0; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.weekly-kpi-sub { font-size: 0.75rem; color: #22c55e; margin: 0.35rem 0 0; }
+.weekly-kpi-sub.neutral { color: #8a9ac0; }
+.weekly-kpi-sub.warn { color: #64748b; }
+.weekly-panel {
+  background: #0d1220; border: 0.5px solid #1a2035;
+  border-radius: 6px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
+}
+.weekly-panel h4 {
+  font-size: 0.95rem; font-weight: 600; color: #e2e8f8; margin: 0 0 0.65rem;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_PERF_EXEC_OUTCOME_ORDER_MAP: dict[str, int] = {
+    label: idx for idx, label in enumerate(_WEEKLY_EXEC_OUTCOME_ORDER)
+}
+
+
+def _perf_with_closure_order(
+    df: pd.DataFrame,
+    outcome_col: str,
+    *,
+    order_col: str = "_closure_order",
+) -> pd.DataFrame:
+    """Numeric closure order for Altair stack sorting (Order.sort rejects list literals)."""
+    out = df.copy()
+    out[order_col] = (
+        out[outcome_col]
+        .astype(str)
+        .str.strip()
+        .map(lambda o: _PERF_EXEC_OUTCOME_ORDER_MAP.get(o, 99))
+    )
+    return out
 _WEEKLY_CHART_THEME = {
     "background": "transparent",
 }
@@ -10975,13 +11403,14 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
         "total": 0,
         "resolved": 0,
         "investigation": 0,
+        "admin_desk": 0,
         "resolution_rate": 0,
         "top_inv_category": "—",
         "top_resolved_category": "—",
         "outcome_df": pd.DataFrame(columns=["outcome", "count"]),
         "category_df": empty_cat,
         "priority_df": pd.DataFrame(
-            columns=["Outcome", "Assigned category", "Tickets", "Action Required"]
+            columns=["Closure", "Assigned category", "Tickets", "Action Required"]
         ),
         "trend_df": empty_trend,
     }
@@ -10992,60 +11421,74 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
     view["Category"] = (
         view["Category"].astype(str).str.strip().replace("", "(uncategorized)")
     )
-    view["Outcome"] = view["Status"].astype(str).str.strip().map(_perf_weekly_outcome_group)
+    view["Closure"] = _perf_detail_outcome_series(view)
 
     total = int(view["ID"].astype(str).nunique())
     id_first = view.drop_duplicates(subset=["ID"], keep="first")
-    resolved = int(id_first["Outcome"].eq("Resolved").sum())
-    investigation = total - resolved
-    rate = int(round(100 * resolved / total)) if total else 0
+    rate, _total_check, field_resolved = _perf_field_resolution_rate(detail_df)
+    investigation = int(id_first["Closure"].eq(_PERF_CLOSURE_INVESTIGATION).sum())
+    admin_desk = int(id_first["Closure"].eq(_PERF_CLOSURE_ADMIN_DESK).sum())
 
     inv_by_cat = (
-        id_first.loc[id_first["Outcome"].eq("Investigation")]
+        id_first.loc[id_first["Closure"].eq(_PERF_CLOSURE_INVESTIGATION)]
         .groupby("Category")
         .size()
         .sort_values(ascending=False)
     )
     res_by_cat = (
-        id_first.loc[id_first["Outcome"].eq("Resolved")]
+        id_first.loc[id_first["Closure"].isin(_PERF_FIELD_RESOLVED_OUTCOMES)]
         .groupby("Category")
         .size()
         .sort_values(ascending=False)
     )
 
     category_df = (
-        id_first.groupby(["Category", "Outcome"], as_index=False)
+        id_first.groupby(["Category", "Closure"], as_index=False)
         .size()
-        .rename(columns={"size": "count", "Category": "category", "Outcome": "outcome"})
+        .rename(columns={"size": "count", "Category": "category", "Closure": "outcome"})
         .sort_values(["count", "category"], ascending=[False, True])
     )
 
     priority = (
-        id_first.groupby(["Outcome", "Category"], as_index=False)
+        id_first.groupby(["Closure", "Category"], as_index=False)
         .size()
         .rename(
             columns={
                 "size": "Tickets",
-                "Outcome": "Outcome",
+                "Closure": "Closure",
                 "Category": "Assigned category",
             }
         )
         .sort_values(["Tickets", "Assigned category"], ascending=[False, True])
     )
-    priority["Action Required"] = priority["Outcome"].map(
-        lambda o: "High" if o == "Investigation" else "Review"
+    priority["Action Required"] = priority["Closure"].map(
+        lambda o: "High"
+        if o == _PERF_CLOSURE_INVESTIGATION
+        else ("Monitor" if o == _PERF_CLOSURE_ADMIN_DESK else "Review")
     )
+
+    outcome_counts = (
+        id_first["Closure"].astype(str).value_counts().to_dict()
+        if not id_first.empty
+        else {}
+    )
+    outcome_rows = [
+        {"outcome": label, "count": int(outcome_counts.get(label, 0))}
+        for label in _WEEKLY_EXEC_OUTCOME_ORDER
+        if int(outcome_counts.get(label, 0)) > 0
+    ]
 
     return {
         "total": total,
-        "resolved": resolved,
+        "resolved": field_resolved,
         "investigation": investigation,
+        "admin_desk": admin_desk,
         "resolution_rate": rate,
         "top_inv_category": str(inv_by_cat.index[0]) if len(inv_by_cat) else "—",
         "top_resolved_category": str(res_by_cat.index[0]) if len(res_by_cat) else "—",
-        "outcome_df": pd.DataFrame(
-            {"outcome": ["Investigation", "Resolved"], "count": [investigation, resolved]}
-        ),
+        "outcome_df": pd.DataFrame(outcome_rows)
+        if outcome_rows
+        else pd.DataFrame(columns=["outcome", "count"]),
         "category_df": category_df,
         "priority_df": priority,
         "trend_df": empty_trend,
@@ -11071,18 +11514,9 @@ def _perf_weekly_resolution_trend(
         )
         detail = bundle.get("detail")
         detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
-        total = int(bundle.get("total") or 0)
-        if total == 0 or detail_df.empty:
+        rate, total, _field_n = _perf_field_resolution_rate(detail_df)
+        if total == 0:
             rate = 0
-        else:
-            resolved = int(
-                detail_df["Status"]
-                .astype(str)
-                .str.strip()
-                .isin([STATUS_RESOLVED, SC_STATUS_RESOLVED])
-                .sum()
-            )
-            rate = int(round(100 * resolved / total))
         rows.append(
             {
                 "week": d0.strftime("%d %b"),
@@ -11095,65 +11529,244 @@ def _perf_weekly_resolution_trend(
 
 
 def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
-    st.markdown(
-        """
-<style>
-.weekly-exec-header {
-  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
-  gap: 12px; margin-bottom: 1rem; padding-bottom: 0.75rem;
-  border-bottom: 0.5px solid #1a2035;
-}
-.weekly-exec-title { font-size: 1.15rem; font-weight: 600; color: #e2e8f8; margin: 0; }
-.weekly-exec-sub { font-size: 0.85rem; color: #2a3a5a; margin: 0.15rem 0 0; }
-.weekly-exec-badge {
-  font-size: 0.85rem; color: #8a9ac0; padding: 0.45rem 0.85rem;
-  border: 0.5px solid #1a2035; border-radius: 6px; background: #0d1220;
-}
-.weekly-date-wrap [data-testid="stDateInput"] label {
-  font-size: 0.85rem !important; color: #2a3a5a !important;
-}
-.weekly-date-wrap [data-testid="stDateInput"] > div {
-  background: #0d1220 !important;
-  border: 0.5px solid #1a2035 !important;
-  border-radius: 6px !important;
-}
-.weekly-date-range {
-  font-size: 0.78rem; color: #3b82f6; margin: 0.25rem 0 0; text-align: right;
-}
-.weekly-kpi-card {
-  background: #0d1220; border: 0.5px solid #1a2035;
-  border-radius: 6px; padding: 1rem 1.1rem; min-height: 88px;
-}
-.weekly-kpi-label { font-size: 0.78rem; color: #2a3a5a; margin: 0 0 0.35rem; }
-.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e2e8f8; margin: 0; line-height: 1.2; }
-.weekly-kpi-sub { font-size: 0.75rem; color: #3b82f6; margin: 0.35rem 0 0; }
-.weekly-panel {
-  background: #0d1220; border: 0.5px solid #1a2035;
-  border-radius: 6px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
-}
-.weekly-panel h4 {
-  font-size: 0.95rem; font-weight: 600; color: #e2e8f8; margin: 0 0 0.65rem;
-}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
+    total = int(metrics.get("total") or 0)
+    rate = int(metrics.get("resolution_rate") or 0)
+    investigation = int(metrics.get("investigation") or 0)
+    inv_pct = int(metrics.get("investigation_pct") or 0)
+    admin_desk = int(metrics.get("admin_desk") or 0)
+    rate_delta = str(metrics.get("rate_delta") or "")
+    delta_cls = "weekly-kpi-sub"
+    if rate_delta.startswith("↓"):
+        delta_cls = "weekly-kpi-sub warn"
+    elif rate_delta.startswith("Flat"):
+        delta_cls = "weekly-kpi-sub neutral"
+
     k1, k2, k3, k4 = st.columns(4)
     cards = [
-        (k1, "Total Tickets", str(metrics["total"]), ""),
-        (k2, "Resolution Rate", f"{metrics['resolution_rate']}%", ""),
-        (k3, "Top 'Investigation' Category", str(metrics["top_inv_category"]), ""),
-        (k4, "Top 'Resolved' Category", str(metrics["top_resolved_category"]), ""),
+        (k1, "Cases attended", str(total), "", "weekly-kpi-sub neutral"),
+        (k2, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
+        (k3, "Investigation", str(investigation), f"{inv_pct}% of cases", "weekly-kpi-sub neutral"),
+        (k4, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
     ]
-    for col, label, value, sub in cards:
+    for col, label, value, sub, sub_class in cards:
         with col:
-            sub_html = f'<p class="weekly-kpi-sub">{sub}</p>' if sub else ""
+            sub_html = f'<p class="{sub_class}">{html.escape(sub)}</p>' if sub else ""
             st.markdown(
                 f'<div class="weekly-kpi-card">'
-                f'<p class="weekly-kpi-label">{label}</p>'
-                f'<p class="weekly-kpi-value">{value}</p>{sub_html}</div>',
+                f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+                f'<p class="weekly-kpi-value">{html.escape(value)}</p>{sub_html}</div>',
                 unsafe_allow_html=True,
             )
+
+
+def _render_perf_summary_closure_donut(metrics: dict[str, object]) -> None:
+    st.markdown('<div class="weekly-panel"><h4>Closure breakdown</h4></div>', unsafe_allow_html=True)
+    outcome_df = metrics.get("outcome_df")
+    if not isinstance(outcome_df, pd.DataFrame) or outcome_df.empty:
+        st.caption("No closure data for this range.")
+        return
+    domains, colors = _perf_exec_outcome_color_scale(outcome_df["outcome"])
+    donut = _weekly_altair_theme(
+        alt.Chart(outcome_df)
+        .mark_arc(innerRadius=58, outerRadius=92)
+        .encode(
+            theta=alt.Theta("count:Q", stack=True),
+            color=alt.Color(
+                "outcome:N",
+                scale=alt.Scale(domain=domains, range=colors),
+                legend=alt.Legend(title="Closure", orient="right"),
+            ),
+            tooltip=[
+                alt.Tooltip("outcome:N", title="Closure"),
+                alt.Tooltip("count:Q", title="Tickets"),
+            ],
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(donut, use_container_width=True)
+
+
+def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
+    st.markdown('<div class="weekly-panel"><h4>Field resolution trend</h4></div>', unsafe_allow_html=True)
+    trend_df = metrics.get("trend_df")
+    if not isinstance(trend_df, pd.DataFrame) or trend_df.empty:
+        st.caption("Not enough history for trends.")
+        return
+    trend = _weekly_altair_theme(
+        alt.Chart(trend_df)
+        .mark_area(color=_WEEKLY_RESOLVED_COLOR, opacity=0.28, line={"color": _WEEKLY_RESOLVED_COLOR})
+        .encode(
+            x=alt.X(
+                "week:N",
+                title="Period",
+                sort=alt.EncodingSortField(field="sort", order="ascending"),
+            ),
+            y=alt.Y(
+                "rate:Q",
+                title="Field resolution rate (%)",
+                scale=alt.Scale(domain=[0, 100]),
+            ),
+            tooltip=[
+                alt.Tooltip("week:N", title="Period"),
+                alt.Tooltip("rate:Q", title="Field resolution %"),
+                alt.Tooltip("total:Q", title="Tickets"),
+            ],
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(trend, use_container_width=True)
+
+
+def _render_perf_summary_overview_tab(metrics: dict[str, object]) -> None:
+    """Overview — KPIs, closure donut, resolution trend."""
+    st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
+    _render_weekly_kpi_cards(metrics)
+    chart_left, chart_right = st.columns(2)
+    with chart_left:
+        _render_perf_summary_closure_donut(metrics)
+    with chart_right:
+        _render_perf_summary_resolution_trend(metrics)
+
+
+def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
+    """Breakdown — category chart and top priority rows."""
+    st.markdown('<p class="weekly-section-label">By category & closure</p>', unsafe_allow_html=True)
+    category_df = metrics.get("category_df")
+    if isinstance(category_df, pd.DataFrame) and not category_df.empty:
+        plot_df = _perf_category_chart_top_n(category_df)
+        cat_domains, cat_colors = _perf_exec_outcome_color_scale(plot_df["outcome"])
+        category_plot = _perf_with_closure_order(plot_df, "outcome")
+        bar = _weekly_altair_theme(
+            alt.Chart(category_plot)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "category:N",
+                    title="Category",
+                    sort=alt.EncodingSortField(field="count", op="sum", order="descending"),
+                    axis=alt.Axis(labelAngle=-24),
+                ),
+                y=alt.Y("count:Q", title="Tickets", axis=alt.Axis(tickMinStep=1)),
+                color=alt.Color(
+                    "outcome:N",
+                    scale=alt.Scale(domain=cat_domains, range=cat_colors),
+                    legend=alt.Legend(title="Closure"),
+                ),
+                order=alt.Order("_closure_order:Q"),
+                tooltip=[
+                    alt.Tooltip("category:N", title="Category"),
+                    alt.Tooltip("outcome:N", title="Closure"),
+                    alt.Tooltip("count:Q", title="Tickets"),
+                ],
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(bar, use_container_width=True)
+        if len(category_df["category"].astype(str).unique()) > _WEEKLY_SUMMARY_TOP_CATEGORIES:
+            st.caption(
+                f"Showing top {_WEEKLY_SUMMARY_TOP_CATEGORIES} categories; remainder grouped as Other."
+            )
+    else:
+        st.caption("No category breakdown for this range.")
+
+    priority_df = metrics.get("priority_df")
+    if isinstance(priority_df, pd.DataFrame) and not priority_df.empty:
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">Top cases by volume</p>',
+            unsafe_allow_html=True,
+        )
+        top = priority_df.head(_WEEKLY_SUMMARY_PRIORITY_ROWS).copy()
+        show = top.rename(columns={"Action Required": "Priority"})
+        _render_perf_dataframe(
+            show,
+            max_rows=_WEEKLY_SUMMARY_PRIORITY_ROWS,
+            column_config={
+                "Tickets": st.column_config.NumberColumn(format="%d"),
+                "Closure": st.column_config.TextColumn(width="medium"),
+                "Priority": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.markdown(
+            '<div style="margin:4px 0 8px;display:flex;flex-wrap:wrap;gap:6px">'
+            f'{_perf_priority_action_pill("High")}'
+            f'{_perf_priority_action_pill("Review")}'
+            f'{_perf_priority_action_pill("Monitor")}'
+            '<span style="font-size:11px;color:#8a9ac0;margin-left:4px">'
+            "Investigation · Resolved / admin · Desk-only</span></div>",
+            unsafe_allow_html=True,
+        )
+        if len(priority_df) > _WEEKLY_SUMMARY_PRIORITY_ROWS:
+            st.caption(
+                f"Showing top {_WEEKLY_SUMMARY_PRIORITY_ROWS} of {len(priority_df)} groups."
+            )
+    else:
+        st.caption("No priority groupings for this range.")
+
+
+def _render_perf_summary_staff_tab(
+    summary: pd.DataFrame,
+    detail: pd.DataFrame,
+    *,
+    d0: date,
+    d1: date,
+) -> None:
+    """Staff credit, exports, and case list."""
+    if summary.empty:
+        st.info("No attended residential tickets or resort cases in this range.")
+        return
+
+    st.markdown('<p class="weekly-section-label">Staff credit (compact)</p>', unsafe_allow_html=True)
+    compact = _perf_summary_staff_pinned_total(_perf_summary_staff_compact(summary))
+    _render_perf_dataframe(compact)
+
+    with st.expander("Full staff breakdown", expanded=False):
+        _render_perf_dataframe(_perf_summary_staff_pinned_total(summary))
+
+    file_stamp = f"{d0.isoformat()}_{d1.isoformat()}"
+    st.markdown(
+        '<p class="weekly-section-label" style="margin-top:14px">Export</p>',
+        unsafe_allow_html=True,
+    )
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "Download summary CSV",
+            data=summary.to_csv(index=False).encode("utf-8"),
+            file_name=f"exec_attended_{file_stamp}_summary.csv",
+            mime="text/csv",
+            key=f"perf_exec_summary_csv_{file_stamp}",
+        )
+    with dl2:
+        st.download_button(
+            "Download detail CSV",
+            data=detail.to_csv(index=False).encode("utf-8"),
+            file_name=f"exec_attended_{file_stamp}_detail.csv",
+            mime="text/csv",
+            key=f"perf_exec_detail_csv_{file_stamp}",
+        )
+    st.caption("Use detail CSV for full case rows including closure and category.")
+
+    with st.expander(f"Case list ({len(detail)})", expanded=False):
+        detail_view = detail.copy()
+        preferred = [
+            "Track",
+            "ID",
+            "Status",
+            "Closure",
+            "Attended by",
+            "Credit",
+            "Category",
+            "Activity (local)",
+        ]
+        cols = [c for c in preferred if c in detail_view.columns]
+        extra = [c for c in detail_view.columns if c not in cols]
+        _render_perf_dataframe(
+            detail_view[cols + extra],
+            column_config={
+                "Closure": st.column_config.TextColumn(width="medium"),
+                "Category": st.column_config.TextColumn(width="medium"),
+            },
+        )
 
 
 def _render_perf_weekly_executive_dashboard(
@@ -11165,135 +11778,33 @@ def _render_perf_weekly_executive_dashboard(
     week_end: date,
     week_offset: int,
     period: str = "Weekly",
-) -> None:
-    """Executive summary layout — Streamlit + Altair (no React)."""
-    detail = bundle.get("detail")
-    detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
-    metrics = _perf_weekly_executive_metrics(detail_df)
-    if period == "Monthly":
-        metrics["trend_df"] = _perf_monthly_resolution_trend(
-            df_all, sales_all, end_month_offset=week_offset, months=4
+    metrics: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Executive summary — tabbed layout; returns metrics for context bar."""
+    if metrics is None:
+        metrics = _perf_weekly_summary_metrics(
+            df_all,
+            sales_all,
+            bundle,
+            period=period,
+            week_offset=week_offset,
         )
-    else:
-        metrics["trend_df"] = _perf_weekly_resolution_trend(
-            df_all, sales_all, end_week_offset=week_offset, weeks=4
+    tab_overview, tab_breakdown, tab_staff = st.tabs(
+        ["Overview", "Breakdown", "Staff & export"]
+    )
+    with tab_overview:
+        _render_perf_summary_overview_tab(metrics)
+    with tab_breakdown:
+        _render_perf_summary_breakdown_tab(metrics)
+    with tab_staff:
+        summary = bundle.get("summary")
+        detail = bundle.get("detail")
+        summary_df = summary if isinstance(summary, pd.DataFrame) else pd.DataFrame()
+        detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+        _render_perf_summary_staff_tab(
+            summary_df, detail_df, d0=week_start, d1=week_end
         )
-
-    st.markdown("#### KPI Overview & Outcome Breakdown")
-    left, right = st.columns([1.35, 1])
-    with left:
-        _render_weekly_kpi_cards(metrics)
-    with right:
-        st.markdown('<div class="weekly-panel"><h4>Outcome Breakdown</h4></div>', unsafe_allow_html=True)
-        outcome_df = metrics["outcome_df"]
-        if isinstance(outcome_df, pd.DataFrame) and not outcome_df.empty:
-            donut = _weekly_altair_theme(
-                alt.Chart(outcome_df)
-                .mark_arc(innerRadius=58, outerRadius=92)
-                .encode(
-                    theta=alt.Theta("count:Q", stack=True),
-                    color=alt.Color(
-                        "outcome:N",
-                        scale=alt.Scale(
-                            domain=["Investigation", "Resolved"],
-                            range=[_WEEKLY_INV_COLOR, _WEEKLY_RESOLVED_COLOR],
-                        ),
-                        legend=alt.Legend(title=None, orient="right"),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("outcome:N", title="Outcome"),
-                        alt.Tooltip("count:Q", title="Tickets"),
-                    ],
-                )
-                .properties(height=220)
-            )
-            st.altair_chart(donut, use_container_width=True)
-            st.caption(f"Total Outcome: **{metrics['total']}**")
-        else:
-            st.caption("No outcome data for this week.")
-
-    st.markdown("#### Tickets by Category & Outcome")
-    category_df = metrics["category_df"]
-    if isinstance(category_df, pd.DataFrame) and not category_df.empty:
-        bar = _weekly_altair_theme(
-            alt.Chart(category_df)
-            .mark_bar()
-            .encode(
-                x=alt.X(
-                    "category:N",
-                    title="Assigned Category",
-                    sort=alt.EncodingSortField(field="count", op="sum", order="descending"),
-                    axis=alt.Axis(labelAngle=-28),
-                ),
-                y=alt.Y("count:Q", title="Tickets", axis=alt.Axis(tickMinStep=1)),
-                color=alt.Color(
-                    "outcome:N",
-                    scale=alt.Scale(
-                        domain=["Investigation", "Resolved"],
-                        range=[_WEEKLY_INV_COLOR, _WEEKLY_RESOLVED_COLOR],
-                    ),
-                    legend=alt.Legend(title="Outcome"),
-                ),
-                order=alt.Order("outcome:N", sort="ascending"),
-                tooltip=[
-                    alt.Tooltip("category:N", title="Category"),
-                    alt.Tooltip("outcome:N", title="Outcome"),
-                    alt.Tooltip("count:Q", title="Tickets"),
-                ],
-            )
-            .properties(height=320)
-        )
-        st.altair_chart(bar, use_container_width=True)
-    else:
-        st.caption("No category breakdown for this week.")
-
-    st.markdown("#### Priority Cases & Efficiency Trends")
-    pri_col, trend_col = st.columns(2)
-    with pri_col:
-        st.markdown('<div class="weekly-panel"><h4>Priority Cases (Investigation)</h4></div>', unsafe_allow_html=True)
-        priority_df = metrics["priority_df"]
-        if isinstance(priority_df, pd.DataFrame) and not priority_df.empty:
-            show = priority_df.copy()
-            show["Action Required"] = show["Action Required"].map(
-                {"High": "🚩 High", "Review": "🟧 Review"}
-            )
-            _render_perf_dataframe(
-                show,
-                column_config={
-                    "Tickets": st.column_config.NumberColumn(format="%d"),
-                },
-            )
-        else:
-            st.markdown(
-                '<p style="font-size:11px;color:#8a9ac0;margin:4px 0">'
-                "No priority cases this week.</p>",
-                unsafe_allow_html=True,
-            )
-    with trend_col:
-        st.markdown('<div class="weekly-panel"><h4>Efficiency Trends</h4></div>', unsafe_allow_html=True)
-        trend_df = metrics["trend_df"]
-        if isinstance(trend_df, pd.DataFrame) and not trend_df.empty:
-            trend = _weekly_altair_theme(
-                alt.Chart(trend_df)
-                .mark_area(color=_WEEKLY_INV_COLOR, opacity=0.35, line={"color": _WEEKLY_INV_COLOR})
-                .encode(
-                    x=alt.X("week:N", title="Week", sort=alt.EncodingSortField(field="sort", order="ascending")),
-                    y=alt.Y("rate:Q", title="Resolution Rate (%)", scale=alt.Scale(domain=[0, 100])),
-                    tooltip=[
-                        alt.Tooltip("week:N", title="Week"),
-                        alt.Tooltip("rate:Q", title="Resolution %"),
-                        alt.Tooltip("total:Q", title="Tickets"),
-                    ],
-                )
-                .properties(height=260)
-            )
-            st.altair_chart(trend, use_container_width=True)
-        else:
-            st.markdown(
-                '<p style="font-size:11px;color:#8a9ac0;margin:4px 0">'
-                "Not enough history for trends.</p>",
-                unsafe_allow_html=True,
-            )
+    return metrics
 
 
 def _perf_monthly_resolution_trend(
@@ -11315,29 +11826,9 @@ def _perf_monthly_resolution_trend(
         )
         detail = bundle.get("detail")
         detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
-        total = int(bundle.get("total") or 0)
-        if total == 0 or detail_df.empty:
+        rate, total, _field_n = _perf_field_resolution_rate(detail_df)
+        if total == 0:
             rate = 0
-        else:
-            resolved = int(
-                detail_df["Status"]
-                .astype(str)
-                .str.strip()
-                .isin([STATUS_RESOLVED, SC_STATUS_RESOLVED])
-                .sum()
-            )
-            # Unique cases: Status is per credit row; use ID when present.
-            if "ID" in detail_df.columns:
-                id_first = detail_df.drop_duplicates(subset=["ID"], keep="first")
-                total = int(id_first["ID"].astype(str).nunique())
-                resolved = int(
-                    id_first["Status"]
-                    .astype(str)
-                    .str.strip()
-                    .isin([STATUS_RESOLVED, SC_STATUS_RESOLVED])
-                    .sum()
-                )
-            rate = int(round(100 * resolved / total)) if total else 0
         rows.append(
             {
                 "week": d0.strftime("%b %Y"),
@@ -11399,8 +11890,8 @@ def _render_perf_weekly_attended_report(
     with h_left:
         st.markdown(
             f'<div class="weekly-exec-header" style="border:none;padding:0;margin:0;">'
-            f'<div><p class="weekly-exec-title">NetOps | Coverage Eye</p>'
-            f'<p class="weekly-exec-sub">Executive Summary · {LOCAL_TZ_LABEL}</p></div>'
+            f'<div><p class="weekly-exec-title">Summary</p>'
+            f'<p class="weekly-exec-sub">Attended cases · {LOCAL_TZ_LABEL}</p></div>'
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -11431,9 +11922,18 @@ def _render_perf_weekly_attended_report(
             range_start=range_start,
             range_end=range_end,
         )
-    summary = bundle["summary"]
-    detail = bundle["detail"]
-
+    _inject_weekly_summary_styles()
+    metrics = _perf_weekly_summary_metrics(
+        df_all,
+        sales_all,
+        bundle,
+        period=period,
+        week_offset=period_offset,
+    )
+    _render_perf_summary_context_bar(metrics, period_label)
+    if int(metrics.get("total") or 0) == 0:
+        st.info("No attended residential tickets or resort cases in this range.")
+        return
     _render_perf_weekly_executive_dashboard(
         df_all,
         sales_all,
@@ -11442,52 +11942,35 @@ def _render_perf_weekly_attended_report(
         week_end=d1,
         week_offset=period_offset,
         period=period,
+        metrics=metrics,
     )
-
-    if summary.empty:
-        st.info("No attended residential tickets or resort cases in this range.")
-        return
-
-    st.subheader("Staff breakdown")
-    _render_perf_dataframe(summary)
-
-    file_stamp = f"{d0.isoformat()}_{d1.isoformat()}"
-    dl1, dl2 = st.columns(2)
-    with dl1:
-        st.download_button(
-            "Download summary CSV",
-            data=summary.to_csv(index=False).encode("utf-8"),
-            file_name=f"exec_attended_{file_stamp}_summary.csv",
-            mime="text/csv",
-            key=f"perf_exec_summary_csv_{file_stamp}",
-        )
-    with dl2:
-        st.download_button(
-            "Download detail CSV",
-            data=detail.to_csv(index=False).encode("utf-8"),
-            file_name=f"exec_attended_{file_stamp}_detail.csv",
-            mime="text/csv",
-            key=f"perf_exec_detail_csv_{file_stamp}",
-        )
-
-    with st.expander(f"Case list ({len(detail)})", expanded=True):
-        _render_perf_dataframe(detail)
-
 
 
 def _perf_combine_work(
     completed: pd.DataFrame,
     investigation: pd.DataFrame,
+    *,
+    closure_log_map: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Resolved + Under Investigation = total active work in the window."""
+    log_map = closure_log_map or {}
     parts: list[pd.DataFrame] = []
     if not completed.empty:
         c = completed.copy()
-        c["_outcome"] = STATUS_RESOLVED
+        outcomes: list[str] = []
+        for _, row in c.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            outcomes.append(
+                _perf_classify_residential_closure(
+                    row,
+                    log_action=log_map.get(tn, "Resolved"),
+                )
+            )
+        c["_outcome"] = outcomes
         parts.append(c)
     if not investigation.empty:
         i = investigation.copy()
-        i["_outcome"] = "Investigation"
+        i["_outcome"] = _PERF_CLOSURE_INVESTIGATION
         parts.append(i)
     if not parts:
         return pd.DataFrame()
@@ -11688,6 +12171,8 @@ def _render_perf_outcome_trend(
     )
     by_out["bucket_sort"] = pd.to_datetime(by_out["bucket"], errors="coerce")
     by_out = by_out.sort_values("bucket_sort")
+    out_domains, out_colors = _perf_exec_outcome_color_scale(by_out["_outcome"])
+    by_out = _perf_with_closure_order(by_out, "_outcome")
     chart = (
         alt.Chart(by_out)
         .mark_bar()
@@ -11700,12 +12185,13 @@ def _render_perf_outcome_trend(
             y=alt.Y("count:Q", title="Tickets"),
             color=alt.Color(
                 "_outcome:N",
-                legend=alt.Legend(title="Outcome"),
-                scale=alt.Scale(range=["#D7B491", "#8fa89e"]),
+                legend=alt.Legend(title="Closure"),
+                scale=alt.Scale(domain=out_domains, range=out_colors),
             ),
+            order=alt.Order("_closure_order:Q"),
             tooltip=[
                 alt.Tooltip("bucket:N", title="Bucket"),
-                alt.Tooltip("_outcome:N", title="Outcome"),
+                alt.Tooltip("_outcome:N", title="Closure"),
                 alt.Tooltip("count:Q", title="Count"),
             ],
         )
@@ -16698,7 +17184,7 @@ _BON_THEME_CSS = """
         font-weight: 600;
         margin-left: 0.2rem;
     }
-    /* Header nav tabs — override global oak button styling */
+    /* Header nav tabs — segmented control */
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button,
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"],
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"],
@@ -16706,33 +17192,32 @@ _BON_THEME_CSS = """
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {
         background: transparent !important;
         background-color: transparent !important;
-        background-image: none !important;
         border: none !important;
-        border-bottom: 2px solid transparent !important;
-        border-radius: 0 !important;
+        border-radius: 6px !important;
         box-shadow: none !important;
-        color: #6b7f9e !important;
-        font-size:14px !important;
-        font-weight: 400 !important;
+        color: #6b7a99 !important;
+        font-size: 13px !important;
+        font-weight: 500 !important;
         padding: 0 14px !important;
-        min-height: var(--disp-header-h) !important;
-        height: var(--disp-header-h) !important;
+        min-height: 28px !important;
+        height: 28px !important;
     }
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"],
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"] {
-        color: #e2e8f8 !important;
-        font-weight: 500 !important;
-        border-bottom-color: #3b82f6 !important;
+        color: #f0f4fc !important;
+        font-weight: 600 !important;
+        background: #1a2240 !important;
+        background-color: #1a2240 !important;
     }
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"],
     div.st-key-disp_header_shell div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {
-        color: #6b7f9e !important;
+        color: #6b7a99 !important;
     }
     div.st-key-disp_header_shell [data-testid="stPopover"] > button {
         background: transparent !important;
-        border: 0.5px solid #2a3a5a !important;
-        border-radius: 999px !important;
-        color: #8a9ac0 !important;
+        border: none !important;
+        border-radius: 6px !important;
+        color: #6b7a99 !important;
         box-shadow: none !important;
     }
 </style>
@@ -17693,7 +18178,7 @@ def _sync_dashboard_nav_state(
 
 
 def _render_main_navigation() -> str:
-    """Top row: Ticket · Performance · Log."""
+    """Top row: Ticket · Performance · Log (segmented control)."""
     current = _normalize_dash_main_nav(
         st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM)
     )
@@ -17708,11 +18193,11 @@ def _render_main_navigation() -> str:
                 key=tab_key,
                 type="primary" if is_active else "secondary",
                 use_container_width=False,
-                disabled=is_active,
             ):
-                st.session_state[_DASH_MAIN_NAV_KEY] = opt
-                _close_lookup_dialog()
-                st.rerun()
+                if not is_active:
+                    st.session_state[_DASH_MAIN_NAV_KEY] = opt
+                    _close_lookup_dialog()
+                    st.rerun()
     return current
 
 
@@ -24362,12 +24847,19 @@ def _perf_handled_tab_context(
         else 0
     )
     n_work_sales = n_work - n_work_field
-    n_handled_resolved = (
-        int((work_view["_outcome"] == STATUS_RESOLVED).sum())
-        if not work_view.empty and "_outcome" in work_view.columns
-        else 0
+    if not work_view.empty and "_outcome" in work_view.columns:
+        oc = work_view["_outcome"].astype(str)
+        n_field_resolved = int(oc.eq(_PERF_CLOSURE_FIELD).sum())
+        n_admin_closed_resp = int(oc.eq(_PERF_CLOSURE_ADMIN_RESP).sum())
+        n_admin_closed_desk = int(oc.eq(_PERF_CLOSURE_ADMIN_DESK).sum())
+        n_resort_resolved = int(oc.eq(_PERF_CLOSURE_RESORT).sum())
+        n_handled_investigation = int(oc.eq(_PERF_CLOSURE_INVESTIGATION).sum())
+    else:
+        n_field_resolved = n_admin_closed_resp = n_admin_closed_desk = 0
+        n_resort_resolved = n_handled_investigation = 0
+    n_handled_field_resolved = (
+        n_field_resolved + n_admin_closed_resp + n_admin_closed_desk
     )
-    n_handled_investigation = n_work - n_handled_resolved
     responded_in_view = pd.DataFrame()
     if not visits_all.empty and "outcome" in visits_all.columns:
         responded_in_view = visits_all[
@@ -24393,7 +24885,11 @@ def _perf_handled_tab_context(
         "n_work": n_work,
         "n_work_field": n_work_field,
         "n_work_sales": n_work_sales,
-        "n_handled_resolved": n_handled_resolved,
+        "n_field_resolved": n_field_resolved,
+        "n_admin_closed_resp": n_admin_closed_resp,
+        "n_admin_closed_desk": n_admin_closed_desk,
+        "n_resort_resolved": n_resort_resolved,
+        "n_handled_field_resolved": n_handled_field_resolved,
         "n_handled_investigation": n_handled_investigation,
         "n_handled_visit_tickets": n_handled_visit_tickets,
     }
@@ -24716,7 +25212,7 @@ def _render_performance_sidebar() -> None:
         index=range_options.index(cur_range) if cur_range in range_options else 1,
         label_visibility="collapsed",
         key="perf_range_select",
-        help="Applies to all Performance views, including Summary (executive report).",
+        help="Applies to all Performance views, including Summary.",
     )
     prev_range = st.session_state.get("_perf_prev_range")
     st.session_state[_PERF_RANGE_PRESET_KEY] = range_val
@@ -24763,7 +25259,11 @@ def _render_perf_handled_tab(
     n_work: int,
     n_work_field: int,
     n_work_sales: int,
-    n_handled_resolved: int,
+    n_field_resolved: int,
+    n_admin_closed_resp: int,
+    n_admin_closed_desk: int,
+    n_resort_resolved: int,
+    n_handled_field_resolved: int,
     n_handled_investigation: int,
     n_handled_visit_tickets: int,
 ) -> None:
@@ -24776,10 +25276,12 @@ def _render_perf_handled_tab(
         f'<p style="font-size:11px;color:#2a3a5a;line-height:1.5;margin:4px 0 10px">'
         f"<strong>Assigned / reassigned in range:</strong> {n_assigned_in_range} field ticket(s) · "
         f"<strong>Handled ({n_work})</strong> = <strong>{n_work_field}</strong> Field{sales_part} · "
-        f"<strong>{n_handled_resolved}</strong> {html.escape(STATUS_RESOLVED)} + "
-        f"<strong>{n_handled_investigation}</strong> Investigation with activity in "
-        f"<strong>{html.escape(range_caption)}</strong> "
-        f"(resolve, reassign, admin action, or resort update). "
+        f"<strong>{n_field_resolved}</strong> field resolved · "
+        f"<strong>{n_admin_closed_resp}</strong> admin closed (responded) · "
+        f"<strong>{n_admin_closed_desk}</strong> admin closed (desk) · "
+        f"<strong>{n_resort_resolved}</strong> resort resolved · "
+        f"<strong>{n_handled_investigation}</strong> investigation "
+        f"in <strong>{html.escape(range_caption)}</strong>. "
         f"<strong>Visit fair credit:</strong> {n_handled_visit_tickets} responded ticket(s).</p>",
         unsafe_allow_html=True,
     )
@@ -24936,8 +25438,9 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
     visits_all = ctx["visits_all"]
     visits_f = ctx["visits_f"]
 
-    _render_performance_metric_strip(counts=counts)
-    st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+    if view != "Summary":
+        _render_performance_metric_strip(counts=counts)
+        st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
     if view == "Overview":
         _render_perf_overview_tab(
             df_all,
