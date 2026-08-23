@@ -11853,11 +11853,6 @@ def _render_perf_summary_unattended_section(metrics: dict[str, object]) -> None:
             flagged,
             help="Tickets with marked_unattended_at still credited to this engineer.",
         )
-    st.caption(
-        "Assignment cases match **Overview Unatt** and **Performance → Unattended**. "
-        "Flagged backlog matches the UNATTENDED metric card (current queue, not range-scoped). "
-        "See the **Unattended** tab for ticket-level detail."
-    )
 
 
 def _render_perf_summary_unattended_tab(metrics: dict[str, object]) -> None:
@@ -12209,7 +12204,6 @@ def _render_perf_weekly_attended_report(
         )
         metrics["summary_focus"] = focus
     _render_perf_summary_context_bar(metrics, period_label)
-    _render_perf_glossary_expander(compact=True)
     has_attended = int(metrics.get("total") or 0) > 0
     has_unattended = int(metrics.get("unattended_assignments") or 0) > 0
     if not has_attended and not (focus not in ("", "All") and has_unattended):
@@ -26246,7 +26240,6 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
 
     if view == "Overview":
         _render_performance_metric_strip(counts=counts)
-        _render_perf_glossary_expander(compact=True)
         st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
     elif view == "On hold":
         _render_performance_metric_strip(counts=counts)
