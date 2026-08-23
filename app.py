@@ -10889,7 +10889,9 @@ def _perf_weekly_attended_bundle(
     if focus not in ("", "All"):
         csm_attended = _perf_filter_by_person(csm_attended, focus)
         sales_attended = _perf_filter_by_person(sales_attended, focus)
-    summary, detail = _perf_build_weekly_attended_tables(csm_attended, sales_attended)
+    summary, detail = _perf_build_weekly_attended_tables(
+        csm_attended, sales_attended, focus=focus
+    )
     n_unique = int(detail["ID"].astype(str).nunique()) if not detail.empty else 0
     return {
         "csm": csm_attended,
@@ -10915,9 +10917,23 @@ def _perf_resolve_display_category(row: pd.Series, *, track: str) -> str:
     return cat if cat else "(uncategorized)"
 
 
+def _perf_filter_attended_detail_by_focus(
+    detail: pd.DataFrame,
+    focus: str,
+) -> pd.DataFrame:
+    """Keep only rows credited to the focused engineer (not co-assignees on shared tickets)."""
+    if detail.empty or focus in ("", "All") or "Attended by" not in detail.columns:
+        return detail
+    focus_key = _perf_norm_member(focus)
+    mask = detail["Attended by"].astype(str).map(_perf_norm_member).eq(focus_key)
+    return detail.loc[mask].copy()
+
+
 def _perf_build_weekly_attended_tables(
     csm_raw: pd.DataFrame,
     sales_raw: pd.DataFrame,
+    *,
+    focus: str = "All",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return ``(summary_by_person, detail_rows)`` for the weekly attended report."""
     detail_cols = [
@@ -11039,6 +11055,7 @@ def _perf_build_weekly_attended_tables(
 
     attended = detail["Attended by"].astype(str).str.strip()
     detail = detail.loc[attended.ne("")].copy()
+    detail = _perf_filter_attended_detail_by_focus(detail, focus)
     if detail.empty:
         return empty_summary, detail
 
@@ -11175,7 +11192,8 @@ def _perf_build_weekly_attended_tables(
         else 0
     )
     totals["Grand total"] = int(detail["ID"].astype(str).nunique())
-    summary = pd.concat([summary, pd.DataFrame([totals])], ignore_index=True)
+    if focus in ("", "All"):
+        summary = pd.concat([summary, pd.DataFrame([totals])], ignore_index=True)
     return summary, detail
 
 
@@ -11228,7 +11246,6 @@ def _perf_closure_totals_from_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
 
 
 _WEEKLY_SUMMARY_TOP_CATEGORIES = 8
-_WEEKLY_SUMMARY_PRIORITY_ROWS = 5
 
 
 def _perf_rate_delta_from_trend(trend_df: pd.DataFrame, current_rate: int) -> str:
@@ -11712,11 +11729,9 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
             '<p class="weekly-section-label" style="margin-top:14px">Top cases by volume</p>',
             unsafe_allow_html=True,
         )
-        top = priority_df.head(_WEEKLY_SUMMARY_PRIORITY_ROWS).copy()
-        show = top.rename(columns={"Action Required": "Priority"})
+        show = priority_df.rename(columns={"Action Required": "Priority"}).copy()
         _render_perf_dataframe(
             show,
-            max_rows=_WEEKLY_SUMMARY_PRIORITY_ROWS,
             column_config={
                 "Tickets": st.column_config.NumberColumn(format="%d"),
                 "Closure": st.column_config.TextColumn(width="medium"),
@@ -11732,10 +11747,10 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
             "Investigation · Resolved / admin · Desk-only</span></div>",
             unsafe_allow_html=True,
         )
-        if len(priority_df) > _WEEKLY_SUMMARY_PRIORITY_ROWS:
-            st.caption(
-                f"Showing top {_WEEKLY_SUMMARY_PRIORITY_ROWS} of {len(priority_df)} groups."
-            )
+        st.caption(
+            f"All **{len(priority_df)}** category × closure groups in this range "
+            "(same cases as the chart above)."
+        )
     else:
         st.caption("No priority groupings for this range.")
 
@@ -25348,7 +25363,14 @@ def _get_on_hold_by_assignee(on_hold: pd.DataFrame, *, focus: str) -> list[dict[
     if on_hold.empty:
         return []
     view = _perf_filter_by_person(on_hold, focus)
-    if view.empty or "assigned_to" not in view.columns:
+    if view.empty:
+        return []
+    if focus not in ("", "All"):
+        stem = _canonical_username_stem(focus)
+        if not stem:
+            return []
+        return [{"assigned_to": stem, "count": len(view)}]
+    if "assigned_to" not in view.columns:
         return []
     counts = (
         view["assigned_to"]
