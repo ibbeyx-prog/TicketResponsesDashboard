@@ -76,15 +76,52 @@ def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> boo
     assigned_at = _parse_ts(row.get("last_assigned_at"))
     if not assigned_at:
         return False
-    now = now or datetime.now(timezone.utc)
-    assign_local = to_ops_local(assigned_at)
-    now_local = to_ops_local(now)
-    assign_date = assign_local.date()
-    today = now_local.date()
-    cutoff = assign_day_cutoff_time()
-    if assign_date < today:
+    return visit_cycle_is_unattended(
+        visit_start=assigned_at,
+        visit_end=None,
+        outcome=row.get("status"),
+        responded_at=row.get("responded_at"),
+        now=now,
+    )
+
+
+def visit_cycle_is_unattended(
+    *,
+    visit_start: object,
+    visit_end: object = None,
+    outcome: object = None,
+    responded_at: object = None,
+    now: datetime | None = None,
+) -> bool:
+    """True when an assignment cycle had no field response before assign-day cutoff (UTC+5)."""
+    outcome_s = str(outcome or "").strip()
+    if outcome_s == "responded":
+        return False
+    if outcome_s == "unattended":
         return True
-    if assign_date == today and now_local.time() >= cutoff:
+    if outcome_s == "on_hold":
+        return False
+
+    assigned_at = _parse_ts(visit_start)
+    if not assigned_at:
+        return False
+
+    end_at = _parse_ts(visit_end)
+    now = now or datetime.now(timezone.utc)
+    eval_at = end_at or now
+
+    resp_at = _parse_ts(responded_at)
+    if resp_at and assigned_at <= resp_at <= eval_at:
+        return False
+
+    assign_local = to_ops_local(assigned_at)
+    eval_local = to_ops_local(eval_at)
+    assign_date = assign_local.date()
+    eval_date = eval_local.date()
+    cutoff = assign_day_cutoff_time()
+    if assign_date < eval_date:
+        return True
+    if assign_date == eval_date and eval_local.time() >= cutoff:
         return True
     return False
 

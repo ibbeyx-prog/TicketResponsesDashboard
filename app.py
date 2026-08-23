@@ -125,7 +125,6 @@ try:
         render_engineer_row,
         render_nudge_banner,
         render_queue_list,
-        render_refresh_caption,
         render_sales_case_table,
         render_settings_popover,
         render_sidebar_today_grid,
@@ -160,6 +159,7 @@ from unattended import (
     is_daily_task_status,
     run_unattended_close,
     should_close_as_unattended,
+    visit_cycle_is_unattended,
 )
 
 
@@ -1645,6 +1645,12 @@ _PERF_VIEW_OPTIONS: tuple[str, ...] = (
     "Handled",
     "On hold",
     "Unattended",
+)
+_PERF_VIEW_OPTIONS_FOCUSED: tuple[str, ...] = (
+    "Summary",
+    "Overview",
+    "Case info",
+    "Handled",
 )
 _PERF_OVERVIEW_COL_RESIDENTIAL = "Residential"
 _PERF_OVERVIEW_COL_RESORT = "Resort"
@@ -7741,6 +7747,8 @@ def _perf_visit_ticket_pool(
         focus_key=pool_focus,
         search=search or (tid if tid else ""),
     )
+    if focus_key:
+        all_engineers = [focus_key]
     return all_engineers, pool, ticket_engineers, focus_key, total_all
 
 
@@ -8844,6 +8852,11 @@ def _render_perf_case_info_tab_fragment(
         f"visit dots = activity in **{_format_perf_range_caption() or 'sidebar range'}**. "
         f"Matrix shows up to **{_PERF_MATRIX_MAX_TICKETS}** cases at once — "
         "use **Ticket ID** lookup for a specific ref."
+        + (
+            f" Filtered to **{_perf_norm_member(focus)}**."
+            if focus not in ("", "All")
+            else ""
+        )
     )
     with st.spinner("Loading case matrix…"):
         payload = _build_perf_case_info_payload_cached(
@@ -9250,6 +9263,36 @@ def _perf_focus_for_filter() -> str:
     if focus == "All engineers":
         return "All"
     return _perf_norm_member(focus)
+
+
+def _perf_focus_heading_suffix(focus: str) -> str:
+    """Append engineer handle to view titles when Focus assignee is set."""
+    if focus in ("", "All"):
+        return ""
+    handle = _perf_norm_member(focus)
+    return f" — {handle}" if handle != "(unknown)" else ""
+
+
+def _perf_focused_view_options() -> tuple[str, ...]:
+    """Sidebar views when a single engineer is focused (dossier-first IA)."""
+    return _PERF_VIEW_OPTIONS_FOCUSED
+
+
+def _perf_sidebar_view_options(focus: str) -> tuple[str, ...]:
+    if focus in ("", "All"):
+        return _PERF_VIEW_OPTIONS
+    return _PERF_VIEW_OPTIONS_FOCUSED
+
+
+def _sync_perf_detail_to_focus() -> None:
+    """Keep the detail panel aligned with Focus assignee."""
+    focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    if focus == "All engineers":
+        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
+    else:
+        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = _perf_overview_button_key(
+            _perf_person_credit_key(focus)
+        )
 
 
 def _perf_focus_assignee_handle() -> str | None:
@@ -10584,6 +10627,8 @@ def _perf_filter_sales_by_account(df: pd.DataFrame, account: str) -> pd.DataFram
 def _perf_enrich_tickets(df: pd.DataFrame) -> pd.DataFrame:
     """Add ``staff``, ``category``, and local time from ``_ts``."""
     view = df.copy()
+    if "_ts" not in view.columns:
+        view["_ts"] = _perf_reference_ts(view)
     view["_local"] = view["_ts"].dt.tz_convert(LOCAL_TZ)
     if "assigned_to" in view.columns:
         view["staff"] = view["assigned_to"].map(_perf_norm_member)
@@ -10849,6 +10894,7 @@ def _perf_weekly_attended_bundle(
     *,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    focus: str = "All",
 ) -> dict[str, object]:
     """Compute weekly CSM + Sales attended once (summary, detail, counts)."""
     csm_attended = _perf_csm_attended_in_week(
@@ -10859,7 +10905,12 @@ def _perf_weekly_attended_bundle(
         range_start=range_start,
         range_end=range_end,
     )
-    summary, detail = _perf_build_weekly_attended_tables(csm_attended, sales_attended)
+    if focus not in ("", "All"):
+        csm_attended = _perf_filter_by_person(csm_attended, focus)
+        sales_attended = _perf_filter_by_person(sales_attended, focus)
+    summary, detail = _perf_build_weekly_attended_tables(
+        csm_attended, sales_attended, focus=focus
+    )
     n_unique = int(detail["ID"].astype(str).nunique()) if not detail.empty else 0
     return {
         "csm": csm_attended,
@@ -10885,9 +10936,23 @@ def _perf_resolve_display_category(row: pd.Series, *, track: str) -> str:
     return cat if cat else "(uncategorized)"
 
 
+def _perf_filter_attended_detail_by_focus(
+    detail: pd.DataFrame,
+    focus: str,
+) -> pd.DataFrame:
+    """Keep only rows credited to the focused engineer (not co-assignees on shared tickets)."""
+    if detail.empty or focus in ("", "All") or "Attended by" not in detail.columns:
+        return detail
+    focus_key = _perf_norm_member(focus)
+    mask = detail["Attended by"].astype(str).map(_perf_norm_member).eq(focus_key)
+    return detail.loc[mask].copy()
+
+
 def _perf_build_weekly_attended_tables(
     csm_raw: pd.DataFrame,
     sales_raw: pd.DataFrame,
+    *,
+    focus: str = "All",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return ``(summary_by_person, detail_rows)`` for the weekly attended report."""
     detail_cols = [
@@ -11009,6 +11074,7 @@ def _perf_build_weekly_attended_tables(
 
     attended = detail["Attended by"].astype(str).str.strip()
     detail = detail.loc[attended.ne("")].copy()
+    detail = _perf_filter_attended_detail_by_focus(detail, focus)
     if detail.empty:
         return empty_summary, detail
 
@@ -11145,7 +11211,8 @@ def _perf_build_weekly_attended_tables(
         else 0
     )
     totals["Grand total"] = int(detail["ID"].astype(str).nunique())
-    summary = pd.concat([summary, pd.DataFrame([totals])], ignore_index=True)
+    if focus in ("", "All"):
+        summary = pd.concat([summary, pd.DataFrame([totals])], ignore_index=True)
     return summary, detail
 
 
@@ -11198,7 +11265,6 @@ def _perf_closure_totals_from_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
 
 
 _WEEKLY_SUMMARY_TOP_CATEGORIES = 8
-_WEEKLY_SUMMARY_PRIORITY_ROWS = 5
 
 
 def _perf_rate_delta_from_trend(trend_df: pd.DataFrame, current_rate: int) -> str:
@@ -11260,6 +11326,7 @@ def _perf_weekly_summary_metrics(
     *,
     period: str,
     week_offset: int,
+    focus: str = "All",
 ) -> dict[str, object]:
     """Executive Summary metrics + trend frame for the selected period."""
     detail = bundle.get("detail")
@@ -11267,11 +11334,11 @@ def _perf_weekly_summary_metrics(
     metrics = _perf_weekly_executive_metrics(detail_df)
     if period == "Monthly":
         metrics["trend_df"] = _perf_monthly_resolution_trend(
-            df_all, sales_all, end_month_offset=week_offset, months=4
+            df_all, sales_all, end_month_offset=week_offset, months=4, focus=focus
         )
     else:
         metrics["trend_df"] = _perf_weekly_resolution_trend(
-            df_all, sales_all, end_week_offset=week_offset, weeks=4
+            df_all, sales_all, end_week_offset=week_offset, weeks=4, focus=focus
         )
     total = int(metrics.get("total") or 0)
     investigation = int(metrics.get("investigation") or 0)
@@ -11283,14 +11350,53 @@ def _perf_weekly_summary_metrics(
     return metrics
 
 
+def _perf_summary_focus_unattended_metrics(
+    df_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, int]:
+    """Unattended KPIs for Summary when Focus assignee is a single engineer."""
+    credit_key = _perf_person_credit_key(focus)
+    if credit_key in ("", "(unknown)"):
+        return {"unattended_assignments": 0, "unattended_flagged_backlog": 0}
+
+    visits = _perf_load_overview_visits_history(df_all)
+    assignment_cases = int(
+        _perf_overview_unattended_counts_by_credit(
+            df_all,
+            focus=focus,
+            visits=visits,
+            range_start=range_start,
+            range_end=range_end,
+        ).get(credit_key, 0)
+    )
+    flagged = 0
+    if not df_all.empty:
+        flagged_rows = df_all.loc[_ticket_marked_unattended_mask(df_all)]
+        flagged = len(_perf_filter_by_person(flagged_rows, focus))
+    return {
+        "unattended_assignments": assignment_cases,
+        "unattended_flagged_backlog": flagged,
+    }
+
+
 def _render_perf_summary_context_bar(metrics: dict[str, object], period_label: str) -> None:
     total = int(metrics.get("total") or 0)
     rate = int(metrics.get("resolution_rate") or 0)
+    unattended = int(metrics.get("unattended_assignments") or 0)
+    extra = (
+        f'<span><strong>{unattended}</strong> unattended assignment(s)</span>'
+        if unattended > 0
+        else ""
+    )
     st.markdown(
         f'<div class="weekly-summary-context">'
         f"<span><strong>Attended in range</strong> · {html.escape(period_label)}</span>"
         f"<span><strong>{total}</strong> cases</span>"
         f"<span><strong>{rate}%</strong> field resolution</span>"
+        f"{extra}"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -11505,6 +11611,7 @@ def _perf_weekly_resolution_trend(
     *,
     end_week_offset: int = 0,
     weeks: int = 4,
+    focus: str = "All",
 ) -> pd.DataFrame:
     """Resolution rate for the last ``weeks`` Sun–Sat windows ending at ``end_week_offset``."""
     rows: list[dict[str, object]] = []
@@ -11515,6 +11622,7 @@ def _perf_weekly_resolution_trend(
             sales_all if sales_all is not None else pd.DataFrame(),
             range_start=rs,
             range_end=re,
+            focus=focus,
         )
         detail = bundle.get("detail")
         detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
@@ -11538,6 +11646,8 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
     investigation = int(metrics.get("investigation") or 0)
     inv_pct = int(metrics.get("investigation_pct") or 0)
     admin_desk = int(metrics.get("admin_desk") or 0)
+    unattended = int(metrics.get("unattended_assignments") or 0)
+    show_unattended = "unattended_assignments" in metrics
     rate_delta = str(metrics.get("rate_delta") or "")
     delta_cls = "weekly-kpi-sub"
     if rate_delta.startswith("↓"):
@@ -11545,13 +11655,23 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
     elif rate_delta.startswith("Flat"):
         delta_cls = "weekly-kpi-sub neutral"
 
-    k1, k2, k3, k4 = st.columns(4)
-    cards = [
-        (k1, "Cases attended", str(total), "", "weekly-kpi-sub neutral"),
-        (k2, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
-        (k3, "Investigation", str(investigation), f"{inv_pct}% of cases", "weekly-kpi-sub neutral"),
-        (k4, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
-    ]
+    if show_unattended:
+        k1, k2, k3, k4, k5 = st.columns(5)
+        cards = [
+            (k1, "Cases attended", str(total), "", "weekly-kpi-sub neutral"),
+            (k2, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
+            (k3, "Investigation", str(investigation), f"{inv_pct}% of cases", "weekly-kpi-sub neutral"),
+            (k4, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
+            (k5, "Unattended assignments", str(unattended), "After 23:59 UTC+5 · in range", "weekly-kpi-sub warn"),
+        ]
+    else:
+        k1, k2, k3, k4 = st.columns(4)
+        cards = [
+            (k1, "Cases attended", str(total), "", "weekly-kpi-sub neutral"),
+            (k2, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
+            (k3, "Investigation", str(investigation), f"{inv_pct}% of cases", "weekly-kpi-sub neutral"),
+            (k4, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
+        ]
     for col, label, value, sub, sub_class in cards:
         with col:
             sub_html = f'<p class="{sub_class}">{html.escape(sub)}</p>' if sub else ""
@@ -11679,11 +11799,9 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
             '<p class="weekly-section-label" style="margin-top:14px">Top cases by volume</p>',
             unsafe_allow_html=True,
         )
-        top = priority_df.head(_WEEKLY_SUMMARY_PRIORITY_ROWS).copy()
-        show = top.rename(columns={"Action Required": "Priority"})
+        show = priority_df.rename(columns={"Action Required": "Priority"}).copy()
         _render_perf_dataframe(
             show,
-            max_rows=_WEEKLY_SUMMARY_PRIORITY_ROWS,
             column_config={
                 "Tickets": st.column_config.NumberColumn(format="%d"),
                 "Closure": st.column_config.TextColumn(width="medium"),
@@ -11699,12 +11817,110 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
             "Investigation · Resolved / admin · Desk-only</span></div>",
             unsafe_allow_html=True,
         )
-        if len(priority_df) > _WEEKLY_SUMMARY_PRIORITY_ROWS:
-            st.caption(
-                f"Showing top {_WEEKLY_SUMMARY_PRIORITY_ROWS} of {len(priority_df)} groups."
-            )
+        st.caption(
+            f"All **{len(priority_df)}** category × closure groups in this range "
+            "(same cases as the chart above)."
+        )
     else:
         st.caption("No priority groupings for this range.")
+
+
+def _render_perf_summary_unattended_section(metrics: dict[str, object]) -> None:
+    """Unattended accountability block — only when Focus assignee metrics are present."""
+    if "unattended_assignments" not in metrics:
+        return
+    assignments = int(metrics.get("unattended_assignments") or 0)
+    flagged = int(metrics.get("unattended_flagged_backlog") or 0)
+    if assignments == 0 and flagged == 0:
+        st.caption("No unattended assignment cases or flagged backlog for this engineer.")
+        return
+
+    st.markdown(
+        '<p class="weekly-section-label" style="margin-top:14px">Unattended accountability</p>',
+        unsafe_allow_html=True,
+    )
+    u1, u2 = st.columns(2)
+    with u1:
+        st.metric(
+            "Assignment cases (in range)",
+            assignments,
+            help="One case per assign day after 23:59 UTC+5 cutoff — assignee only; nudges excluded.",
+        )
+    with u2:
+        st.metric(
+            "Flagged in queue (snapshot)",
+            flagged,
+            help="Tickets with marked_unattended_at still credited to this engineer.",
+        )
+
+
+def _render_perf_summary_unattended_tab(metrics: dict[str, object]) -> None:
+    """Unattended tab — assignment cases in range + flagged backlog snapshot."""
+    focus_suffix = _perf_focus_heading_suffix(str(metrics.get("summary_focus") or ""))
+    st.markdown(
+        f'<p class="weekly-section-label">Unattended assignments{html.escape(focus_suffix)}</p>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "One case per assign day after **23:59 UTC+5** cutoff with no field response — assignee only. "
+        "Telegram nudges do not count. Reassign on a new day counts again."
+    )
+    _render_perf_summary_unattended_section(metrics)
+
+    assignment_rows = metrics.get("unattended_assignment_rows")
+    flagged_rows = metrics.get("unattended_flagged_rows")
+    assignment_list = (
+        list(assignment_rows) if isinstance(assignment_rows, list) else []
+    )
+    flagged_list = list(flagged_rows) if isinstance(flagged_rows, list) else []
+
+    st.markdown(
+        '<p class="weekly-section-label" style="margin-top:14px">Assignment cases in range</p>',
+        unsafe_allow_html=True,
+    )
+    if assignment_list:
+        assignment_df = pd.DataFrame(assignment_list)
+        _render_perf_dataframe(
+            assignment_df,
+            column_config={
+                "Ticket": st.column_config.TextColumn(width="medium"),
+                "Category": st.column_config.TextColumn(width="medium"),
+                "Assign day": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.download_button(
+            "Download assignment cases CSV",
+            data=assignment_df.to_csv(index=False).encode("utf-8"),
+            file_name="summary_unattended_assignments.csv",
+            mime="text/csv",
+            key="perf_summary_unattended_assignments_csv",
+        )
+    else:
+        st.caption("No unattended assignment cases in this range.")
+
+    st.markdown(
+        '<p class="weekly-section-label" style="margin-top:14px">Flagged backlog (snapshot)</p>',
+        unsafe_allow_html=True,
+    )
+    if flagged_list:
+        flagged_df = pd.DataFrame(flagged_list)
+        _render_perf_dataframe(
+            flagged_df,
+            column_config={
+                "Ticket": st.column_config.TextColumn(width="medium"),
+                "Category": st.column_config.TextColumn(width="medium"),
+                "Flagged at": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.download_button(
+            "Download flagged backlog CSV",
+            data=flagged_df.to_csv(index=False).encode("utf-8"),
+            file_name="summary_unattended_flagged.csv",
+            mime="text/csv",
+            key="perf_summary_unattended_flagged_csv",
+        )
+    else:
+        st.caption("No flagged unattended tickets in queue for this engineer.")
 
 
 def _render_perf_summary_staff_tab(
@@ -11713,18 +11929,29 @@ def _render_perf_summary_staff_tab(
     *,
     d0: date,
     d1: date,
+    metrics: dict[str, object] | None = None,
 ) -> None:
     """Staff credit, exports, and case list."""
-    if summary.empty:
+    metrics = metrics or {}
+    has_unattended = int(metrics.get("unattended_assignments") or 0) > 0 or int(
+        metrics.get("unattended_flagged_backlog") or 0
+    ) > 0
+    if summary.empty and not has_unattended:
         st.info("No attended residential tickets or resort cases in this range.")
         return
 
-    st.markdown('<p class="weekly-section-label">Staff credit (compact)</p>', unsafe_allow_html=True)
-    compact = _perf_summary_staff_pinned_total(_perf_summary_staff_compact(summary))
-    _render_perf_dataframe(compact)
+    if not summary.empty:
+        st.markdown('<p class="weekly-section-label">Staff credit (compact)</p>', unsafe_allow_html=True)
+        compact = _perf_summary_staff_pinned_total(_perf_summary_staff_compact(summary))
+        _render_perf_dataframe(compact)
 
-    with st.expander("Full staff breakdown", expanded=False):
-        _render_perf_dataframe(_perf_summary_staff_pinned_total(summary))
+        with st.expander("Full staff breakdown", expanded=False):
+            _render_perf_dataframe(_perf_summary_staff_pinned_total(summary))
+
+    _render_perf_summary_unattended_section(metrics)
+
+    if summary.empty:
+        return
 
     file_stamp = f"{d0.isoformat()}_{d1.isoformat()}"
     st.markdown(
@@ -11783,6 +12010,7 @@ def _render_perf_weekly_executive_dashboard(
     week_offset: int,
     period: str = "Weekly",
     metrics: dict[str, object] | None = None,
+    focus: str = "All",
 ) -> dict[str, object]:
     """Executive summary — tabbed layout; returns metrics for context bar."""
     if metrics is None:
@@ -11792,22 +12020,34 @@ def _render_perf_weekly_executive_dashboard(
             bundle,
             period=period,
             week_offset=week_offset,
+            focus=focus,
         )
-    tab_overview, tab_breakdown, tab_staff = st.tabs(
-        ["Overview", "Breakdown", "Staff & export"]
-    )
+    summary = bundle.get("summary")
+    detail = bundle.get("detail")
+    summary_df = summary if isinstance(summary, pd.DataFrame) else pd.DataFrame()
+    detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+
+    if focus not in ("", "All"):
+        tab_overview, tab_breakdown, tab_staff, tab_unattended = st.tabs(
+            ["Overview", "Breakdown", "Staff & export", "Unattended"]
+        )
+    else:
+        tab_overview, tab_breakdown, tab_staff = st.tabs(
+            ["Overview", "Breakdown", "Staff & export"]
+        )
+        tab_unattended = None
+
     with tab_overview:
         _render_perf_summary_overview_tab(metrics)
     with tab_breakdown:
         _render_perf_summary_breakdown_tab(metrics)
     with tab_staff:
-        summary = bundle.get("summary")
-        detail = bundle.get("detail")
-        summary_df = summary if isinstance(summary, pd.DataFrame) else pd.DataFrame()
-        detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
         _render_perf_summary_staff_tab(
-            summary_df, detail_df, d0=week_start, d1=week_end
+            summary_df, detail_df, d0=week_start, d1=week_end, metrics=metrics
         )
+    if tab_unattended is not None:
+        with tab_unattended:
+            _render_perf_summary_unattended_tab(metrics)
     return metrics
 
 
@@ -11817,6 +12057,7 @@ def _perf_monthly_resolution_trend(
     *,
     end_month_offset: int = 0,
     months: int = 4,
+    focus: str = "All",
 ) -> pd.DataFrame:
     """Resolution rate for the last ``months`` calendar months."""
     rows: list[dict[str, object]] = []
@@ -11827,6 +12068,7 @@ def _perf_monthly_resolution_trend(
             sales_all if sales_all is not None else pd.DataFrame(),
             range_start=rs,
             range_end=re,
+            focus=focus,
         )
         detail = bundle.get("detail")
         detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
@@ -11851,6 +12093,7 @@ def _render_perf_weekly_attended_report(
     sidebar_range_start: pd.Timestamp | None = None,
     sidebar_range_end: pd.Timestamp | None = None,
     this_week_bundle: dict[str, object] | None = None,
+    focus: str = "All",
 ) -> None:
     """Executive attended report for the Performance sidebar Range only."""
     if sidebar_range_start is None or sidebar_range_end is None:
@@ -11892,9 +12135,10 @@ def _render_perf_weekly_attended_report(
 
     h_left, h_right = st.columns([1.35, 1])
     with h_left:
+        focus_suffix = _perf_focus_heading_suffix(focus)
         st.markdown(
             f'<div class="weekly-exec-header" style="border:none;padding:0;margin:0;">'
-            f'<div><p class="weekly-exec-title">Summary</p>'
+            f'<div><p class="weekly-exec-title">Summary{html.escape(focus_suffix)}</p>'
             f'<p class="weekly-exec-sub">Attended cases · {LOCAL_TZ_LABEL}</p></div>'
             f"</div>",
             unsafe_allow_html=True,
@@ -11925,6 +12169,7 @@ def _render_perf_weekly_attended_report(
             sales_all,
             range_start=range_start,
             range_end=range_end,
+            focus=focus,
         )
     _inject_weekly_summary_styles()
     metrics = _perf_weekly_summary_metrics(
@@ -11933,9 +12178,34 @@ def _render_perf_weekly_attended_report(
         bundle,
         period=period,
         week_offset=period_offset,
+        focus=focus,
     )
+    if focus not in ("", "All"):
+        visits = _perf_load_overview_visits_history(df_all)
+        metrics.update(
+            _perf_summary_focus_unattended_metrics(
+                df_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+            )
+        )
+        metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
+            df_all,
+            focus=focus,
+            visits=visits,
+            range_start=range_start,
+            range_end=range_end,
+        )
+        metrics["unattended_flagged_rows"] = _perf_flagged_unattended_ticket_rows(
+            df_all,
+            focus=focus,
+        )
+        metrics["summary_focus"] = focus
     _render_perf_summary_context_bar(metrics, period_label)
-    if int(metrics.get("total") or 0) == 0:
+    has_attended = int(metrics.get("total") or 0) > 0
+    has_unattended = int(metrics.get("unattended_assignments") or 0) > 0
+    if not has_attended and not (focus not in ("", "All") and has_unattended):
         st.info("No attended residential tickets or resort cases in this range.")
         return
     _render_perf_weekly_executive_dashboard(
@@ -11947,6 +12217,7 @@ def _render_perf_weekly_attended_report(
         week_offset=period_offset,
         period=period,
         metrics=metrics,
+        focus=focus,
     )
 
 
@@ -12053,12 +12324,6 @@ def _perf_build_summary(
     )
 
 
-
-
-def _render_perf_individual_summary_table(summary: pd.DataFrame) -> None:
-    if summary.empty:
-        return
-    st.dataframe(summary, use_container_width=True, hide_index=True)
 
 
 def _render_perf_person_bar(
@@ -17668,35 +17933,13 @@ def _ticket_pending_unattended_eligible_row(row: object) -> bool:
 
 
 def _perf_overview_unattended_eligible_mask(df: pd.DataFrame) -> pd.Series:
-    """Overview accountability: flagged unattended or overdue Daily Task without response."""
+    """Ticket-level mask (queue/metric strip): flagged or overdue Daily Task without response."""
     if df.empty:
         return pd.Series(dtype=bool)
     marked = _ticket_marked_unattended_mask(df)
     pending = df.apply(_ticket_pending_unattended_eligible_row, axis=1)
     responded = df.apply(_ticket_has_field_response_since_assign_row, axis=1)
     return (marked | pending) & ~responded
-
-
-def _perf_visits_active_at_ref(
-    visits: pd.DataFrame,
-    ticket_number: str,
-    ref_ts: pd.Timestamp,
-) -> pd.DataFrame:
-    if visits.empty or not ticket_number or pd.isna(ref_ts):
-        return pd.DataFrame()
-    tn = str(ticket_number).strip()
-    part = visits[visits["ticket_number"].astype(str).str.strip().eq(tn)]
-    if part.empty:
-        return part
-    rows: list[pd.Series] = []
-    for _, visit in part.iterrows():
-        start = _parse_ts(visit.get("visit_start"))
-        end = _parse_ts(visit.get("visit_end"))
-        if pd.isna(start) or start > ref_ts:
-            continue
-        if pd.isna(end) or end >= ref_ts:
-            rows.append(visit)
-    return pd.DataFrame(rows) if rows else part.iloc[0:0].copy()
 
 
 def _perf_credit_keys_from_assignee_names(assignees: list[str]) -> list[str]:
@@ -17709,65 +17952,6 @@ def _perf_credit_keys_from_assignee_names(assignees: list[str]) -> list[str]:
         seen.add(key)
         keys.append(key)
     return keys
-
-
-def _perf_unattended_credit_keys_for_ticket(
-    row: object,
-    *,
-    visits: pd.DataFrame,
-) -> list[str]:
-    """Assignee(s) accountable for one ticket's unattended outcome."""
-    data = _ticket_row_as_dict(row)
-    tn = str(data.get("ticket_number") or "").strip()
-    if not tn or _ticket_has_field_response_since_assign_row(row):
-        return []
-
-    ticket_visits = pd.DataFrame()
-    if not visits.empty and "ticket_number" in visits.columns:
-        ticket_visits = visits[visits["ticket_number"].astype(str).str.strip().eq(tn)]
-
-    if not ticket_visits.empty and "outcome" in ticket_visits.columns:
-        explicit = ticket_visits[
-            ticket_visits["outcome"].astype(str).str.strip().eq("unattended")
-        ]
-        if not explicit.empty and "assignee" in explicit.columns:
-            keys = _perf_credit_keys_from_assignee_names(
-                explicit["assignee"].astype(str).tolist()
-            )
-            if keys:
-                return keys
-
-    marked_ts = _parse_ts(data.get("marked_unattended_at"))
-    pending = _ticket_pending_unattended_eligible_row(row)
-    if pd.isna(marked_ts) and not pending:
-        return []
-
-    ref_ts = marked_ts if pd.notna(marked_ts) else pd.Timestamp.now(tz="UTC")
-    last_assigned = _parse_ts(data.get("last_assigned_at"))
-    reassigned_after_mark = (
-        pd.notna(marked_ts)
-        and pd.notna(last_assigned)
-        and last_assigned > marked_ts
-    )
-
-    if not ticket_visits.empty:
-        active_at_ref = _perf_visits_active_at_ref(ticket_visits, tn, ref_ts)
-        if not active_at_ref.empty and "assignee" in active_at_ref.columns:
-            keys = _perf_credit_keys_from_assignee_names(
-                active_at_ref["assignee"].astype(str).tolist()
-            )
-            if keys:
-                if _perf_has_second_assignee(row) and not reassigned_after_mark:
-                    for eng in _perf_ticket_credit_assignees(row):
-                        key = _perf_person_credit_key(eng)
-                        if key and key not in keys:
-                            keys.append(key)
-                return keys
-
-    if reassigned_after_mark:
-        return []
-
-    return _perf_credit_keys_from_assignee_names(_perf_ticket_credit_assignees(row))
 
 
 def _ticket_follow_up_mask(df: pd.DataFrame) -> pd.Series:
@@ -17898,13 +18082,6 @@ def _migrate_legacy_queue_nav() -> None:
     else:
         st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_TICKET
         st.session_state[_DASH_TICKET_QUEUE_KEY] = legacy
-
-
-def _render_dashboard_header(*, refreshed_at: str) -> None:
-    """Last refresh line below the nav."""
-    render_refresh_caption(
-        f"Updated {refreshed_at} {LOCAL_TZ_LABEL} · change dates in ⚙ settings"
-    )
 
 
 def _apply_pending_dashboard_nav() -> None:
@@ -23357,7 +23534,6 @@ def _render_dashboard(
     lookback_days: int,
 ) -> None:
     day_word = "day" if lookback_days == 1 else "days"
-    refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
     _apply_deferred_widget_clears()
     _apply_pending_dashboard_nav()
     _migrate_legacy_queue_nav()
@@ -23371,8 +23547,6 @@ def _render_dashboard(
     main_nav = _normalize_dash_main_nav(
         st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET)
     )
-    if main_nav == _DASH_NAV_TICKET:
-        _render_dashboard_header(refreshed_at=refreshed_at)
 
     if main_nav == "Log":
         _render_attendance_tab(lookback_days=lookback_days)
@@ -23411,22 +23585,9 @@ def _render_dashboard(
         return
     else:
         range_start, range_end = _get_dash_range()
-        df, in_range_count = _dashboard_tickets_in_view(
+        df, _ = _dashboard_tickets_in_view(
             df_all, range_start=range_start, range_end=range_end
         )
-        range_hint = _format_dash_range_caption() or f"the last {lookback_days} day(s)"
-        active_extra = max(0, len(df) - in_range_count)
-        if len(df_all) > in_range_count or active_extra:
-            parts = [
-                f"**{in_range_count}** ticket(s) with activity in {range_hint}",
-            ]
-            if active_extra:
-                parts.append(
-                    f"**{active_extra}** active queue ticket(s) kept visible outside that range"
-                )
-            if len(df_all) > len(df):
-                parts.append(f"**{len(df_all) - len(df)}** older row(s) hidden — widen **Time range**")
-            st.caption(". ".join(parts) + ".")
 
     if not df_all.empty and "status" in df_all.columns:
         mismatches = _fetch_pending_with_response_mismatch()
@@ -23651,7 +23812,7 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
         ("RESOLVED", counts["resolved"], "#8a9ac0"),
         ("INVESTIGATION", counts["investigation"], "#8a9ac0"),
         (
-            "UNATTENDED",
+            "FLAGGED",
             counts["unattended"],
             "#ef4444" if counts["unattended"] > 0 else "#8a9ac0",
         ),
@@ -23685,10 +23846,28 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
             )
     combined = int(counts.get("combined", counts["total"] + counts["resort"]))
     st.caption(
-        f"**Combined backlog:** {combined} cases "
+        f"**Queue snapshot** — combined backlog **{combined}** "
         f"(Residential {counts['total']} + Resort {counts['resort']}). "
-        "Queue cards are residential only."
+        "**FLAGGED** = tickets with `marked_unattended_at` (not assignment cases). "
+        "Overview / Summary credit rows are **per engineer** and may overlap on shared tickets."
     )
+
+
+def _render_perf_glossary_expander(*, compact: bool = False) -> None:
+    """Shared definitions for Performance metrics."""
+    title = "Metric definitions" if not compact else "What do these numbers mean?"
+    with st.expander(title, expanded=False):
+        st.markdown(
+            """
+**Queue snapshot (metric strip)** — Current backlog inventory by status.  
+**FLAGGED** — Ticket permanently tagged unattended (`marked_unattended_at`); still in queue.  
+**Overview credit** — Solo/shared resort assignment credit from visit history (snapshot).  
+**Unatt assignments (range)** — One case per assign day with no field response after **23:59 UTC+5** cutoff; assignee only. Sticks even if the ticket is attended later; nudges are not unattended.  
+**Summary attended** — On hold / resolved / investigation / resort activity in sidebar range.  
+**Handled** — Closures and visit fair credit in sidebar range.  
+**Inventory ≠ credit** — Combined backlog counts unique tickets; engineer lines are personal credit.
+            """.strip()
+        )
 
 
 def _perf_overview_df_for_solo_shared(df_all: pd.DataFrame) -> pd.DataFrame:
@@ -24062,23 +24241,142 @@ def _solo_shared_rows_by_credit_key(
     return {str(r["credit_key"]): r for r in rows}
 
 
+def _perf_visit_cycle_unattended_credit_keys(visit: object) -> list[str]:
+    """Credit only the engineer assigned for this visit cycle."""
+    v = visit if isinstance(visit, pd.Series) else pd.Series(visit if isinstance(visit, dict) else {})
+    return _perf_credit_keys_from_assignee_names([str(v.get("assignee") or "")])
+
+
+def _perf_visit_cycle_had_field_response(
+    visit: object,
+    ticket_row: object | None = None,
+) -> bool:
+    """True when this visit cycle has a field response (visit row or ticket timestamp)."""
+    v = visit if isinstance(visit, pd.Series) else pd.Series(visit if isinstance(visit, dict) else {})
+    outcome_s = str(v.get("outcome") or "").strip()
+    if outcome_s == "responded":
+        return True
+    if outcome_s == "on_hold" and str(v.get("response_note") or "").strip():
+        return True
+
+    start = _parse_ts(v.get("visit_start"))
+    end = _parse_ts(v.get("visit_end"))
+    if pd.isna(start):
+        return False
+    eval_at = end if pd.notna(end) else pd.Timestamp.now(tz="UTC")
+
+    if ticket_row is not None:
+        row = ticket_row if isinstance(ticket_row, pd.Series) else pd.Series(
+            ticket_row if isinstance(ticket_row, dict) else {}
+        )
+        resp = _parse_ts(row.get("responded_at"))
+        if pd.notna(resp) and start <= resp <= eval_at:
+            return True
+    return False
+
+
+def _perf_visit_cycle_responded_at_in_window(
+    visit: object,
+    ticket_row: object | None = None,
+) -> object:
+    """``responded_at`` only when the reply belongs to this visit cycle window."""
+    v = visit if isinstance(visit, pd.Series) else pd.Series(visit if isinstance(visit, dict) else {})
+    start = _parse_ts(v.get("visit_start"))
+    if pd.isna(start):
+        return None
+    end = _parse_ts(v.get("visit_end"))
+    eval_at = end if pd.notna(end) else pd.Timestamp.now(tz="UTC")
+    if ticket_row is None:
+        return None
+    row = ticket_row if isinstance(ticket_row, pd.Series) else pd.Series(
+        ticket_row if isinstance(ticket_row, dict) else {}
+    )
+    resp = _parse_ts(row.get("responded_at"))
+    if pd.notna(resp) and start <= resp <= eval_at:
+        return row.get("responded_at")
+    return None
+
+
+def _perf_overview_visit_cycle_unattended(
+    visit: object,
+    ticket_row: object | None = None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Unattended case after assign-day cutoff (UTC+5), or cycle closed without response.
+
+    Telegram nudges do not count. Same-day active assignments stay pending until cutoff.
+    Later attendance on the ticket does not erase a prior assign-day failure.
+    """
+    v = visit if isinstance(visit, pd.Series) else pd.Series(visit if isinstance(visit, dict) else {})
+    outcome_s = str(v.get("outcome") or "").strip()
+    if outcome_s in ("responded", "on_hold"):
+        return False
+    if _perf_visit_cycle_had_field_response(v, ticket_row):
+        return False
+    if outcome_s == "unattended":
+        return True
+    if outcome_s == "reassigned":
+        return True
+
+    start = _parse_ts(v.get("visit_start"))
+    if pd.isna(start):
+        return False
+
+    end = _parse_ts(v.get("visit_end"))
+    is_active = bool(v.get("is_active")) if "is_active" in v.index else False
+
+    if outcome_s == "assigned":
+        if is_active and ticket_row is not None:
+            visit_eng = _perf_person_credit_key(_perf_norm_member(v.get("assignee")))
+            current_eng = _perf_person_credit_key(_perf_norm_member(ticket_row.get("assigned_to")))
+            if visit_eng != current_eng:
+                return False
+
+        visit_end_raw = v.get("visit_end")
+        return visit_cycle_is_unattended(
+            visit_start=v.get("visit_start"),
+            visit_end=visit_end_raw if pd.notna(end) else None,
+            outcome=outcome_s,
+            responded_at=_perf_visit_cycle_responded_at_in_window(v, ticket_row),
+            now=now,
+        )
+
+    return False
+
+
+def _perf_overview_unattended_cycle_dedupe_key(visit: object, ticket_number: str) -> str:
+    """One unattended case per ticket + assignee + assign day (UTC+5)."""
+    v = visit if isinstance(visit, pd.Series) else pd.Series(visit if isinstance(visit, dict) else {})
+    assignee = _perf_person_credit_key(_perf_norm_member(v.get("assignee")))
+    start = _parse_ts(v.get("visit_start"))
+    if pd.notna(start):
+        assign_day = start.tz_convert(LOCAL_TZ).date().isoformat()
+    else:
+        assign_day = str(v.get("visit_start") or "")[:10]
+    return f"cycle:{ticket_number}:{assignee}:{assign_day}"
+
+
 def _perf_overview_unattended_counts_by_credit(
     df_all: pd.DataFrame,
     *,
     focus: str,
     visits: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> dict[str, int]:
-    """Unattended accountability per engineer (visit-fair credit + pending overdue)."""
-    if df_all.empty:
-        return {}
-    view = df_all.copy()
-    if focus not in ("", "All"):
-        view = view.loc[view.apply(lambda r: _perf_row_credited_to_person(r, focus), axis=1)]
-    if view.empty:
+    """Unattended = one count per assignment cycle, assignee only (reassign = new case)."""
+    if df_all.empty or "ticket_number" not in df_all.columns:
         return {}
 
-    eligible = view.loc[_perf_overview_unattended_eligible_mask(view)]
-    if eligible.empty:
+    ticket_nums = set(_perf_overview_ticket_numbers(df_all))
+    tickets_by_num: dict[str, pd.Series] = {}
+    for _, row in df_all.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if tn:
+            tickets_by_num[tn] = row
+
+    if not ticket_nums:
         return {}
 
     visit_df = (
@@ -24088,10 +24386,275 @@ def _perf_overview_unattended_counts_by_credit(
     )
 
     counts: dict[str, int] = {}
-    for _, row in eligible.iterrows():
-        for credit_key in _perf_unattended_credit_keys_for_ticket(row, visits=visit_df):
-            counts[credit_key] = int(counts.get(credit_key, 0)) + 1
+    seen_cycles: set[str] = set()
+    focus_key = _perf_person_credit_key(focus) if focus not in ("", "All") else ""
+    prepared = _perf_prepare_visits_df(visit_df) if not visit_df.empty else pd.DataFrame()
+
+    def _record_unattended(*, credit_key: str, dedupe_key: str) -> None:
+        if not credit_key or credit_key == "(unknown)" or dedupe_key in seen_cycles:
+            return
+        if focus_key and credit_key != focus_key:
+            return
+        seen_cycles.add(dedupe_key)
+        counts[credit_key] = int(counts.get(credit_key, 0)) + 1
+
+    if not prepared.empty:
+        for _, visit in prepared.iterrows():
+            tn = str(visit.get("ticket_number") or "").strip()
+            if tn not in ticket_nums:
+                continue
+            ticket_row = tickets_by_num.get(tn)
+
+            visit_start = _parse_ts(visit.get("visit_start"))
+            if pd.isna(visit_start):
+                continue
+            if range_start is not None and range_end is not None:
+                if visit_start < range_start or visit_start > range_end:
+                    continue
+
+            if not _perf_overview_visit_cycle_unattended(visit, ticket_row):
+                continue
+
+            cycle_keys = _perf_visit_cycle_unattended_credit_keys(visit)
+            if focus_key:
+                cycle_keys = [k for k in cycle_keys if k == focus_key]
+                if not cycle_keys:
+                    continue
+
+            dedupe_key = _perf_overview_unattended_cycle_dedupe_key(visit, tn)
+            for credit_key in cycle_keys:
+                _record_unattended(credit_key=credit_key, dedupe_key=dedupe_key)
+
+    tickets_with_visits = (
+        set(prepared["ticket_number"].astype(str).str.strip())
+        if not prepared.empty and "ticket_number" in prepared.columns
+        else set()
+    )
+
+    for tn in ticket_nums:
+        row = tickets_by_num[tn]
+        if not _ticket_pending_unattended_eligible_row(row):
+            continue
+
+        primary = _perf_person_credit_key(_perf_norm_member(row.get("assigned_to")))
+        if not primary or primary == "(unknown)":
+            continue
+        if focus_key and primary != focus_key:
+            continue
+
+        if tn in tickets_with_visits and not prepared.empty:
+            active_for_primary = False
+            ticket_visits = prepared[
+                prepared["ticket_number"].astype(str).str.strip().eq(tn)
+            ]
+            for _, visit in ticket_visits.iterrows():
+                if str(visit.get("outcome") or "").strip() != "assigned":
+                    continue
+                if not bool(visit.get("is_active")) if "is_active" in visit.index else False:
+                    continue
+                if _perf_person_credit_key(_perf_norm_member(visit.get("assignee"))) == primary:
+                    active_for_primary = True
+                    break
+            if active_for_primary:
+                continue
+
+        assigned_ts = _parse_ts(row.get("last_assigned_at"))
+        if pd.isna(assigned_ts):
+            continue
+        if range_start is not None and range_end is not None:
+            if assigned_ts < range_start or assigned_ts > range_end:
+                continue
+
+        assign_day = assigned_ts.tz_convert(LOCAL_TZ).date().isoformat()
+        dedupe_key = f"pending:{tn}:{primary}:{assign_day}"
+        _record_unattended(credit_key=primary, dedupe_key=dedupe_key)
+
     return counts
+
+
+def _perf_ticket_row_category(row: object | None) -> str:
+    if row is None:
+        return "(uncategorized)"
+    data = row if isinstance(row, pd.Series) else pd.Series(row if isinstance(row, dict) else {})
+    cat = canonical_task_category(data.get("task_category"))
+    return str(cat) if cat else "(uncategorized)"
+
+
+def _perf_unattended_assignment_rows(
+    df_all: pd.DataFrame,
+    *,
+    focus: str,
+    visits: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
+) -> list[dict[str, str]]:
+    """Ticket-level unattended assignment cases for Summary / Unattended tab."""
+    if df_all.empty or "ticket_number" not in df_all.columns:
+        return []
+
+    ticket_nums = set(_perf_overview_ticket_numbers(df_all))
+    tickets_by_num: dict[str, pd.Series] = {}
+    for _, row in df_all.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if tn:
+            tickets_by_num[tn] = row
+
+    visit_df = (
+        visits
+        if visits is not None
+        else _perf_load_overview_visits_history(df_all)
+    )
+    rows: list[dict[str, str]] = []
+    seen_cycles: set[str] = set()
+    focus_key = _perf_person_credit_key(focus) if focus not in ("", "All") else ""
+    prepared = _perf_prepare_visits_df(visit_df) if not visit_df.empty else pd.DataFrame()
+
+    def _append_row(
+        *,
+        dedupe_key: str,
+        ticket_number: str,
+        assign_day: str,
+        case_kind: str,
+        visit_outcome: str,
+        ticket_row: pd.Series | None,
+    ) -> None:
+        if dedupe_key in seen_cycles:
+            return
+        seen_cycles.add(dedupe_key)
+        status = "—"
+        if ticket_row is not None:
+            status = str(ticket_row.get("status") or "—").strip() or "—"
+        rows.append(
+            {
+                "Ticket": ticket_number,
+                "Category": _perf_ticket_row_category(ticket_row),
+                "Assign day": assign_day,
+                "Case kind": case_kind,
+                "Visit outcome": visit_outcome,
+                "Status": status,
+            }
+        )
+
+    if not prepared.empty:
+        for _, visit in prepared.iterrows():
+            tn = str(visit.get("ticket_number") or "").strip()
+            if tn not in ticket_nums:
+                continue
+            ticket_row = tickets_by_num.get(tn)
+
+            visit_start = _parse_ts(visit.get("visit_start"))
+            if pd.isna(visit_start):
+                continue
+            if range_start is not None and range_end is not None:
+                if visit_start < range_start or visit_start > range_end:
+                    continue
+
+            if not _perf_overview_visit_cycle_unattended(visit, ticket_row):
+                continue
+
+            cycle_keys = _perf_visit_cycle_unattended_credit_keys(visit)
+            if focus_key:
+                cycle_keys = [k for k in cycle_keys if k == focus_key]
+                if not cycle_keys:
+                    continue
+
+            assign_day = visit_start.tz_convert(LOCAL_TZ).date().isoformat()
+            dedupe_key = _perf_overview_unattended_cycle_dedupe_key(visit, tn)
+            outcome = str(visit.get("outcome") or "").strip() or "assigned"
+            kind = "Reassigned" if outcome == "reassigned" else "Visit cycle"
+            _append_row(
+                dedupe_key=dedupe_key,
+                ticket_number=tn,
+                assign_day=assign_day,
+                case_kind=kind,
+                visit_outcome=outcome,
+                ticket_row=ticket_row,
+            )
+
+    tickets_with_visits = (
+        set(prepared["ticket_number"].astype(str).str.strip())
+        if not prepared.empty and "ticket_number" in prepared.columns
+        else set()
+    )
+
+    for tn in ticket_nums:
+        row = tickets_by_num[tn]
+        if not _ticket_pending_unattended_eligible_row(row):
+            continue
+
+        primary = _perf_person_credit_key(_perf_norm_member(row.get("assigned_to")))
+        if not primary or primary == "(unknown)":
+            continue
+        if focus_key and primary != focus_key:
+            continue
+
+        if tn in tickets_with_visits and not prepared.empty:
+            active_for_primary = False
+            ticket_visits = prepared[
+                prepared["ticket_number"].astype(str).str.strip().eq(tn)
+            ]
+            for _, visit in ticket_visits.iterrows():
+                if str(visit.get("outcome") or "").strip() != "assigned":
+                    continue
+                if not bool(visit.get("is_active")) if "is_active" in visit.index else False:
+                    continue
+                if _perf_person_credit_key(_perf_norm_member(visit.get("assignee"))) == primary:
+                    active_for_primary = True
+                    break
+            if active_for_primary:
+                continue
+
+        assigned_ts = _parse_ts(row.get("last_assigned_at"))
+        if pd.isna(assigned_ts):
+            continue
+        if range_start is not None and range_end is not None:
+            if assigned_ts < range_start or assigned_ts > range_end:
+                continue
+
+        assign_day = assigned_ts.tz_convert(LOCAL_TZ).date().isoformat()
+        dedupe_key = f"pending:{tn}:{primary}:{assign_day}"
+        _append_row(
+            dedupe_key=dedupe_key,
+            ticket_number=tn,
+            assign_day=assign_day,
+            case_kind="Open daily task",
+            visit_outcome="assigned",
+            ticket_row=row,
+        )
+
+    return sorted(rows, key=lambda r: (r["Assign day"], r["Ticket"]), reverse=True)
+
+
+def _perf_flagged_unattended_ticket_rows(
+    df_all: pd.DataFrame,
+    *,
+    focus: str,
+) -> list[dict[str, str]]:
+    """Snapshot flagged backlog (``marked_unattended_at``) for one engineer."""
+    if df_all.empty:
+        return []
+    flagged = df_all.loc[_ticket_marked_unattended_mask(df_all)]
+    view = _perf_filter_by_person(flagged, focus)
+    if view.empty:
+        return []
+
+    rows: list[dict[str, str]] = []
+    for _, row in view.iterrows():
+        marked = _parse_ts(row.get("marked_unattended_at"))
+        flagged_local = (
+            marked.tz_convert(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+            if pd.notna(marked)
+            else "—"
+        )
+        rows.append(
+            {
+                "Ticket": str(row.get("ticket_number") or "").strip(),
+                "Category": _perf_ticket_row_category(row),
+                "Status": str(row.get("status") or "—").strip() or "—",
+                "Flagged at": flagged_local,
+            }
+        )
+    return sorted(rows, key=lambda r: r["Flagged at"], reverse=True)
 
 
 def _render_combined_overview_legend() -> None:
@@ -24113,7 +24676,7 @@ def _render_combined_overview_legend() -> None:
       <strong>Residential</strong> = visit fair credit (full snapshot; unattended excluded) ·
       <strong>Resort</strong> = assignment credit (full snapshot) ·
       <strong>Admin</strong> = no field engineer (residential or resort) ·
-      <strong>Unattended</strong> = no field response (flagged or overdue Daily Task).</p>
+      <strong>Unattended</strong> = one case per assign day after cutoff (assignee only; nudges excluded).</p>
     """,
         unsafe_allow_html=True,
     )
@@ -24270,76 +24833,6 @@ def _render_perf_overview_board_fast(
                     st.rerun()
 
 
-def _render_combined_overview_row(
-    *,
-    credit_key: str,
-    res: dict[str, object] | None,
-    rsr: dict[str, object] | None,
-    unattended_count: int = 0,
-) -> None:
-    """One engineer — residential + resort solo/shared in a single bar."""
-    res_solo = int(res.get("solo", 0)) if res else 0
-    res_shared = int(res.get("shared", 0)) if res else 0
-    rsr_solo = int(rsr.get("solo", 0)) if rsr else 0
-    rsr_shared = int(rsr.get("shared", 0)) if rsr else 0
-    unattended = int(unattended_count)
-    total = res_solo + res_shared + rsr_solo + rsr_shared + unattended
-    if total <= 0:
-        return
-
-    source = res or rsr or {}
-    btn_id = str(source.get("engineer") or _perf_overview_button_key(credit_key))
-    label = str(source.get("label") or _perf_overview_row_label(credit_key))
-    if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
-        label = f"🔒 {label.lstrip('🔒 ')}"
-    key_suffix = _perf_overview_button_key(credit_key)
-
-    def _pct(n: int) -> float:
-        return (n / total) * 100 if total else 0.0
-
-    segs = ""
-    for count, color in (
-        (res_solo, CHART_COLORS["solo"]),
-        (res_shared, CHART_COLORS["shared"]),
-        (rsr_solo, CHART_COLORS["resort_solo"]),
-        (rsr_shared, CHART_COLORS["resort_shared"]),
-        (unattended, "#ef4444"),
-    ):
-        if count > 0:
-            segs += f'<div style="background:{color};width:{_pct(count)}%"></div>'
-    if not segs:
-        segs = f'<div style="background:{CHART_COLORS["grid"]};width:100%"></div>'
-
-    stat_parts: list[str] = []
-    if res_solo or res_shared:
-        stat_parts.append(f"Res {res_solo} solo / {res_shared} shared")
-    if rsr_solo or rsr_shared:
-        stat_parts.append(
-            f'<span style="color:#a78bfa">Rsr {rsr_solo} solo / {rsr_shared} shared</span>'
-        )
-    if unattended > 0:
-        stat_parts.append(f'<span style="color:#ef4444">Unatt {unattended}</span>')
-    stats_line = " · ".join(stat_parts) if stat_parts else "—"
-
-    col_btn, col_bar = st.columns([1, 4])
-    with col_btn:
-        if st.button(label, key=f"ov_all_{key_suffix}", use_container_width=True):
-            st.session_state[_PERF_SELECTED_ENGINEER_KEY] = btn_id
-            st.rerun()
-    with col_bar:
-        st.markdown(
-            f"""
-        <div style="margin-top:4px">
-          <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;
-            background:{CHART_COLORS['grid']}">{segs}</div>
-          <p style="font-size:11px;line-height:1.35;margin:4px 0 0;color:#8a9ac0">
-            {stats_line}</p>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
-
-
 def _render_perf_overview_tab(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
@@ -24366,22 +24859,33 @@ def _render_perf_overview_tab(
     rsr_map = _solo_shared_rows_by_credit_key(rsr_rows)
     visits_history = _perf_load_overview_visits_history(df_all)
     unattended_map = _perf_overview_unattended_counts_by_credit(
-        df_all, focus=focus, visits=visits_history
+        df_all,
+        focus=focus,
+        visits=visits_history,
+        range_start=range_start,
+        range_end=range_end,
     )
 
-    all_keys = sorted(
-        set(res_map) | set(rsr_map) | set(unattended_map),
-        key=lambda k: (
-            -(
-                int(res_map.get(k, {}).get("solo", 0))
-                + int(res_map.get(k, {}).get("shared", 0))
-                + int(rsr_map.get(k, {}).get("solo", 0))
-                + int(rsr_map.get(k, {}).get("shared", 0))
-                + int(unattended_map.get(k, 0))
+    if focus not in ("", "All"):
+        focus_key = _perf_person_credit_key(focus)
+        if focus_key and focus_key != "(unknown)":
+            all_keys = [focus_key]
+        else:
+            all_keys = []
+    else:
+        all_keys = sorted(
+            set(res_map) | set(rsr_map) | set(unattended_map),
+            key=lambda k: (
+                -(
+                    int(res_map.get(k, {}).get("solo", 0))
+                    + int(res_map.get(k, {}).get("shared", 0))
+                    + int(rsr_map.get(k, {}).get("solo", 0))
+                    + int(rsr_map.get(k, {}).get("shared", 0))
+                    + int(unattended_map.get(k, 0))
+                ),
+                str(k).lower(),
             ),
-            str(k).lower(),
-        ),
-    )
+        )
 
     if not all_keys:
         st.markdown(
@@ -24391,9 +24895,10 @@ def _render_perf_overview_tab(
         )
         return
 
+    focus_suffix = html.escape(_perf_focus_heading_suffix(focus))
     st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
-        'margin:6px 0 8px">Solo vs shared — Residential + Resort (all cases)</p>',
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
+        f'margin:6px 0 8px">Solo vs shared — Residential + Resort (all cases){focus_suffix}</p>',
         unsafe_allow_html=True,
     )
     _render_combined_overview_legend()
@@ -24403,6 +24908,17 @@ def _render_perf_overview_tab(
         res_map=res_map,
         rsr_map=rsr_map,
         unattended_map=unattended_map,
+    )
+
+    total_unatt_cases = sum(int(v) for v in unattended_map.values())
+    flagged_backlog = (
+        int(_ticket_marked_unattended_mask(df_all).sum()) if not df_all.empty else 0
+    )
+    range_label = _format_perf_range_caption() or "sidebar range"
+    st.caption(
+        f"**Unatt assignments ({range_label}):** {total_unatt_cases} case(s) · "
+        f"**Flagged backlog (snapshot):** {flagged_backlog} ticket(s). "
+        "Assignment = one per assign day, assignee only; sticks after cutoff even if later attended."
     )
 
     st.markdown(
@@ -24449,14 +24965,15 @@ def _get_engineer_performance_detail(
                 rsr_solo += 1
     resort_count = rsr_solo + rsr_shared
 
-    overview_unattended = 0
-    credited_all = _perf_overview_field_tickets(df_all, person=credit_key)
-    if not credited_all.empty:
-        eligible = credited_all.loc[_perf_overview_unattended_eligible_mask(credited_all)]
-        for _, row in eligible.iterrows():
-            keys = _perf_unattended_credit_keys_for_ticket(row, visits=visits_history)
-            if credit_key in keys:
-                overview_unattended += 1
+    overview_unattended = int(
+        _perf_overview_unattended_counts_by_credit(
+            df_all,
+            focus=credit_key,
+            visits=visits_history,
+            range_start=range_start,
+            range_end=range_end,
+        ).get(credit_key, 0)
+    )
 
     in_range = pd.DataFrame()
     if not df_all.empty and credit_key not in ("", "(unknown)"):
@@ -24476,12 +24993,15 @@ def _get_engineer_performance_detail(
     if not credited.empty and "status" in credited.columns:
         status_col = credited["status"].astype(str)
         resolved = int(status_col.eq(STATUS_RESOLVED).sum())
-        eligible = credited.loc[_perf_overview_unattended_eligible_mask(credited)]
-        for _, row in eligible.iterrows():
-            if credit_key in _perf_unattended_credit_keys_for_ticket(
-                row, visits=visits_history
-            ):
-                unattended += 1
+        unattended = int(
+            _perf_overview_unattended_counts_by_credit(
+                credited,
+                focus=credit_key,
+                visits=visits_history,
+                range_start=range_start,
+                range_end=range_end,
+            ).get(credit_key, 0)
+        )
 
     recent = credited.copy()
     if not recent.empty and "updated_at" in recent.columns:
@@ -24954,8 +25474,13 @@ def _perf_handled_tab_context(
     n_assigned_in_range = 0
 
     if field_has_data or not sales_all.empty:
+        visits_for_assign = (
+            _perf_filter_visits_by_person(visits_all, focus)
+            if focus not in ("", "All")
+            else visits_all
+        )
         assigned_ids = _perf_assigned_ticket_ids_in_range(
-            visits_all,
+            visits_for_assign,
             df_all,
             range_start=range_start,
             range_end=range_end,
@@ -25003,10 +25528,11 @@ def _perf_handled_tab_context(
     n_handled_field_resolved = (
         n_field_resolved + n_admin_closed_resp + n_admin_closed_desk
     )
+    visits_f = _perf_filter_visits_by_person(visits_all, focus)
     responded_in_view = pd.DataFrame()
-    if not visits_all.empty and "outcome" in visits_all.columns:
-        responded_in_view = visits_all[
-            visits_all["outcome"].astype(str).eq("responded")
+    if not visits_f.empty and "outcome" in visits_f.columns:
+        responded_in_view = visits_f[
+            visits_f["outcome"].astype(str).eq("responded")
         ].copy()
     n_handled_visit_tickets = (
         int(responded_in_view["ticket_number"].astype(str).nunique())
@@ -25015,7 +25541,6 @@ def _perf_handled_tab_context(
     )
     range_caption = _format_perf_range_caption() or "selected range"
     bucket_fmt, x_title, axis_format = _perf_bucket_settings(range_start, range_end)
-    visits_f = _perf_filter_visits_by_person(visits_all, focus)
 
     return {
         "work_view": work_view,
@@ -25024,6 +25549,7 @@ def _perf_handled_tab_context(
         "bucket_fmt": bucket_fmt,
         "x_title": x_title,
         "axis_format": axis_format,
+        "focus": focus,
         "n_assigned_in_range": n_assigned_in_range,
         "n_work": n_work,
         "n_work_field": n_work_field,
@@ -25132,6 +25658,7 @@ def _get_weekly_attended_by_engineer(
         sales_all,
         range_start=week_start,
         range_end=week_end,
+        focus=focus,
     )
     summary = bundle["summary"]
     if summary.empty or "Attended by" not in summary.columns:
@@ -25173,13 +25700,13 @@ def _render_perf_weekly_tab(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    """Executive Summary — same sidebar Range as other Performance views."""
-    del focus  # full report; use sidebar Focus assignee on other views
+    """Executive Summary — same sidebar Range + Focus assignee as other Performance views."""
     _render_perf_weekly_attended_report(
         df_all,
         sales_all,
         sidebar_range_start=range_start,
         sidebar_range_end=range_end,
+        focus=focus,
     )
 
 
@@ -25187,7 +25714,14 @@ def _get_on_hold_by_assignee(on_hold: pd.DataFrame, *, focus: str) -> list[dict[
     if on_hold.empty:
         return []
     view = _perf_filter_by_person(on_hold, focus)
-    if view.empty or "assigned_to" not in view.columns:
+    if view.empty:
+        return []
+    if focus not in ("", "All"):
+        stem = _canonical_username_stem(focus)
+        if not stem:
+            return []
+        return [{"assigned_to": stem, "count": len(view)}]
+    if "assigned_to" not in view.columns:
         return []
     counts = (
         view["assigned_to"]
@@ -25202,35 +25736,78 @@ def _get_on_hold_by_assignee(on_hold: pd.DataFrame, *, focus: str) -> list[dict[
     ]
 
 
+def _perf_on_hold_ticket_rows(
+    on_hold: pd.DataFrame,
+    *,
+    focus: str,
+) -> list[dict[str, str]]:
+    """Ticket-level on-hold rows for Performance → On hold."""
+    if on_hold.empty:
+        return []
+    view = _perf_filter_by_person(on_hold, focus)
+    if view.empty:
+        return []
+    rows: list[dict[str, str]] = []
+    for _, row in view.iterrows():
+        assignees = _perf_ticket_credit_assignees(row)
+        staff = ", ".join(assignees) if assignees else "—"
+        rows.append(
+            {
+                "Ticket": str(row.get("ticket_number") or "").strip(),
+                "Category": _perf_ticket_row_category(row),
+                "Staff": staff,
+            }
+        )
+    return sorted(rows, key=lambda r: r["Ticket"])
+
+
 def _render_perf_on_hold_tab(on_hold: pd.DataFrame, *, focus: str) -> None:
+    focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
-        "On hold by assignee</p>",
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
+        f"On hold by assignee{html.escape(focus_suffix)}</p>",
         unsafe_allow_html=True,
     )
+    st.caption("Queue snapshot — not limited by sidebar Range.")
     data = _get_on_hold_by_assignee(on_hold, focus=focus)
-    if not data:
+    ticket_rows = _perf_on_hold_ticket_rows(on_hold, focus=focus)
+    if not data and not ticket_rows:
         st.markdown(
             '<div style="padding:30px;text-align:center;color:#2a3a5a;font-size:14px">'
             "No tickets currently on hold</div>",
             unsafe_allow_html=True,
         )
         return
-    _render_perf_fast_table_with_actions(
-        headers=["Assignee", "On hold"],
-        rows=[
-            [
-                f"@{html.escape(str(row['assigned_to']))}",
-                f'<span style="font-size:16px;font-weight:600;color:#f59e0b;'
-                f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
-            ]
-            for row in data
-        ],
-        action_keys=[str(row["assigned_to"]) for row in data],
-        action_label="●",
-        on_action=_perf_select_engineer,
-        actions_container_key="perf_on_hold_actions",
-    )
+    if focus in ("", "All") and data:
+        _render_perf_fast_table_with_actions(
+            headers=["Assignee", "On hold"],
+            rows=[
+                [
+                    f"@{html.escape(str(row['assigned_to']))}",
+                    f'<span style="font-size:16px;font-weight:600;color:#f59e0b;'
+                    f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
+                ]
+                for row in data
+            ],
+            action_keys=[str(row["assigned_to"]) for row in data],
+            action_label="●",
+            on_action=_perf_select_engineer,
+            actions_container_key="perf_on_hold_actions",
+        )
+    if ticket_rows:
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">On hold tickets</p>',
+            unsafe_allow_html=True,
+        )
+        hold_df = pd.DataFrame(ticket_rows)
+        _render_perf_dataframe(hold_df)
+        st.download_button(
+            "Download on hold CSV",
+            data=hold_df.to_csv(index=False).encode("utf-8"),
+            file_name="perf_on_hold_tickets.csv",
+            mime="text/csv",
+            key="perf_on_hold_tickets_csv",
+        )
 
 
 def _get_unattended_by_assignee(
@@ -25243,49 +25820,27 @@ def _get_unattended_by_assignee(
 ) -> list[dict[str, object]]:
     if df_all.empty:
         return []
-    view = _perf_filter_by_person(df_all, focus)
-    if view.empty:
-        return []
-
-    eligible = view.loc[_perf_overview_unattended_eligible_mask(view)]
-    if eligible.empty:
-        return []
-
-    in_range_rows: list[pd.Series] = []
-    for _, row in eligible.iterrows():
-        marked_ts = _parse_ts(row.get("marked_unattended_at"))
-        if pd.notna(marked_ts):
-            if range_start <= marked_ts <= range_end:
-                in_range_rows.append(row)
-            continue
-        assigned_ts = _parse_ts(row.get("last_assigned_at"))
-        if pd.notna(assigned_ts) and range_start <= assigned_ts <= range_end:
-            in_range_rows.append(row)
-        elif pd.isna(assigned_ts):
-            ref = _parse_ts(row.get("updated_at"))
-            if pd.notna(ref) and range_start <= ref <= range_end:
-                in_range_rows.append(row)
-
-    if not in_range_rows:
-        return []
 
     visit_df = (
         visits
         if visits is not None
         else _perf_load_overview_visits_history(df_all)
     )
-
-    counts: dict[str, int] = {}
-    for row in in_range_rows:
-        for credit_key in _perf_unattended_credit_keys_for_ticket(row, visits=visit_df):
-            stem = _canonical_username_stem(credit_key)
-            if not stem:
-                continue
-            counts[stem] = int(counts.get(stem, 0)) + 1
+    counts = _perf_overview_unattended_counts_by_credit(
+        df_all,
+        focus=focus,
+        visits=visit_df,
+        range_start=range_start,
+        range_end=range_end,
+    )
 
     return [
-        {"assigned_to": eng, "count": int(c)}
-        for eng, c in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        {"assigned_to": _canonical_username_stem(credit_key), "count": int(c)}
+        for credit_key, c in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], str(item[0]).lower()),
+        )
+        if _canonical_username_stem(credit_key)
     ]
 
 
@@ -25296,15 +25851,17 @@ def _render_perf_unattended_tab(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
+    focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
-        "Unattended by engineer</p>",
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
+        f"Unattended by engineer{html.escape(focus_suffix)}</p>",
         unsafe_allow_html=True,
     )
     st.caption(
-        "Counts no-response tickets in the sidebar Range (flagged or overdue Daily Task). "
-        "Credit uses the assignee active at mark time — not after reassignment. "
-        "The UNATTENDED metric card counts only permanently flagged tickets."
+        "One case per assignment with no field response after assign-day cutoff (23:59 UTC+5) — assignee only. "
+        "Telegram nudges do not count. "
+        "Same ticket reassigned next day counts again for the new assignee. "
+        f"Uses sidebar **Range** ({_format_perf_range_caption() or 'selected range'})."
     )
     visits_history = _perf_load_overview_visits_history(df_all)
     data = _get_unattended_by_assignee(
@@ -25314,28 +25871,73 @@ def _render_perf_unattended_tab(
         range_end=range_end,
         visits=visits_history,
     )
-    if not data:
+    assignment_rows = _perf_unattended_assignment_rows(
+        df_all,
+        focus=focus,
+        visits=visits_history,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    if not data and not assignment_rows:
         st.markdown(
             '<div style="padding:30px;text-align:center;color:#2a3a5a;font-size:14px">'
-            "No unattended tickets in this range</div>",
+            "No unattended assignment cases in this range</div>",
             unsafe_allow_html=True,
         )
         return
-    _render_perf_fast_table_with_actions(
-        headers=["Engineer", "Unattended"],
-        rows=[
-            [
-                f'<span style="color:#8a9ac0">@{html.escape(str(row["assigned_to"]))}</span>',
-                f'<span style="font-size:16px;font-weight:600;color:#ef4444;'
-                f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
-            ]
-            for row in data
-        ],
-        action_keys=[str(row["assigned_to"]) for row in data],
-        action_label="→",
-        on_action=_perf_jump_to_unattended_queue,
-        actions_container_key="perf_unattended_actions",
-    )
+    if focus in ("", "All") and data:
+        _render_perf_fast_table_with_actions(
+            headers=["Engineer", "Unatt assignments"],
+            rows=[
+                [
+                    f'<span style="color:#8a9ac0">@{html.escape(str(row["assigned_to"]))}</span>',
+                    f'<span style="font-size:16px;font-weight:600;color:#ef4444;'
+                    f'font-variant-numeric:tabular-nums">{row["count"]}</span>',
+                ]
+                for row in data
+            ],
+            action_keys=[str(row["assigned_to"]) for row in data],
+            action_label="→",
+            on_action=_perf_jump_to_unattended_queue,
+            actions_container_key="perf_unattended_actions",
+        )
+    if assignment_rows:
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">'
+            "Unatt assignment cases</p>",
+            unsafe_allow_html=True,
+        )
+        unatt_df = pd.DataFrame(assignment_rows)
+        _render_perf_dataframe(
+            unatt_df,
+            column_config={
+                "Ticket": st.column_config.TextColumn(width="medium"),
+                "Category": st.column_config.TextColumn(width="medium"),
+                "Assign day": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.download_button(
+            "Download unattended assignments CSV",
+            data=unatt_df.to_csv(index=False).encode("utf-8"),
+            file_name="perf_unattended_assignments.csv",
+            mime="text/csv",
+            key="perf_unattended_assignments_csv",
+        )
+        if focus not in ("", "All"):
+            st.caption(
+                "Flagged backlog detail is under **Summary → Unattended** for this engineer."
+            )
+
+
+def _on_perf_focus_change() -> None:
+    """Sync detail panel selection when Focus assignee changes."""
+    _sync_perf_detail_to_focus()
+    focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    if focus != "All engineers":
+        view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+        allowed = _perf_focused_view_options()
+        if view not in allowed:
+            st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
 
 
 def _render_performance_sidebar() -> None:
@@ -25347,14 +25949,15 @@ def _render_performance_sidebar() -> None:
     engineers = get_engineer_handles()
     options = ["All engineers"] + engineers
     cur_focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    if cur_focus not in options:
+        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = "All engineers"
     focus = st.selectbox(
         "Focus assignee",
         options,
-        index=options.index(cur_focus) if cur_focus in options else 0,
         label_visibility="collapsed",
-        key="perf_focus_select",
+        key=_PERF_FOCUS_ASSIGNEE_KEY,
+        on_change=_on_perf_focus_change,
     )
-    st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = focus
 
     if focus != "All engineers":
         st.markdown(
@@ -25400,10 +26003,11 @@ def _render_performance_sidebar() -> None:
         t_section_label("View", margin="margin:18px 0 7px"),
         unsafe_allow_html=True,
     )
-    views = list(_PERF_VIEW_OPTIONS)
+    views = list(_perf_sidebar_view_options(_perf_focus_for_filter()))
     cur_view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
     if cur_view not in views:
-        cur_view = "Overview"
+        cur_view = views[0]
+        st.session_state[_PERF_ACTIVE_VIEW_KEY] = cur_view
     active_view = st.radio(
         "View",
         views,
@@ -25413,7 +26017,7 @@ def _render_performance_sidebar() -> None:
     )
     if active_view != st.session_state.get(_PERF_ACTIVE_VIEW_KEY):
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = active_view
-        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
+        _sync_perf_detail_to_focus()
         st.rerun()
 
 
@@ -25436,10 +26040,12 @@ def _render_perf_handled_tab(
     n_handled_field_resolved: int,
     n_handled_investigation: int,
     n_handled_visit_tickets: int,
+    focus: str = "All",
 ) -> None:
     sales_part = f" + <strong>{n_work_sales}</strong> Resort" if n_work_sales else ""
+    focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
-        t_heading("Handled"),
+        t_heading(f"Handled{focus_suffix}"),
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -25608,9 +26214,18 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
     visits_all = ctx["visits_all"]
     visits_f = ctx["visits_f"]
 
-    if view != "Summary":
+    if view == "Overview":
         _render_performance_metric_strip(counts=counts)
         st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+    elif view == "On hold":
+        _render_performance_metric_strip(counts=counts)
+        st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+    elif view != "Summary":
+        st.caption(
+            "Queue snapshot cards apply to **Overview** and **On hold** only. "
+            "This view uses the sidebar **Range**."
+        )
+        st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
     if view == "Overview":
         _render_perf_overview_tab(
             df_all,
