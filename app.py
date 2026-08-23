@@ -156,7 +156,10 @@ from unattended import (
     STATUS_DAILY_TASK,
     STATUS_UNATTENDED,
     UNATTENDED_NUDGE_HOURS,
+    has_field_response_since_assign,
+    is_daily_task_status,
     run_unattended_close,
+    should_close_as_unattended,
 )
 
 
@@ -3229,6 +3232,7 @@ def _invalidate_dashboard_data_cache(
         _cached_latest_admin_comment.clear()
     if visits:
         clearables.append(_fetch_visits_in_range_cached)
+        clearables.append(_fetch_visits_for_snapshot_cached)
     if field_engineers:
         clearables.append(_cached_field_engineer_usernames)
     if task_categories:
@@ -17644,6 +17648,128 @@ def _ticket_marked_unattended_mask(df: pd.DataFrame) -> pd.Series:
     return pd.Series(False, index=df.index)
 
 
+def _ticket_row_as_dict(row: object) -> dict:
+    if isinstance(row, pd.Series):
+        return row.to_dict()
+    if isinstance(row, dict):
+        return row
+    return {}
+
+
+def _ticket_has_field_response_since_assign_row(row: object) -> bool:
+    return has_field_response_since_assign(_ticket_row_as_dict(row))
+
+
+def _ticket_pending_unattended_eligible_row(row: object) -> bool:
+    data = _ticket_row_as_dict(row)
+    if not is_daily_task_status(data.get("status")):
+        return False
+    return should_close_as_unattended(data)
+
+
+def _perf_overview_unattended_eligible_mask(df: pd.DataFrame) -> pd.Series:
+    """Overview accountability: flagged unattended or overdue Daily Task without response."""
+    if df.empty:
+        return pd.Series(dtype=bool)
+    marked = _ticket_marked_unattended_mask(df)
+    pending = df.apply(_ticket_pending_unattended_eligible_row, axis=1)
+    responded = df.apply(_ticket_has_field_response_since_assign_row, axis=1)
+    return (marked | pending) & ~responded
+
+
+def _perf_visits_active_at_ref(
+    visits: pd.DataFrame,
+    ticket_number: str,
+    ref_ts: pd.Timestamp,
+) -> pd.DataFrame:
+    if visits.empty or not ticket_number or pd.isna(ref_ts):
+        return pd.DataFrame()
+    tn = str(ticket_number).strip()
+    part = visits[visits["ticket_number"].astype(str).str.strip().eq(tn)]
+    if part.empty:
+        return part
+    rows: list[pd.Series] = []
+    for _, visit in part.iterrows():
+        start = _parse_ts(visit.get("visit_start"))
+        end = _parse_ts(visit.get("visit_end"))
+        if pd.isna(start) or start > ref_ts:
+            continue
+        if pd.isna(end) or end >= ref_ts:
+            rows.append(visit)
+    return pd.DataFrame(rows) if rows else part.iloc[0:0].copy()
+
+
+def _perf_credit_keys_from_assignee_names(assignees: list[str]) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for eng in assignees:
+        key = _perf_person_credit_key(_perf_norm_member(eng))
+        if key in ("", "(unknown)") or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _perf_unattended_credit_keys_for_ticket(
+    row: object,
+    *,
+    visits: pd.DataFrame,
+) -> list[str]:
+    """Assignee(s) accountable for one ticket's unattended outcome."""
+    data = _ticket_row_as_dict(row)
+    tn = str(data.get("ticket_number") or "").strip()
+    if not tn or _ticket_has_field_response_since_assign_row(row):
+        return []
+
+    ticket_visits = pd.DataFrame()
+    if not visits.empty and "ticket_number" in visits.columns:
+        ticket_visits = visits[visits["ticket_number"].astype(str).str.strip().eq(tn)]
+
+    if not ticket_visits.empty and "outcome" in ticket_visits.columns:
+        explicit = ticket_visits[
+            ticket_visits["outcome"].astype(str).str.strip().eq("unattended")
+        ]
+        if not explicit.empty and "assignee" in explicit.columns:
+            keys = _perf_credit_keys_from_assignee_names(
+                explicit["assignee"].astype(str).tolist()
+            )
+            if keys:
+                return keys
+
+    marked_ts = _parse_ts(data.get("marked_unattended_at"))
+    pending = _ticket_pending_unattended_eligible_row(row)
+    if pd.isna(marked_ts) and not pending:
+        return []
+
+    ref_ts = marked_ts if pd.notna(marked_ts) else pd.Timestamp.now(tz="UTC")
+    last_assigned = _parse_ts(data.get("last_assigned_at"))
+    reassigned_after_mark = (
+        pd.notna(marked_ts)
+        and pd.notna(last_assigned)
+        and last_assigned > marked_ts
+    )
+
+    if not ticket_visits.empty:
+        active_at_ref = _perf_visits_active_at_ref(ticket_visits, tn, ref_ts)
+        if not active_at_ref.empty and "assignee" in active_at_ref.columns:
+            keys = _perf_credit_keys_from_assignee_names(
+                active_at_ref["assignee"].astype(str).tolist()
+            )
+            if keys:
+                if _perf_has_second_assignee(row) and not reassigned_after_mark:
+                    for eng in _perf_ticket_credit_assignees(row):
+                        key = _perf_person_credit_key(eng)
+                        if key and key not in keys:
+                            keys.append(key)
+                return keys
+
+    if reassigned_after_mark:
+        return []
+
+    return _perf_credit_keys_from_assignee_names(_perf_ticket_credit_assignees(row))
+
+
 def _ticket_follow_up_mask(df: pd.DataFrame) -> pd.Series:
     """Tracked follow-up cases: Under Investigation with ``follow_up_at`` set."""
     if df.empty:
@@ -23940,8 +24066,9 @@ def _perf_overview_unattended_counts_by_credit(
     df_all: pd.DataFrame,
     *,
     focus: str,
+    visits: pd.DataFrame | None = None,
 ) -> dict[str, int]:
-    """Unattended ticket counts per credited engineer (overview snapshot scope)."""
+    """Unattended accountability per engineer (visit-fair credit + pending overdue)."""
     if df_all.empty:
         return {}
     view = df_all.copy()
@@ -23949,16 +24076,20 @@ def _perf_overview_unattended_counts_by_credit(
         view = view.loc[view.apply(lambda r: _perf_row_credited_to_person(r, focus), axis=1)]
     if view.empty:
         return {}
-    unattended = view.loc[_ticket_marked_unattended_mask(view)]
-    if unattended.empty:
+
+    eligible = view.loc[_perf_overview_unattended_eligible_mask(view)]
+    if eligible.empty:
         return {}
 
+    visit_df = (
+        visits
+        if visits is not None
+        else _perf_load_overview_visits_history(df_all)
+    )
+
     counts: dict[str, int] = {}
-    for _, row in unattended.iterrows():
-        for eng in _perf_ticket_credit_assignees(row):
-            credit_key = _perf_person_credit_key(eng)
-            if credit_key in ("", "(unknown)"):
-                continue
+    for _, row in eligible.iterrows():
+        for credit_key in _perf_unattended_credit_keys_for_ticket(row, visits=visit_df):
             counts[credit_key] = int(counts.get(credit_key, 0)) + 1
     return counts
 
@@ -23982,7 +24113,7 @@ def _render_combined_overview_legend() -> None:
       <strong>Residential</strong> = visit fair credit (full snapshot; unattended excluded) ·
       <strong>Resort</strong> = assignment credit (full snapshot) ·
       <strong>Admin</strong> = no field engineer (residential or resort) ·
-      <strong>Unattended</strong> = separate accountability count.</p>
+      <strong>Unattended</strong> = no field response (flagged or overdue Daily Task).</p>
     """,
         unsafe_allow_html=True,
     )
@@ -24233,7 +24364,10 @@ def _render_perf_overview_tab(
     )
     res_map = _solo_shared_rows_by_credit_key(res_rows)
     rsr_map = _solo_shared_rows_by_credit_key(rsr_rows)
-    unattended_map = _perf_overview_unattended_counts_by_credit(df_all, focus=focus)
+    visits_history = _perf_load_overview_visits_history(df_all)
+    unattended_map = _perf_overview_unattended_counts_by_credit(
+        df_all, focus=focus, visits=visits_history
+    )
 
     all_keys = sorted(
         set(res_map) | set(rsr_map) | set(unattended_map),
@@ -24318,7 +24452,11 @@ def _get_engineer_performance_detail(
     overview_unattended = 0
     credited_all = _perf_overview_field_tickets(df_all, person=credit_key)
     if not credited_all.empty:
-        overview_unattended = int(_ticket_marked_unattended_mask(credited_all).sum())
+        eligible = credited_all.loc[_perf_overview_unattended_eligible_mask(credited_all)]
+        for _, row in eligible.iterrows():
+            keys = _perf_unattended_credit_keys_for_ticket(row, visits=visits_history)
+            if credit_key in keys:
+                overview_unattended += 1
 
     in_range = pd.DataFrame()
     if not df_all.empty and credit_key not in ("", "(unknown)"):
@@ -24338,7 +24476,12 @@ def _get_engineer_performance_detail(
     if not credited.empty and "status" in credited.columns:
         status_col = credited["status"].astype(str)
         resolved = int(status_col.eq(STATUS_RESOLVED).sum())
-        unattended = int(_ticket_marked_unattended_mask(credited).sum())
+        eligible = credited.loc[_perf_overview_unattended_eligible_mask(credited)]
+        for _, row in eligible.iterrows():
+            if credit_key in _perf_unattended_credit_keys_for_ticket(
+                row, visits=visits_history
+            ):
+                unattended += 1
 
     recent = credited.copy()
     if not recent.empty and "updated_at" in recent.columns:
@@ -25091,35 +25234,50 @@ def _render_perf_on_hold_tab(on_hold: pd.DataFrame, *, focus: str) -> None:
 
 
 def _get_unattended_by_assignee(
-    unattended: pd.DataFrame,
+    df_all: pd.DataFrame,
     *,
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits: pd.DataFrame | None = None,
 ) -> list[dict[str, object]]:
-    if unattended.empty:
+    if df_all.empty:
         return []
-    view = _perf_filter_by_person(unattended, focus)
-    if view.empty:
-        return []
-    if "marked_unattended_at" in view.columns:
-        ref = _parse_ts(view["marked_unattended_at"])
-        view = view.loc[ref.notna() & (ref >= range_start) & (ref <= range_end)]
-    elif "_ts" in view.columns:
-        view = view.loc[
-            view["_ts"].notna()
-            & (view["_ts"] >= range_start)
-            & (view["_ts"] <= range_end)
-        ]
+    view = _perf_filter_by_person(df_all, focus)
     if view.empty:
         return []
 
+    eligible = view.loc[_perf_overview_unattended_eligible_mask(view)]
+    if eligible.empty:
+        return []
+
+    in_range_rows: list[pd.Series] = []
+    for _, row in eligible.iterrows():
+        marked_ts = _parse_ts(row.get("marked_unattended_at"))
+        if pd.notna(marked_ts):
+            if range_start <= marked_ts <= range_end:
+                in_range_rows.append(row)
+            continue
+        assigned_ts = _parse_ts(row.get("last_assigned_at"))
+        if pd.notna(assigned_ts) and range_start <= assigned_ts <= range_end:
+            in_range_rows.append(row)
+        elif pd.isna(assigned_ts):
+            ref = _parse_ts(row.get("updated_at"))
+            if pd.notna(ref) and range_start <= ref <= range_end:
+                in_range_rows.append(row)
+
+    if not in_range_rows:
+        return []
+
+    visit_df = (
+        visits
+        if visits is not None
+        else _perf_load_overview_visits_history(df_all)
+    )
+
     counts: dict[str, int] = {}
-    for _, row in view.iterrows():
-        for eng in _perf_ticket_credit_assignees(row):
-            credit_key = _perf_person_credit_key(eng)
-            if credit_key in ("", "(unknown)"):
-                continue
+    for row in in_range_rows:
+        for credit_key in _perf_unattended_credit_keys_for_ticket(row, visits=visit_df):
             stem = _canonical_username_stem(credit_key)
             if not stem:
                 continue
@@ -25132,7 +25290,7 @@ def _get_unattended_by_assignee(
 
 
 def _render_perf_unattended_tab(
-    unattended: pd.DataFrame,
+    df_all: pd.DataFrame,
     *,
     focus: str,
     range_start: pd.Timestamp,
@@ -25144,11 +25302,17 @@ def _render_perf_unattended_tab(
         unsafe_allow_html=True,
     )
     st.caption(
-        "Counts tickets marked unattended in the sidebar Range (both assignees on shared tickets). "
-        "The UNATTENDED metric card above is the current backlog snapshot (all flagged tickets)."
+        "Counts no-response tickets in the sidebar Range (flagged or overdue Daily Task). "
+        "Credit uses the assignee active at mark time — not after reassignment. "
+        "The UNATTENDED metric card counts only permanently flagged tickets."
     )
+    visits_history = _perf_load_overview_visits_history(df_all)
     data = _get_unattended_by_assignee(
-        unattended, focus=focus, range_start=range_start, range_end=range_end
+        df_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+        visits=visits_history,
     )
     if not data:
         st.markdown(
@@ -25486,7 +25650,7 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
         _render_perf_on_hold_tab(slices["on_hold"], focus=focus)
     elif view == "Unattended":
         _render_perf_unattended_tab(
-            slices["unattended"],
+            df_all,
             focus=focus,
             range_start=range_start,
             range_end=range_end,

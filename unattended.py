@@ -257,11 +257,42 @@ async def run_unattended_nudges(
     return {"sent": sent, "skipped": skipped, "scanned": len(pending)}
 
 
+TICKET_VISITS_TABLE = (
+    os.getenv("TICKET_VISITS_TABLE") or "public.ticket_visits"
+).strip()
+
+
+def _close_open_visits_unattended(
+    client: Any,
+    *,
+    visits_table: str,
+    ticket_number: str,
+    visit_end: str,
+) -> None:
+    """Close active visit rows as unattended when auto-closing a ticket."""
+    tn = str(ticket_number).strip()
+    payload = {
+        "visit_end": visit_end,
+        "outcome": "unattended",
+        "closed_by": "system",
+        "is_active": False,
+    }
+    for filt in (
+        lambda q: q.eq("ticket_number", tn).eq("is_active", True),
+        lambda q: q.eq("ticket_number", tn).is_("visit_end", "null"),
+    ):
+        try:
+            filt(client.table(visits_table).update(payload)).execute()
+        except Exception:
+            log.exception("visit unattended close failed for %s", tn)
+
+
 def run_unattended_close(
     client: Any,
     *,
     tickets_table: str,
     attendance_table: str,
+    visits_table: str | None = None,
 ) -> dict[str, int]:
     """Mark eligible Daily Task tickets as unattended and move to **Needs Review** (Open).
 
@@ -269,6 +300,7 @@ def run_unattended_close(
     """
     pending = _fetch_daily_task_tickets(client, tickets_table=tickets_table)
     now_iso = datetime.now(timezone.utc).isoformat()
+    visits_tbl = (visits_table or TICKET_VISITS_TABLE).strip()
     closed = 0
     for row in pending:
         if not should_close_as_unattended(row):
@@ -284,6 +316,12 @@ def run_unattended_close(
             if not row.get("marked_unattended_at"):
                 payload["marked_unattended_at"] = now_iso
             client.table(tickets_table).update(payload).eq("ticket_number", ticket).execute()
+            _close_open_visits_unattended(
+                client,
+                visits_table=visits_tbl,
+                ticket_number=ticket,
+                visit_end=now_iso,
+            )
             client.table(attendance_table).insert(
                 {
                     "ticket_number": ticket,
