@@ -25111,18 +25111,23 @@ def _get_unattended_by_assignee(
             & (view["_ts"] >= range_start)
             & (view["_ts"] <= range_end)
         ]
-    if view.empty or "assigned_to" not in view.columns:
+    if view.empty:
         return []
-    counts = (
-        view["assigned_to"]
-        .map(_perf_norm_member)
-        .value_counts()
-        .sort_values(ascending=False)
-    )
+
+    counts: dict[str, int] = {}
+    for _, row in view.iterrows():
+        for eng in _perf_ticket_credit_assignees(row):
+            credit_key = _perf_person_credit_key(eng)
+            if credit_key in ("", "(unknown)"):
+                continue
+            stem = _canonical_username_stem(credit_key)
+            if not stem:
+                continue
+            counts[stem] = int(counts.get(stem, 0)) + 1
+
     return [
-        {"assigned_to": eng.lstrip("@").lower(), "count": int(c)}
-        for eng, c in counts.items()
-        if eng not in ("", "(unknown)")
+        {"assigned_to": eng, "count": int(c)}
+        for eng, c in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
 
 
@@ -25139,7 +25144,8 @@ def _render_perf_unattended_tab(
         unsafe_allow_html=True,
     )
     st.caption(
-        "Overview red segment matches snapshot unattended. Excluded from solo/shared credit."
+        "Counts tickets marked unattended in the sidebar Range (both assignees on shared tickets). "
+        "The UNATTENDED metric card above is the current backlog snapshot (all flagged tickets)."
     )
     data = _get_unattended_by_assignee(
         unattended, focus=focus, range_start=range_start, range_end=range_end
