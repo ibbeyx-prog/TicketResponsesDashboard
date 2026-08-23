@@ -7741,6 +7741,8 @@ def _perf_visit_ticket_pool(
         focus_key=pool_focus,
         search=search or (tid if tid else ""),
     )
+    if focus_key:
+        all_engineers = [focus_key]
     return all_engineers, pool, ticket_engineers, focus_key, total_all
 
 
@@ -8844,6 +8846,11 @@ def _render_perf_case_info_tab_fragment(
         f"visit dots = activity in **{_format_perf_range_caption() or 'sidebar range'}**. "
         f"Matrix shows up to **{_PERF_MATRIX_MAX_TICKETS}** cases at once — "
         "use **Ticket ID** lookup for a specific ref."
+        + (
+            f" Filtered to **{_perf_norm_member(focus)}**."
+            if focus not in ("", "All")
+            else ""
+        )
     )
     with st.spinner("Loading case matrix…"):
         payload = _build_perf_case_info_payload_cached(
@@ -9250,6 +9257,25 @@ def _perf_focus_for_filter() -> str:
     if focus == "All engineers":
         return "All"
     return _perf_norm_member(focus)
+
+
+def _perf_focus_heading_suffix(focus: str) -> str:
+    """Append engineer handle to view titles when Focus assignee is set."""
+    if focus in ("", "All"):
+        return ""
+    handle = _perf_norm_member(focus)
+    return f" — {handle}" if handle != "(unknown)" else ""
+
+
+def _sync_perf_detail_to_focus() -> None:
+    """Keep the detail panel aligned with Focus assignee."""
+    focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    if focus == "All engineers":
+        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
+    else:
+        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = _perf_overview_button_key(
+            _perf_person_credit_key(focus)
+        )
 
 
 def _perf_focus_assignee_handle() -> str | None:
@@ -10849,6 +10875,7 @@ def _perf_weekly_attended_bundle(
     *,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    focus: str = "All",
 ) -> dict[str, object]:
     """Compute weekly CSM + Sales attended once (summary, detail, counts)."""
     csm_attended = _perf_csm_attended_in_week(
@@ -10859,6 +10886,9 @@ def _perf_weekly_attended_bundle(
         range_start=range_start,
         range_end=range_end,
     )
+    if focus not in ("", "All"):
+        csm_attended = _perf_filter_by_person(csm_attended, focus)
+        sales_attended = _perf_filter_by_person(sales_attended, focus)
     summary, detail = _perf_build_weekly_attended_tables(csm_attended, sales_attended)
     n_unique = int(detail["ID"].astype(str).nunique()) if not detail.empty else 0
     return {
@@ -11260,6 +11290,7 @@ def _perf_weekly_summary_metrics(
     *,
     period: str,
     week_offset: int,
+    focus: str = "All",
 ) -> dict[str, object]:
     """Executive Summary metrics + trend frame for the selected period."""
     detail = bundle.get("detail")
@@ -11267,11 +11298,11 @@ def _perf_weekly_summary_metrics(
     metrics = _perf_weekly_executive_metrics(detail_df)
     if period == "Monthly":
         metrics["trend_df"] = _perf_monthly_resolution_trend(
-            df_all, sales_all, end_month_offset=week_offset, months=4
+            df_all, sales_all, end_month_offset=week_offset, months=4, focus=focus
         )
     else:
         metrics["trend_df"] = _perf_weekly_resolution_trend(
-            df_all, sales_all, end_week_offset=week_offset, weeks=4
+            df_all, sales_all, end_week_offset=week_offset, weeks=4, focus=focus
         )
     total = int(metrics.get("total") or 0)
     investigation = int(metrics.get("investigation") or 0)
@@ -11505,6 +11536,7 @@ def _perf_weekly_resolution_trend(
     *,
     end_week_offset: int = 0,
     weeks: int = 4,
+    focus: str = "All",
 ) -> pd.DataFrame:
     """Resolution rate for the last ``weeks`` Sun–Sat windows ending at ``end_week_offset``."""
     rows: list[dict[str, object]] = []
@@ -11515,6 +11547,7 @@ def _perf_weekly_resolution_trend(
             sales_all if sales_all is not None else pd.DataFrame(),
             range_start=rs,
             range_end=re,
+            focus=focus,
         )
         detail = bundle.get("detail")
         detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
@@ -11817,6 +11850,7 @@ def _perf_monthly_resolution_trend(
     *,
     end_month_offset: int = 0,
     months: int = 4,
+    focus: str = "All",
 ) -> pd.DataFrame:
     """Resolution rate for the last ``months`` calendar months."""
     rows: list[dict[str, object]] = []
@@ -11827,6 +11861,7 @@ def _perf_monthly_resolution_trend(
             sales_all if sales_all is not None else pd.DataFrame(),
             range_start=rs,
             range_end=re,
+            focus=focus,
         )
         detail = bundle.get("detail")
         detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
@@ -11851,6 +11886,7 @@ def _render_perf_weekly_attended_report(
     sidebar_range_start: pd.Timestamp | None = None,
     sidebar_range_end: pd.Timestamp | None = None,
     this_week_bundle: dict[str, object] | None = None,
+    focus: str = "All",
 ) -> None:
     """Executive attended report for the Performance sidebar Range only."""
     if sidebar_range_start is None or sidebar_range_end is None:
@@ -11892,9 +11928,10 @@ def _render_perf_weekly_attended_report(
 
     h_left, h_right = st.columns([1.35, 1])
     with h_left:
+        focus_suffix = _perf_focus_heading_suffix(focus)
         st.markdown(
             f'<div class="weekly-exec-header" style="border:none;padding:0;margin:0;">'
-            f'<div><p class="weekly-exec-title">Summary</p>'
+            f'<div><p class="weekly-exec-title">Summary{html.escape(focus_suffix)}</p>'
             f'<p class="weekly-exec-sub">Attended cases · {LOCAL_TZ_LABEL}</p></div>'
             f"</div>",
             unsafe_allow_html=True,
@@ -11925,6 +11962,7 @@ def _render_perf_weekly_attended_report(
             sales_all,
             range_start=range_start,
             range_end=range_end,
+            focus=focus,
         )
     _inject_weekly_summary_styles()
     metrics = _perf_weekly_summary_metrics(
@@ -11933,6 +11971,7 @@ def _render_perf_weekly_attended_report(
         bundle,
         period=period,
         week_offset=period_offset,
+        focus=focus,
     )
     _render_perf_summary_context_bar(metrics, period_label)
     if int(metrics.get("total") or 0) == 0:
@@ -24091,13 +24130,6 @@ def _perf_overview_unattended_counts_by_credit(
         if tn:
             tickets_by_num[tn] = row
 
-    if focus not in ("", "All"):
-        ticket_nums = {
-            tn
-            for tn in ticket_nums
-            if tn in tickets_by_num
-            and _perf_row_credited_to_person(tickets_by_num[tn], focus)
-        }
     if not ticket_nums:
         return {}
 
@@ -24137,8 +24169,14 @@ def _perf_overview_unattended_counts_by_credit(
             if not _perf_overview_visit_cycle_unattended(visit, ticket_row):
                 continue
 
+            cycle_keys = _perf_visit_cycle_unattended_credit_keys(visit)
+            if focus_key:
+                cycle_keys = [k for k in cycle_keys if k == focus_key]
+                if not cycle_keys:
+                    continue
+
             dedupe_key = _perf_overview_unattended_cycle_dedupe_key(visit, tn)
-            for credit_key in _perf_visit_cycle_unattended_credit_keys(visit):
+            for credit_key in cycle_keys:
                 _record_unattended(credit_key=credit_key, dedupe_key=dedupe_key)
 
     tickets_with_visits = (
@@ -24156,6 +24194,8 @@ def _perf_overview_unattended_counts_by_credit(
 
         primary = _perf_person_credit_key(_perf_norm_member(row.get("assigned_to")))
         if not primary or primary == "(unknown)":
+            continue
+        if focus_key and primary != focus_key:
             continue
 
         if tn in tickets_with_visits and not prepared.empty:
@@ -24463,19 +24503,26 @@ def _render_perf_overview_tab(
         df_all, focus=focus, visits=visits_history
     )
 
-    all_keys = sorted(
-        set(res_map) | set(rsr_map) | set(unattended_map),
-        key=lambda k: (
-            -(
-                int(res_map.get(k, {}).get("solo", 0))
-                + int(res_map.get(k, {}).get("shared", 0))
-                + int(rsr_map.get(k, {}).get("solo", 0))
-                + int(rsr_map.get(k, {}).get("shared", 0))
-                + int(unattended_map.get(k, 0))
+    if focus not in ("", "All"):
+        focus_key = _perf_person_credit_key(focus)
+        if focus_key and focus_key != "(unknown)":
+            all_keys = [focus_key]
+        else:
+            all_keys = []
+    else:
+        all_keys = sorted(
+            set(res_map) | set(rsr_map) | set(unattended_map),
+            key=lambda k: (
+                -(
+                    int(res_map.get(k, {}).get("solo", 0))
+                    + int(res_map.get(k, {}).get("shared", 0))
+                    + int(rsr_map.get(k, {}).get("solo", 0))
+                    + int(rsr_map.get(k, {}).get("shared", 0))
+                    + int(unattended_map.get(k, 0))
+                ),
+                str(k).lower(),
             ),
-            str(k).lower(),
-        ),
-    )
+        )
 
     if not all_keys:
         st.markdown(
@@ -24485,9 +24532,10 @@ def _render_perf_overview_tab(
         )
         return
 
+    focus_suffix = html.escape(_perf_focus_heading_suffix(focus))
     st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
-        'margin:6px 0 8px">Solo vs shared — Residential + Resort (all cases)</p>',
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
+        f'margin:6px 0 8px">Solo vs shared — Residential + Resort (all cases){focus_suffix}</p>',
         unsafe_allow_html=True,
     )
     _render_combined_overview_legend()
@@ -25060,8 +25108,13 @@ def _perf_handled_tab_context(
     n_assigned_in_range = 0
 
     if field_has_data or not sales_all.empty:
+        visits_for_assign = (
+            _perf_filter_visits_by_person(visits_all, focus)
+            if focus not in ("", "All")
+            else visits_all
+        )
         assigned_ids = _perf_assigned_ticket_ids_in_range(
-            visits_all,
+            visits_for_assign,
             df_all,
             range_start=range_start,
             range_end=range_end,
@@ -25110,9 +25163,9 @@ def _perf_handled_tab_context(
         n_field_resolved + n_admin_closed_resp + n_admin_closed_desk
     )
     responded_in_view = pd.DataFrame()
-    if not visits_all.empty and "outcome" in visits_all.columns:
-        responded_in_view = visits_all[
-            visits_all["outcome"].astype(str).eq("responded")
+    if not visits_f.empty and "outcome" in visits_f.columns:
+        responded_in_view = visits_f[
+            visits_f["outcome"].astype(str).eq("responded")
         ].copy()
     n_handled_visit_tickets = (
         int(responded_in_view["ticket_number"].astype(str).nunique())
@@ -25130,6 +25183,7 @@ def _perf_handled_tab_context(
         "bucket_fmt": bucket_fmt,
         "x_title": x_title,
         "axis_format": axis_format,
+        "focus": focus,
         "n_assigned_in_range": n_assigned_in_range,
         "n_work": n_work,
         "n_work_field": n_work_field,
@@ -25238,6 +25292,7 @@ def _get_weekly_attended_by_engineer(
         sales_all,
         range_start=week_start,
         range_end=week_end,
+        focus=focus,
     )
     summary = bundle["summary"]
     if summary.empty or "Attended by" not in summary.columns:
@@ -25279,13 +25334,13 @@ def _render_perf_weekly_tab(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    """Executive Summary — same sidebar Range as other Performance views."""
-    del focus  # full report; use sidebar Focus assignee on other views
+    """Executive Summary — same sidebar Range + Focus assignee as other Performance views."""
     _render_perf_weekly_attended_report(
         df_all,
         sales_all,
         sidebar_range_start=range_start,
         sidebar_range_end=range_end,
+        focus=focus,
     )
 
 
@@ -25309,9 +25364,10 @@ def _get_on_hold_by_assignee(on_hold: pd.DataFrame, *, focus: str) -> list[dict[
 
 
 def _render_perf_on_hold_tab(on_hold: pd.DataFrame, *, focus: str) -> None:
+    focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
-        "On hold by assignee</p>",
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
+        f"On hold by assignee{html.escape(focus_suffix)}</p>",
         unsafe_allow_html=True,
     )
     data = _get_on_hold_by_assignee(on_hold, focus=focus)
@@ -25380,9 +25436,10 @@ def _render_perf_unattended_tab(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
+    focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
-        "Unattended by engineer</p>",
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 8px">'
+        f"Unattended by engineer{html.escape(focus_suffix)}</p>",
         unsafe_allow_html=True,
     )
     st.caption(
@@ -25421,6 +25478,11 @@ def _render_perf_unattended_tab(
     )
 
 
+def _on_perf_focus_change() -> None:
+    """Sync detail panel selection when Focus assignee changes."""
+    _sync_perf_detail_to_focus()
+
+
 def _render_performance_sidebar() -> None:
     """Focus assignee, range, and vertical view navigation."""
     st.markdown(
@@ -25430,14 +25492,15 @@ def _render_performance_sidebar() -> None:
     engineers = get_engineer_handles()
     options = ["All engineers"] + engineers
     cur_focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    if cur_focus not in options:
+        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = "All engineers"
     focus = st.selectbox(
         "Focus assignee",
         options,
-        index=options.index(cur_focus) if cur_focus in options else 0,
         label_visibility="collapsed",
-        key="perf_focus_select",
+        key=_PERF_FOCUS_ASSIGNEE_KEY,
+        on_change=_on_perf_focus_change,
     )
-    st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = focus
 
     if focus != "All engineers":
         st.markdown(
@@ -25496,7 +25559,7 @@ def _render_performance_sidebar() -> None:
     )
     if active_view != st.session_state.get(_PERF_ACTIVE_VIEW_KEY):
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = active_view
-        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
+        _sync_perf_detail_to_focus()
         st.rerun()
 
 
@@ -25519,10 +25582,12 @@ def _render_perf_handled_tab(
     n_handled_field_resolved: int,
     n_handled_investigation: int,
     n_handled_visit_tickets: int,
+    focus: str = "All",
 ) -> None:
     sales_part = f" + <strong>{n_work_sales}</strong> Resort" if n_work_sales else ""
+    focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
-        t_heading("Handled"),
+        t_heading(f"Handled{focus_suffix}"),
         unsafe_allow_html=True,
     )
     st.markdown(
