@@ -125,7 +125,6 @@ try:
         render_engineer_row,
         render_nudge_banner,
         render_queue_list,
-        render_refresh_caption,
         render_sales_case_table,
         render_settings_popover,
         render_sidebar_today_grid,
@@ -18085,13 +18084,6 @@ def _migrate_legacy_queue_nav() -> None:
         st.session_state[_DASH_TICKET_QUEUE_KEY] = legacy
 
 
-def _render_dashboard_header(*, refreshed_at: str) -> None:
-    """Last refresh line below the nav."""
-    render_refresh_caption(
-        f"Updated {refreshed_at} {LOCAL_TZ_LABEL} · change dates in ⚙ settings"
-    )
-
-
 def _apply_pending_dashboard_nav() -> None:
     """Apply metric-click navigation before nav widgets are drawn."""
     current_nav = str(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET))
@@ -23542,7 +23534,6 @@ def _render_dashboard(
     lookback_days: int,
 ) -> None:
     day_word = "day" if lookback_days == 1 else "days"
-    refreshed_at = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
     _apply_deferred_widget_clears()
     _apply_pending_dashboard_nav()
     _migrate_legacy_queue_nav()
@@ -23556,8 +23547,6 @@ def _render_dashboard(
     main_nav = _normalize_dash_main_nav(
         st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET)
     )
-    if main_nav == _DASH_NAV_TICKET:
-        _render_dashboard_header(refreshed_at=refreshed_at)
 
     if main_nav == "Log":
         _render_attendance_tab(lookback_days=lookback_days)
@@ -23596,22 +23585,9 @@ def _render_dashboard(
         return
     else:
         range_start, range_end = _get_dash_range()
-        df, in_range_count = _dashboard_tickets_in_view(
+        df, _ = _dashboard_tickets_in_view(
             df_all, range_start=range_start, range_end=range_end
         )
-        range_hint = _format_dash_range_caption() or f"the last {lookback_days} day(s)"
-        active_extra = max(0, len(df) - in_range_count)
-        if len(df_all) > in_range_count or active_extra:
-            parts = [
-                f"**{in_range_count}** ticket(s) with activity in {range_hint}",
-            ]
-            if active_extra:
-                parts.append(
-                    f"**{active_extra}** active queue ticket(s) kept visible outside that range"
-                )
-            if len(df_all) > len(df):
-                parts.append(f"**{len(df_all) - len(df)}** older row(s) hidden — widen **Time range**")
-            st.caption(". ".join(parts) + ".")
 
     if not df_all.empty and "status" in df_all.columns:
         mismatches = _fetch_pending_with_response_mismatch()
