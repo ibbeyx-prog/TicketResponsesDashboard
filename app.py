@@ -122,7 +122,6 @@ try:
         active_queue_key,
         display_status,
         format_utc5,
-        render_engineer_row,
         render_nudge_banner,
         render_queue_list,
         render_sales_case_table,
@@ -130,8 +129,6 @@ try:
         render_sidebar_today_grid,
         render_ticket_table,
         render_ticket_table_pager,
-        render_timeline_entry,
-        render_topbar,
         status_pill,
         prepare_dispatch_ticket_page,
         DISPATCH_TICKET_PAGE_SIZE,
@@ -3178,6 +3175,8 @@ _DASH_ATTENDANCE_POLL_SEC = max(
 _DASH_DATA_CACHE_TTL_SEC = max(
     15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "120") or "120"))
 )
+_DISPATCH_CTX_SESSION_KEY = "_dispatch_ticket_ctx_run"
+_PERF_CTX_SESSION_KEY = "_perf_ctx_run"
 
 _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
     "ticket_number",
@@ -6826,480 +6825,6 @@ def _perf_ticket_collaboration_map(visits: pd.DataFrame) -> dict[str, int]:
             continue
         out[tn] = int(grp["assignee"].dropna().astype(str).nunique()) if "assignee" in grp.columns else 1
     return out
-
-
-def _perf_overview_board_summary(
-    df_all: pd.DataFrame,
-    overview_table: pd.DataFrame,
-    sales_summary: pd.DataFrame | None,
-    *,
-    visits_history: pd.DataFrame,
-) -> pd.DataFrame:
-    """Overview board rows: visit-cycle solo/shared fair credit + Resort cases."""
-    sales = sales_summary if sales_summary is not None else pd.DataFrame()
-    people: set[str] = set()
-    if not overview_table.empty and "Person" in overview_table.columns:
-        people |= {
-            _perf_norm_member(p)
-            for p in overview_table["Person"].tolist()
-            if str(p).strip()
-        }
-    if not sales.empty and "Person" in sales.columns:
-        people |= {
-            _perf_norm_member(p)
-            for p in sales["Person"].tolist()
-            if str(p).strip()
-        }
-    if not visits_history.empty and "assignee" in visits_history.columns:
-        prepared = _perf_prepare_visits_df(visits_history)
-        if not df_all.empty and "ticket_number" in prepared.columns:
-            credited_nums = set(_perf_credited_ticket_numbers(df_all))
-            if credited_nums:
-                prepared = prepared[
-                    prepared["ticket_number"].astype(str).str.strip().isin(credited_nums)
-                ]
-        for assignee in prepared["assignee"].dropna().unique():
-            norm = _perf_norm_member(assignee)
-            if norm and norm != "(unknown)":
-                people.add(norm)
-    if not people:
-        return pd.DataFrame()
-
-    sales_map: dict[str, int] = {}
-    if not sales.empty and "Total" in sales.columns:
-        for person, total in zip(sales["Person"], sales["Total"]):
-            sales_map[_perf_norm_member(person)] = int(total)
-
-    field_map: dict[str, int] = {}
-    if not overview_table.empty and "Total" in overview_table.columns:
-        for person, total in zip(overview_table["Person"], overview_table["Total"]):
-            field_map[_perf_norm_member(person)] = int(total)
-
-    rows: list[dict[str, object]] = []
-    for person in sorted(people, key=str.lower):
-        norm = _perf_norm_member(person)
-        solo, shared = _perf_visit_solo_shared_counts(
-            visits_history,
-            credit_key=norm,
-            df_all=df_all,
-        )
-        rows.append(
-            {
-                "Person": norm,
-                "Solo tickets": solo,
-                "Shared tickets": shared,
-                "Tickets touched": solo + shared,
-                _PERF_OVERVIEW_COL_RESIDENTIAL: int(field_map.get(norm, 0)),
-                _PERF_OVERVIEW_COL_RESORT: int(sales_map.get(norm, 0)),
-            }
-        )
-    if not rows:
-        return pd.DataFrame()
-    out = pd.DataFrame(rows)
-    out = out[(out[_PERF_OVERVIEW_COL_RESIDENTIAL] > 0) | (out[_PERF_OVERVIEW_COL_RESORT] > 0)]
-    if out.empty:
-        return out
-    return out.sort_values(
-        [_PERF_OVERVIEW_COL_RESIDENTIAL, _PERF_OVERVIEW_COL_RESORT, "Tickets touched"],
-        ascending=[False, False, False],
-    )
-
-
-def _perf_solo_shared_ticket_rows(visits: pd.DataFrame, person: str) -> pd.DataFrame:
-    """Per ticket: solo vs shared for tickets this engineer touched in the window."""
-    if person in ("", "All"):
-        return pd.DataFrame()
-    return _perf_ticket_detail_rows(visits, person=person)
-
-
-def _perf_solo_shared_summary_all(visits: pd.DataFrame) -> pd.DataFrame:
-    """Solo vs shared ticket counts for every engineer in the visit window."""
-    if visits.empty or "assignee" not in visits.columns:
-        return pd.DataFrame()
-    prepared = _perf_prepare_visits_df(visits)
-    people = sorted(prepared["assignee"].dropna().unique().tolist(), key=str.lower)
-    rows: list[dict[str, object]] = []
-    for person in people:
-        detail = _perf_solo_shared_ticket_rows(prepared, person)
-        if detail.empty:
-            continue
-        solo = int((detail["Type"] == "Solo").sum())
-        shared = int((detail["Type"] == "Shared").sum())
-        rows.append(
-            {
-                "Person": person,
-                "Solo tickets": solo,
-                "Shared tickets": shared,
-                "Tickets touched": solo + shared,
-            }
-        )
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(
-        ["Tickets touched", "Solo tickets"],
-        ascending=[False, False],
-    )
-
-
-def _perf_solo_shared_board_summary(
-    visits: pd.DataFrame,
-    sales_summary: pd.DataFrame | None,
-) -> pd.DataFrame:
-    """Visit solo/shared counts plus Resort cases staff (e.g. resort-only in window)."""
-    visit_summary = (
-        _perf_solo_shared_summary_all(visits)
-        if not visits.empty
-        else pd.DataFrame()
-    )
-    sales = sales_summary if sales_summary is not None else pd.DataFrame()
-    if visit_summary.empty and (sales.empty or "Person" not in sales.columns):
-        return pd.DataFrame()
-    if sales.empty or "Person" not in sales.columns or "Total" not in sales.columns:
-        out = visit_summary.copy()
-        if not out.empty:
-            out[_PERF_OVERVIEW_COL_RESORT] = 0
-        return out
-    sales_cols = sales[["Person", "Total"]].rename(
-        columns={"Total": _PERF_OVERVIEW_COL_RESORT},
-    )
-    if visit_summary.empty:
-        out = sales_cols.copy()
-        out["Solo tickets"] = 0
-        out["Shared tickets"] = 0
-        out["Tickets touched"] = 0
-        return out.sort_values([_PERF_OVERVIEW_COL_RESORT, "Person"], ascending=[False, True])
-    merged = visit_summary.merge(sales_cols, on="Person", how="outer")
-    for col in ("Solo tickets", "Shared tickets", "Tickets touched", _PERF_OVERVIEW_COL_RESORT):
-        if col in merged.columns:
-            merged[col] = merged[col].fillna(0).astype(int)
-    return merged.sort_values(
-        ["Tickets touched", _PERF_OVERVIEW_COL_RESORT, "Solo tickets"],
-        ascending=[False, False, False],
-    )
-
-
-def _perf_summary_row_for_person(
-    table: pd.DataFrame, person: str,
-) -> pd.Series | None:
-    """Match overview row by normalized @handle (handles Admin, casing, etc.)."""
-    if table.empty or "Person" not in table.columns or person in ("", "All"):
-        return None
-    key = _perf_norm_member(person)
-    for _, row in table.iterrows():
-        if _perf_norm_member(row.get("Person")) == key:
-            return row
-    return None
-
-
-def _perf_count_column_total(
-    table: pd.DataFrame,
-    column: str,
-    *,
-    focus: str,
-) -> int:
-    if table.empty or column not in table.columns:
-        return 0
-    if focus not in ("", "All"):
-        row = _perf_summary_row_for_person(table, focus)
-        if row is None or column not in row.index:
-            return 0
-        return int(row[column])
-    return int(table[column].sum())
-
-
-def _perf_attach_sales_to_overview(
-    overview_table: pd.DataFrame,
-    sales_summary: pd.DataFrame,
-) -> pd.DataFrame:
-    """Add per-person Resort counts (field ``Total`` stays residential-only)."""
-    if sales_summary.empty or "Total" not in sales_summary.columns:
-        if overview_table.empty:
-            return overview_table
-        out = overview_table.copy()
-        out[_PERF_OVERVIEW_COL_RESORT] = 0
-        return out
-    sales_col = sales_summary[["Person", "Total"]].rename(
-        columns={"Total": _PERF_OVERVIEW_COL_RESORT},
-    )
-    if overview_table.empty:
-        out = sales_col.copy()
-        out["Total"] = 0
-        out["Handled"] = 0
-        return out
-    merged = overview_table.merge(sales_col, on="Person", how="outer")
-    for col in ("Total", _PERF_OVERVIEW_COL_RESORT, "Handled"):
-        if col in merged.columns:
-            merged[col] = merged[col].fillna(0).astype(int)
-    return merged
-
-
-def _perf_grand_total_for_board(
-    overview_table: pd.DataFrame,
-    solo_shared_summary: pd.DataFrame,
-    *,
-    sales_summary: pd.DataFrame | None = None,
-    focus: str = "All",
-) -> int:
-    """Ring total: residential queue snapshot + Resort cases in the sidebar window."""
-    field_n = _perf_count_column_total(overview_table, "Total", focus=focus)
-    sales_n = _perf_count_column_total(
-        sales_summary if sales_summary is not None else pd.DataFrame(),
-        "Total",
-        focus=focus,
-    )
-    if field_n or sales_n:
-        return field_n + sales_n
-    if not solo_shared_summary.empty and "Tickets touched" in solo_shared_summary.columns:
-        return _perf_count_column_total(solo_shared_summary, "Tickets touched", focus=focus)
-    return 0
-
-
-def _perf_overview_total_breakdown(
-    overview_table: pd.DataFrame,
-    *,
-    sales_summary: pd.DataFrame | None = None,
-    focus: str = "All",
-) -> tuple[int, int, int]:
-    field_n = _perf_count_column_total(overview_table, "Total", focus=focus)
-    sales_n = _perf_count_column_total(
-        sales_summary if sales_summary is not None else pd.DataFrame(),
-        "Total",
-        focus=focus,
-    )
-    return field_n + sales_n, field_n, sales_n
-
-
-def _perf_overview_ring_subhtml(field_n: int, sales_n: int) -> str:
-    if field_n and sales_n:
-        return (
-            f'<div class="perf-ss-total-sub">'
-            f'{_PERF_OVERVIEW_COL_RESIDENTIAL} {field_n} · '
-            f'{_PERF_OVERVIEW_COL_RESORT} {sales_n}</div>'
-        )
-    if sales_n:
-        return (
-            f'<div class="perf-ss-total-sub">'
-            f'{_PERF_OVERVIEW_COL_RESORT} {sales_n}</div>'
-        )
-    if field_n:
-        return (
-            f'<div class="perf-ss-total-sub">'
-            f'{_PERF_OVERVIEW_COL_RESIDENTIAL} {field_n}</div>'
-        )
-    return ""
-
-
-def _render_perf_queue_strip(summary: pd.DataFrame, *, focus: str) -> None:
-    """Thin queue breakdown chips for one engineer or team totals."""
-    if summary.empty:
-        return
-    if focus != "All":
-        row = _perf_summary_row_for_person(summary, focus)
-        if row is None:
-            return
-        r = row
-    else:
-        r = summary.sum(numeric_only=True)
-    labels = (
-        ("Total", _PERF_OVERVIEW_COL_RESIDENTIAL),
-        (_PERF_OVERVIEW_COL_RESORT, _PERF_OVERVIEW_COL_RESORT),
-        (STATUS_DAILY_TASK, STATUS_DAILY_TASK),
-        ("Needs Review", "Needs Review"),
-        ("Investigation", "Investigation"),
-        (STATUS_RESOLVED, STATUS_RESOLVED),
-        ("On Hold", "On Hold"),
-        ("Unattended", "Unattended"),
-        ("Handled", "Handled"),
-        ("Visit responded", "Visit responded"),
-    )
-    chips: list[str] = []
-    for col, label in labels:
-        if col not in summary.columns:
-            continue
-        val = int(r.get(col, 0))
-        if val == 0 and col not in ("Total", _PERF_OVERVIEW_COL_RESORT, "Handled"):
-            continue
-        chips.append(
-            f'<span class="perf-queue-chip">{html.escape(label)}'
-            f"<strong>{val}</strong></span>"
-        )
-    if not chips:
-        return
-    st.markdown(
-        f'<div class="perf-queue-strip">{"".join(chips)}</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def _render_perf_solo_shared_board(
-    visits_all: pd.DataFrame,
-    *,
-    focus: str,
-    overview_table: pd.DataFrame | None = None,
-    sales_summary: pd.DataFrame | None = None,
-    df_all: pd.DataFrame | None = None,
-    visits_history: pd.DataFrame | None = None,
-) -> None:
-    """Engineer rows (solo | shared pills) + total ring."""
-    overview_table = overview_table if overview_table is not None else pd.DataFrame()
-    sales_summary = sales_summary if sales_summary is not None else pd.DataFrame()
-    df_all = df_all if df_all is not None else pd.DataFrame()
-    visits_history = visits_history if visits_history is not None else pd.DataFrame()
-    total_n, field_n, sales_n = _perf_overview_total_breakdown(
-        overview_table,
-        sales_summary=sales_summary,
-        focus=focus,
-    )
-    sub_html = _perf_overview_ring_subhtml(field_n, sales_n)
-
-    summary = _perf_overview_board_summary(
-        df_all,
-        overview_table,
-        sales_summary,
-        visits_history=visits_history,
-    )
-    if summary.empty:
-        if total_n == 0:
-            st.markdown(
-                '<p class="perf-ss-hint">No residential or resort tickets in the system.</p>',
-                unsafe_allow_html=True,
-            )
-        elif total_n > 0:
-            st.markdown(
-                '<p class="perf-ss-hint">Overview counts residential queue snapshot + resort cases.</p>',
-                unsafe_allow_html=True,
-            )
-        if total_n > 0:
-            st.markdown(
-                f'<div class="perf-ss-board"><div class="perf-ss-list"></div>'
-                f'<div class="perf-ss-total"><div class="perf-ss-circle">{total_n}</div>'
-                f'<div class="perf-ss-total-lbl">in queues</div>{sub_html}</div></div>',
-                unsafe_allow_html=True,
-            )
-        elif summary.empty:
-            st.caption("No engineers in visit or resort case data for this window.")
-        return
-
-    focus_key = _perf_norm_member(focus) if focus not in ("", "All") else ""
-    if total_n == 0:
-        total_n = _perf_grand_total_for_board(
-            overview_table,
-            summary,
-            sales_summary=sales_summary,
-            focus=focus,
-        )
-        _, field_n, sales_n = _perf_overview_total_breakdown(
-            overview_table,
-            sales_summary=sales_summary,
-            focus=focus,
-        )
-        sub_html = _perf_overview_ring_subhtml(field_n, sales_n)
-    rows_html: list[str] = []
-    for _, row in summary.iterrows():
-        person = str(row["Person"])
-        solo = int(row.get("Solo tickets", 0))
-        shared = int(row.get("Shared tickets", 0))
-        resort_n_person = int(row.get(_PERF_OVERVIEW_COL_RESORT, 0))
-        selected = focus_key and _perf_norm_member(person) == focus_key
-        row_cls = "perf-ss-row is-selected" if selected else "perf-ss-row"
-        resort_seg = ""
-        if resort_n_person > 0:
-            resort_seg = (
-                f'<span class="perf-ss-seg resort">resort'
-                f"{_perf_count_span(resort_n_person)}</span>"
-            )
-        rows_html.append(
-            f'<div class="{row_cls}">'
-            f'<span class="perf-ss-name">{html.escape(person)}</span>'
-            f'<div class="perf-ss-pill{" has-resort" if resort_n_person else ""}">'
-            f'<span class="perf-ss-seg solo">solo{_perf_count_span(solo)}</span>'
-            f'<span class="perf-ss-seg shared">shared{_perf_count_span(shared)}</span>'
-            f"{resort_seg}"
-            f"</div>"
-            f"</div>"
-        )
-
-    st.markdown(
-        f'<div class="perf-ss-board">'
-        f'<div class="perf-ss-list">{"".join(rows_html)}</div>'
-        f'<div class="perf-ss-total">'
-        f'<div class="perf-ss-circle">{total_n}</div>'
-        f'<div class="perf-ss-total-lbl">in queues</div>'
-        f"{sub_html}"
-        f"</div></div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<p class="perf-ss-hint">Solo / shared = **visit fair credit** — each engineer who held a '
-        "visit cycle on the ticket counts (respond, reassign, etc.). "
-        "**Solo** = only one engineer ever touched that ticket; "
-        "**shared** = two or more engineers on the same ticket. "
-        "<strong>Resort</strong> = all resort cases · "
-        "Ring = residential queues + resort (excludes <strong>Unattended</strong>). "
-        "Use <strong>Focus Assignee</strong> to highlight a row.</p>",
-        unsafe_allow_html=True,
-    )
-
-
-def _render_perf_solo_shared_detail(
-    visits_all: pd.DataFrame,
-    *,
-    focus: str,
-    sales_cases: pd.DataFrame | None = None,
-) -> None:
-    """Residential visit ticket list + resort cases for Overview detail."""
-    all_focus = focus in ("", "All")
-    detail = (
-        _perf_ticket_detail_rows(
-            visits_all,
-            person=None if all_focus else focus,
-        )
-        if not visits_all.empty
-        else pd.DataFrame()
-    )
-    sales_view = pd.DataFrame()
-    if sales_cases is not None and not sales_cases.empty:
-        sales_view = _perf_enrich_sales_cases(sales_cases)
-        if not all_focus:
-            sales_view = _perf_filter_by_person(sales_view, focus)
-    if detail.empty and sales_view.empty:
-        st.caption("No residential visit or resort case detail in this window.")
-        return
-
-    label = "All engineers" if all_focus else focus
-    if not detail.empty:
-        st.markdown(f"**Residential tickets — {label} ({len(detail)})**")
-        shared_only = detail[detail["Type"] == "Shared"]
-        if not shared_only.empty:
-            st.caption(f"**{len(shared_only)}** shared (multiple engineers on the same ticket).")
-            st.dataframe(shared_only, width="stretch", hide_index=True, height="content")
-        _render_perf_dataframe(detail)
-
-    if not sales_view.empty:
-        cols = [
-            c
-            for c in (
-                "ticket_number",
-                "account_name",
-                "sales_category",
-                "status_eff",
-                "_local",
-            )
-            if c in sales_view.columns
-        ]
-        show = sales_view[cols].copy() if cols else sales_view.copy()
-        rename = {
-            "ticket_number": "Ticket",
-            "account_name": "Account",
-            "sales_category": "Category",
-            "status_eff": "Status",
-            "_local": "Updated",
-        }
-        show = show.rename(columns={k: v for k, v in rename.items() if k in show.columns})
-        if "Updated" in show.columns:
-            show["Updated"] = show["Updated"].dt.strftime("%Y-%m-%d %H:%M")
-        st.markdown(f"**Resort cases — {label} ({len(show)})**")
-        st.dataframe(show, use_container_width=True, hide_index=True)
 
 
 _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
@@ -12506,38 +12031,6 @@ def _render_perf_handled_work_table(df: pd.DataFrame) -> None:
     _render_perf_dataframe(_format_local(show), max_rows=200)
 
 
-def _render_perf_ticket_table(df: pd.DataFrame) -> None:
-    if df.empty:
-        st.caption("No tickets to list.")
-        return
-    detail = df.sort_values("_ts", ascending=False).head(200)
-    if "_outcome" in detail.columns:
-        detail = detail.rename(columns={"_outcome": "Outcome"})
-    cols = [
-        c
-        for c in (
-            "Outcome",
-            "status",
-            "ticket_number",
-            "assigned_to",
-            "task_category",
-            "outcome_category",
-            "last_assigned_at",
-            "updated_at",
-            "responded_at",
-            "follow_up_at",
-            "follow_up_note",
-            "unattended_nudge_sent_at",
-        )
-        if c in detail.columns
-    ]
-    st.dataframe(
-        _format_local(detail[cols]),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
 def _sales_row_derived_field_response(row: dict) -> str:
     """Field outcome stored on the sales row when no CSM ticket / bot log exists."""
     existing = _clean_display_value(row.get("field_response"))
@@ -12872,71 +12365,6 @@ def _render_perf_sales_status_bar(view: pd.DataFrame, *, title: str) -> None:
         .properties(height=220, title=title)
     )
     st.altair_chart(chart, use_container_width=True)
-
-
-def _render_perf_sales_cases_tab(
-    sales_df: pd.DataFrame,
-    *,
-    focus: str,
-    bucket_fmt: str,
-    x_title: str,
-    axis_format: str,
-) -> None:
-    """Sales Cases in the Performance window — queues, staff, and case list."""
-    st.caption(
-        "Cases in the sidebar **Time range**, plus any still in an active sales queue. "
-        "**Performance credit** = field engineer when `assigned_to` is set, otherwise **Admin**."
-    )
-    if sales_df.empty:
-        st.info("No Resort cases for this filter — try **All** in Focus Assignee or widen the time range.")
-        return
-
-    view = _perf_enrich_sales_cases(sales_df)
-    counts = _perf_sales_status_counts(view)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total", len(view))
-    c2.metric("Sales Ticket", counts["Sales Ticket"])
-    c3.metric("Investigation", counts["Investigation"])
-    c4.metric("Design", counts["Design"])
-    c5.metric("Resolved", counts["Resolved"])
-
-    _render_perf_sales_status_strip(view)
-
-    chart_l, chart_r = st.columns(2)
-    with chart_l:
-        _render_perf_sales_status_bar(view, title="By queue")
-    with chart_r:
-        staff_title = (
-            f"By sales credit ({focus})"
-            if focus not in ("", "All")
-            else "By sales credit (field or Admin)"
-        )
-        _render_perf_sales_staff_bar(view, title=staff_title)
-
-    split = (
-        view.groupby(["status_eff", "category"], as_index=False)
-        .size()
-        .rename(columns={"size": "Cases", "status_eff": "Status", "category": "Category"})
-        .sort_values(["Cases", "Status", "Category"], ascending=[False, True, True])
-    )
-    if not split.empty:
-        st.markdown("**Split (status × category)**")
-        st.dataframe(split, use_container_width=True, hide_index=True)
-
-    with st.expander("Trend over time", expanded=len(view) <= 12):
-        if "staff" in view.columns and "_local" in view.columns:
-            _render_perf_stacked_staff_chart(
-                view,
-                y_title="Resort cases",
-                bucket_fmt=bucket_fmt,
-                x_title=x_title,
-                axis_format=axis_format,
-            )
-        else:
-            st.caption("No timeline data for this range.")
-
-    st.markdown("**Case list**")
-    _render_perf_sales_case_table(sales_df)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -18142,109 +17570,6 @@ def _apply_pending_dashboard_nav() -> None:
         st.session_state["_disp_preserve_lookup_selection"] = True
 
 
-def _render_clickable_queue_metric(
-    col: object,
-    *,
-    title: str,
-    value: int,
-    queue_name: str,
-    option_label: str,
-) -> None:
-    """Metric-style control — click to open that ticket queue."""
-    main_nav = _normalize_dash_main_nav(st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_CSM))
-    q_base = _queue_segment_base(st.session_state.get(_DASH_TICKET_QUEUE_KEY))
-    active = main_nav == _DASH_NAV_CSM and q_base == queue_name
-    label = f"{title}\n{value:,}"
-    with col:
-        if st.button(
-            label,
-            key=f"dash_metric_nav_{queue_name.lower().replace(' ', '_')}",
-            type="secondary",
-            use_container_width=True,
-            disabled=active,
-        ):
-            st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
-            st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = option_label
-            st.rerun()
-
-
-def _render_queue_summary_metrics(
-    *,
-    total_pending: int,
-    total_on_hold: int,
-    total_open: int,
-    total_investigation: int,
-    total_unattended: int,
-    total_completed: int,
-    pending_label: str,
-    on_hold_label: str,
-    open_label: str,
-    investigation_label: str,
-    unattended_label: str,
-    completed_label: str,
-    total_in_view: int = 0,
-    total_in_tabs: int = 0,
-    total_other: int = 0,
-) -> None:
-    """Counts — click a queue to switch view."""
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    _render_clickable_queue_metric(
-        c1,
-        title=STATUS_DAILY_TASK,
-        value=total_pending,
-        queue_name=STATUS_DAILY_TASK,
-        option_label=pending_label,
-    )
-    _render_clickable_queue_metric(
-        c2,
-        title="Needs Review",
-        value=total_open,
-        queue_name="Open",
-        option_label=open_label,
-    )
-    _render_clickable_queue_metric(
-        c3,
-        title="On Hold",
-        value=total_on_hold,
-        queue_name=STATUS_ON_HOLD,
-        option_label=on_hold_label,
-    )
-    _render_clickable_queue_metric(
-        c4,
-        title="Investigation",
-        value=total_investigation,
-        queue_name=STATUS_UNDER_INVESTIGATION,
-        option_label=investigation_label,
-    )
-    _render_clickable_queue_metric(
-        c5,
-        title=STATUS_RESOLVED,
-        value=total_completed,
-        queue_name=STATUS_RESOLVED,
-        option_label=completed_label,
-    )
-    _render_clickable_queue_metric(
-        c6,
-        title="Unattended",
-        value=total_unattended,
-        queue_name="Unattended",
-        option_label=unattended_label,
-    )
-    if total_in_view > 0:
-        st.caption(
-            f"**{total_in_tabs}** ticket(s) across queue tabs "
-            f"(**{total_in_view}** in view"
-            + (
-                f"; **{total_other}** with an unrecognized status — widen **Time range** "
-                "or fix status in Supabase"
-                if total_other
-                else ""
-            )
-            + "). Active **Daily Task / Needs Review / On Hold / Investigation** rows stay "
-            "visible even outside the date range."
-        )
-
-
 _TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
     "ticket_number",
     "assigned_to",
@@ -20330,31 +19655,6 @@ def _dispatch_today_metrics(
     daily_task_count = int(masks["pending"].sum())
     unattended_count = int(masks["unattended"].sum())
     return assigned_today, responded_today, daily_task_count, unattended_count
-
-
-def _dispatch_engineer_presence(df: pd.DataFrame) -> list[dict[str, object]]:
-    names, _missing = _try_fetch_field_engineer_usernames()
-    active_counts: dict[str, int] = {}
-    if not df.empty and "assigned_to" in df.columns:
-        for col in ("assigned_to", "assigned_to_2"):
-            if col not in df.columns:
-                continue
-            for raw in df[col].dropna().astype(str):
-                h = str(raw).strip()
-                if h:
-                    active_counts[h.lower()] = active_counts.get(h.lower(), 0) + 1
-    rows: list[dict[str, object]] = []
-    for uname in names:
-        handle = uname if str(uname).startswith("@") else f"@{uname}"
-        n = active_counts.get(str(uname).lower(), 0) + active_counts.get(handle.lower(), 0)
-        rows.append(
-            {
-                "username": handle,
-                "active_tickets": n,
-                "online": n > 0,
-            }
-        )
-    return rows
 
 
 def _dispatch_row_dict(row: pd.Series) -> dict[str, object]:
@@ -23114,8 +22414,8 @@ def _dispatch_run_action(
         st.error(str(exc))
 
 
-def _load_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
-    """Cached ticket-board context — safe to call from @st.fragment reruns."""
+def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
+    """Ticket-board context: queues, resort bundle, sidebar metrics."""
     del lookback_days
     df_all = _fetch_tickets_cached()
     if df_all.empty or "status" not in df_all.columns:
@@ -23127,6 +22427,26 @@ def _load_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
             df_all, range_start=range_start, range_end=range_end
         )
         masks = _ticket_queue_count_masks(df)
+        total_other = int(masks["other"].sum())
+        if total_other:
+            raw_other = (
+                df.loc[masks["other"], "status"].astype(str).str.strip().value_counts().head(5)
+                if not df.empty and "status" in df.columns
+                else pd.Series(dtype=int)
+            )
+            detail = ", ".join(f"**{k}** ({v})" for k, v in raw_other.items())
+            st.warning(
+                f"**{total_other}** ticket(s) use a status not shown in the queue tabs: {detail}. "
+                "Run migration `20260625_rename_no_answer_to_on_hold.sql` or move them manually."
+            )
+    _sync_dashboard_nav_state(
+        total_pending=int(masks["pending"].sum()),
+        total_on_hold=int(masks["on_hold"].sum()),
+        total_open=int(masks["open"].sum()),
+        total_investigation=int(masks["investigation"].sum()),
+        total_unattended=int(masks["unattended"].sum()),
+        total_completed=int(masks["completed"].sum()),
+    )
     case_type_filter = _init_case_type_filter()
     sales_df = (
         _fetch_sales_cases_cached()
@@ -23168,6 +22488,19 @@ def _load_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
         "fe_missing": fe_missing,
         "cat_names": cat_names,
     }
+
+
+def _load_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
+    """Ticket-board context — one build per full rerun, reused by board + detail fragments."""
+    cached = st.session_state.get(_DISPATCH_CTX_SESSION_KEY)
+    if isinstance(cached, dict) and cached.get("_lookback_days") == lookback_days:
+        return cached
+    ctx = _build_dispatch_ticket_context(lookback_days)
+    st.session_state[_DISPATCH_CTX_SESSION_KEY] = {
+        **ctx,
+        "_lookback_days": lookback_days,
+    }
+    return st.session_state[_DISPATCH_CTX_SESSION_KEY]
 
 
 def _compute_dispatch_ticket_view(ctx: dict[str, object]) -> dict[str, object]:
@@ -23498,14 +22831,9 @@ def _render_dispatch_detail_column(ctx: dict[str, object]) -> None:
 
 def _render_dispatch_csm_dashboard(
     *,
-    df: pd.DataFrame,
-    df_all: pd.DataFrame,
-    masks: dict[str, pd.Series],
     lookback_days: int,
-    sales_df: pd.DataFrame | None = None,
 ) -> None:
     """Three-column dispatch console — board fragment + detail column."""
-    del df, df_all, masks, sales_df
     _modal_pending = any(
         str(st.session_state.get(k) or "").strip()
         for k in (
@@ -23557,9 +22885,10 @@ def _render_dashboard(
 
     _maybe_run_unattended_close()
     _maybe_toast_new_telegram_activity()
+    st.session_state.pop(_DISPATCH_CTX_SESSION_KEY, None)
 
     try:
-        df_all = _fetch_tickets()
+        df_all = _fetch_tickets_cached()
     except _TableMissingError as missing:
         _render_missing_table_help(missing.table)
         return
@@ -23579,17 +22908,10 @@ def _render_dashboard(
             "No ticket rows returned (empty ``tickets_active`` or connection issue). "
             "Queue counts are zero — **Performance** and **Log** still use attendance history."
         )
-        df = pd.DataFrame({"status": pd.Series(dtype=str)})
     elif "status" not in df_all.columns:
         st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
         return
-    else:
-        range_start, range_end = _get_dash_range()
-        df, _ = _dashboard_tickets_in_view(
-            df_all, range_start=range_start, range_end=range_end
-        )
-
-    if not df_all.empty and "status" in df_all.columns:
+    elif not df_all.empty and "status" in df_all.columns:
         mismatches = _fetch_pending_with_response_mismatch()
         if mismatches:
             shown = ", ".join(mismatches[:5])
@@ -23600,139 +22922,7 @@ def _render_dashboard(
                 "Tickets **reassigned** for another visit are not listed here."
             )
 
-    masks = _ticket_queue_count_masks(df)
-    pending_mask = masks["pending"]
-    on_hold_mask = masks["on_hold"]
-    open_mask = masks["open"]
-    investigation_mask = masks["investigation"]
-    unattended_mask = masks["unattended"]
-    completed_mask = masks["completed"]
-    other_mask = masks["other"]
-
-    total_pending = int(pending_mask.sum())
-    total_on_hold = int(on_hold_mask.sum())
-    total_open = int(open_mask.sum())
-    total_investigation = int(investigation_mask.sum())
-    total_unattended = int(unattended_mask.sum())
-    total_completed = int(completed_mask.sum())
-    total_other = int(other_mask.sum())
-    total_in_tabs = int(
-        (
-            pending_mask
-            | on_hold_mask
-            | open_mask
-            | investigation_mask
-            | completed_mask
-            | unattended_mask
-            | other_mask
-        ).sum()
-    )
-    total_in_view = len(df) if not df.empty else 0
-    if total_other:
-        raw_other = (
-            df.loc[other_mask, "status"].astype(str).str.strip().value_counts().head(5)
-            if not df.empty and "status" in df.columns
-            else pd.Series(dtype=int)
-        )
-        detail = ", ".join(f"**{k}** ({v})" for k, v in raw_other.items())
-        st.warning(
-            f"**{total_other}** ticket(s) use a status not shown in the queue tabs: {detail}. "
-            "Run migration `20260625_rename_no_answer_to_on_hold.sql` or move them manually."
-        )
-
-    _sync_dashboard_nav_state(
-        total_pending=total_pending,
-        total_on_hold=total_on_hold,
-        total_open=total_open,
-        total_investigation=total_investigation,
-        total_unattended=total_unattended,
-        total_completed=total_completed,
-    )
-
-    case_type_filter = _init_case_type_filter()
-    sales_df = (
-        _fetch_sales_cases_df()
-        if case_type_filter != CASE_TYPE_RESIDENTIAL
-        else None
-    )
-
-    _render_dispatch_csm_dashboard(
-        df=df,
-        df_all=df_all,
-        masks=masks,
-        lookback_days=lookback_days,
-        sales_df=sales_df,
-    )
-
-
-def _render_field_photos_section(done: pd.DataFrame) -> None:
-    """Group every Response photo per ticket and render as a thumbnail grid.
-
-    Photo history comes from ``ticket_attendance_logs`` (every Response
-    with a non-null ``photo_url``). For tickets that only ever had the
-    single "pinned" ``photo_url`` on ``tickets_active`` -- e.g. before the
-    storage migration was applied -- we still surface that one so nothing
-    disappears from view.
-    """
-    ticket_ids = [
-        str(t)
-        for t in (done.get("ticket_number") if "ticket_number" in done.columns else [])
-        if t is not None
-    ]
-    if not ticket_ids:
-        st.caption("No resolved tickets to show photos for.")
-        return
-
-    grouped = _fetch_ticket_photos(ticket_ids)
-
-    # Fallback: stitch in the pinned tickets_active.photo_url if its URL
-    # isn't already represented in the log history for that ticket. This
-    # covers older rows recorded before the bot started logging Responses.
-    if "photo_url" in done.columns:
-        for _, row in done.iterrows():
-            tid = str(row.get("ticket_number") or "").strip()
-            pinned = str(row.get("photo_url") or "").strip()
-            if not tid or not pinned.startswith("http"):
-                continue
-            existing_urls = {p["url"] for p in grouped.get(tid, [])}
-            if pinned in existing_urls:
-                continue
-            grouped.setdefault(tid, []).append(
-                {
-                    "url": pinned,
-                    "note": row.get("field_response"),
-                    "member": row.get("assigned_to"),
-                    "when": row.get("responded_at") or row.get("updated_at"),
-                }
-            )
-
-    tickets_with_photos = [t for t in ticket_ids if grouped.get(t)]
-    if not tickets_with_photos:
-        st.caption("No field photos uploaded yet for these tickets.")
-        return
-
-    st.caption(
-        f"**{len(tickets_with_photos)}** ticket(s) with photos. "
-        f"Each ticket groups every photo the assignee has submitted, "
-        f"newest first."
-    )
-    info_lookup: dict[str, str] = {}
-    if "additional_info" in done.columns and "ticket_number" in done.columns:
-        for _, row in done.iterrows():
-            tid = str(row.get("ticket_number") or "").strip()
-            info = row.get("additional_info")
-            if tid and isinstance(info, str) and info.strip():
-                info_lookup[tid] = info.strip()
-
-    for tid in tickets_with_photos:
-        photos = grouped.get(tid, [])
-        with st.expander(f"Ticket {tid} — {len(photos)} photo(s)", expanded=False):
-            info_text = info_lookup.get(tid)
-            if info_text:
-                st.caption("**Additional info from assignment:**")
-                st.markdown(info_text)
-                st.divider()
-            _render_photo_grid(photos, cols_per_row=3)
+    _render_dispatch_csm_dashboard(lookback_days=lookback_days)
 
 
 def _get_performance_snapshot_counts(
@@ -23851,23 +23041,6 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
         "**FLAGGED** = tickets with `marked_unattended_at` (not assignment cases). "
         "Overview / Summary credit rows are **per engineer** and may overlap on shared tickets."
     )
-
-
-def _render_perf_glossary_expander(*, compact: bool = False) -> None:
-    """Shared definitions for Performance metrics."""
-    title = "Metric definitions" if not compact else "What do these numbers mean?"
-    with st.expander(title, expanded=False):
-        st.markdown(
-            """
-**Queue snapshot (metric strip)** — Current backlog inventory by status.  
-**FLAGGED** — Ticket permanently tagged unattended (`marked_unattended_at`); still in queue.  
-**Overview credit** — Solo/shared resort assignment credit from visit history (snapshot).  
-**Unatt assignments (range)** — One case per assign day with no field response after **23:59 UTC+5** cutoff; assignee only. Sticks even if the ticket is attended later; nudges are not unattended.  
-**Summary attended** — On hold / resolved / investigation / resort activity in sidebar range.  
-**Handled** — Closures and visit fair credit in sidebar range.  
-**Inventory ≠ credit** — Combined backlog counts unique tickets; engineer lines are personal credit.
-            """.strip()
-        )
 
 
 def _perf_overview_df_for_solo_shared(df_all: pd.DataFrame) -> pd.DataFrame:
@@ -24140,6 +23313,7 @@ def _get_solo_shared_data(
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
 ) -> list[dict[str, object]]:
     """Visit-cycle solo/shared fair credit per engineer (all residential tickets).
 
@@ -24148,7 +23322,8 @@ def _get_solo_shared_data(
     """
     del sales_all, range_start, range_end
 
-    visits_history = _perf_load_overview_visits_history(df_all)
+    if visits_history is None:
+        visits_history = _perf_load_overview_visits_history(df_all)
     df_res_credit = _perf_overview_df_for_solo_shared(df_all)
 
     engineers = _perf_overview_people(
@@ -24840,14 +24015,18 @@ def _render_perf_overview_tab(
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
 ) -> None:
     """Overview: residential + resort solo/shared combined per engineer."""
+    if visits_history is None:
+        visits_history = _perf_load_overview_visits_history(df_all)
     res_rows = _get_solo_shared_data(
         df_all,
         sales_all,
         focus=focus,
         range_start=range_start,
         range_end=range_end,
+        visits_history=visits_history,
     )
     rsr_rows = _get_resort_solo_shared_data(
         sales_all,
@@ -24857,7 +24036,6 @@ def _render_perf_overview_tab(
     )
     res_map = _solo_shared_rows_by_credit_key(res_rows)
     rsr_map = _solo_shared_rows_by_credit_key(rsr_rows)
-    visits_history = _perf_load_overview_visits_history(df_all)
     unattended_map = _perf_overview_unattended_counts_by_credit(
         df_all,
         focus=focus,
@@ -24937,11 +24115,13 @@ def _get_engineer_performance_detail(
     visits_all: pd.DataFrame,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     """Breakdown for one engineer in the Performance detail panel."""
     credit_key = _perf_resolve_overview_credit_key(engineer)
     df_res_credit = _perf_overview_df_for_solo_shared(df_all)
-    visits_history = _perf_load_overview_visits_history(df_all)
+    if visits_history is None:
+        visits_history = _perf_load_overview_visits_history(df_all)
 
     if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
         solo, shared = _perf_overview_assignment_solo_shared_counts(
@@ -25093,6 +24273,7 @@ def _render_performance_detail_panel(
     visits_all: pd.DataFrame,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
 ) -> None:
     """Right detail panel — engineer breakdown when a chart/table row is selected."""
     selected = st.session_state.get(_PERF_SELECTED_ENGINEER_KEY)
@@ -25115,6 +24296,7 @@ def _render_performance_detail_panel(
         visits_all=visits_all,
         range_start=range_start,
         range_end=range_end,
+        visits_history=visits_history,
     )
     credit_key = _perf_resolve_overview_credit_key(selected)
     display_name = _perf_overview_row_label(credit_key) if credit_key else f"@{selected}"
@@ -25264,201 +24446,6 @@ def _perf_sales_matches_focus(row: pd.Series, focus: str) -> bool:
     return _perf_sales_credited_person(row) == _perf_person_credit_key(focus)
 
 
-def _get_case_info_rows(
-    df_all: pd.DataFrame,
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-
-    tickets = _perf_rows_in_updated_range(
-        df_all, range_start=range_start, range_end=range_end
-    )
-    if focus not in ("", "All"):
-        tickets = _perf_filter_by_person(tickets, focus)
-    for _, t in tickets.iterrows():
-        staff = str(t.get("assigned_to") or "—")
-        if _sc_sales_has_field_assignee(t.get("assigned_to_2")):
-            staff += f" + {t.get('assigned_to_2')}"
-        rows.append(
-            {
-                "type": "residential",
-                "ref": str(t.get("ticket_number") or ""),
-                "title": str(t.get("task_category") or "—"),
-                "staff": staff,
-                "status": str(t.get("status") or "—"),
-                "sort_key": str(t.get("ticket_number") or ""),
-            }
-        )
-
-    sales = _perf_rows_in_updated_range(
-        sales_all, range_start=range_start, range_end=range_end
-    )
-    if focus not in ("", "All"):
-        sales = sales.loc[sales.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
-    for _, c in sales.iterrows():
-        if _sc_sales_has_field_assignee(c.get("assigned_to")):
-            staff = str(_perf_norm_member(c.get("assigned_to")))
-        else:
-            admin = str(c.get("admin_owner") or "—").strip()
-            staff = f"{_perf_norm_member(admin)} (admin)" if admin and admin != "—" else "—"
-        rows.append(
-            {
-                "type": "resort",
-                "ref": str(c.get("case_ref") or ""),
-                "title": str(c.get("account_name") or "—"),
-                "staff": staff,
-                "status": str(c.get("status") or "—"),
-                "sort_key": str(c.get("case_ref") or ""),
-            }
-        )
-
-    return sorted(rows, key=lambda r: str(r["sort_key"]), reverse=True)
-
-
-def _render_perf_case_info_list_tab(
-    df_all: pd.DataFrame,
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> None:
-    """Combined CSM + Sales activity list for the Case Info view."""
-    st.markdown(
-        '<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 4px">'
-        "Case info — all activity in range</p>",
-        unsafe_allow_html=True,
-    )
-    st.caption("Field tickets and sales cases combined — staff involvement and notes")
-
-    rows = _get_case_info_rows(
-        df_all, sales_all, focus=focus, range_start=range_start, range_end=range_end
-    )
-    if not rows:
-        st.markdown(
-            '<div style="padding:30px;text-align:center;color:#2a3a5a;font-size:14px">'
-            "No activity in this range</div>",
-            unsafe_allow_html=True,
-        )
-        return
-
-    h1, h2, h3, h4, h5, h6 = st.columns([0.7, 1.25, 1.85, 1.15, 1.05, 0.95], gap="small")
-    for col, label in zip(
-        [h1, h2, h3, h4, h5, h6],
-        ["Type", "Ref", "Title / Account", "Staff", "Status", ""],
-    ):
-        with col:
-            st.markdown(t_col_header(label), unsafe_allow_html=True)
-    st.markdown("<div style='margin:4px 0 6px;border-bottom:0.5px solid #1a2035'></div>",
-                  unsafe_allow_html=True)
-
-    for row in rows:
-        c1, c2, c3, c4, c5, c6 = st.columns([0.7, 1.25, 1.85, 1.15, 1.05, 0.95], gap="small")
-        is_residential = row["type"] == "residential"
-        icon = "🔧" if is_residential else "🏢"
-        color = "#5b7fb5" if is_residential else "#a78bfa"
-        with c1:
-            st.markdown(
-                f'<span style="font-size:14px;color:{color}">{icon}</span>',
-                unsafe_allow_html=True,
-            )
-        with c2:
-            st.markdown(
-                f'<span style="font-size:13px;color:#8a9ac0">{html.escape(str(row["ref"]))}</span>',
-                unsafe_allow_html=True,
-            )
-        with c3:
-            st.markdown(
-                f'<span style="font-size:13px;color:#4a5a7a">{html.escape(str(row["title"]))}</span>',
-                unsafe_allow_html=True,
-            )
-        with c4:
-            st.markdown(
-                f'<span style="font-size:11px;color:#8a9ac0">{html.escape(str(row["staff"]))}</span>',
-                unsafe_allow_html=True,
-            )
-        with c5:
-            st.markdown(
-                f'<span style="font-size:11px;color:#2a3a5a">{html.escape(str(row["status"]))}</span>',
-                unsafe_allow_html=True,
-            )
-        with c6:
-            ref = str(row["ref"])
-            rtype = str(row["type"])
-            if st.button("View →", key=f"ci_{rtype}_{ref}", use_container_width=True):
-                if rtype == "residential":
-                    _perf_jump_to_csm_ticket(ref)
-                else:
-                    _perf_jump_to_sales_case(ref)
-
-
-def _get_handled_field_tickets_perf(
-    df_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> list[dict[str, object]]:
-    if df_all.empty or "status" not in df_all.columns:
-        return []
-    view = df_all.loc[
-        df_all["status"].astype(str).isin([STATUS_RESOLVED, STATUS_UNDER_INVESTIGATION])
-    ].copy()
-    view = _perf_rows_in_updated_range(view, range_start=range_start, range_end=range_end)
-    if focus not in ("", "All"):
-        view = _perf_filter_by_person(view, focus)
-    return [
-        {
-            "ticket_number": str(r.get("ticket_number") or ""),
-            "task_category": str(r.get("task_category") or "—"),
-            "assigned_to": str(r.get("assigned_to") or "—"),
-        }
-        for _, r in view.iterrows()
-    ]
-
-
-def _get_handled_resort_cases_perf(
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> list[dict[str, object]]:
-    if sales_all.empty or "status" not in sales_all.columns:
-        return []
-    view = sales_all.loc[
-        sales_all["status"]
-        .astype(str)
-        .map(_sc_effective_status)
-        .isin([SC_STATUS_INVESTIGATION, SC_STATUS_REGIONAL, SC_STATUS_RESOLVED])
-    ].copy()
-    view = view.loc[
-        view.apply(
-            lambda r: _perf_sales_activity_in_range(
-                r, range_start=range_start, range_end=range_end
-            ),
-            axis=1,
-        )
-    ]
-    if focus not in ("", "All"):
-        view = view.loc[view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)]
-    rows: list[dict[str, object]] = []
-    for _, r in view.iterrows():
-        rows.append(
-            {
-                "case_ref": str(r.get("case_ref") or ""),
-                "account_name": str(r.get("account_name") or "—"),
-                "assigned_to": r.get("assigned_to"),
-                "admin_owner": r.get("admin_owner"),
-            }
-        )
-    return rows
-
-
 def _perf_handled_tab_context(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
@@ -25562,134 +24549,6 @@ def _perf_handled_tab_context(
         "n_handled_investigation": n_handled_investigation,
         "n_handled_visit_tickets": n_handled_visit_tickets,
     }
-
-
-def _render_perf_handled_list_tab(
-    df_all: pd.DataFrame,
-    sales_all: pd.DataFrame,
-    *,
-    focus: str,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-) -> None:
-    """Handled tab — field tickets and qualifying sales cases in separate sections."""
-    field_handled = _get_handled_field_tickets_perf(
-        df_all, focus=focus, range_start=range_start, range_end=range_end
-    )
-    resort_handled = _get_handled_resort_cases_perf(
-        sales_all, focus=focus, range_start=range_start, range_end=range_end
-    )
-    total = len(field_handled) + len(resort_handled)
-
-    st.markdown(
-        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 4px">'
-        f"Handled this range — {total} total</p>",
-        unsafe_allow_html=True,
-    )
-    st.caption(f"{len(field_handled)} residential · {len(resort_handled)} resort")
-
-    st.markdown(
-        '<p style="font-size:13px;font-weight:500;color:#8a9ac0;margin:12px 0 6px">'
-        "Residential tickets</p>",
-        unsafe_allow_html=True,
-    )
-    if field_handled:
-        _render_perf_fast_table_with_actions(
-            headers=["Ticket", "Category", "Engineer"],
-            rows=[
-                [
-                    f'<span style="color:#8a9ac0">{html.escape(str(t["ticket_number"]))}</span>',
-                    html.escape(str(t.get("task_category", "—"))),
-                    html.escape(str(t.get("assigned_to", "—"))),
-                ]
-                for t in field_handled
-            ],
-            action_keys=[str(t["ticket_number"]) for t in field_handled],
-            action_label="→",
-            on_action=_perf_jump_to_csm_ticket,
-            actions_container_key="perf_handled_field_actions",
-        )
-    else:
-        st.caption("No residential tickets handled in this range")
-
-    st.markdown(
-        '<p style="font-size:13px;font-weight:500;color:#8a9ac0;margin:12px 0 6px">'
-        "Resort cases</p>",
-        unsafe_allow_html=True,
-    )
-    if resort_handled:
-        _render_perf_fast_table_with_actions(
-            headers=["Case", "Account", "Credited"],
-            rows=[
-                [
-                    f'<span style="color:#8a9ac0">{html.escape(str(c["case_ref"]))}</span>',
-                    html.escape(str(c.get("account_name", "—"))),
-                    html.escape(
-                        str(_perf_norm_member(c.get("assigned_to")))
-                        if _sc_sales_has_field_assignee(c.get("assigned_to"))
-                        else _SC_SALES_OVERVIEW_ADMIN_LABEL
-                    ),
-                ]
-                for c in resort_handled
-            ],
-            action_keys=[str(c["case_ref"]) for c in resort_handled],
-            action_label="→",
-            on_action=_perf_jump_to_sales_case,
-            actions_container_key="perf_handled_resort_actions",
-        )
-    else:
-        st.caption("No resort cases handled in this range")
-
-
-def _get_weekly_attended_by_engineer(
-    df_all: pd.DataFrame,
-    sales_all: pd.DataFrame,
-    *,
-    week_start: pd.Timestamp,
-    week_end: pd.Timestamp,
-    focus: str,
-) -> list[dict[str, object]]:
-    """
-    Combined field + sales handled counts per credited person for calendar week.
-    Sales credit: field engineer when dispatched, otherwise **Admin**.
-    """
-    bundle = _perf_weekly_attended_bundle(
-        df_all,
-        sales_all,
-        range_start=week_start,
-        range_end=week_end,
-        focus=focus,
-    )
-    summary = bundle["summary"]
-    if summary.empty or "Attended by" not in summary.columns:
-        return []
-
-    rows: list[dict[str, object]] = []
-    for _, row in summary.iterrows():
-        credit_key = _perf_person_credit_key(row["Attended by"])
-        field_count = int(row.get("CSM total", 0) or 0)
-        sales_count = int(row.get("Sales total", 0) or 0)
-        if focus != "All" and not _perf_credit_keys_equal(credit_key, focus):
-            continue
-        total = field_count + sales_count
-        if total <= 0:
-            continue
-        is_admin_credit = (
-            credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL
-            and field_count == 0
-            and sales_count > 0
-        )
-        rows.append(
-            {
-                "engineer": _perf_overview_button_key(credit_key),
-                "label": _perf_overview_row_label(credit_key),
-                "is_admin_credit": is_admin_credit,
-                "field_count": field_count,
-                "sales_count": sales_count,
-                "total": total,
-            }
-        )
-    return sorted(rows, key=lambda r: int(r["total"]), reverse=True)
 
 
 def _render_perf_weekly_tab(
@@ -25850,6 +24709,7 @@ def _render_perf_unattended_tab(
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
 ) -> None:
     focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
@@ -25863,7 +24723,8 @@ def _render_perf_unattended_tab(
         "Same ticket reassigned next day counts again for the new assignee. "
         f"Uses sidebar **Range** ({_format_perf_range_caption() or 'selected range'})."
     )
-    visits_history = _perf_load_overview_visits_history(df_all)
+    if visits_history is None:
+        visits_history = _perf_load_overview_visits_history(df_all)
     data = _get_unattended_by_assignee(
         df_all,
         focus=focus,
@@ -26152,8 +25013,8 @@ def _render_perf_handled_tab(
             _render_visit_detail_table(visits_f)
 
 
-def _load_perf_context(lookback_days: int) -> dict[str, object]:
-    """Cached Performance context — safe inside @st.fragment reruns."""
+def _build_perf_context(lookback_days: int) -> dict[str, object]:
+    """Performance tab context — slices, counts, and optional visit history."""
     del lookback_days
     _init_perf_session_state()
     _sync_perf_range_from_ui(str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week")))
@@ -26187,6 +25048,9 @@ def _load_perf_context(lookback_days: int) -> dict[str, object]:
         except Exception:
             pass
     visits_f = _perf_filter_visits_by_person(visits_all, focus)
+    visits_history = pd.DataFrame()
+    if field_has_data and view in ("Overview", "Unattended", "Summary"):
+        visits_history = _perf_load_overview_visits_history(df_all)
     return {
         "range_start": range_start,
         "range_end": range_end,
@@ -26198,7 +25062,21 @@ def _load_perf_context(lookback_days: int) -> dict[str, object]:
         "view": view,
         "visits_all": visits_all,
         "visits_f": visits_f,
+        "visits_history": visits_history,
     }
+
+
+def _load_perf_context(lookback_days: int) -> dict[str, object]:
+    """Performance context — one build per full rerun, reused by board + detail fragments."""
+    cached = st.session_state.get(_PERF_CTX_SESSION_KEY)
+    if isinstance(cached, dict) and cached.get("_lookback_days") == lookback_days:
+        return cached
+    ctx = _build_perf_context(lookback_days)
+    st.session_state[_PERF_CTX_SESSION_KEY] = {
+        **ctx,
+        "_lookback_days": lookback_days,
+    }
+    return st.session_state[_PERF_CTX_SESSION_KEY]
 
 
 def _render_performance_main(ctx: dict[str, object]) -> None:
@@ -26213,6 +25091,7 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
     range_end = ctx["range_end"]
     visits_all = ctx["visits_all"]
     visits_f = ctx["visits_f"]
+    visits_history = ctx.get("visits_history", pd.DataFrame())
 
     if view == "Overview":
         _render_performance_metric_strip(counts=counts)
@@ -26233,6 +25112,7 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
             focus=focus,
             range_start=range_start,
             range_end=range_end,
+            visits_history=visits_history,
         )
     elif view == "Summary":
         _render_perf_weekly_tab(
@@ -26269,6 +25149,7 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
             focus=focus,
             range_start=range_start,
             range_end=range_end,
+            visits_history=visits_history,
         )
 
 
@@ -26293,6 +25174,7 @@ def _perf_detail_column_fragment(lookback_days: int) -> None:
         visits_all=ctx["visits_f"],
         range_start=ctx["range_start"],
         range_end=ctx["range_end"],
+        visits_history=ctx.get("visits_history"),
     )
 
 
@@ -26308,6 +25190,7 @@ def _render_performance_tab(*, lookback_days: int) -> None:
 
 def _render_field_performance_tab(*, lookback_days: int) -> None:
     """Performance tab — three-column layout with sidebar filters and detail panel."""
+    st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
     _render_performance_tab(lookback_days=lookback_days)
 
 
