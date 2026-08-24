@@ -1619,6 +1619,7 @@ _SALES_SELECTED_KEY = "selected_sales_case"
 _SALES_ROW_RESOLVE = "_sales_row_resolve"
 _SALES_ROW_EDIT = "_sales_row_edit"
 _SALES_ROW_REASSIGN = "_sales_row_reassign_case"
+_SALES_ROW_RECORD = "_sales_row_record_case"
 _SALES_ASSIGN_MODE_KEY = "sales_assign_mode"
 _SALES_ASSIGN_MODE_INTAKE = "intake"
 _SALES_ASSIGN_MODE_ASSIGN = "assign"
@@ -3622,6 +3623,86 @@ def _apply_manual_field_response(
     )
 
 
+_SALES_MANUAL_RESPONSE_STATUSES: frozenset[str] = frozenset(
+    (SC_STATUS_SALES_TICKET, "Open", SC_STATUS_DESIGN)
+)
+
+
+def _apply_manual_sales_field_response(
+    case_ref: str,
+    *,
+    field_response: str,
+    responded_by_input: str | None = None,
+) -> None:
+    """Record a resort field reply from the dashboard when Telegram ingest missed it."""
+    text = (field_response or "").strip()
+    if not text:
+        raise ValueError("Field response text is required.")
+
+    row = _fetch_sales_case_row_by_ref(case_ref)
+    if not row:
+        raise ValueError(f"Case {case_ref} not found.")
+    raw_status = str(row.get("status") or "").strip()
+    status = _sc_effective_status(raw_status)
+    if status not in _SALES_MANUAL_RESPONSE_STATUSES:
+        raise ValueError(
+            f"Case is {raw_status or status}; manual response is only allowed while "
+            "Sales ticket, Design (on hold), or Open (needs review)."
+        )
+
+    row_id = str(row.get("id") or "").strip()
+    if not row_id:
+        raise ValueError("Case row id missing.")
+
+    assignee_raw = str(row.get("assigned_to") or "").strip()
+    assignee = (
+        assignee_raw
+        if assignee_raw.startswith("@")
+        else (f"@{assignee_raw.lstrip('@')}" if assignee_raw else "@unknown")
+    )
+    field_responded_by = _resolve_field_responded_by(
+        assignee_raw, (responded_by_input or "").strip()
+    )
+
+    client = _get_supabase_client()
+    now_iso = _cc_utc_now_iso()
+    payload: dict[str, object] = {
+        "field_response": text,
+        "field_responded_by": field_responded_by,
+    }
+    if status in (SC_STATUS_SALES_TICKET, SC_STATUS_DESIGN):
+        payload["status"] = "Open"
+        payload["responded_at"] = now_iso
+    elif not row.get("responded_at"):
+        payload["responded_at"] = now_iso
+
+    _sales_cases_update_row(row_id, payload)
+
+    op = _session_operator_id() or _session_dashboard_username() or "dashboard-admin"
+    action = "entry" if status in (SC_STATUS_SALES_TICKET, SC_STATUS_DESIGN) else "update"
+    log_note = text
+    if field_responded_by:
+        log_note = f"Responded by {field_responded_by}: {text}"
+    log_note = f"Manual dashboard {action} by {op}: {log_note}"
+
+    _cc_insert_attendance_log(
+        client,
+        ticket_number=case_ref,
+        member_username=assignee,
+        action_type="Response",
+        note=log_note,
+    )
+    visit_assignee = field_responded_by or assignee_raw or assignee
+    _visits_close_responded(
+        client,
+        case_ref,
+        assignee=visit_assignee,
+        response_note=text,
+        closed_by="dashboard",
+        visit_end=now_iso,
+    )
+
+
 def _parse_ts_value(value: object) -> datetime | None:
     """Parse one ISO timestamp from Supabase (UTC-aware)."""
     if value is None:
@@ -5310,6 +5391,101 @@ def _render_manual_field_response_editor(
             st.success(f"{picked} → **Open** (field response saved).")
         else:
             st.success(f"{picked}: field response updated.")
+        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+        st.rerun()
+
+
+def _render_sales_manual_field_response_editor(
+    *,
+    case_ref: str,
+    edit_key_prefix: str,
+    clear_session_keys: tuple[str, ...] = (),
+) -> None:
+    """Admin form: record or correct a resort field reply (Sales ticket/Design → Open)."""
+    keys = _manual_field_response_session_keys(edit_key_prefix)
+    if not st.session_state.get(keys["show"]):
+        return
+
+    cref = str(case_ref or "").strip()
+    if not cref:
+        return
+
+    row = _fetch_sales_case_row_by_ref(cref)
+    if not row:
+        st.warning("Case not found.")
+        return
+    status = _sc_effective_status(row.get("status"))
+    if status not in _SALES_MANUAL_RESPONSE_STATUSES:
+        st.info(
+            "Manual response applies to **Sales ticket**, **Design**, or **Open** cases only "
+            f"(current: **{status or '—'}**)."
+        )
+        return
+
+    _sync_manual_field_response_widgets(keys=keys, picked=cref, row=row)
+
+    assignee = str(row.get("assigned_to") or "—")
+    if status == SC_STATUS_SALES_TICKET:
+        st.caption(
+            f"Record a field reply for resort case **{cref}** (assignee {assignee}). "
+            "Use when the bot did not capture the Telegram reply. Saves to **Open** (Needs Review)."
+        )
+    elif status == SC_STATUS_DESIGN:
+        st.caption(
+            f"Record a field reply for **{cref}** while on **Design** hold. "
+            "Saves to **Open** (Needs Review)."
+        )
+    else:
+        st.caption(
+            f"Update field response for **{cref}** (assignee {assignee}). "
+            "Corrects text or **Responded by** on an Open case."
+        )
+
+    with st.form(f"{edit_key_prefix}_sales_mfr_form", border=True):
+        st.text_area(
+            "Field Response",
+            placeholder="Paste or type what the engineer replied in Telegram",
+            height=120,
+            key=keys["text"],
+        )
+        st.text_input(
+            "Responded By (Optional)",
+            placeholder="e.g. @DHRTemsX6 if they used a test phone",
+            help="Leave empty when the assignee replied from their own account.",
+            key=keys["responded_by"],
+        )
+        c_save, c_cancel = st.columns(2)
+        with c_save:
+            submit = st.form_submit_button(
+                "Save response", type="primary", use_container_width=True
+            )
+        with c_cancel:
+            cancel = st.form_submit_button("Cancel", use_container_width=True)
+
+    if cancel:
+        st.session_state[keys["show"]] = False
+        st.rerun()
+    if submit:
+        try:
+            _apply_manual_sales_field_response(
+                cref,
+                field_response=str(st.session_state.get(keys["text"]) or ""),
+                responded_by_input=str(st.session_state.get(keys["responded_by"]) or "")
+                or None,
+            )
+        except Exception as exc:
+            st.error(str(exc))
+            return
+        st.session_state[keys["show"]] = False
+        for sk in clear_session_keys:
+            st.session_state.pop(sk, None)
+        _schedule_deferred_widget_clears(
+            keys["text"], keys["responded_by"], keys["synced_ticket"]
+        )
+        if status in (SC_STATUS_SALES_TICKET, SC_STATUS_DESIGN):
+            st.success(f"{cref} → **Open** (field response saved).")
+        else:
+            st.success(f"{cref}: field response updated.")
         _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
         st.rerun()
 
@@ -19284,10 +19460,14 @@ def _sales_floor_move(case_ref: str, destination: str) -> None:
     _rerun_dispatch_after_ticket_write()
 
 
-def _render_sales_row_actions(case: dict, row_key: str) -> None:
+def _render_sales_row_actions(case: dict, row_key: str, *, is_admin: bool | None = None) -> None:
+    if is_admin is None:
+        is_admin = _is_dashboard_admin()
     status = str(case.get("status") or "")
     case_ref = str(case.get("case_ref") or "")
-    items = _build_sales_row_menu_items(case=case, case_ref=case_ref, status=status)
+    items = _build_sales_row_menu_items(
+        case=case, case_ref=case_ref, status=status, is_admin=is_admin
+    )
     _render_row_action_menu(
         items=items,
         menu_key=f"row_menu_actions_sc_{row_key}",
@@ -19556,6 +19736,29 @@ def _render_sales_floor_modals(*, df: pd.DataFrame) -> None:
                 if st.button("Done", key="sales_row_reassign_done"):
                     st.session_state.pop(_SALES_ROW_REASSIGN, None)
                     st.rerun()
+
+    if _is_dashboard_admin():
+        record_ref = st.session_state.get(_SALES_ROW_RECORD)
+        if record_ref:
+            cref = str(record_ref).strip()
+            row = _fetch_sales_case_row_by_ref(cref)
+            if row:
+                with st.expander(f"Record response · {cref}", expanded=True):
+                    st.session_state[
+                        _manual_field_response_session_keys("sales_row")["show"]
+                    ] = True
+                    _render_sales_manual_field_response_editor(
+                        case_ref=cref,
+                        edit_key_prefix="sales_row",
+                        clear_session_keys=(_SALES_ROW_RECORD,),
+                    )
+                    if st.button("Done", key="sales_row_record_done"):
+                        st.session_state.pop(_SALES_ROW_RECORD, None)
+                        st.session_state.pop(
+                            _manual_field_response_session_keys("sales_row")["show"],
+                            None,
+                        )
+                        st.rerun()
 
 
 def _render_sales_cases_dashboard() -> None:
@@ -20000,6 +20203,7 @@ def _sales_any_row_modal_active() -> bool:
         st.session_state.get(_SALES_ROW_RESOLVE)
         or st.session_state.get(_SALES_ROW_EDIT)
         or st.session_state.get(_SALES_ROW_REASSIGN)
+        or st.session_state.get(_SALES_ROW_RECORD)
     )
 
 
@@ -20012,7 +20216,7 @@ def _render_unified_row_actions(
 ) -> None:
     if str(ticket.get("case_type") or "") == CASE_TYPE_RESORT:
         sales_row = ticket.get("_sales_row") or ticket
-        _render_sales_row_actions(sales_row, row_key)
+        _render_sales_row_actions(sales_row, row_key, is_admin=is_admin)
     else:
         _render_dispatch_row_actions(
             ticket, is_admin, row_key, queue_name=queue_name
@@ -20368,7 +20572,7 @@ def _sales_row_has_active_modal(case_ref: str) -> bool:
         return False
     return any(
         str(st.session_state.get(k) or "").strip() == ref
-        for k in (_SALES_ROW_EDIT, _SALES_ROW_REASSIGN, _SALES_ROW_RESOLVE)
+        for k in (_SALES_ROW_EDIT, _SALES_ROW_REASSIGN, _SALES_ROW_RESOLVE, _SALES_ROW_RECORD)
     )
 
 
@@ -20446,6 +20650,7 @@ def _build_sales_row_menu_items(
     case: dict,
     case_ref: str,
     status: str,
+    is_admin: bool = False,
 ) -> list[tuple[str, Callable[[], None]]]:
     items: list[tuple[str, Callable[[], None]]] = []
     for label, dest in _sales_move_destinations(status):
@@ -20459,6 +20664,11 @@ def _build_sales_row_menu_items(
     def _open_reassign() -> None:
         _sales_prepare_row_selection(case_ref)
         st.session_state[_SALES_ROW_REASSIGN] = case_ref
+        st.rerun()
+
+    def _open_record() -> None:
+        _sales_prepare_row_selection(case_ref)
+        st.session_state[_SALES_ROW_RECORD] = case_ref
         st.rerun()
 
     def _delete() -> None:
@@ -20478,6 +20688,8 @@ def _build_sales_row_menu_items(
     items.append(("Action › Edit details", _open_edit))
     if _sc_effective_status(status) != SC_STATUS_RESOLVED:
         items.append(("Action › Reassign", _open_reassign))
+    if is_admin and _sc_effective_status(status) in _SALES_MANUAL_RESPONSE_STATUSES:
+        items.append(("Action › Record response", _open_record))
     if _sc_effective_status(status) == SC_STATUS_RESOLVED:
         items.append(("Action › Delete", _delete))
     return items
