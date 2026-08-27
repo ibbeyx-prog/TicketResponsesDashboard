@@ -1235,7 +1235,7 @@ def _sc_clear_toolbar_panels_except(key_prefix: str) -> None:
 
 def _sc_status_actions_for_case(cur_status: str) -> tuple[tuple[str, str], ...]:
     """Action menu options for one selected case (row status may differ from queue view)."""
-    if cur_status == SC_STATUS_SALES_TICKET:
+    if cur_status in (SC_STATUS_SALES_TICKET, "Open"):
         return (
             ("Investigation", SC_STATUS_INVESTIGATION),
             ("Design", SC_STATUS_DESIGN),
@@ -1285,7 +1285,7 @@ def _sc_apply_status_advance(
     """Move case to another queue. Returns an error message, or None on success."""
     cur = _sc_effective_status(r0.get("status"))
     if target_status == SC_STATUS_INVESTIGATION:
-        if cur == SC_STATUS_SALES_TICKET:
+        if cur in (SC_STATUS_SALES_TICKET, "Open"):
             payload = _sc_patch_with_action_comment(
                 {"status": SC_STATUS_INVESTIGATION, "admin_owner": op},
                 action_comment,
@@ -1306,6 +1306,7 @@ def _sc_apply_status_advance(
     if target_status == SC_STATUS_DESIGN:
         if cur in (
             SC_STATUS_SALES_TICKET,
+            "Open",
             SC_STATUS_INVESTIGATION,
             SC_STATUS_REGIONAL,
         ):
@@ -1325,6 +1326,7 @@ def _sc_apply_status_advance(
     if target_status == SC_STATUS_RESOLVED:
         if cur not in (
             SC_STATUS_SALES_TICKET,
+            "Open",
             SC_STATUS_INVESTIGATION,
             SC_STATUS_REGIONAL,
             SC_STATUS_DESIGN,
