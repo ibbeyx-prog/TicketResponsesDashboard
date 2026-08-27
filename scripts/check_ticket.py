@@ -31,6 +31,16 @@ def main() -> int:
     else:
         for k, v in sorted(rows[0].items()):
             print(f"  {k}: {v}")
+    sales_tbl = os.getenv("SALES_CASES_TABLE", "dashboard_sales_cases")
+    sales_rows = (
+        c.table(sales_tbl).select("*").eq("case_ref", tid).limit(1).execute().data or []
+    )
+    print(f"=== {sales_tbl} / {tid} ===")
+    if not sales_rows:
+        print("NOT FOUND")
+    else:
+        for k, v in sorted(sales_rows[0].items()):
+            print(f"  {k}: {v}")
     log_rows = (
         c.table(logs_tbl)
         .select("timestamp,action_type,member_username,note,photo_url")

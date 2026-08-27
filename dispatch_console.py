@@ -284,6 +284,7 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"] {{
   background-color: transparent !important;
   background-image: none !important;
   border: none !important;
+  border-color: transparent !important;
   border-radius: 6px !important;
   box-shadow: none !important;
   color: var(--disp-dim) !important;
@@ -302,8 +303,10 @@ div.st-key-disp_main_nav_tabs .stButton > button[data-testid="baseButton-primary
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"] {{
   color: var(--disp-text) !important;
   font-weight: 600 !important;
-  background: var(--disp-row-sel) !important;
-  background-color: var(--disp-row-sel) !important;
+  background: var(--disp-accent-bg) !important;
+  background-color: var(--disp-accent-bg) !important;
+  background-image: none !important;
+  box-shadow: inset 0 -2px 0 var(--disp-accent-strong) !important;
 }}
 div.st-key-disp_main_nav_tabs .stButton > button:hover,
 div.st-key-disp_main_nav_tabs .stButton > button[kind="secondary"]:hover,
@@ -316,8 +319,9 @@ div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-secondary"]:hover
 div.st-key-disp_main_nav_tabs .stButton > button[kind="primary"]:hover,
 div.st-key-disp_main_nav_tabs button[data-testid="stBaseButton-primary"]:hover {{
   color: var(--disp-text) !important;
-  background: var(--disp-row-sel) !important;
-  background-color: var(--disp-row-sel) !important;
+  background: var(--disp-accent-bg) !important;
+  background-color: var(--disp-accent-bg) !important;
+  box-shadow: inset 0 -2px 0 var(--disp-accent) !important;
 }}
 div.st-key-disp_main_nav_tabs [data-testid="column"] {{
   flex: 0 0 auto !important;
@@ -472,18 +476,26 @@ div.disp-header-mid-item {{
   flex-shrink: 0;
 }}
 .disp-brand-line-title {{
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
   color: var(--disp-text);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   line-height: 1;
   white-space: nowrap;
+}}
+.disp-brand-line-sep {{
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--disp-border-strong);
+  line-height: 1;
+  user-select: none;
 }}
 .disp-brand-line-org {{
   font-size: 11px;
   font-weight: 500;
   color: var(--disp-dim);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   line-height: 1;
   white-space: nowrap;
 }}
@@ -594,7 +606,44 @@ div.st-key-disp_header_util [data-testid="stHorizontalBlock"] {{
   justify-content: flex-end !important;
   width: 100% !important;
   height: var(--disp-header-h) !important;
-  gap: 4px !important;
+  gap: 0 !important;
+}}
+div.st-key-disp_header_toolbar {{
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  padding: 0 4px !important;
+  margin: 0 !important;
+  background: var(--disp-card) !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: var(--disp-radius-sm) !important;
+  box-sizing: border-box !important;
+  overflow: visible !important;
+}}
+div.st-key-disp_header_toolbar [data-testid="stVerticalBlockBorderWrapper"],
+div.st-key-disp_header_toolbar [data-testid="stVerticalBlock"],
+div.st-key-disp_header_toolbar [data-testid="stHorizontalBlock"],
+div.st-key-disp_header_toolbar [data-testid="column"],
+div.st-key-disp_header_toolbar [data-testid="element-container"] {{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  align-items: center !important;
+}}
+div.st-key-disp_header_toolbar [data-testid="stHorizontalBlock"] {{
+  gap: 0 !important;
+}}
+div.st-key-disp_header_toolbar [data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
+  flex: 0 0 auto !important;
+  width: auto !important;
+  padding: 0 2px !important;
 }}
 div.st-key-disp_header_util [data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
   flex: 0 0 auto !important;
@@ -611,22 +660,32 @@ div.st-key-disp_header_lookup .stButton > button,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
   background: transparent !important;
   border: none !important;
-  color: var(--disp-dim) !important;
-  font-size: 16px !important;
-  font-weight: 400 !important;
-  width: 32px !important;
-  min-width: 32px !important;
-  max-width: 32px !important;
-  height: 32px !important;
-  min-height: 32px !important;
-  max-height: 32px !important;
-  padding: 0 !important;
+  color: var(--disp-muted) !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  width: auto !important;
+  min-width: unset !important;
+  max-width: unset !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  max-height: 28px !important;
+  padding: 0 10px !important;
   border-radius: 6px !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
   margin: 0 !important;
   line-height: 1 !important;
+  letter-spacing: 0.01em !important;
+}}
+div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  padding: 0 !important;
+  color: var(--disp-dim) !important;
 }}
 div.st-key-disp_header_lookup .stButton > button:hover,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
@@ -634,16 +693,16 @@ div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
   background: rgba(255, 255, 255, 0.05) !important;
 }}
 div.st-key-disp_header_user [data-testid="stPopover"] > button {{
-  width: 32px !important;
-  min-width: 32px !important;
-  max-width: 32px !important;
-  height: 32px !important;
-  min-height: 32px !important;
-  max-height: 32px !important;
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  max-height: 28px !important;
   padding: 0 !important;
   border-radius: 50% !important;
-  border: 1px solid var(--disp-border-strong) !important;
-  background: var(--disp-card) !important;
+  border: none !important;
+  background: var(--disp-panel) !important;
   color: var(--disp-muted) !important;
   font-size: 10px !important;
   font-weight: 700 !important;
@@ -730,6 +789,30 @@ div.st-key-disp_context_strip [data-testid="element-container"] {{
   text-align: right;
   line-height: 1;
   white-space: nowrap;
+}}
+div.st-key-disp_context_range,
+div.st-key-disp_context_range [data-testid="stVerticalBlock"],
+div.st-key-disp_context_range [data-testid="element-container"] {{
+  display: inline-flex !important;
+  align-items: center !important;
+  height: var(--disp-context-h) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}}
+div.st-key-disp_context_range [data-testid="stPopover"] > button {{
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: var(--disp-muted) !important;
+  min-height: 22px !important;
+  height: 22px !important;
+  padding: 0 8px !important;
+  border: 1px solid var(--disp-border) !important;
+  border-radius: 6px !important;
+  background: var(--disp-bg) !important;
+}}
+div.st-key-disp_context_range [data-testid="stPopover"] > button:hover {{
+  border-color: var(--disp-accent) !important;
+  color: var(--disp-text) !important;
 }}
 div.st-key-disp_header_lookup,
 div.st-key-disp_header_settings,
@@ -2978,6 +3061,7 @@ def render_settings_popover(
     trigger_label: str = "⚙",
     trigger_help: str = "Settings",
     show_signout: bool = True,
+    show_date_range: bool = True,
 ) -> None:
     """Compact settings popover for the top bar."""
     with st.popover(trigger_label, help=trigger_help, use_container_width=False):
@@ -3008,42 +3092,43 @@ def render_settings_popover(
             else:
                 st.rerun()
 
-        st.divider()
+        if show_date_range:
+            st.divider()
 
-        st.markdown(
-            '<p class="settings-section-label">Date range</p>',
-            unsafe_allow_html=True,
-        )
-        if range_caption:
             st.markdown(
-                f'<p class="settings-range-cap">{html.escape(range_caption)}</p>',
+                '<p class="settings-section-label">Date range</p>',
                 unsafe_allow_html=True,
             )
-        menu_labels = [o for o in time_preset_options if o != "Pick dates"]
-        display_opts = menu_labels + ["Custom"]
-        cur = str(st.session_state.get(time_preset_key, "This week"))
-        if cur == "Pick dates":
-            cur = "Custom"
-        if cur not in display_opts:
-            cur = "This week"
-            st.session_state[time_preset_key] = "This week"
-        # Drop legacy searchable selectbox state (could show stale filter text).
-        st.session_state.pop("settings_range", None)
-        radio_key = f"settings_time_range_{time_preset_key}"
-        if st.session_state.get(radio_key) not in display_opts:
-            st.session_state[radio_key] = cur
-        range_opt = st.radio(
-            "Range",
-            display_opts,
-            label_visibility="collapsed",
-            key=radio_key,
-        )
-        if range_opt == "Custom":
-            st.session_state[time_preset_key] = "Pick dates"
-            if render_custom_dates:
-                render_custom_dates()
-        else:
-            st.session_state[time_preset_key] = range_opt
+            if range_caption:
+                st.markdown(
+                    f'<p class="settings-range-cap">{html.escape(range_caption)}</p>',
+                    unsafe_allow_html=True,
+                )
+            menu_labels = [o for o in time_preset_options if o != "Pick dates"]
+            display_opts = menu_labels + ["Custom"]
+            cur = str(st.session_state.get(time_preset_key, "This week"))
+            if cur == "Pick dates":
+                cur = "Custom"
+            if cur not in display_opts:
+                cur = "This week"
+                st.session_state[time_preset_key] = "This week"
+            # Drop legacy searchable selectbox state (could show stale filter text).
+            st.session_state.pop("settings_range", None)
+            radio_key = f"settings_time_range_{time_preset_key}"
+            if st.session_state.get(radio_key) not in display_opts:
+                st.session_state[radio_key] = cur
+            range_opt = st.radio(
+                "Range",
+                display_opts,
+                label_visibility="collapsed",
+                key=radio_key,
+            )
+            if range_opt == "Custom":
+                st.session_state[time_preset_key] = "Pick dates"
+                if render_custom_dates:
+                    render_custom_dates()
+            else:
+                st.session_state[time_preset_key] = range_opt
 
         if render_admin:
             st.divider()

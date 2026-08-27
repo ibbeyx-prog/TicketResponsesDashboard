@@ -827,7 +827,7 @@ def _db_clear_active_ticket(user_id: int) -> None:
 def _db_get_ticket(ticket_number: str) -> dict[str, Any] | None:
     res = (
         supabase.table(TICKETS_TABLE)
-        .select("ticket_number, assigned_to, task_category, status")
+        .select("ticket_number, assigned_to, assigned_to_2, task_category, status")
         .eq("ticket_number", ticket_number)
         .limit(1)
         .execute()
@@ -888,7 +888,10 @@ def _field_reply_row_accepting_response(row: dict[str, Any]) -> bool:
     if row.get("_field_source") == "sales":
         if str(row.get("status") or "").strip() == _SALES_STATUS_RESOLVED:
             return False
-        return bool(str(row.get("assigned_to") or "").strip())
+        return bool(
+            str(row.get("assigned_to") or "").strip()
+            or str(row.get("assigned_to_2") or "").strip()
+        )
     return str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES
 
 
@@ -897,6 +900,13 @@ def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | 
         return False
     db_key = _normalize_username(str(assigned_to_db)) if assigned_to_db is not None else None
     return bool(db_key and db_key == _normalize_username(replier_username))
+
+
+def _sender_matches_row_assignee(row: dict[str, Any], replier_username: str | None) -> bool:
+    """True when replier is primary or co-assignee on a ticket / sales case row."""
+    return _sender_matches_assigned_to(row.get("assigned_to"), replier_username) or (
+        _sender_matches_assigned_to(row.get("assigned_to_2"), replier_username)
+    )
 
 
 def _ticket_field_reply_eligible(ticket_number: str) -> bool:
@@ -1039,7 +1049,7 @@ def _resolve_ticket_by_unique_id(
                 row = None
         if not row:
             continue
-        if _sender_matches_assigned_to(row.get("assigned_to"), replier_username):
+        if _sender_matches_row_assignee(row, replier_username):
             matched.append(tid)
 
     if len(matched) == 1:
@@ -1067,7 +1077,7 @@ def _pending_tickets_for_assignee(replier_username: str | None) -> list[dict[str
     try:
         res = (
             supabase.table(TICKETS_TABLE)
-            .select("ticket_number, assigned_to, last_assigned_at")
+            .select("ticket_number, assigned_to, assigned_to_2, last_assigned_at")
             .eq("status", STATUS_DAILY_TASK)
             .execute()
         )
@@ -1077,7 +1087,7 @@ def _pending_tickets_for_assignee(replier_username: str | None) -> list[dict[str
     return [
         r
         for r in (res.data or [])
-        if _sender_matches_assigned_to(r.get("assigned_to"), replier_username)
+        if _sender_matches_row_assignee(r, replier_username)
     ]
 
 
@@ -1093,7 +1103,7 @@ def _pending_field_targets_for_assignee(replier_username: str | None) -> list[st
     try:
         res = (
             supabase.table(SALES_CASES_TABLE)
-            .select("case_ref, assigned_to, status")
+            .select("case_ref, assigned_to, assigned_to_2, status")
             .neq("status", _SALES_STATUS_RESOLVED)
             .execute()
         )
@@ -1101,7 +1111,7 @@ def _pending_field_targets_for_assignee(replier_username: str | None) -> list[st
         log.exception("pending sales cases lookup failed for @%s", replier_username)
     else:
         for r in res.data or []:
-            if not _sender_matches_assigned_to(r.get("assigned_to"), replier_username):
+            if not _sender_matches_row_assignee(r, replier_username):
                 continue
             cref = str(r.get("case_ref") or "").strip()
             if cref:
@@ -2927,13 +2937,12 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         or explicit_ticket_in_reply
         or has_reply_photo
     )
-    if not allow_any_phone and not _sender_matches_assigned_to(
-        row.get("assigned_to"), username
-    ):
+    if not allow_any_phone and not _sender_matches_row_assignee(row, username):
         log.warning(
-            "field_reply assignee mismatch ticket=%s db=%r replier=@%s",
+            "field_reply assignee mismatch ticket=%s db=%r db2=%r replier=@%s",
             ticket_number,
             row.get("assigned_to"),
+            row.get("assigned_to_2"),
             username,
         )
         await _reply(update, "You are not the assignee for that ticket.")
@@ -3202,7 +3211,7 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     row = _field_reply_lookup(ticket_number)
                 except Exception:
                     row = None
-                if row and _sender_matches_assigned_to(row.get("assigned_to"), username):
+                if row and _sender_matches_row_assignee(row, username):
                     log.info(
                         "handle_non_text: group photo completion for %s",
                         ticket_number,
