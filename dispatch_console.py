@@ -17,6 +17,25 @@ _DISP_HEADER_H = "48px"
 _DISP_CONTEXT_H = "32px"
 UI_MIN_FONT_PX = 11
 
+
+def embed_inline_html(
+    src: str,
+    *,
+    height: int | str = "content",
+    width: int | str = "stretch",
+) -> None:
+    """Embed inline HTML/JS via ``st.iframe`` srcdoc."""
+    snippet = src.strip()
+    iframe_height: int | str = "content" if height in (0, "content") else int(height)
+    if iframe_height == "content" and snippet.lower().startswith(("<script", "<style")):
+        snippet = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>html,body{margin:0;padding:0;height:0;overflow:hidden;}"
+            "</style></head><body>"
+            f"{snippet}</body></html>"
+        )
+    st.iframe(snippet, height=iframe_height, width=width)
+
 # Shared design tokens (CSS variables for embedded HTML components).
 _DISPATCH_VARS = f"""
 :root {{
@@ -747,6 +766,7 @@ div.st-key-disp_context_strip {{
   position: sticky !important;
   top: var(--disp-header-h) !important;
   z-index: 998 !important;
+  overflow: visible !important;
 }}
 div.st-key-disp_context_strip [data-testid="stVerticalBlock"],
 div.st-key-disp_context_strip [data-testid="stHorizontalBlock"],
@@ -760,6 +780,7 @@ div.st-key-disp_context_strip [data-testid="element-container"] {{
   min-height: var(--disp-context-h) !important;
   max-height: var(--disp-context-h) !important;
   align-items: center !important;
+  overflow: visible !important;
 }}
 .disp-context-meta {{
   display: flex;
@@ -812,6 +833,19 @@ div.st-key-disp_context_range [data-testid="stPopover"] > button {{
 div.st-key-disp_context_range [data-testid="stPopover"] > button:hover {{
   border-color: var(--disp-accent) !important;
   color: var(--disp-text) !important;
+}}
+div.st-key-disp_context_range [data-testid="stPopoverBody"],
+div.st-key-disp_header_settings [data-testid="stPopoverBody"] {{
+  overflow: visible !important;
+  min-width: 15rem !important;
+}}
+div.st-key-disp_context_range [data-testid="stPopoverBody"] .stDateInput,
+div.st-key-disp_header_settings [data-testid="stPopoverBody"] .stDateInput {{
+  position: relative !important;
+  z-index: 2 !important;
+}}
+div[data-baseweb="popover"]:has([data-baseweb="calendar"]) {{
+  z-index: 10050 !important;
 }}
 div.st-key-disp_header_lookup,
 div.st-key-disp_header_settings,
@@ -2733,7 +2767,7 @@ div[data-baseweb="popover"] ul[role="listbox"] li > div {
 def inject_dispatch_row_popover_compact_css() -> None:
     """Inject compact row-action menu styles into the parent document head."""
     css_json = json.dumps(_DISPATCH_ROW_MENU_COMPACT_CSS.strip())
-    st.iframe(
+    embed_inline_html(
         f"""
         <script>
         (function () {{
@@ -2749,7 +2783,6 @@ def inject_dispatch_row_popover_compact_css() -> None:
         }})();
         </script>
         """,
-        height="content",
     )
 
 
@@ -3067,7 +3100,9 @@ def render_settings_popover(
     time_preset_key: str,
     on_refresh: Callable[[], None] | None = None,
     on_signout: Callable[[], None] | None = None,
-    render_custom_dates: Callable[[], None] | None = None,
+    render_custom_dates: Callable[[], bool] | Callable[[], None] | None = None,
+    on_range_change: Callable[[], None] | None = None,
+    on_open_custom_dates: Callable[[], None] | None = None,
     render_admin: Callable[[], None] | None = None,
     range_caption: str = "",
     trigger_label: str = "⚙",
@@ -3118,29 +3153,37 @@ def render_settings_popover(
                 )
             menu_labels = [o for o in time_preset_options if o != "Pick dates"]
             display_opts = menu_labels + ["Custom"]
-            cur = str(st.session_state.get(time_preset_key, "This week"))
-            if cur == "Pick dates":
-                cur = "Custom"
-            if cur not in display_opts:
-                cur = "This week"
+            preset = str(st.session_state.get(time_preset_key, "This week"))
+            display_cur = "Custom" if preset == "Pick dates" else preset
+            if display_cur not in display_opts:
+                display_cur = "This week"
                 st.session_state[time_preset_key] = "This week"
-            # Drop legacy searchable selectbox state (could show stale filter text).
-            st.session_state.pop("settings_range", None)
+                preset = "This week"
             radio_key = f"settings_time_range_{time_preset_key}"
-            if st.session_state.get(radio_key) not in display_opts:
-                st.session_state[radio_key] = cur
+            st.session_state.pop(radio_key, None)
             range_opt = st.radio(
                 "Range",
                 display_opts,
+                index=display_opts.index(display_cur),
                 label_visibility="collapsed",
-                key=radio_key,
             )
             if range_opt == "Custom":
-                st.session_state[time_preset_key] = "Pick dates"
+                preset_changed = preset != "Pick dates"
+                if preset_changed:
+                    st.session_state[time_preset_key] = "Pick dates"
+                    if on_open_custom_dates:
+                        on_open_custom_dates()
                 if render_custom_dates:
                     render_custom_dates()
+                if preset_changed and on_range_change:
+                    on_range_change()
             else:
-                st.session_state[time_preset_key] = range_opt
+                if preset != range_opt:
+                    st.session_state[time_preset_key] = range_opt
+                    if on_range_change:
+                        on_range_change()
+                else:
+                    st.session_state[time_preset_key] = range_opt
 
         if render_admin:
             st.divider()

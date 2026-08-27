@@ -90,18 +90,6 @@ except ImportError:
     _HAS_STAFF_MATRIX = False
 
 
-def _iframe_html(
-    src: str,
-    *,
-    height: int | str = "content",
-    width: int | str = "stretch",
-) -> None:
-    """Embed trusted HTML/JS (replaces deprecated ``st.components.v1.html``)."""
-    if height == 0:
-        height = "content"
-    st.iframe(src, height=height, width=width)
-
-
 from bot_utils import (
     NOTIFY_BUILD_ID,
     AssignmentTelegramRef,
@@ -122,41 +110,62 @@ from task_categories import (
     task_categories_table,
     upsert_task_category,
 )
+
+
+def _import_dispatch_console_module():
+    """Import dispatch_console; retry once on Streamlit hot-reload KeyError."""
+    import importlib
+    import sys
+
+    last_err: BaseException | None = None
+    for attempt in range(2):
+        try:
+            if attempt:
+                sys.modules.pop("dispatch_console", None)
+                importlib.invalidate_caches()
+            return importlib.import_module("dispatch_console")
+        except (ImportError, KeyError, ModuleNotFoundError) as err:
+            last_err = err
+    assert last_err is not None
+    raise last_err
+
+
 try:
-    from dispatch_console import (
-        DISPATCH_FULL_DARK_CSS,
-        DISPATCH_LAYOUT_RULES,
-        DISPATCH_LOGIN_CSS,
-        QUEUE_DOTS,
-        QUEUE_ORDER,
-        SALES_QUEUE_DOTS,
-        SALES_QUEUE_ORDER,
-        active_queue_key,
-        display_status,
-        format_utc5,
-        render_nudge_banner,
-        render_queue_list,
-        render_sales_case_table,
-        render_settings_popover,
-        render_sidebar_today_grid,
-        render_ticket_table,
-        render_ticket_table_pager,
-        status_pill,
-        prepare_dispatch_ticket_page,
-        DISPATCH_TICKET_PAGE_SIZE,
-        inject_dispatch_row_popover_compact_css,
+    _dispatch_console = _import_dispatch_console_module()
+    DISPATCH_FULL_DARK_CSS = _dispatch_console.DISPATCH_FULL_DARK_CSS
+    DISPATCH_LAYOUT_RULES = _dispatch_console.DISPATCH_LAYOUT_RULES
+    DISPATCH_LOGIN_CSS = _dispatch_console.DISPATCH_LOGIN_CSS
+    QUEUE_DOTS = _dispatch_console.QUEUE_DOTS
+    QUEUE_ORDER = _dispatch_console.QUEUE_ORDER
+    SALES_QUEUE_DOTS = _dispatch_console.SALES_QUEUE_DOTS
+    SALES_QUEUE_ORDER = _dispatch_console.SALES_QUEUE_ORDER
+    active_queue_key = _dispatch_console.active_queue_key
+    display_status = _dispatch_console.display_status
+    format_utc5 = _dispatch_console.format_utc5
+    render_nudge_banner = _dispatch_console.render_nudge_banner
+    render_queue_list = _dispatch_console.render_queue_list
+    render_sales_case_table = _dispatch_console.render_sales_case_table
+    render_settings_popover = _dispatch_console.render_settings_popover
+    render_sidebar_today_grid = _dispatch_console.render_sidebar_today_grid
+    render_ticket_table = _dispatch_console.render_ticket_table
+    render_ticket_table_pager = _dispatch_console.render_ticket_table_pager
+    status_pill = _dispatch_console.status_pill
+    prepare_dispatch_ticket_page = _dispatch_console.prepare_dispatch_ticket_page
+    DISPATCH_TICKET_PAGE_SIZE = _dispatch_console.DISPATCH_TICKET_PAGE_SIZE
+    inject_dispatch_row_popover_compact_css = (
+        _dispatch_console.inject_dispatch_row_popover_compact_css
     )
-    try:
-        from dispatch_console import render_ticket_table_fast
-    except ImportError:
-        render_ticket_table_fast = render_ticket_table
-except ImportError as _dispatch_import_err:
+    render_ticket_table_fast = getattr(
+        _dispatch_console, "render_ticket_table_fast", render_ticket_table
+    )
+    _iframe_html = _dispatch_console.embed_inline_html
+except (ImportError, KeyError, ModuleNotFoundError) as _dispatch_import_err:
     import traceback
 
     traceback.print_exc()
     raise ImportError(
-        "dispatch_console failed to import — redeploy/reboot the Streamlit app "
-        "so app.py and dispatch_console.py are the same commit. "
+        "dispatch_console failed to import — stop and restart Streamlit "
+        "(streamlit run app.py) so both files reload cleanly. "
         f"Original error: {_dispatch_import_err!r}"
     ) from _dispatch_import_err
 from unattended import (
@@ -503,7 +512,7 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v8"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v9"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
 
 
@@ -1648,6 +1657,7 @@ _DASH_TIME_PRESET_OPTIONS: tuple[str, ...] = (
 )
 _DASH_SEARCH_FROM_DATE_KEY = "_dash_search_from_date"
 _DASH_SEARCH_TO_DATE_KEY = "_dash_search_to_date"
+_DASH_CUSTOM_DATE_DIALOG_KEY = "_dash_custom_date_dialog_open"
 _DASH_PREV_PRESET_KEY = "_dash_prev_preset"
 _DASH_RANGE_CUSTOM_OPEN_KEY = "_dash_range_custom_open"
 _DASH_TIME_PRESET_MENU: tuple[str, ...] = (
@@ -9247,8 +9257,24 @@ def _render_dash_menu_time_range() -> str:
     return preset
 
 
-def _render_dash_custom_date_inputs() -> None:
-    """From/To pickers when preset is Pick dates."""
+def _apply_dash_range_change() -> None:
+    """Refresh cached reads after the header time-range picker changes."""
+    _invalidate_dashboard_data_cache()
+    st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+
+
+def _open_dash_custom_date_dialog() -> None:
+    st.session_state[_DASH_CUSTOM_DATE_DIALOG_KEY] = True
+
+
+def _close_dash_custom_date_dialog() -> None:
+    st.session_state[_DASH_CUSTOM_DATE_DIALOG_KEY] = False
+
+
+@st.dialog("Custom date range", width="small", on_dismiss=_close_dash_custom_date_dialog)
+def _dash_custom_date_dialog() -> None:
+    """From/To pickers in a dialog — calendar popovers fail inside st.popover."""
+    _init_dash_date_range_state()
     c1, c2 = st.columns(2)
     with c1:
         st.date_input(
@@ -9262,7 +9288,30 @@ def _render_dash_custom_date_inputs() -> None:
             format="YYYY-MM-DD",
             key=_DASH_SEARCH_TO_DATE_KEY,
         )
-    _sync_dash_range_from_ui("Pick dates")
+    if st.button("Apply range", key="dash_custom_date_apply", type="primary", width="stretch"):
+        from_d = st.session_state.get(_DASH_SEARCH_FROM_DATE_KEY)
+        to_d = st.session_state.get(_DASH_SEARCH_TO_DATE_KEY)
+        if from_d is None or to_d is None:
+            return
+        if from_d > to_d:
+            st.session_state[_DASH_SEARCH_TO_DATE_KEY] = from_d
+        st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
+        _sync_dash_range_from_ui("Pick dates")
+        _apply_dash_range_change()
+        _close_dash_custom_date_dialog()
+        st.rerun()
+
+
+def _render_dash_custom_date_inputs(*, trigger_key: str = "dash_custom_dates_btn") -> bool:
+    """Show current custom range and open the date dialog (popover-safe)."""
+    from_d = st.session_state.get(_DASH_SEARCH_FROM_DATE_KEY)
+    to_d = st.session_state.get(_DASH_SEARCH_TO_DATE_KEY)
+    if from_d and to_d:
+        st.caption(f"{from_d} → {to_d}")
+    if st.button("Choose dates…", key=trigger_key, width="stretch"):
+        _open_dash_custom_date_dialog()
+        st.rerun()
+    return False
 
 
 def _init_lookup_state() -> None:
@@ -9732,6 +9781,8 @@ def _render_dispatch_app_shell() -> None:
 
     if bool(st.session_state.get("show_lookup", False)):
         render_lookup_popover()
+    if bool(st.session_state.get(_DASH_CUSTOM_DATE_DIALOG_KEY, False)):
+        _dash_custom_date_dialog()
 
 
 def _render_dispatch_header_utilities(*, chip: dict[str, str]) -> None:
@@ -9793,34 +9844,43 @@ def _render_dispatch_user_menu(*, chip: dict[str, str]) -> None:
 
 def _render_dash_time_range_controls(*, radio_key: str, refresh_key: str) -> None:
     """Shared time-range preset picker for context strip and settings."""
+    del radio_key  # legacy keyed radios removed — avoid stale widget state
     _init_dash_date_range_state()
     preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
-    _sync_dash_range_from_ui(preset)
     range_cap = _format_dash_range_caption()
     if range_cap:
         st.caption(range_cap)
     menu_labels = [o for o in _DASH_TIME_PRESET_OPTIONS if o != "Pick dates"]
     display_opts = menu_labels + ["Custom"]
-    cur = preset if preset != "Pick dates" else "Custom"
-    if cur not in display_opts:
-        cur = "This week"
-    if st.session_state.get(radio_key) not in display_opts:
-        st.session_state[radio_key] = cur
+    display_cur = "Custom" if preset == "Pick dates" else preset
+    if display_cur not in display_opts:
+        display_cur = "This week"
+        st.session_state[_DASH_TIME_PRESET_KEY] = "This week"
+        preset = "This week"
+
     range_opt = st.radio(
         "Range",
         display_opts,
+        index=display_opts.index(display_cur),
         label_visibility="collapsed",
-        key=radio_key,
     )
+
     if range_opt == "Custom":
-        st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
-        _render_dash_custom_date_inputs()
-        _sync_dash_range_from_ui("Pick dates")
+        preset_changed = preset != "Pick dates"
+        if preset_changed:
+            st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
+            _open_dash_custom_date_dialog()
+            _apply_dash_range_change()
+        _render_dash_custom_date_inputs(trigger_key="context_custom_dates_btn")
     else:
-        st.session_state[_DASH_TIME_PRESET_KEY] = range_opt
-        _sync_dash_range_from_ui(range_opt)
+        if preset != range_opt:
+            st.session_state[_DASH_TIME_PRESET_KEY] = range_opt
+            _sync_dash_range_from_ui(range_opt)
+            _apply_dash_range_change()
+        else:
+            _sync_dash_range_from_ui(range_opt)
     if st.button("↻ Refresh now", key=refresh_key, width="stretch"):
-        _invalidate_dashboard_data_cache()
+        _apply_dash_range_change()
         st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
         st.rerun()
 
@@ -9907,9 +9967,14 @@ def _render_dispatch_settings_popover(
         st.session_state.pop(_LOGIN_VIEW_KEY, None)
         st.rerun()
 
-    def _custom_dates() -> None:
-        _render_dash_custom_date_inputs()
-        _sync_dash_range_from_ui("Pick dates")
+    def _custom_dates() -> bool:
+        return _render_dash_custom_date_inputs(trigger_key="settings_custom_dates_btn")
+
+    def _on_range_change() -> None:
+        _apply_dash_range_change()
+
+    def _open_custom_dates() -> None:
+        _open_dash_custom_date_dialog()
 
     popover_kwargs: dict[str, object] = {
         "time_preset_options": list(_DASH_TIME_PRESET_OPTIONS),
@@ -9917,6 +9982,8 @@ def _render_dispatch_settings_popover(
         "on_refresh": _refresh,
         "on_signout": _signout,
         "render_custom_dates": _custom_dates,
+        "on_range_change": _on_range_change,
+        "on_open_custom_dates": _open_custom_dates,
         "range_caption": _format_dash_range_caption(),
         "trigger_label": trigger_label,
         "trigger_help": trigger_help,
@@ -15935,9 +16002,10 @@ def main() -> None:
     auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
 
+    _render_dispatch_app_shell()
+
     @st.fragment(run_every=run_every)
     def _dashboard_body_fragment() -> None:
-        _render_dispatch_app_shell()
         _sync_dash_range_from_ui(
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
