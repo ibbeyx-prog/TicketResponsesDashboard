@@ -78,7 +78,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from cryptography.fernet import Fernet
 import altair as alt
 
@@ -89,6 +88,19 @@ try:
 except ImportError:
     _staff_matrix_component = None
     _HAS_STAFF_MATRIX = False
+
+
+def _iframe_html(
+    src: str,
+    *,
+    height: int | str = "content",
+    width: int | str = "stretch",
+) -> None:
+    """Embed trusted HTML/JS (replaces deprecated ``st.components.v1.html``)."""
+    if height == 0:
+        height = "content"
+    st.iframe(src, height=height, width=width)
+
 
 from bot_utils import (
     NOTIFY_BUILD_ID,
@@ -285,7 +297,6 @@ def _render_perf_dataframe(
     height: int | str = (
         "content" if row_count <= 15 else min(480, 42 + row_count * 35)
     )
-    kwargs.pop("use_container_width", None)
     kwargs.setdefault("hide_index", True)
     st.dataframe(view, width="stretch", height=height, **kwargs)
 
@@ -492,8 +503,28 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v7"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v8"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
+
+
+def _inject_css_into_head(element_id: str, css_text: str) -> None:
+    """Inject CSS into the parent document head (fragment-safe, inject once)."""
+    css_json = json.dumps(css_text.strip())
+    id_json = json.dumps(element_id)
+    _iframe_html(
+        f"""
+        <script>
+        (function () {{
+          const doc = window.parent.document;
+          if (doc.getElementById({id_json})) return;
+          const style = doc.createElement("style");
+          style.id = {id_json};
+          style.textContent = {css_json};
+          doc.head.appendChild(style);
+        }})();
+        </script>
+        """,
+    )
 
 
 def apply_theme(*, login: bool = False) -> None:
@@ -505,9 +536,7 @@ def apply_theme(*, login: bool = False) -> None:
     if st.session_state.get(theme_key):
         return
     st.session_state[theme_key] = True
-    st.markdown(
-        f"""
-    <style>
+    css_text = f"""
     /* ── Base ── */
     [data-testid="stAppViewContainer"] {{ background: #0a0f1a; }}
     [data-testid="stSidebar"]          {{ background: #0f1629; border-right: 1px solid #243047; }}
@@ -792,10 +821,37 @@ def apply_theme(*, login: bool = False) -> None:
     [data-testid="stPopoverBody"]:has(.disp-row-popover-label) hr {{
       margin: 1px 0 !important;
     }}
-    </style>
-    """,
-        unsafe_allow_html=True,
-    )
+
+    .weekly-kpi-card {{
+      background: #0d1220; border: 0.5px solid #1a2035;
+      border-radius: 6px; padding: 0.85rem 1rem; min-height: 96px; height: 100%;
+      display: flex; flex-direction: column; justify-content: flex-start;
+      box-sizing: border-box;
+    }}
+    .weekly-kpi-label {{
+      font-size: 0.78rem; color: #8a9ac0; margin: 0 0 0.45rem;
+      line-height: 1.25; min-height: 2.5em;
+    }}
+    .weekly-kpi-value {{
+      font-size: 1.75rem; font-weight: 600; color: #e2e8f8; margin: 0;
+      line-height: 1.1; font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+    }}
+    .weekly-kpi-sub {{
+      font-size: 0.72rem; color: #22c55e; margin: 0.45rem 0 0;
+      line-height: 1.35; min-height: 2.6em;
+    }}
+    .weekly-kpi-sub.neutral {{ color: #8a9ac0; }}
+    .weekly-kpi-sub.warn {{ color: #64748b; }}
+    .weekly-panel {{
+      background: #0d1220; border: 0.5px solid #1a2035;
+      border-radius: 6px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
+    }}
+    .weekly-panel h4 {{
+      font-size: 0.95rem; font-weight: 600; color: #e2e8f8; margin: 0 0 0.65rem;
+    }}
+    """
+    _inject_css_into_head("disp-dashboard-theme", css_text)
     if login:
         st.markdown(DISPATCH_LOGIN_CSS, unsafe_allow_html=True)
 
@@ -806,7 +862,6 @@ _DISPATCH_QUEUE_MASK: dict[str, str] = {
     "On Hold": "on_hold",
     "Under Investigation": "investigation",
     "Follow up": "follow_up",
-    "Unattended": "unattended",
     "Resolved": "completed",
 }
 _DISP_SELECTED_KEY = "disp_selected_ticket"
@@ -1235,7 +1290,7 @@ def _sc_clear_toolbar_panels_except(key_prefix: str) -> None:
 
 def _sc_status_actions_for_case(cur_status: str) -> tuple[tuple[str, str], ...]:
     """Action menu options for one selected case (row status may differ from queue view)."""
-    if cur_status == SC_STATUS_SALES_TICKET:
+    if cur_status in (SC_STATUS_SALES_TICKET, "Open"):
         return (
             ("Investigation", SC_STATUS_INVESTIGATION),
             ("Design", SC_STATUS_DESIGN),
@@ -1285,7 +1340,7 @@ def _sc_apply_status_advance(
     """Move case to another queue. Returns an error message, or None on success."""
     cur = _sc_effective_status(r0.get("status"))
     if target_status == SC_STATUS_INVESTIGATION:
-        if cur == SC_STATUS_SALES_TICKET:
+        if cur in (SC_STATUS_SALES_TICKET, "Open"):
             payload = _sc_patch_with_action_comment(
                 {"status": SC_STATUS_INVESTIGATION, "admin_owner": op},
                 action_comment,
@@ -1306,6 +1361,7 @@ def _sc_apply_status_advance(
     if target_status == SC_STATUS_DESIGN:
         if cur in (
             SC_STATUS_SALES_TICKET,
+            "Open",
             SC_STATUS_INVESTIGATION,
             SC_STATUS_REGIONAL,
         ):
@@ -1325,6 +1381,7 @@ def _sc_apply_status_advance(
     if target_status == SC_STATUS_RESOLVED:
         if cur not in (
             SC_STATUS_SALES_TICKET,
+            "Open",
             SC_STATUS_INVESTIGATION,
             SC_STATUS_REGIONAL,
             SC_STATUS_DESIGN,
@@ -1634,6 +1691,7 @@ _PERF_FOCUS_ASSIGNEE_KEY = "perf_focus_assignee"
 _PERF_RANGE_PRESET_KEY = "perf_range"
 _PERF_ACTIVE_VIEW_KEY = "perf_active_view"
 _PERF_SELECTED_ENGINEER_KEY = "perf_selected_engineer"
+_PERF_FOCUS_REV_KEY = "_perf_focus_rev"
 _PERF_RANGE_FROM_KEY = "_perf_range_from_utc"
 _PERF_RANGE_TO_KEY = "_perf_range_to_utc"
 _PERF_VIEW_OPTIONS: tuple[str, ...] = (
@@ -1642,13 +1700,13 @@ _PERF_VIEW_OPTIONS: tuple[str, ...] = (
     "Case info",
     "Handled",
     "On hold",
-    "Unattended",
 )
 _PERF_VIEW_OPTIONS_FOCUSED: tuple[str, ...] = (
     "Summary",
     "Overview",
     "Case info",
     "Handled",
+    "Unattended",
 )
 _PERF_OVERVIEW_COL_RESIDENTIAL = "Residential"
 _PERF_OVERVIEW_COL_RESORT = "Resort"
@@ -2062,7 +2120,7 @@ def _login_remember_bootstrap() -> None:
     # One inject per Streamlit session — avoids a second Sign-in click on first submit.
     st.session_state[_LOGIN_REMEMBER_BOOT_KEY] = True
 
-    components.html(
+    _iframe_html(
         """
         <script>
         (function () {
@@ -2079,31 +2137,28 @@ def _login_remember_bootstrap() -> None:
         })();
         </script>
         """,
-        height=0,
     )
 
 
 def _login_remember_persist(*, username: str, password: str) -> None:
     token = _encode_remembered_login(username=username, password=password)
     safe = json.dumps(token)
-    components.html(
+    _iframe_html(
         f"""
         <script>
         localStorage.setItem("fto_remember_v1", {safe});
         </script>
         """,
-        height=0,
     )
 
 
 def _login_remember_clear() -> None:
-    components.html(
+    _iframe_html(
         """
         <script>
         localStorage.removeItem("fto_remember_v1");
         </script>
         """,
-        height=0,
     )
 
 
@@ -2428,7 +2483,7 @@ def _render_dashboard_team_accounts_body() -> None:
     view_tab, add_tab = st.tabs(["Accounts", "Add user"])
 
     with view_tab:
-        if st.button("Refresh List", key="dash_team_refresh", use_container_width=True):
+        if st.button("Refresh List", key="dash_team_refresh", width="stretch"):
             if not admin_pw:
                 st.warning("Enter your password first.")
             else:
@@ -2471,7 +2526,7 @@ def _render_dashboard_team_accounts_body() -> None:
                     if st.button(
                         btn_label,
                         key=f"dash_team_toggle_{hkey}",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         if not admin_pw:
                             st.warning("Enter your password first.")
@@ -2512,7 +2567,7 @@ def _render_dashboard_team_accounts_body() -> None:
             new_pw = st.text_input("Temporary Password", type="password")
             confirm_pw = st.text_input("Confirm Password", type="password")
             submitted = st.form_submit_button(
-                "Create account", use_container_width=True
+                "Create account", width="stretch"
             )
 
         if not submitted:
@@ -2757,7 +2812,7 @@ def _render_per_user_login_form() -> None:
                 key=_LOGIN_SAVE_PW_KEY,
                 help="Stores an encrypted login token in this browser only.",
             )
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        submitted = st.form_submit_button("Sign in", width="stretch")
 
     _, col_forgot = st.columns([1.4, 1])
     with col_forgot:
@@ -2793,7 +2848,7 @@ def _render_legacy_login_form(*, legacy_password: str) -> None:
             autocomplete="current-password",
             key=_LOGIN_PWD_WIDGET_KEY,
         )
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        submitted = st.form_submit_button("Sign in", width="stretch")
 
     if submitted:
         _handle_legacy_login(operator_id, shared_password, legacy_password=legacy_password)
@@ -2811,7 +2866,7 @@ def _forgot_password_dialog() -> None:
         )
         username = st.text_input("Username", key="reset_username")
         st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
-        if st.button("Send reset code", key="reset_request_btn", use_container_width=True):
+        if st.button("Send reset code", key="reset_request_btn", width="stretch"):
             if not username.strip():
                 st.toast("Enter a username", icon="⚠️")
             else:
@@ -2859,7 +2914,7 @@ def _forgot_password_dialog() -> None:
         help=f"Minimum {_MIN_DASHBOARD_PASSWORD_LEN} characters",
     )
     st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
-    if st.button("Reset password", key="reset_confirm_btn", use_container_width=True):
+    if st.button("Reset password", key="reset_confirm_btn", width="stretch"):
         if not code.strip() or not new_password:
             st.toast("Enter both the code and a new password", icon="⚠️")
         elif len(new_password) < _MIN_DASHBOARD_PASSWORD_LEN:
@@ -2957,7 +3012,7 @@ def _render_login_screen(
                     else "Use username + password"
                 )
                 with st.container(key="login_mode_toggle"):
-                    if st.button(toggle_label, key="toggle_login_mode", use_container_width=True):
+                    if st.button(toggle_label, key="toggle_login_mode", width="stretch"):
                         st.session_state[_LOGIN_MODE_KEY] = (
                             "legacy" if login_mode == "per_user" else "per_user"
                         )
@@ -4750,7 +4805,7 @@ def _render_selectable_ticket_table(
         st.session_state[sel_key] = []
 
     if "ticket_number" not in view.columns:
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
         return []
 
     prev = set(_get_selected_queue_tickets(key_prefix, options))
@@ -4777,7 +4832,7 @@ def _render_selectable_ticket_table(
     edited = st.data_editor(
         table,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         key=editor_key,
         column_config=col_cfg,
         disabled=disabled_cols,
@@ -5163,7 +5218,7 @@ def _render_ticket_delete_popover(
 ) -> None:
     """Secondary remove flow — popover, confirm checkbox, disabled until checked."""
     label = "Remove" if compact else "Remove…"
-    with st.popover(label, use_container_width=True):
+    with st.popover(label, width="stretch"):
         picked_list = _get_selected_queue_tickets(key_prefix, options)
         if not picked_list:
             st.caption("Select ticket(s) in the table, then open Remove again.")
@@ -5192,7 +5247,7 @@ def _render_ticket_delete_popover(
             "Delete",
             key=f"{key_prefix}_del_btn",
             type="secondary",
-            use_container_width=True,
+            width="stretch",
             disabled=not confirm_del,
         ):
             ok = 0
@@ -5224,7 +5279,7 @@ def _render_ticket_transfer_to_sales_popover(
     key_prefix: str,
     options: list[str],
 ) -> None:
-    with st.popover("Move to Resort", use_container_width=True):
+    with st.popover("Move to Resort", width="stretch"):
         picked_list = _get_selected_queue_tickets(key_prefix, options)
         if not picked_list:
             st.caption("Select ticket(s), then open **Move to Resort** again.")
@@ -5261,7 +5316,7 @@ def _render_ticket_transfer_to_sales_popover(
             "Move",
             key=f"{key_prefix}_xfer_sales_btn",
             type="secondary",
-            use_container_width=True,
+            width="stretch",
             disabled=not confirm,
         ):
             ok = 0
@@ -5362,10 +5417,10 @@ def _render_manual_field_response_editor(
         c_save, c_cancel = st.columns(2)
         with c_save:
             submit = st.form_submit_button(
-                save_label, type="primary", use_container_width=True
+                save_label, type="primary", width="stretch"
             )
         with c_cancel:
-            cancel = st.form_submit_button("Cancel", use_container_width=True)
+            cancel = st.form_submit_button("Cancel", width="stretch")
 
     if cancel:
         st.session_state[keys["show"]] = False
@@ -5457,10 +5512,10 @@ def _render_sales_manual_field_response_editor(
         c_save, c_cancel = st.columns(2)
         with c_save:
             submit = st.form_submit_button(
-                "Save response", type="primary", use_container_width=True
+                "Save response", type="primary", width="stretch"
             )
         with c_cancel:
-            cancel = st.form_submit_button("Cancel", use_container_width=True)
+            cancel = st.form_submit_button("Cancel", width="stretch")
 
     if cancel:
         st.session_state[keys["show"]] = False
@@ -5506,7 +5561,7 @@ def _render_ticket_status_action_popover(
     current = str(st.session_state.get(sel_key, "") or "")
     trigger = current if current in status_labels else "Action"
 
-    with st.popover(trigger, use_container_width=True):
+    with st.popover(trigger, width="stretch"):
         st.caption("Choose action — click again to clear")
         for label in status_labels:
             picked = label == current
@@ -5514,7 +5569,7 @@ def _render_ticket_status_action_popover(
                 label,
                 key=f"{key_prefix}_pick_{label.replace(' ', '_')}",
                 type="primary" if picked else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[sel_key] = "" if picked else label
                 st.rerun()
@@ -5523,7 +5578,7 @@ def _render_ticket_status_action_popover(
             "Apply",
             key=f"{key_prefix}_apply",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=current not in status_labels,
         ):
             choice = str(st.session_state.get(sel_key, ""))
@@ -5550,7 +5605,7 @@ def _render_ticket_status_action_popover(
 
 def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> None:
     """Tracked individual follow-up (●) — one Open ticket, optional note."""
-    with st.popover("Follow-up", use_container_width=True):
+    with st.popover("Follow-up", width="stretch"):
         picked = _get_selected_queue_tickets(key_prefix, options)
         if not picked:
             st.caption(
@@ -5576,7 +5631,7 @@ def _render_mark_follow_up_popover(*, key_prefix: str, options: list[str]) -> No
             "Confirm follow-up",
             key=f"{key_prefix}_follow_up_confirm",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         ):
             op = _session_operator_id()
             if not op:
@@ -5685,7 +5740,7 @@ def _render_admin_close_form_inline(
         "Confirm close",
         key=f"{key_prefix}_admin_close_confirm",
         type="primary",
-        use_container_width=True,
+        width="stretch",
     ):
         op = _session_operator_id()
         if not op:
@@ -5757,7 +5812,7 @@ def _render_mark_resolved_form_inline(
         "Confirm resolved",
         key=f"{key_prefix}_mark_resolved_confirm",
         type="primary",
-        use_container_width=True,
+        width="stretch",
     ):
         op = _session_operator_id()
         if not op:
@@ -5813,7 +5868,7 @@ def _render_follow_up_form_inline(*, key_prefix: str, options: list[str]) -> Non
         "Confirm follow-up",
         key=f"{key_prefix}_follow_up_confirm",
         type="primary",
-        use_container_width=True,
+        width="stretch",
     ):
         op = _session_operator_id()
         if not op:
@@ -5855,12 +5910,12 @@ def _render_ticket_overflow_menu(
     reassign_keys = _reassign_session_keys(key_prefix)
     picked = _get_selected_queue_tickets(key_prefix, options)
 
-    with st.popover("⋮", use_container_width=False):
+    with st.popover("⋮", width="content"):
         if allow_reassign:
             if st.button(
                 "Reassign",
                 key=f"{key_prefix}_ctx_reassign",
-                use_container_width=True,
+                width="stretch",
             ):
                 if st.session_state.get(reassign_keys["show"]):
                     st.session_state.pop(reassign_keys["show"], None)
@@ -5873,7 +5928,7 @@ def _render_ticket_overflow_menu(
             if st.button(
                 "Edit assignment",
                 key=f"{key_prefix}_ctx_edit",
-                use_container_width=True,
+                width="stretch",
             ):
                 if st.session_state.get(edit_keys["show"]):
                     st.session_state.pop(edit_keys["show"], None)
@@ -5904,7 +5959,7 @@ def _render_ticket_overflow_menu(
                         "Move",
                         key=f"{key_prefix}_ctx_xfer_btn",
                         disabled=not confirm,
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         op = _session_operator_id() or ""
                         ok = 0
@@ -5930,7 +5985,7 @@ def _render_ticket_overflow_menu(
             if st.button(
                 label,
                 key=f"{key_prefix}_ctx_status_{label.replace(' ', '_')}",
-                use_container_width=True,
+                width="stretch",
             ):
                 _apply_ticket_status_batch(
                     key_prefix=key_prefix,
@@ -5953,7 +6008,7 @@ def _render_ticket_overflow_menu(
                     if st.button(
                         "Remove",
                         key=f"{key_prefix}_ctx_del_btn",
-                        use_container_width=True,
+                        width="stretch",
                         disabled=not confirm_del,
                     ):
                         ok = 0
@@ -6045,7 +6100,7 @@ def _render_ticket_actions_popover_body(
     mfr_keys = _manual_field_response_session_keys(key_prefix)
     edit_keys = _assignment_edit_session_keys(key_prefix)
     reassign_keys = _reassign_session_keys(key_prefix)
-    btn_kw = {"use_container_width": True}
+    btn_kw = {"width": "stretch"}
     has_workflow = allow_reassign or allow_edit_assignment
 
     if allow_manual_field_response:
@@ -8489,7 +8544,7 @@ th.perf-matrix-ticket.shared-col {{ color: #60a5fa; }}
 </div>
 </div>
 </body></html>"""
-    components.html(matrix_html, height=min(560, 80 + 28 * max(len(tickets_pool), 1)), scrolling=True)
+    _iframe_html(matrix_html, height=min(560, 80 + 28 * max(len(tickets_pool), 1)))
 
 
 @st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
@@ -8669,10 +8724,9 @@ th.perf-matrix-sticky-col {{ z-index: 4; background: #0d1220; }}
 <table class="perf-matrix"><thead><tr>{"".join(header_cells)}</tr></thead>
 <tbody>{"".join(body_rows)}</tbody></table>
 </div></div></body></html>"""
-    components.html(
+    _iframe_html(
         matrix_html,
         height=min(560, 80 + 28 * max(len(tickets), 1)),
-        scrolling=True,
     )
 
 
@@ -8701,7 +8755,7 @@ def _render_visit_summary_table(visits: pd.DataFrame) -> None:
     if summary.empty:
         st.caption("No visit data for this filter.")
         return
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.dataframe(summary, width="stretch", hide_index=True)
 
 
 def _render_visit_detail_table(visits: pd.DataFrame) -> None:
@@ -8718,7 +8772,7 @@ def _render_visit_detail_table(visits: pd.DataFrame) -> None:
         "response_note", "photo_url", "closed_by",
     ) if c in view.columns]
     st.dataframe(view[cols].sort_values("visit_start", ascending=False).head(300),
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
 
 
 def _render_handled_visit_credit_bar(visits: pd.DataFrame) -> None:
@@ -8768,7 +8822,7 @@ def _render_handled_visit_credit_bar(visits: pd.DataFrame) -> None:
         )
         .properties(height=height)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> None:
@@ -8811,7 +8865,7 @@ def _render_visit_bar(visits: pd.DataFrame, *, outcome: str | None = None) -> No
         )
         .properties(height=height)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def _perf_norm_member(raw: object) -> str:
@@ -8885,21 +8939,14 @@ def _store_perf_range(start: pd.Timestamp, end: pd.Timestamp) -> None:
 
 
 def _get_perf_range() -> tuple[pd.Timestamp, pd.Timestamp]:
-    if _PERF_RANGE_FROM_KEY not in st.session_state:
-        start, end = _preset_range_utc("This week")
-        _store_perf_range(start, end)
-    start = pd.to_datetime(st.session_state[_PERF_RANGE_FROM_KEY], utc=True)
-    end = pd.to_datetime(st.session_state[_PERF_RANGE_TO_KEY], utc=True)
-    return start, end
+    """Performance uses the same range as Ticket / Log (header context strip)."""
+    _init_dash_date_range_state()
+    _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week")))
+    return _get_dash_range()
 
 
 def _format_perf_range_caption() -> str:
-    if _PERF_RANGE_FROM_KEY not in st.session_state:
-        return ""
-    start, end = _get_perf_range()
-    lo = start.tz_convert(LOCAL_TZ).strftime("%d %b")
-    hi = end.tz_convert(LOCAL_TZ).strftime("%d %b %Y")
-    return f"{lo} – {hi} • {LOCAL_TZ_LABEL}"
+    return _format_dash_range_caption()
 
 
 def _sync_perf_range_from_ui(range_val: str) -> None:
@@ -8953,9 +9000,6 @@ def _init_perf_session_state() -> None:
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
     if _PERF_SELECTED_ENGINEER_KEY not in st.session_state:
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
-    if _PERF_RANGE_FROM_KEY not in st.session_state:
-        _sync_perf_range_from_ui(str(st.session_state[_PERF_RANGE_PRESET_KEY]))
-    _ensure_perf_custom_range_widgets()
 
 
 def _perf_focus_for_filter() -> str:
@@ -8994,6 +9038,19 @@ def _sync_perf_detail_to_focus() -> None:
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = _perf_overview_button_key(
             _perf_person_credit_key(focus)
         )
+
+
+def _sync_perf_view_for_focus() -> None:
+    """Ensure the active view exists for the current Focus assignee (avoids radio crash)."""
+    focus = _perf_focus_for_filter()
+    views = list(_perf_sidebar_view_options(focus))
+    cur = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+    if cur == "Unattended" and focus in ("", "All"):
+        cur = "Overview"
+    if cur not in views:
+        cur = views[0]
+    st.session_state[_PERF_ACTIVE_VIEW_KEY] = cur
+    st.session_state.pop("perf_view_radio", None)
 
 
 def _perf_focus_assignee_handle() -> str | None:
@@ -9137,7 +9194,7 @@ def _render_dash_time_range_pills(*, preset: str, custom_open: bool) -> None:
             if st.button(
                 pill_label,
                 key=_DASH_TIME_PRESET_PILL_KEYS[opt],
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[_DASH_TIME_PRESET_KEY] = opt
                 st.session_state[_DASH_RANGE_CUSTOM_OPEN_KEY] = False
@@ -9156,7 +9213,7 @@ def _render_dash_time_range_pills(*, preset: str, custom_open: bool) -> None:
         if st.button(
             custom_label,
             key="bon_dash_range_custom_btn",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
             st.session_state[_DASH_RANGE_CUSTOM_OPEN_KEY] = True
@@ -9302,7 +9359,7 @@ def _unified_queue_for_lookup(rtype: str, data: dict[str, object]) -> str:
         return True
 
     if _ts_present(data.get("marked_unattended_at")):
-        return "Unattended"
+        return "Needs Review"
     if _ts_present(data.get("follow_up_at")):
         return "Follow up"
     status = _normalize_ticket_status_value(data.get("status"))
@@ -9364,10 +9421,10 @@ def render_lookup_popover() -> None:
     col_search, col_clear = st.columns([3, 1])
     with col_search:
         search_clicked = st.button(
-            "Search", key="lookup_search_btn", use_container_width=True
+            "Search", key="lookup_search_btn", width="stretch"
         )
     with col_clear:
-        if st.button("Clear", key="lookup_clear_btn", use_container_width=True):
+        if st.button("Clear", key="lookup_clear_btn", width="stretch"):
             st.session_state.lookup_query = ""
             st.session_state.lookup_result = None
             _schedule_deferred_widget_clears("lookup_input")
@@ -9428,7 +9485,7 @@ def render_lookup_popover() -> None:
         unsafe_allow_html=True,
     )
     st.markdown('<div class="primary-btn" style="margin-top:10px">', unsafe_allow_html=True)
-    if st.button("Open in Ticket tab →", key="lookup_open_btn", use_container_width=True):
+    if st.button("Open in Ticket tab →", key="lookup_open_btn", width="stretch"):
         _lookup_navigate(rtype, data)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -9446,7 +9503,7 @@ def _render_dash_filters_panel() -> None:
             key="bon_toolbar_refresh_interval",
         )
     st.caption("Ticket lookup is in the header — **Lookup** next to Settings.")
-    if st.button("↻ Refresh now", key="bon_menu_refresh_btn", use_container_width=True):
+    if st.button("↻ Refresh now", key="bon_menu_refresh_btn", width="stretch"):
         _invalidate_dashboard_data_cache()
         st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
         st.rerun()
@@ -9557,7 +9614,7 @@ def _render_app_menu_panel() -> None:
         if st.button(
             "▸ Assign" if not sidebar_open else "▾ Assign",
             key="bon_menu_assign_btn",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state[_BON_SIDEBAR_OPEN_KEY] = not sidebar_open
             st.rerun()
@@ -9569,7 +9626,7 @@ def _render_app_menu_panel() -> None:
         with st.expander("Filters", expanded=False):
             _render_dash_filters_panel()
 
-        if st.button("Log out", key="bon_menu_logout_btn", use_container_width=True):
+        if st.button("Log out", key="bon_menu_logout_btn", width="stretch"):
             _clear_auth_session()
             st.session_state.pop(_LOGIN_VIEW_KEY, None)
             st.rerun()
@@ -9692,7 +9749,7 @@ def _render_dispatch_header_utilities(*, chip: dict[str, str]) -> None:
                     "Lookup",
                     key="topbar_lookup_btn",
                     help="Search ticket or case ref",
-                    use_container_width=False,
+                    width="content",
                     type="secondary",
                 ):
                     st.session_state.show_lookup = not bool(
@@ -9724,13 +9781,13 @@ def _render_dispatch_user_menu(*, chip: dict[str, str]) -> None:
         st.rerun()
 
     with st.container(key="disp_header_user"):
-        with st.popover(initials, help=help_text, use_container_width=False):
+        with st.popover(initials, help=help_text, width="content"):
             st.markdown(
                 f'<p class="disp-user-menu-name">{name}</p>'
                 f'<p class="disp-user-menu-role">{role}</p>',
                 unsafe_allow_html=True,
             )
-            if st.button("Sign out", key="header_user_signout", use_container_width=True):
+            if st.button("Sign out", key="header_user_signout", width="stretch"):
                 _signout()
 
 
@@ -9762,7 +9819,7 @@ def _render_dash_time_range_controls(*, radio_key: str, refresh_key: str) -> Non
     else:
         st.session_state[_DASH_TIME_PRESET_KEY] = range_opt
         _sync_dash_range_from_ui(range_opt)
-    if st.button("↻ Refresh now", key=refresh_key, use_container_width=True):
+    if st.button("↻ Refresh now", key=refresh_key, width="stretch"):
         _invalidate_dashboard_data_cache()
         st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
         st.rerun()
@@ -9780,6 +9837,15 @@ def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
     _init_dash_date_range_state()
     range_cap = _format_dash_range_caption()
     open_count = int(st.session_state.get("_dash_prev_open_count", 0) or 0)
+    main_nav = _normalize_dash_main_nav(
+        st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET)
+    )
+    on_ticket = main_nav == _DASH_NAV_TICKET
+    range_help = (
+        "Time range for Performance reports and charts"
+        if main_nav == "Performance"
+        else "Time range for tickets, log, and performance"
+    )
 
     with st.container(key="disp_context_strip"):
         c_left, c_right = st.columns([3.2, 1], gap="small", vertical_alignment="center")
@@ -9789,7 +9855,7 @@ def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
                 with st.container(key="disp_context_range"):
                     with st.popover(
                         _context_strip_range_trigger(),
-                        help="Time range for tickets and performance",
+                        help=range_help,
                     ):
                         _render_dash_time_range_controls(
                             radio_key="context_time_range_radio",
@@ -9808,7 +9874,7 @@ def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
                     unsafe_allow_html=True,
                 )
         with c_right:
-            if open_count > 0:
+            if on_ticket and open_count > 0:
                 noun = "case" if open_count == 1 else "cases"
                 st.markdown(
                     f'<div class="disp-context-open">{open_count} open {noun}</div>',
@@ -11112,19 +11178,92 @@ def _perf_weekly_summary_metrics(
     return metrics
 
 
-def _perf_summary_focus_unattended_metrics(
+def _perf_closed_by_others_count(
     df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    assigned_ids: frozenset[str],
+) -> int:
+    """Assigned to focus in range, but reached attended status credited to someone else."""
+    if not assigned_ids:
+        return 0
+    assigned_set = set(assigned_ids)
+    csm_attended = _perf_csm_attended_in_week(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    sales_attended = _perf_sales_attended_in_week(
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+    )
+    closed_ids: set[str] = set()
+
+    if not csm_attended.empty and "ticket_number" in csm_attended.columns:
+        for tn in csm_attended["ticket_number"].astype(str).str.strip().unique():
+            if tn not in assigned_set:
+                continue
+            sub = df_all.loc[df_all["ticket_number"].astype(str).str.strip().eq(tn)]
+            if sub.empty:
+                continue
+            if not _perf_row_credited_to_person(sub.iloc[0], focus):
+                closed_ids.add(tn)
+
+    sales_df = sales_all if sales_all is not None else pd.DataFrame()
+    if not sales_attended.empty and "case_ref" in sales_attended.columns and not sales_df.empty:
+        for cref in sales_attended["case_ref"].astype(str).str.strip().unique():
+            if cref not in assigned_set:
+                continue
+            sub = sales_df.loc[sales_df["case_ref"].astype(str).str.strip().eq(cref)]
+            if sub.empty:
+                continue
+            if not _perf_row_credited_to_person(sub.iloc[0], focus):
+                closed_ids.add(cref)
+
+    return len(closed_ids)
+
+
+def _perf_summary_focus_engineer_metrics(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
     *,
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> dict[str, int]:
-    """Unattended KPIs for Summary when Focus assignee is a single engineer."""
+    """Per-engineer Summary KPIs when Focus assignee is set."""
     credit_key = _perf_person_credit_key(focus)
+    empty = {
+        "assigned_in_range": 0,
+        "closed_by_others": 0,
+        "unattended_assignments": 0,
+        "unattended_flagged_backlog": 0,
+    }
     if credit_key in ("", "(unknown)"):
-        return {"unattended_assignments": 0, "unattended_flagged_backlog": 0}
+        return empty
 
     visits = _perf_load_overview_visits_history(df_all)
+    visits_for_assign = _perf_filter_visits_by_person(visits, focus)
+    df_for_assign = (
+        _perf_filter_by_person(df_all, focus) if not df_all.empty else df_all
+    )
+    assigned_ids = _perf_assigned_ticket_ids_in_range(
+        visits_for_assign,
+        df_for_assign,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    assigned_in_range = len(assigned_ids)
+    closed_by_others = _perf_closed_by_others_count(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+        assigned_ids=assigned_ids,
+    )
     assignment_cases = int(
         _perf_overview_unattended_counts_by_credit(
             df_all,
@@ -11139,28 +11278,68 @@ def _perf_summary_focus_unattended_metrics(
         flagged_rows = df_all.loc[_ticket_marked_unattended_mask(df_all)]
         flagged = len(_perf_filter_by_person(flagged_rows, focus))
     return {
+        "assigned_in_range": assigned_in_range,
+        "closed_by_others": closed_by_others,
         "unattended_assignments": assignment_cases,
         "unattended_flagged_backlog": flagged,
     }
+
+
+def _perf_summary_focus_unattended_metrics(
+    df_all: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    sales_all: pd.DataFrame | None = None,
+) -> dict[str, int]:
+    """Backward-compatible alias — includes assigned + unattended focus KPIs."""
+    return _perf_summary_focus_engineer_metrics(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
 
 
 def _render_perf_summary_context_bar(metrics: dict[str, object], period_label: str) -> None:
     total = int(metrics.get("total") or 0)
     rate = int(metrics.get("resolution_rate") or 0)
     unattended = int(metrics.get("unattended_assignments") or 0)
-    extra = (
-        f'<span><strong>{unattended}</strong> unattended assignment(s)</span>'
-        if unattended > 0
-        else ""
-    )
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    closed_other = int(metrics.get("closed_by_others") or 0)
+
+    def _chip(label: str, value: str) -> str:
+        return (
+            f'<div class="weekly-ctx-chip">'
+            f'<span class="weekly-ctx-k">{html.escape(label)}</span>'
+            f'<span class="weekly-ctx-v">{html.escape(value)}</span>'
+            f"</div>"
+        )
+
+    chips = [
+        _chip("Period", period_label),
+        _chip("Assigned", str(assigned) if assigned else "—"),
+        _chip("Attended (yours)", str(total)),
+        _chip("Closed by others", str(closed_other) if closed_other else "—"),
+        _chip("Unattended", str(unattended) if unattended else "—"),
+        _chip("Field resolution", f"{rate}%"),
+    ]
     st.markdown(
-        f'<div class="weekly-summary-context">'
-        f"<span><strong>Attended in range</strong> · {html.escape(period_label)}</span>"
-        f"<span><strong>{total}</strong> cases</span>"
-        f"<span><strong>{rate}%</strong> field resolution</span>"
-        f"{extra}"
-        f"</div>",
+        f'<div class="weekly-summary-context">{"".join(chips)}</div>',
         unsafe_allow_html=True,
+    )
+
+
+def _render_perf_summary_volume_caption(*, show_engineer: bool) -> None:
+    if not show_engineer:
+        return
+    st.caption(
+        "**Assigned** = every field assign/reassign in range. "
+        "**Cases attended (yours)** = cases you closed or moved to On Hold / Resolved / Investigation. "
+        "**Closed by others** = you were assigned in range, but another engineer is credited when it reached attended status. "
+        "**Unattended assignments** = your assign days with no field response before 23:59 UTC+5."
     )
 
 
@@ -11200,29 +11379,8 @@ def _perf_summary_staff_pinned_total(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def _inject_weekly_summary_styles() -> None:
-    st.markdown(
-        """
-<style>
-.weekly-kpi-card {
-  background: #0d1220; border: 0.5px solid #1a2035;
-  border-radius: 6px; padding: 1rem 1.1rem; min-height: 88px;
-}
-.weekly-kpi-label { font-size: 0.78rem; color: #8a9ac0; margin: 0 0 0.35rem; }
-.weekly-kpi-value { font-size: 1.65rem; font-weight: 600; color: #e2e8f8; margin: 0; line-height: 1.2; font-variant-numeric: tabular-nums; }
-.weekly-kpi-sub { font-size: 0.75rem; color: #22c55e; margin: 0.35rem 0 0; }
-.weekly-kpi-sub.neutral { color: #8a9ac0; }
-.weekly-kpi-sub.warn { color: #64748b; }
-.weekly-panel {
-  background: #0d1220; border: 0.5px solid #1a2035;
-  border-radius: 6px; padding: 0.85rem 1rem 0.5rem; margin-bottom: 0.5rem;
-}
-.weekly-panel h4 {
-  font-size: 0.95rem; font-weight: 600; color: #e2e8f8; margin: 0 0 0.65rem;
-}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
+    """Weekly Summary panel rules ship in ``apply_theme`` (head injection)."""
+    return
 
 
 _PERF_EXEC_OUTCOME_ORDER_MAP: dict[str, int] = {
@@ -11409,6 +11567,8 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
     inv_pct = int(metrics.get("investigation_pct") or 0)
     admin_desk = int(metrics.get("admin_desk") or 0)
     unattended = int(metrics.get("unattended_assignments") or 0)
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    closed_other = int(metrics.get("closed_by_others") or 0)
     show_unattended = "unattended_assignments" in metrics
     rate_delta = str(metrics.get("rate_delta") or "")
     delta_cls = "weekly-kpi-sub"
@@ -11418,13 +11578,38 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
         delta_cls = "weekly-kpi-sub neutral"
 
     if show_unattended:
-        k1, k2, k3, k4, k5 = st.columns(5)
+        r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+        volume_cards = [
+            (r1c1, "Assigned in range", str(assigned), "All field assign + reassign"),
+            (r1c2, "Unattended assignments", str(unattended), "No response before cutoff"),
+            (r1c3, "Closed by others", str(closed_other), "Reassigned then resolved elsewhere"),
+            (
+                r1c4,
+                "Cases attended (yours)",
+                str(total),
+                "On Hold · Resolved · Investigation",
+            ),
+        ]
+        for col, label, value, sub, sub_class in [
+            (*row, "weekly-kpi-sub neutral") for row in volume_cards
+        ]:
+            with col:
+                st.markdown(
+                    f'<div class="weekly-kpi-card">'
+                    f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+                    f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
+                    f'<p class="{sub_class}">{html.escape(sub)}</p></div>',
+                    unsafe_allow_html=True,
+                )
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">Outcomes</p>',
+            unsafe_allow_html=True,
+        )
+        r2c1, r2c2, r2c3 = st.columns(3)
         cards = [
-            (k1, "Cases attended", str(total), "", "weekly-kpi-sub neutral"),
-            (k2, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
-            (k3, "Investigation", str(investigation), f"{inv_pct}% of cases", "weekly-kpi-sub neutral"),
-            (k4, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
-            (k5, "Unattended assignments", str(unattended), "After 23:59 UTC+5 · in range", "weekly-kpi-sub warn"),
+            (r2c1, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
+            (r2c2, "Investigation", str(investigation), f"{inv_pct}% of attended", "weekly-kpi-sub neutral"),
+            (r2c3, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
         ]
     else:
         k1, k2, k3, k4 = st.columns(4)
@@ -11469,7 +11654,7 @@ def _render_perf_summary_closure_donut(metrics: dict[str, object]) -> None:
         )
         .properties(height=220)
     )
-    st.altair_chart(donut, use_container_width=True)
+    st.altair_chart(donut, width="stretch")
 
 
 def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
@@ -11500,12 +11685,14 @@ def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
         )
         .properties(height=220)
     )
-    st.altair_chart(trend, use_container_width=True)
+    st.altair_chart(trend, width="stretch")
 
 
 def _render_perf_summary_overview_tab(metrics: dict[str, object]) -> None:
     """Overview — KPIs, closure donut, resolution trend."""
+    show_engineer = "assigned_in_range" in metrics
     st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
+    _render_perf_summary_volume_caption(show_engineer=show_engineer)
     _render_weekly_kpi_cards(metrics)
     chart_left, chart_right = st.columns(2)
     with chart_left:
@@ -11547,7 +11734,7 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
             )
             .properties(height=300)
         )
-        st.altair_chart(bar, use_container_width=True)
+        st.altair_chart(bar, width="stretch")
         if len(category_df["category"].astype(str).unique()) > _WEEKLY_SUMMARY_TOP_CATEGORIES:
             st.caption(
                 f"Showing top {_WEEKLY_SUMMARY_TOP_CATEGORIES} categories; remainder grouped as Other."
@@ -11588,27 +11775,41 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
 
 
 def _render_perf_summary_unattended_section(metrics: dict[str, object]) -> None:
-    """Unattended accountability block — only when Focus assignee metrics are present."""
+    """Engineer accountability block when Focus assignee is set."""
     if "unattended_assignments" not in metrics:
         return
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    closed_other = int(metrics.get("closed_by_others") or 0)
     assignments = int(metrics.get("unattended_assignments") or 0)
     flagged = int(metrics.get("unattended_flagged_backlog") or 0)
-    if assignments == 0 and flagged == 0:
-        st.caption("No unattended assignment cases or flagged backlog for this engineer.")
+    if assigned == 0 and assignments == 0 and flagged == 0 and closed_other == 0:
+        st.caption("No assignments or unattended cases for this engineer in this range.")
         return
 
     st.markdown(
-        '<p class="weekly-section-label" style="margin-top:14px">Unattended accountability</p>',
+        '<p class="weekly-section-label" style="margin-top:14px">Assignment & unattended</p>',
         unsafe_allow_html=True,
     )
-    u1, u2 = st.columns(2)
+    u0, u1, u2, u3 = st.columns(4)
+    with u0:
+        st.metric(
+            "Total assigned (in range)",
+            assigned,
+            help="Field tickets assigned or reassigned to this engineer in the header time range.",
+        )
     with u1:
         st.metric(
-            "Assignment cases (in range)",
+            "Closed by others",
+            closed_other,
+            help="You were assigned in range, but another engineer is credited when the case reached On Hold, Resolved, or Investigation.",
+        )
+    with u2:
+        st.metric(
+            "Unattended assignments (in range)",
             assignments,
             help="One case per assign day after 23:59 UTC+5 cutoff — assignee only; nudges excluded.",
         )
-    with u2:
+    with u3:
         st.metric(
             "Flagged in queue (snapshot)",
             flagged,
@@ -11698,7 +11899,8 @@ def _render_perf_summary_staff_tab(
     has_unattended = int(metrics.get("unattended_assignments") or 0) > 0 or int(
         metrics.get("unattended_flagged_backlog") or 0
     ) > 0
-    if summary.empty and not has_unattended:
+    has_assigned = int(metrics.get("assigned_in_range") or 0) > 0
+    if summary.empty and not has_unattended and not has_assigned:
         st.info("No attended residential tickets or resort cases in this range.")
         return
 
@@ -11857,7 +12059,7 @@ def _render_perf_weekly_attended_report(
     this_week_bundle: dict[str, object] | None = None,
     focus: str = "All",
 ) -> None:
-    """Executive attended report for the Performance sidebar Range only."""
+    """Executive attended report for the header time range."""
     if sidebar_range_start is None or sidebar_range_end is None:
         range_start, range_end = _get_perf_range()
     else:
@@ -11908,7 +12110,7 @@ def _render_perf_weekly_attended_report(
     with h_right:
         st.markdown(
             f'<p class="weekly-date-range">Report period: {period_label}</p>'
-            f'<p class="weekly-date-hint">From sidebar Range</p>',
+            f'<p class="weekly-date-hint">From header time range</p>',
             unsafe_allow_html=True,
         )
 
@@ -11950,6 +12152,7 @@ def _render_perf_weekly_attended_report(
                 focus=focus,
                 range_start=range_start,
                 range_end=range_end,
+                sales_all=sales_all,
             )
         )
         metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
@@ -11967,7 +12170,12 @@ def _render_perf_weekly_attended_report(
     _render_perf_summary_context_bar(metrics, period_label)
     has_attended = int(metrics.get("total") or 0) > 0
     has_unattended = int(metrics.get("unattended_assignments") or 0) > 0
-    if not has_attended and not (focus not in ("", "All") and has_unattended):
+    has_assigned = int(metrics.get("assigned_in_range") or 0) > 0
+    has_closed_by_others = int(metrics.get("closed_by_others") or 0) > 0
+    if not has_attended and not (
+        focus not in ("", "All")
+        and (has_unattended or has_assigned or has_closed_by_others)
+    ):
         st.info("No attended residential tickets or resort cases in this range.")
         return
     _render_perf_weekly_executive_dashboard(
@@ -12135,7 +12343,7 @@ def _render_perf_person_bar(
         )
         .properties(height=height, title=title)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def _render_perf_stacked_staff_chart(
@@ -12179,7 +12387,7 @@ def _render_perf_stacked_staff_chart(
         )
         .properties(height=chart_height)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def _render_perf_outcome_trend(
@@ -12228,7 +12436,7 @@ def _render_perf_outcome_trend(
         )
         .properties(height=260)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def _render_perf_handled_work_table(df: pd.DataFrame) -> None:
@@ -12503,7 +12711,7 @@ def _render_perf_sales_case_table(df: pd.DataFrame) -> None:
     }
     st.dataframe(
         show,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config=col_cfg,
     )
@@ -12570,7 +12778,7 @@ def _render_perf_sales_staff_bar(view: pd.DataFrame, *, title: str) -> None:
         )
         .properties(height=height, title=title)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def _render_perf_sales_status_bar(view: pd.DataFrame, *, title: str) -> None:
@@ -12601,7 +12809,7 @@ def _render_perf_sales_status_bar(view: pd.DataFrame, *, title: str) -> None:
         )
         .properties(height=220, title=title)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -13472,7 +13680,7 @@ def _render_assignment_editor(
             value=True,
             key=keys["sync_tg"],
         )
-        submitted = st.form_submit_button("Save assignment changes", use_container_width=True)
+        submitted = st.form_submit_button("Save assignment changes", width="stretch")
 
     if not submitted:
         return
@@ -13628,7 +13836,7 @@ def _render_reassign_editor(
             key=keys["sync_tg"],
         )
         submitted = st.form_submit_button(
-            "Reassign → Daily Task", type="primary", use_container_width=True
+            "Reassign → Daily Task", type="primary", width="stretch"
         )
 
     if not submitted:
@@ -13976,7 +14184,7 @@ def _render_sales_assignment_editor(
         )
         submitted = st.form_submit_button(
             "Save assignment changes",
-            use_container_width=True,
+            width="stretch",
         )
 
     if not submitted:
@@ -14201,7 +14409,7 @@ def _render_sales_reassign_editor(
         submitted = st.form_submit_button(
             "Reassign engineer",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     if not submitted:
@@ -14440,7 +14648,7 @@ def _render_engineer_manage_row(eng: dict) -> None:
     hkey = hashlib.sha256(handle.encode("utf-8")).hexdigest()[:16]
     with col_toggle:
         label = "Active" if is_active else "Inactive"
-        if st.button(label, key=f"toggle_eng_{hkey}", use_container_width=True):
+        if st.button(label, key=f"toggle_eng_{hkey}", width="stretch"):
             client = _get_supabase_client()
             client.table(FIELD_ENGINEERS_TABLE).update(
                 {"is_active": not is_active}
@@ -14453,7 +14661,7 @@ def _render_engineer_manage_row(eng: dict) -> None:
             "×",
             key=f"del_eng_{hkey}",
             help="Remove engineer",
-            use_container_width=True,
+            width="stretch",
         ):
             _delete_field_engineer(handle)
             _cached_field_engineer_usernames.clear()
@@ -14494,7 +14702,7 @@ def manage_engineers_dialog() -> None:
                 key="new_eng_handle",
             )
         with col_btn:
-            add_eng = st.form_submit_button("+ Add", use_container_width=True)
+            add_eng = st.form_submit_button("+ Add", width="stretch")
         if add_eng:
             handle = _normalize_engineer_dir_handle(new_handle)
             if not handle:
@@ -14571,7 +14779,7 @@ def manage_categories_dialog() -> None:
                 key="new_cat_name",
             )
         with col_btn:
-            add_cat = st.form_submit_button("+ Add", use_container_width=True)
+            add_cat = st.form_submit_button("+ Add", width="stretch")
         if add_cat:
             name = normalize_task_category_name(new_cat)
             if not name:
@@ -14635,7 +14843,7 @@ def manage_categories_dialog() -> None:
                 "×",
                 key=f"del_cat_{ckey}",
                 help="Remove category",
-                use_container_width=True,
+                width="stretch",
             ):
                 delete_task_category(client, cat_name, table=TASK_CATEGORIES_TABLE)
                 _cached_task_categories.clear()
@@ -15273,7 +15481,7 @@ def _sidebar_sales_intake() -> None:
         submit_st = st.button(
             submit_label,
             type="primary",
-            use_container_width=True,
+            width="stretch",
             key="sc_cc_st_submit",
         )
 
@@ -15484,7 +15692,7 @@ def _sidebar_field_assign() -> None:
         submitted = st.button(
             submit_label,
             type="primary",
-            use_container_width=True,
+            width="stretch",
             key="cc_assign_submit_btn",
         )
 
@@ -17170,7 +17378,7 @@ def _bon_theme_css_text() -> str:
 def _inject_bon_theme_styles_once() -> None:
     """Inject the large theme stylesheet once into the parent document head."""
     css_json = json.dumps(_bon_theme_css_text())
-    components.html(
+    _iframe_html(
         f"""
         <script>
         (function () {{
@@ -17183,7 +17391,6 @@ def _inject_bon_theme_styles_once() -> None:
         }})();
         </script>
         """,
-        height=0,
     )
 
 
@@ -17237,7 +17444,7 @@ def _inject_bon_sidebar_visibility_css() -> None:
 
 def _inject_bon_dashboard_scripts() -> None:
     """One-time dashboard JS: fixed header pin + metrics/sidebar row alignment."""
-    components.html(
+    _iframe_html(
         """
         <script>
         (function () {
@@ -17391,7 +17598,6 @@ def _inject_bon_dashboard_scripts() -> None:
         })();
         </script>
         """,
-        height=0,
     )
 
 
@@ -17700,6 +17906,26 @@ def _apply_dash_time_range(
     return df[mask].copy()
 
 
+def _normalize_sidebar_queue(name: str | None) -> str:
+    """Map legacy session values to a valid Ticket sidebar queue."""
+    q = str(name or "Daily Task").strip()
+    if q == "Unattended":
+        return "Needs Review"
+    if q not in QUEUE_ORDER:
+        return "Daily Task"
+    return q
+
+
+def _ticket_is_flagged_unattended(ticket: dict) -> bool:
+    raw = ticket.get("marked_unattended_at")
+    if raw is None:
+        return False
+    text = str(raw).strip()
+    if not text or text.lower() in {"none", "nat", "nan", "null"}:
+        return False
+    return True
+
+
 def _queue_segment_label(name: str, count: int) -> str:
     return f"{name} ({count})" if count else name
 
@@ -17778,10 +18004,9 @@ def _apply_pending_dashboard_nav() -> None:
             STATUS_ON_HOLD: "On Hold",
             STATUS_UNDER_INVESTIGATION: "Under Investigation",
             "Follow up": "Follow up",
-            "Unattended": "Unattended",
             STATUS_RESOLVED: "Resolved",
         }
-        mapped_queue = queue_map.get(base_q, base_q)
+        mapped_queue = queue_map.get(base_q, _normalize_sidebar_queue(base_q))
         st.session_state[aq_key] = mapped_queue
         st.session_state["_disp_active_queue_prev"] = mapped_queue
         _clear_dispatch_row_modal_keys()
@@ -17878,7 +18103,7 @@ def _ticket_belongs_in_sidebar_queue(row: dict | pd.Series, queue: str) -> bool:
 
 def _navigate_dispatch_queue(queue_name: str, ticket_number: str) -> None:
     """Switch dispatch board queue and keep the ticket selected."""
-    q = str(queue_name or "Daily Task").strip()
+    q = _normalize_sidebar_queue(queue_name)
     if q not in QUEUE_ORDER:
         q = "Daily Task"
     tid = str(ticket_number or "").strip()
@@ -17995,7 +18220,6 @@ def _sync_dashboard_nav_state(
         on_hold_label,
         investigation_label,
         completed_label,
-        unattended_label,
     )
 
     aq_key = active_queue_key()
@@ -18004,14 +18228,11 @@ def _sync_dashboard_nav_state(
         "Open": "Needs Review",
         STATUS_ON_HOLD: "On Hold",
         STATUS_UNDER_INVESTIGATION: "Under Investigation",
-        "Unattended": "Unattended",
         STATUS_RESOLVED: "Resolved",
     }
 
-    cur_active = str(st.session_state.get(aq_key) or "Daily Task")
-    if cur_active not in QUEUE_ORDER:
-        cur_active = "Daily Task"
-        st.session_state[aq_key] = cur_active
+    cur_active = _normalize_sidebar_queue(st.session_state.get(aq_key))
+    st.session_state[aq_key] = cur_active
 
     st.session_state[_DASH_TICKET_QUEUE_KEY] = _dispatch_label_for_sidebar_queue(
         cur_active,
@@ -18057,7 +18278,7 @@ def _render_main_navigation() -> str:
                 label,
                 key=tab_key,
                 type="primary" if is_active else "secondary",
-                use_container_width=False,
+                width="content",
             ):
                 if not is_active:
                     st.session_state[_DASH_MAIN_NAV_KEY] = opt
@@ -18380,7 +18601,7 @@ def _render_selectable_sales_case_table(
 
     ticket_col = "Ticket Number" if "Ticket Number" in view.columns else "case_ref"
     if ticket_col not in view.columns:
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
         return []
 
     prev = set(_get_selected_queue_sales_cases(key_prefix, options))
@@ -18401,7 +18622,7 @@ def _render_selectable_sales_case_table(
     edited = st.data_editor(
         table,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         key=editor_key,
         column_config=col_cfg,
         disabled=disabled_cols,
@@ -18453,7 +18674,7 @@ def _render_sales_case_action_popover(
     current = str(st.session_state.get(sel_key, "") or "")
     trigger = current if current in status_labels else "Action"
 
-    with st.popover(trigger, use_container_width=True):
+    with st.popover(trigger, width="stretch"):
         st.caption("Choose action — click again to clear")
         for label in status_labels:
             picked = label == current
@@ -18461,7 +18682,7 @@ def _render_sales_case_action_popover(
                 label,
                 key=f"{key_prefix}_sc_pick_{label.replace(' ', '_')}",
                 type="primary" if picked else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[sel_key] = "" if picked else label
                 st.rerun()
@@ -18470,7 +18691,7 @@ def _render_sales_case_action_popover(
             "Apply",
             key=f"{key_prefix}_sc_apply",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=current not in status_labels,
         ):
             choice = str(st.session_state.get(sel_key, ""))
@@ -18490,7 +18711,7 @@ def _render_sales_case_delete_popover(
     key_prefix: str,
     options: list[str],
 ) -> None:
-    with st.popover("Remove", use_container_width=True):
+    with st.popover("Remove", width="stretch"):
         picked_list = _get_selected_queue_sales_cases(key_prefix, options)
         if not picked_list:
             st.caption("Tick **Select** on case(s) in the table below, then open **Remove**.")
@@ -18508,7 +18729,7 @@ def _render_sales_case_delete_popover(
             "Delete",
             key=f"{key_prefix}_sc_del_btn",
             type="secondary",
-            use_container_width=True,
+            width="stretch",
             disabled=not confirm_del,
         ):
             ok = 0
@@ -18693,7 +18914,7 @@ def _render_sales_case_transfer_to_csm_popover(
     options: list[str],
     op: str,
 ) -> None:
-    with st.popover("Move to Residential", use_container_width=True):
+    with st.popover("Move to Residential", width="stretch"):
         picked_list = _get_selected_queue_sales_cases(key_prefix, options)
         if not picked_list:
             st.caption("Select case(s), then open **Move to Residential** again.")
@@ -18714,7 +18935,7 @@ def _render_sales_case_transfer_to_csm_popover(
             "Move",
             key=f"{key_prefix}_xfer_csm_btn",
             type="secondary",
-            use_container_width=True,
+            width="stretch",
             disabled=not confirm,
         ):
             ok = 0
@@ -18801,7 +19022,7 @@ def _render_sales_case_actions_popover_body(
     panel_keys = _sc_toolbar_panel_keys(key_prefix)
     edit_keys = _assignment_edit_session_keys(key_prefix)
     reassign_keys = _reassign_session_keys(key_prefix)
-    btn_kw = {"use_container_width": True}
+    btn_kw = {"width": "stretch"}
 
     if op and status_actions:
         for lbl, tgt in status_actions:
@@ -19161,7 +19382,7 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
             if st.button(
                 "✈ Assign engineer",
                 key="sap_mode_assign",
-                use_container_width=True,
+                width="stretch",
                 type="primary" if not intake_only else "secondary",
             ):
                 st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_ASSIGN
@@ -19170,7 +19391,7 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
             if st.button(
                 "☰ Intake only",
                 key="sap_mode_intake",
-                use_container_width=True,
+                width="stretch",
                 type="primary" if intake_only else "secondary",
             ):
                 st.session_state[_SALES_ASSIGN_MODE_KEY] = _SALES_ASSIGN_MODE_INTAKE
@@ -19276,7 +19497,7 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
             )
             submit_label = "Create case ↗" if intake_only else "Create + assign ↗"
             st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
-            clicked = st.button(submit_label, key="sap_submit", use_container_width=True)
+            clicked = st.button(submit_label, key="sap_submit", width="stretch")
             st.markdown("</div>", unsafe_allow_html=True)
             if clicked:
                 _handle_sales_floor_submit(
@@ -19387,7 +19608,7 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
                 "Create case ↗" if intake_only else "Create + assign ↗"
             )
             st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
-            clicked = st.button(submit_label, key="sap_submit", use_container_width=True)
+            clicked = st.button(submit_label, key="sap_submit", width="stretch")
             st.markdown("</div>", unsafe_allow_html=True)
             if clicked:
                 _handle_sales_floor_submit(
@@ -19648,7 +19869,7 @@ def _render_sales_detail_panel() -> None:
             t_section_label("Site photo", spacing=".06em", margin="margin:0 0 5px"),
             unsafe_allow_html=True,
         )
-        st.image(photo_url, use_container_width=True)
+        st.image(photo_url, width="stretch")
 
     _render_dispatch_case_activity_panel(str(case.get("case_ref") or ""))
 
@@ -19932,6 +20153,8 @@ def _dispatch_row_dict(row: pd.Series) -> dict[str, object]:
     fu = _follow_up_display_label(row)
     if fu:
         d["follow_up_label"] = fu
+    if _ticket_is_flagged_unattended(d):
+        d["unattended_flagged"] = True
     d.setdefault("case_type", CASE_TYPE_RESIDENTIAL)
     return d
 
@@ -20149,7 +20372,7 @@ def _render_unified_queue_list(
     case_type_filter: str,
 ) -> str:
     """Unified queue picker with R/S split chips when both types are present."""
-    picked = selected if selected in QUEUE_ORDER else "Daily Task"
+    picked = _normalize_sidebar_queue(selected)
     with st.container(key="disp_sidebar_queues"):
         for q in QUEUE_ORDER:
             res = int(residential_counts.get(q, 0))
@@ -20166,13 +20389,13 @@ def _render_unified_queue_list(
                     f'padding:1px 5px;border-radius:2px">S{rsr}</span>'
                 )
             else:
-                bg = "#2d1515" if q == "Unattended" else "#1a2035"
-                fg = "#ef4444" if q == "Unattended" else "#4a5a7a"
+                bg = "#1a2035"
+                fg = "#4a5a7a"
                 if q == "Follow up":
                     bg, fg = "#1a1030", "#a78bfa"
                 if total > 0:
-                    bg = "#1e293b" if q != "Unattended" else bg
-                    fg = "#e2e8f8" if q != "Unattended" else fg
+                    bg = "#1e293b"
+                    fg = "#e2e8f8"
                 weight = "600" if total > 0 else "500"
                 badge = (
                     f'<span style="font-size:11px;padding:3px 8px;border-radius:999px;'
@@ -20185,7 +20408,7 @@ def _render_unified_queue_list(
                     if st.button(
                         q,
                         key=btn_key,
-                        use_container_width=True,
+                        width="stretch",
                         type="primary" if is_active else "secondary",
                     ):
                         st.session_state[session_key] = q
@@ -20228,7 +20451,7 @@ def _render_empty_queue_state(selected_queue: str) -> None:
         unsafe_allow_html=True,
     )
     if selected_queue != "Daily Task":
-        if st.button("Go to Daily Task", key="disp_empty_go_daily", use_container_width=False):
+        if st.button("Go to Daily Task", key="disp_empty_go_daily", width="content"):
             aq = active_queue_key()
             st.session_state[aq] = "Daily Task"
             st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = "All"
@@ -20236,7 +20459,7 @@ def _render_empty_queue_state(selected_queue: str) -> None:
 
 
 def _render_dispatch_row_modal_back_bar() -> None:
-    if st.button("← Back to assign", key="disp_row_modal_back", use_container_width=True):
+    if st.button("← Back to assign", key="disp_row_modal_back", width="stretch"):
         _clear_dispatch_row_modal_keys()
         st.session_state[_DISP_DETAIL_TAB_KEY] = "assign"
         _rerun_dispatch_after_ticket_write()
@@ -20253,7 +20476,7 @@ def _render_unified_case_type_filter() -> str:
                 label,
                 key=f"disp_case_type_{label.replace(' ', '_').lower()}",
                 type="primary" if label == cur else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = label
     return cur
@@ -20326,7 +20549,7 @@ def _render_investigation_subtabs(df: pd.DataFrame) -> str:
                 label,
                 key=f"disp_inv_subtab_{name.replace('-', '_').lower()}",
                 type="primary" if name == cur else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[_DISP_INVESTIGATION_SUBTAB_KEY] = name
     subtab = str(st.session_state.get(_DISP_INVESTIGATION_SUBTAB_KEY) or cur)
@@ -20671,11 +20894,12 @@ def _build_dispatch_row_menu_items(
 
         return _go
 
+    flagged_unattended = _ticket_is_flagged_unattended(ticket)
     if status in ("Daily Task", "On Hold"):
         items.append(("Move › Investigation", _move("Investigation")))
     if status in ("Needs Review", "Under Investigation"):
         items.append(("Move › Resolve", _move("Resolve")))
-    if status == "Unattended":
+    if status == "Unattended" or (status == "Needs Review" and flagged_unattended):
         items.append(("Move › Daily task (reopen)", _move("Daily task (reopen)")))
     if is_admin and status == "Resolved":
         if str(ticket.get("field_response") or "").strip():
@@ -20686,7 +20910,9 @@ def _build_dispatch_row_menu_items(
     if status == "Needs Review":
         items.append(("Follow › Follow up", _open_modal(_DISP_ROW_FOLLOW_UP)))
         items.append(("Follow › Investigation", _move("Investigation")))
-    if status not in ("Resolved", "Unattended"):
+    if status not in ("Resolved",) and not (
+        status == "Unattended" or (status == "Needs Review" and flagged_unattended)
+    ):
         items.append(("Action › Edit assignment", _open_modal(_DISP_ROW_EDIT)))
     can_reassign = (
         is_admin
@@ -20697,9 +20923,13 @@ def _build_dispatch_row_menu_items(
         items.append(("Action › Reassign", _open_modal(_DISP_ROW_REASSIGN)))
     if is_admin and status in ("Daily Task", "Needs Review", "On Hold"):
         items.append(("Action › Record response", _open_modal(_DISP_ROW_RECORD)))
-    if status in ("Needs Review", "Under Investigation", "Unattended"):
+    if status in ("Needs Review", "Under Investigation") or (
+        status == "Unattended" or (status == "Needs Review" and flagged_unattended)
+    ):
         items.append(("Action › View photos", _open_modal(_DISP_ROW_PHOTOS)))
-    if status not in ("Resolved", "Unattended"):
+    if status not in ("Resolved",) and not (
+        status == "Unattended" or (status == "Needs Review" and flagged_unattended)
+    ):
         items.append(("Action › Move to Resort", lambda: _dispatch_ticket_move_to_sales(tnum)))
     if is_admin:
         items.append(("Action › Admin close", _open_modal(_DISP_ROW_CLOSE)))
@@ -20832,7 +21062,7 @@ def _render_assign_manage_icon_btn(
         "⋮",
         key=manage_key,
         help=manage_help,
-        use_container_width=False,
+        width="content",
     ):
         on_manage()
     st.markdown("</div>", unsafe_allow_html=True)
@@ -20999,10 +21229,10 @@ def _render_residential_reopen_actions(ticket: dict[str, object]) -> None:
     )
     c1, c2 = st.columns(2, gap="small")
     with c1:
-        if st.button("→ Daily task", key=f"detail_reopen_dt_{ref}", use_container_width=True):
+        if st.button("→ Daily task", key=f"detail_reopen_dt_{ref}", width="stretch"):
             _reopen_case_from_detail(ref=ref, target="Daily Task", rtype=CASE_TYPE_RESIDENTIAL)
     with c2:
-        if st.button("→ Needs review", key=f"detail_reopen_nr_{ref}", use_container_width=True):
+        if st.button("→ Needs review", key=f"detail_reopen_nr_{ref}", width="stretch"):
             _reopen_case_from_detail(ref=ref, target="Needs Review", rtype=CASE_TYPE_RESIDENTIAL)
 
 
@@ -21018,10 +21248,10 @@ def _render_resort_reopen_actions(case: dict[str, object]) -> None:
     )
     c1, c2 = st.columns(2, gap="small")
     with c1:
-        if st.button("→ Daily task", key=f"detail_reopen_resort_dt_{ref}", use_container_width=True):
+        if st.button("→ Daily task", key=f"detail_reopen_resort_dt_{ref}", width="stretch"):
             _reopen_case_from_detail(ref=ref, target="Daily Task", rtype=CASE_TYPE_RESORT)
     with c2:
-        if st.button("→ Needs review", key=f"detail_reopen_resort_nr_{ref}", use_container_width=True):
+        if st.button("→ Needs review", key=f"detail_reopen_resort_nr_{ref}", width="stretch"):
             _reopen_case_from_detail(ref=ref, target="Needs Review", rtype=CASE_TYPE_RESORT)
 
 
@@ -21083,6 +21313,14 @@ def _render_dispatch_case_info_panel(
                     f'<span style="font-size:13px;font-weight:500;color:#a78bfa;'
                     f'display:block">'
                     f"{html.escape(str(t.get('follow_up_label') or ''))}</span>",
+                )
+            )
+        if t.get("unattended_flagged"):
+            detail_parts.append(
+                _case_detail_block(
+                    "Unattended",
+                    '<span style="font-size:13px;font-weight:500;color:#ef4444;'
+                    'display:block">Auto-closed — no field response before cutoff</span>',
                 )
             )
         if t.get("additional_info"):
@@ -21152,7 +21390,7 @@ def _render_dispatch_case_info_panel(
                 ),
                 unsafe_allow_html=True,
             )
-            st.image(photo_url, use_container_width=True)
+            st.image(photo_url, width="stretch")
 
         _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
         _render_residential_reopen_actions(t)
@@ -21190,7 +21428,7 @@ def _render_dispatch_right_rail(
                 "Ticket assign",
                 key="disp_detail_tab_assign",
                 type="primary" if detail_tab == "assign" else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[_DISP_DETAIL_TAB_KEY] = "assign"
         with tab_info:
@@ -21198,7 +21436,7 @@ def _render_dispatch_right_rail(
                 "Case info",
                 key="disp_detail_tab_info",
                 type="primary" if detail_tab == "info" else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[_DISP_DETAIL_TAB_KEY] = "info"
 
@@ -21772,7 +22010,7 @@ def _render_assign_engineer_picker(engineers: list[str]) -> None:
         if st.button(
             label,
             key=f"assign_eng_pick_{hkey}",
-            use_container_width=True,
+            width="stretch",
             type="primary" if is_on else "secondary",
         ):
             _toggle_assign_engineer(handle)
@@ -21828,7 +22066,7 @@ def _render_ticket_assign_entry(
                 if st.button(
                     "Residential",
                     key="disp_assign_type_residential",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary" if cur == CASE_TYPE_RESIDENTIAL else "secondary",
                 ):
                     st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
@@ -21837,7 +22075,7 @@ def _render_ticket_assign_entry(
                 if st.button(
                     "Resort",
                     key="disp_assign_type_resort",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary" if cur == CASE_TYPE_RESORT else "secondary",
                 ):
                     st.session_state[_DISP_ASSIGN_CASE_TYPE_KEY] = CASE_TYPE_RESORT
@@ -21964,7 +22202,7 @@ def _render_ticket_assign_entry(
                     if st.button(
                         "Telegram now",
                         key="assign_ch_telegram",
-                        use_container_width=True,
+                        width="stretch",
                         type="primary"
                         if ch == _ASSIGN_DISPATCH_TELEGRAM
                         else "secondary",
@@ -21977,7 +22215,7 @@ def _render_ticket_assign_entry(
                     if st.button(
                         "Assign only",
                         key="assign_ch_silent",
-                        use_container_width=True,
+                        width="stretch",
                         type="primary"
                         if ch == _ASSIGN_DISPATCH_SILENT
                         else "secondary",
@@ -22039,7 +22277,7 @@ def _render_ticket_assign_entry(
         clicked = st.button(
             submit_label,
             key="assign_entry_submit",
-            use_container_width=True,
+            width="stretch",
             disabled=blocked,
         )
         st.markdown("</div>", unsafe_allow_html=True)
@@ -22103,7 +22341,7 @@ def render_assign_panel(
             if st.button(
                 "✈ Assign + Telegram",
                 key="disp_mode_telegram",
-                use_container_width=True,
+                width="stretch",
                 type="primary" if not queue_only else "secondary",
             ):
                 st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_TELEGRAM
@@ -22112,7 +22350,7 @@ def render_assign_panel(
             if st.button(
                 "☰ Queue only",
                 key="disp_mode_queue",
-                use_container_width=True,
+                width="stretch",
                 type="primary" if queue_only else "secondary",
             ):
                 st.session_state[_DISP_ASSIGN_MODE_KEY] = _DISP_ASSIGN_MODE_QUEUE
@@ -22201,7 +22439,7 @@ def render_assign_panel(
             )
             submit_label = "Add to queue ↗" if queue_only else "Assign + Telegram ↗"
             st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
-            if st.button(submit_label, key="qa_submit", use_container_width=True):
+            if st.button(submit_label, key="qa_submit", width="stretch"):
                 if queue_only:
                     _handle_dispatch_queue_only_submit(ticket_num, category, notes)
                 else:
@@ -22297,7 +22535,7 @@ def render_assign_panel(
         with r2c:
             submit_label = "Add to queue ↗" if queue_only else "Assign + Telegram ↗"
             st.markdown('<div class="sales-btn">', unsafe_allow_html=True)
-            if st.button(submit_label, key="qa_submit", use_container_width=True):
+            if st.button(submit_label, key="qa_submit", width="stretch"):
                 if queue_only:
                     _handle_dispatch_queue_only_submit(
                         ticket_num, category, notes
@@ -22514,7 +22752,7 @@ def _render_dispatch_row_modals(
                 "Confirm follow-up",
                 key="disp_row_follow_up_confirm",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             ):
                 op = _session_operator_id()
                 if not op:
@@ -22540,7 +22778,7 @@ def _render_dispatch_row_modals(
                         )
                         _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
                         st.rerun()
-            if st.button("Cancel", key="disp_row_follow_up_cancel", use_container_width=True):
+            if st.button("Cancel", key="disp_row_follow_up_cancel", width="stretch"):
                 st.session_state.pop(_DISP_ROW_FOLLOW_UP, None)
                 st.rerun()
 
@@ -22783,9 +23021,9 @@ def _compute_dispatch_ticket_view(ctx: dict[str, object]) -> dict[str, object]:
     sales_df = ctx.get("sales_df")
     resort_bundle = ctx["resort_bundle"]
     aq_key = str(ctx["aq_key"])
-    selected_queue = str(st.session_state.get(aq_key, "Daily Task"))
-    if selected_queue not in QUEUE_ORDER:
-        selected_queue = "Daily Task"
+    selected_queue = _normalize_sidebar_queue(st.session_state.get(aq_key))
+    if selected_queue != st.session_state.get(aq_key):
+        st.session_state[aq_key] = selected_queue
     mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
     queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
     if selected_queue == "Follow up" and not queue_df.empty:
@@ -22914,7 +23152,6 @@ def _render_dispatch_board_sidebar(ctx: dict[str, object]) -> str:
         "On Hold": int(masks["on_hold"].sum()),
         "Under Investigation": int(masks["investigation"].sum()),
         "Follow up": int(masks["follow_up"].sum()),
-        "Unattended": int(masks["unattended"].sum()),
         "Resolved": int(masks["completed"].sum()),
     }
     with st.container(key="disp_sidebar_inner"):
@@ -22931,9 +23168,9 @@ def _render_dispatch_board_sidebar(ctx: dict[str, object]) -> str:
             t_section_label("Queues", margin="margin-top:14px;margin-bottom:8px"),
             unsafe_allow_html=True,
         )
-        cur = st.session_state.get(aq_key, "Daily Task")
-        if cur not in QUEUE_ORDER:
-            cur = "Daily Task"
+        cur = _normalize_sidebar_queue(st.session_state.get(aq_key))
+        if cur != st.session_state.get(aq_key):
+            st.session_state[aq_key] = cur
         selected_queue = _render_unified_queue_list(
             selected=str(cur),
             residential_counts=residential_queue_counts,
@@ -22951,9 +23188,9 @@ def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
     aq_key = str(ctx["aq_key"])
     is_admin = bool(ctx["is_admin"])
     sales_df = ctx.get("sales_df")
-    selected_queue = str(st.session_state.get(aq_key, "Daily Task"))
-    if selected_queue not in QUEUE_ORDER:
-        selected_queue = "Daily Task"
+    selected_queue = _normalize_sidebar_queue(st.session_state.get(aq_key))
+    if selected_queue != st.session_state.get(aq_key):
+        st.session_state[aq_key] = selected_queue
     mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
     queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
     if selected_queue == "Follow up" and not queue_df.empty:
@@ -24165,7 +24402,7 @@ def _render_perf_fast_table_with_actions(
     with act_col:
         with st.container(key=actions_container_key):
             for row_key, _cells in zip(action_keys, rows, strict=True):
-                if st.button(action_label, key=f"perf_act_{row_key}", use_container_width=True):
+                if st.button(action_label, key=f"perf_act_{row_key}", width="stretch"):
                     on_action(row_key)
 
 
@@ -24276,9 +24513,9 @@ def _render_perf_overview_board_fast(
     with act_col:
         with st.container(key="perf_ov_actions"):
             for key_suffix, btn_id, label in action_specs:
-                if st.button("●", key=f"ov_all_{key_suffix}", help=label, use_container_width=True):
+                if st.button("●", key=f"ov_all_{key_suffix}", help=label, width="stretch"):
                     st.session_state[_PERF_SELECTED_ENGINEER_KEY] = btn_id
-                    st.rerun()
+                    st.rerun(scope="fragment")
 
 
 def _render_perf_overview_tab(
@@ -24573,7 +24810,9 @@ def _render_performance_detail_panel(
     )
     credit_key = _perf_resolve_overview_credit_key(selected)
     display_name = _perf_overview_row_label(credit_key) if credit_key else f"@{selected}"
-    range_label = str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week"))
+    range_label = _dash_time_preset_trigger_label(
+        str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    )
     st.markdown(
         f"""
     <div style="padding-bottom:11px;border-bottom:0.5px solid #1a2035;margin-bottom:11px">
@@ -24630,7 +24869,7 @@ def _render_performance_detail_panel(
         if st.button(
             f"{tn} · {t.get('task_category', '')}",
             key=f"perf_ticket_{tn}",
-            use_container_width=True,
+            width="stretch",
         ):
             _perf_jump_to_csm_ticket(tn)
     if not detail["recent_tickets"]:
@@ -24649,19 +24888,19 @@ def _render_performance_detail_panel(
             if st.button(
                 f"{ref} · {c.get('account_name', '')}",
                 key=f"perf_resort_{ref}",
-                use_container_width=True,
+                width="stretch",
             ):
                 _perf_jump_to_sales_case(ref)
 
 
 def _perf_select_engineer(engineer: str) -> None:
     st.session_state[_PERF_SELECTED_ENGINEER_KEY] = engineer
-    st.rerun()
+    st.rerun(scope="fragment")
 
 
 def _perf_jump_to_unattended_queue(engineer: str) -> None:
     st.session_state[_DASH_PENDING_MAIN_NAV_KEY] = _DASH_NAV_CSM
-    st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = "Unattended"
+    st.session_state[_DASH_PENDING_TICKET_QUEUE_KEY] = "Needs Review"
     st.session_state[_DASH_PENDING_ENGINEER_FILTER_KEY] = engineer
     st.rerun()
 
@@ -24832,7 +25071,7 @@ def _render_perf_weekly_tab(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    """Executive Summary — same sidebar Range + Focus assignee as other Performance views."""
+    """Executive Summary — same header time range + Focus assignee as other Performance views."""
     _render_perf_weekly_attended_report(
         df_all,
         sales_all,
@@ -24900,7 +25139,7 @@ def _render_perf_on_hold_tab(on_hold: pd.DataFrame, *, focus: str) -> None:
         f"On hold by assignee{html.escape(focus_suffix)}</p>",
         unsafe_allow_html=True,
     )
-    st.caption("Queue snapshot — not limited by sidebar Range.")
+    st.caption("Queue snapshot — not limited by the header time range.")
     data = _get_on_hold_by_assignee(on_hold, focus=focus)
     ticket_rows = _perf_on_hold_ticket_rows(on_hold, focus=focus)
     if not data and not ticket_rows:
@@ -24994,7 +25233,7 @@ def _render_perf_unattended_tab(
         "One case per assignment with no field response after assign-day cutoff (23:59 UTC+5) — assignee only. "
         "Telegram nudges do not count. "
         "Same ticket reassigned next day counts again for the new assignee. "
-        f"Uses sidebar **Range** ({_format_perf_range_caption() or 'selected range'})."
+        f"Uses header **time range** ({_format_perf_range_caption() or 'selected range'})."
     )
     if visits_history is None:
         visits_history = _perf_load_overview_visits_history(df_all)
@@ -25063,15 +25302,14 @@ def _render_perf_unattended_tab(
             )
 
 
-def _on_perf_focus_change() -> None:
-    """Sync detail panel selection when Focus assignee changes."""
+def _perf_apply_focus_change() -> None:
+    """Session-state only — run when Focus assignee changes."""
+    st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
     _sync_perf_detail_to_focus()
-    focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
-    if focus != "All engineers":
-        view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
-        allowed = _perf_focused_view_options()
-        if view not in allowed:
-            st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
+    _sync_perf_view_for_focus()
+    st.session_state[_PERF_FOCUS_REV_KEY] = (
+        int(st.session_state.get(_PERF_FOCUS_REV_KEY) or 0) + 1
+    )
 
 
 def _render_performance_sidebar() -> None:
@@ -25084,14 +25322,18 @@ def _render_performance_sidebar() -> None:
     options = ["All engineers"] + engineers
     cur_focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
     if cur_focus not in options:
-        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = "All engineers"
+        cur_focus = "All engineers"
+        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = cur_focus
     focus = st.selectbox(
         "Focus assignee",
         options,
+        index=options.index(cur_focus),
         label_visibility="collapsed",
-        key=_PERF_FOCUS_ASSIGNEE_KEY,
-        on_change=_on_perf_focus_change,
     )
+    if focus != cur_focus:
+        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = focus
+        _perf_apply_focus_change()
+        st.rerun(scope="fragment")
 
     if focus != "All engineers":
         st.markdown(
@@ -25101,58 +25343,47 @@ def _render_performance_sidebar() -> None:
             unsafe_allow_html=True,
         )
     else:
-        st.markdown('<div style="margin-bottom:14px"></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:11px;color:#8a9ac0;line-height:1.45;margin-bottom:14px">'
+            "Unattended accountability is per engineer — pick **Focus assignee** "
+            "to open **Unattended** or see it under **Summary**.</div>",
+            unsafe_allow_html=True,
+        )
 
-    st.markdown(t_section_label("Range"), unsafe_allow_html=True)
-    range_options = [
-        "Today",
-        "This week",
-        "This month",
-        "Last month",
-        "Last 30 days",
-        "Custom",
-    ]
-    cur_range = str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week"))
-    range_val = st.selectbox(
-        "Range",
-        range_options,
-        index=range_options.index(cur_range) if cur_range in range_options else 1,
-        label_visibility="collapsed",
-        key="perf_range_select",
-        help="Applies to all Performance views, including Summary.",
+    preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    range_cap = _format_dash_range_caption()
+    preset_label = html.escape(_dash_time_preset_trigger_label(preset))
+    cap_html = (
+        f" · {html.escape(range_cap)}" if range_cap else ""
     )
-    prev_range = st.session_state.get("_perf_prev_range")
-    st.session_state[_PERF_RANGE_PRESET_KEY] = range_val
-    if range_val == "Custom":
-        _ensure_perf_custom_range_widgets()
-        st.date_input("From", key="perf_custom_from")
-        st.date_input("To", key="perf_custom_to")
-    if range_val != prev_range or prev_range is None:
-        st.session_state["_perf_prev_range"] = range_val
-        _sync_perf_range_from_ui(range_val)
-    elif range_val == "Custom":
-        _sync_perf_range_from_ui(range_val)
+    st.markdown(
+        f'<div style="font-size:11px;color:#8a9ac0;line-height:1.45;margin-bottom:14px">'
+        f"Range: <strong>{preset_label}</strong>{cap_html}<br>"
+        f"Change it with the <strong>{html.escape(_context_strip_range_trigger())}</strong> "
+        f"control in the bar above.</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown(
         t_section_label("View", margin="margin:18px 0 7px"),
         unsafe_allow_html=True,
     )
+    _sync_perf_view_for_focus()
     views = list(_perf_sidebar_view_options(_perf_focus_for_filter()))
     cur_view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
     if cur_view not in views:
         cur_view = views[0]
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = cur_view
-    active_view = st.radio(
+    selected_view = st.radio(
         "View",
         views,
         index=views.index(cur_view),
         label_visibility="collapsed",
-        key="perf_view_radio",
     )
-    if active_view != st.session_state.get(_PERF_ACTIVE_VIEW_KEY):
-        st.session_state[_PERF_ACTIVE_VIEW_KEY] = active_view
-        _sync_perf_detail_to_focus()
-        st.rerun()
+    if selected_view != cur_view:
+        st.session_state[_PERF_ACTIVE_VIEW_KEY] = selected_view
+        st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+        st.rerun(scope="fragment")
 
 
 def _render_perf_handled_tab(
@@ -25290,8 +25521,9 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
     """Performance tab context — slices, counts, and optional visit history."""
     del lookback_days
     _init_perf_session_state()
-    _sync_perf_range_from_ui(str(st.session_state.get(_PERF_RANGE_PRESET_KEY, "This week")))
-    range_start, range_end = _get_perf_range()
+    _init_dash_date_range_state()
+    _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week")))
+    range_start, range_end = _get_dash_range()
     focus = _perf_focus_for_filter()
     try:
         df_all = _fetch_tickets_cached()
@@ -25339,14 +25571,34 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
     }
 
 
+def _perf_context_cache_key(lookback_days: int) -> tuple[object, ...]:
+    """Cache key for Performance context — must change when filters or range change."""
+    _init_perf_session_state()
+    _init_dash_date_range_state()
+    focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
+    view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+    preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    range_start, range_end = _get_dash_range()
+    return (
+        lookback_days,
+        focus,
+        view,
+        preset,
+        range_start.isoformat(),
+        range_end.isoformat(),
+    )
+
+
 def _load_perf_context(lookback_days: int) -> dict[str, object]:
-    """Performance context — one build per full rerun, reused by board + detail fragments."""
+    """Performance context — one build per filter/range combo, reused by board + detail."""
+    cache_key = _perf_context_cache_key(lookback_days)
     cached = st.session_state.get(_PERF_CTX_SESSION_KEY)
-    if isinstance(cached, dict) and cached.get("_lookback_days") == lookback_days:
+    if isinstance(cached, dict) and cached.get("_cache_key") == cache_key:
         return cached
     ctx = _build_perf_context(lookback_days)
     st.session_state[_PERF_CTX_SESSION_KEY] = {
         **ctx,
+        "_cache_key": cache_key,
         "_lookback_days": lookback_days,
     }
     return st.session_state[_PERF_CTX_SESSION_KEY]
@@ -25375,7 +25627,7 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
     elif view != "Summary":
         st.caption(
             "Queue snapshot cards apply to **Overview** and **On hold** only. "
-            "This view uses the sidebar **Range**."
+            "This view uses the header **time range**."
         )
         st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
     if view == "Overview":
@@ -25427,43 +25679,38 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
 
 
 @st.fragment
-def _perf_board_column_fragment(lookback_days: int) -> None:
-    """Performance sidebar + main — partial rerun on filter / view controls."""
-    sb, main = st.columns([1.5, 7.0], gap="small")
-    with sb:
-        _render_performance_sidebar()
-    with main:
+def _perf_workspace_fragment(lookback_days: int) -> None:
+    """Performance sidebar, main charts, and detail — one partial rerun on filter changes."""
+    board_col, detail_col = st.columns([6.8, 2.4], gap="small")
+    with board_col:
+        sb, main = st.columns([1.5, 7.0], gap="small")
+        with sb:
+            _render_performance_sidebar()
+        with main:
+            ctx = _load_perf_context(lookback_days)
+            _render_performance_main(ctx)
+    with detail_col:
         ctx = _load_perf_context(lookback_days)
-        _render_performance_main(ctx)
-
-
-@st.fragment
-def _perf_detail_column_fragment(lookback_days: int) -> None:
-    """Engineer detail panel — partial rerun when selecting an engineer row."""
-    ctx = _load_perf_context(lookback_days)
-    _render_performance_detail_panel(
-        df_all=ctx["df_all"],
-        sales_all=ctx["sales_all"],
-        visits_all=ctx["visits_f"],
-        range_start=ctx["range_start"],
-        range_end=ctx["range_end"],
-        visits_history=ctx.get("visits_history"),
-    )
+        focus_rev = int(st.session_state.get(_PERF_FOCUS_REV_KEY) or 0)
+        with st.container(key=f"perf_detail_{focus_rev}"):
+            _render_performance_detail_panel(
+                df_all=ctx["df_all"],
+                sales_all=ctx["sales_all"],
+                visits_all=ctx["visits_f"],
+                range_start=ctx["range_start"],
+                range_end=ctx["range_end"],
+                visits_history=ctx.get("visits_history"),
+            )
 
 
 def _render_performance_tab(*, lookback_days: int) -> None:
     """Three-column Performance floor: sidebar / main / detail panel."""
     with st.container(key="disp_perf_body"):
-        board_col, detail_col = st.columns([6.8, 2.4], gap="small")
-        with board_col:
-            _perf_board_column_fragment(lookback_days)
-        with detail_col:
-            _perf_detail_column_fragment(lookback_days)
+        _perf_workspace_fragment(lookback_days)
 
 
 def _render_field_performance_tab(*, lookback_days: int) -> None:
     """Performance tab — three-column layout with sidebar filters and detail panel."""
-    st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
     _render_performance_tab(lookback_days=lookback_days)
 
 
@@ -25544,7 +25791,7 @@ def _render_attendance_tab_fragment(*, lookback_days: int) -> None:
     table = _format_local(logs[show_cols])
     st.dataframe(
         table,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config=_dataframe_column_config(table),
     )
