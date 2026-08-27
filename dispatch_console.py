@@ -9,7 +9,6 @@ from collections.abc import Callable
 from typing import Any
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 _UI_TZ_UTC5 = timezone(timedelta(hours=5))
 _DISP_INSET = "10px"
@@ -2664,12 +2663,26 @@ div.st-key-disp_log_body [data-testid="stVerticalBlockBorderWrapper"] {
   border: 0.5px solid var(--disp-border) !important;
 }
 .weekly-summary-context {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+  display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px 12px;
   padding: 10px 14px; margin: 0 0 14px;
   background: var(--disp-card) !important;
   border: 0.5px solid var(--disp-border) !important;
   border-radius: 6px !important;
   font-size: 12px; color: var(--disp-dim) !important;
+}
+.weekly-ctx-chip {
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  min-width: 5.5rem; padding: 2px 10px 2px 0;
+  border-right: 0.5px solid var(--disp-border);
+}
+.weekly-ctx-chip:last-child { border-right: none; padding-right: 0; }
+.weekly-ctx-k {
+  font-size: 10px; font-weight: 500; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--disp-dim) !important; line-height: 1.2;
+}
+.weekly-ctx-v {
+  font-size: 14px; font-weight: 600; color: var(--disp-text) !important;
+  line-height: 1.25; font-variant-numeric: tabular-nums;
 }
 .weekly-summary-context strong { color: var(--disp-text) !important; font-weight: 600; }
 .weekly-summary-context span { font-variant-numeric: tabular-nums; }
@@ -2720,7 +2733,7 @@ div[data-baseweb="popover"] ul[role="listbox"] li > div {
 def inject_dispatch_row_popover_compact_css() -> None:
     """Inject compact row-action menu styles into the parent document head."""
     css_json = json.dumps(_DISPATCH_ROW_MENU_COMPACT_CSS.strip())
-    components.html(
+    st.iframe(
         f"""
         <script>
         (function () {{
@@ -2736,7 +2749,7 @@ def inject_dispatch_row_popover_compact_css() -> None:
         }})();
         </script>
         """,
-        height=0,
+        height="content",
     )
 
 
@@ -2779,7 +2792,6 @@ QUEUE_DOTS: dict[str, str] = {
     "On Hold": "#f59e0b",
     "Under Investigation": "#a78bfa",
     "Follow up": "#f472b6",
-    "Unattended": "#ef4444",
     "Resolved": "#4a5a7a",
 }
 
@@ -2975,7 +2987,7 @@ def render_queue_list(
             if st.button(
                 q,
                 key=btn_key,
-                use_container_width=True,
+                width="stretch",
                 type="primary" if is_active else "secondary",
             ):
                 st.session_state[session_key] = q
@@ -3044,7 +3056,7 @@ def render_quick_assign_bar(
 
         with col_btn:
             st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
-            if st.button("Assign + Telegram ↗", key="qa_submit", use_container_width=True):
+            if st.button("Assign + Telegram ↗", key="qa_submit", width="stretch"):
                 on_submit(ticket_num, engineer, engineer2, category)
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -3064,7 +3076,7 @@ def render_settings_popover(
     show_date_range: bool = True,
 ) -> None:
     """Compact settings popover for the top bar."""
-    with st.popover(trigger_label, help=trigger_help, use_container_width=False):
+    with st.popover(trigger_label, help=trigger_help, width="content"):
         st.markdown(
             '<p class="settings-section-label" style="margin-top:0">Refresh</p>',
             unsafe_allow_html=True,
@@ -3086,7 +3098,7 @@ def render_settings_popover(
             )
             st.session_state["bon_toolbar_refresh_interval"] = interval
 
-        if st.button("↻ Refresh now", key="settings_refresh_now", use_container_width=True):
+        if st.button("↻ Refresh now", key="settings_refresh_now", width="stretch"):
             if on_refresh:
                 on_refresh()
             else:
@@ -3141,7 +3153,7 @@ def render_settings_popover(
 
         if show_signout:
             st.divider()
-            if st.button("Sign out", key="settings_signout", use_container_width=True):
+            if st.button("Sign out", key="settings_signout", width="stretch"):
                 if on_signout:
                     on_signout()
                 else:
@@ -3732,7 +3744,7 @@ def render_ticket_table_pager(
                 "◀ Prev",
                 key=f"{key_prefix}_page_prev",
                 disabled=page <= 1,
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[_DISP_TICKET_PAGE_KEY] = page - 1
         with c_label:
@@ -3747,7 +3759,7 @@ def render_ticket_table_pager(
                 "Next ▶",
                 key=f"{key_prefix}_page_next",
                 disabled=page >= total_pages,
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[_DISP_TICKET_PAGE_KEY] = page + 1
 
