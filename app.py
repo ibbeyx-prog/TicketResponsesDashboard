@@ -9658,6 +9658,7 @@ def _render_dispatch_app_shell() -> None:
             <div class="disp-brand-line">
               <span class="disp-brand-mark-dot" aria-hidden="true"></span>
               <span class="disp-brand-line-title">Coverage Eye</span>
+              <span class="disp-brand-line-sep" aria-hidden="true">·</span>
               <span class="disp-brand-line-org">NetOps</span>
             </div>
             """,
@@ -9677,30 +9678,37 @@ def _render_dispatch_app_shell() -> None:
 
 
 def _render_dispatch_header_utilities(*, chip: dict[str, str]) -> None:
-    """Search, settings, and avatar menu — right side of header."""
+    """Lookup, settings, and avatar — grouped in one toolbar capsule."""
     _init_lookup_state()
-    c_lookup, c_settings, c_user = st.columns(
-        [0.55, 0.55, 0.65],
-        gap="small",
-        vertical_alignment="center",
-    )
-    with c_lookup:
-        with st.container(key="disp_header_lookup"):
-            if st.button(
-                "🔍",
-                key="topbar_lookup_btn",
-                help="Ticket lookup",
-                use_container_width=False,
-            ):
-                st.session_state.show_lookup = not bool(
-                    st.session_state.get("show_lookup", False)
+    with st.container(key="disp_header_toolbar"):
+        c_lookup, c_settings, c_user = st.columns(
+            [1.1, 0.55, 0.55],
+            gap="small",
+            vertical_alignment="center",
+        )
+        with c_lookup:
+            with st.container(key="disp_header_lookup"):
+                if st.button(
+                    "Lookup",
+                    key="topbar_lookup_btn",
+                    help="Search ticket or case ref",
+                    use_container_width=False,
+                    type="secondary",
+                ):
+                    st.session_state.show_lookup = not bool(
+                        st.session_state.get("show_lookup", False)
+                    )
+                    st.rerun()
+        with c_settings:
+            with st.container(key="disp_header_settings"):
+                _render_dispatch_settings_popover(
+                    show_signout=False,
+                    show_date_range=False,
+                    trigger_label="\u2699",
+                    trigger_help="Settings and refresh",
                 )
-                st.rerun()
-    with c_settings:
-        with st.container(key="disp_header_settings"):
-            _render_dispatch_settings_popover(show_signout=False)
-    with c_user:
-        _render_dispatch_user_menu(chip=chip)
+        with c_user:
+            _render_dispatch_user_menu(chip=chip)
 
 
 def _render_dispatch_user_menu(*, chip: dict[str, str]) -> None:
@@ -9726,34 +9734,79 @@ def _render_dispatch_user_menu(*, chip: dict[str, str]) -> None:
                 _signout()
 
 
-def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
-    """Operational context: time range, clock, and open backlog hint."""
+def _render_dash_time_range_controls(*, radio_key: str, refresh_key: str) -> None:
+    """Shared time-range preset picker for context strip and settings."""
     _init_dash_date_range_state()
     preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
-    if preset == "Pick dates":
-        preset_label = "Custom range"
+    _sync_dash_range_from_ui(preset)
+    range_cap = _format_dash_range_caption()
+    if range_cap:
+        st.caption(range_cap)
+    menu_labels = [o for o in _DASH_TIME_PRESET_OPTIONS if o != "Pick dates"]
+    display_opts = menu_labels + ["Custom"]
+    cur = preset if preset != "Pick dates" else "Custom"
+    if cur not in display_opts:
+        cur = "This week"
+    if st.session_state.get(radio_key) not in display_opts:
+        st.session_state[radio_key] = cur
+    range_opt = st.radio(
+        "Range",
+        display_opts,
+        label_visibility="collapsed",
+        key=radio_key,
+    )
+    if range_opt == "Custom":
+        st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
+        _render_dash_custom_date_inputs()
+        _sync_dash_range_from_ui("Pick dates")
     else:
-        preset_label = preset
+        st.session_state[_DASH_TIME_PRESET_KEY] = range_opt
+        _sync_dash_range_from_ui(range_opt)
+    if st.button("↻ Refresh now", key=refresh_key, use_container_width=True):
+        _invalidate_dashboard_data_cache()
+        st.session_state.pop(_DASH_LAST_ATTENDANCE_TS_KEY, None)
+        st.rerun()
+
+
+def _context_strip_range_trigger() -> str:
+    preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    if preset == "Pick dates":
+        return "Custom range ▾"
+    return f"{preset} ▾"
+
+
+def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
+    """Operational context: time range picker, clock, and open backlog hint."""
+    _init_dash_date_range_state()
     range_cap = _format_dash_range_caption()
     open_count = int(st.session_state.get("_dash_prev_open_count", 0) or 0)
 
     with st.container(key="disp_context_strip"):
         c_left, c_right = st.columns([3.2, 1], gap="small", vertical_alignment="center")
         with c_left:
-            parts = [
-                f'<span class="disp-context-strong">{html.escape(preset_label)}</span>',
-            ]
-            if range_cap:
+            meta_cols = st.columns([0.95, 2.05], gap="small", vertical_alignment="center")
+            with meta_cols[0]:
+                with st.container(key="disp_context_range"):
+                    with st.popover(
+                        _context_strip_range_trigger(),
+                        help="Time range for tickets and performance",
+                    ):
+                        _render_dash_time_range_controls(
+                            radio_key="context_time_range_radio",
+                            refresh_key="context_refresh_now",
+                        )
+            with meta_cols[1]:
+                parts: list[str] = []
+                if range_cap:
+                    parts.append(f"<span>{html.escape(range_cap)}</span>")
                 parts.append('<span class="disp-context-sep" aria-hidden="true"></span>')
-                parts.append(f"<span>{html.escape(range_cap)}</span>")
-            parts.append('<span class="disp-context-sep" aria-hidden="true"></span>')
-            parts.append(
-                f"<span>{html.escape(now_date)} · {html.escape(now_time)}</span>"
-            )
-            st.markdown(
-                f'<div class="disp-context-meta">{"".join(parts)}</div>',
-                unsafe_allow_html=True,
-            )
+                parts.append(
+                    f"<span>{html.escape(now_date)} · {html.escape(now_time)}</span>"
+                )
+                st.markdown(
+                    f'<div class="disp-context-meta">{"".join(parts)}</div>',
+                    unsafe_allow_html=True,
+                )
         with c_right:
             if open_count > 0:
                 noun = "case" if open_count == 1 else "cases"
@@ -9768,8 +9821,14 @@ def _render_dispatch_header_right(*, now_date: str, now_time: str, chip: dict[st
     _render_dispatch_header_utilities(chip=chip)
 
 
-def _render_dispatch_settings_popover(*, show_signout: bool = True) -> None:
-    """Settings popover — refresh, date range, optional sign out."""
+def _render_dispatch_settings_popover(
+    *,
+    show_signout: bool = True,
+    show_date_range: bool = True,
+    trigger_label: str = "\u2699",
+    trigger_help: str = "Settings",
+) -> None:
+    """Settings popover — refresh, optional date range, optional sign out."""
     _init_dash_date_range_state()
 
     def _refresh() -> None:
@@ -9793,8 +9852,10 @@ def _render_dispatch_settings_popover(*, show_signout: bool = True) -> None:
         "on_signout": _signout,
         "render_custom_dates": _custom_dates,
         "range_caption": _format_dash_range_caption(),
-        "trigger_label": "⚙",
+        "trigger_label": trigger_label,
+        "trigger_help": trigger_help,
         "show_signout": show_signout,
+        "show_date_range": show_date_range,
         "render_admin": (
             _render_dispatch_settings_admin if _is_dashboard_admin() else None
         ),
