@@ -110,8 +110,17 @@ html, body {{ background: var(--disp-bg) !important; overflow-x: hidden !importa
 [data-testid="stMain"] [data-testid="element-container"] {{
   margin-bottom: 0.2rem !important;
 }}
+div.st-key-disp_header_shell [data-testid="element-container"],
+div.st-key-disp_context_strip [data-testid="element-container"] {{
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+}}
 [data-testid="stMain"] [data-testid="stVerticalBlock"] {{
   gap: 0.15rem !important;
+}}
+div.st-key-disp_header_shell [data-testid="stVerticalBlock"],
+div.st-key-disp_context_strip [data-testid="stVerticalBlock"] {{
+  gap: 0 !important;
 }}
 
 [data-testid="stHorizontalBlock"] {{
@@ -192,6 +201,21 @@ div.st-key-disp_header_shell [data-testid="stHorizontalBlock"] {{
 div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"],
 div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
   flex-wrap: nowrap !important;
+  align-items: center !important;
+}}
+div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] {{
+  justify-content: center !important;
+}}
+div.st-key-disp_header_util,
+div.st-key-disp_header_util [data-testid="stVerticalBlockBorderWrapper"],
+div.st-key-disp_header_util [data-testid="stVerticalBlock"] {{
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  height: var(--disp-header-h) !important;
+  width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }}
 div.st-key-disp_header_shell > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
 div.st-key-disp_header_shell [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
@@ -674,7 +698,7 @@ div.st-key-disp_header_util [data-testid="stHorizontalBlock"] > div[data-testid=
   padding: 0 !important;
   overflow: visible !important;
 }}
-div.st-key-disp_header_lookup .stButton > button,
+div.st-key-disp_header_lookup [data-testid="stPopover"] > button,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
   background: transparent !important;
   border: none !important;
@@ -705,7 +729,7 @@ div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
   padding: 0 !important;
   color: var(--disp-dim) !important;
 }}
-div.st-key-disp_header_lookup .stButton > button:hover,
+div.st-key-disp_header_lookup [data-testid="stPopover"] > button:hover,
 div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
   color: var(--disp-text) !important;
   background: rgba(255, 255, 255, 0.05) !important;
@@ -803,12 +827,55 @@ div.st-key-disp_context_strip [data-testid="element-container"] {{
   flex-shrink: 0;
 }}
 .disp-context-open {{
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: var(--disp-context-h);
+  min-height: var(--disp-context-h);
   font-size: 11px;
   font-weight: 500;
   color: var(--disp-muted);
   text-align: right;
   line-height: 1;
   white-space: nowrap;
+}}
+div.st-key-disp_context_strip > [data-testid="stVerticalBlock"] {{
+  gap: 0 !important;
+  justify-content: center !important;
+}}
+div.st-key-disp_context_strip > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {{
+  align-items: center !important;
+  width: 100% !important;
+  gap: 0 !important;
+}}
+div.st-key-disp_context_strip > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:last-child {{
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+}}
+div.st-key-disp_context_strip [data-testid="element-container"] {{
+  margin: 0 !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+}}
+div.st-key-disp_context_strip [data-testid="stMarkdownContainer"],
+div.st-key-disp_context_strip [data-testid="stMarkdownContainer"] p {{
+  margin: 0 !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  line-height: 1 !important;
+}}
+div.st-key-disp_context_strip [data-testid="column"] > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {{
+  align-items: center !important;
+  gap: 0.65rem !important;
+}}
+div.st-key-disp_context_range [data-testid="stPopover"] {{
+  display: inline-flex !important;
+  align-items: center !important;
+  margin: 0 !important;
+  vertical-align: middle !important;
 }}
 div.st-key-disp_context_range,
 div.st-key-disp_context_range [data-testid="stVerticalBlock"],
@@ -837,12 +904,22 @@ div.st-key-disp_context_range [data-testid="stPopover"] > button:hover {{
 div.st-key-disp_context_range [data-testid="stPopoverBody"],
 div.st-key-disp_header_settings [data-testid="stPopoverBody"] {{
   overflow: visible !important;
-  min-width: 15rem !important;
+  min-width: 16rem !important;
+  max-width: 20rem !important;
+}}
+div.st-key-disp_context_range [data-testid="stPopover"],
+div.st-key-disp_header_settings [data-testid="stPopover"] {{
+  overflow: visible !important;
 }}
 div.st-key-disp_context_range [data-testid="stPopoverBody"] .stDateInput,
 div.st-key-disp_header_settings [data-testid="stPopoverBody"] .stDateInput {{
   position: relative !important;
   z-index: 2 !important;
+}}
+div.st-key-disp_context_range [data-testid="stPopoverBody"] .stDateInput input,
+div.st-key-disp_header_settings [data-testid="stPopoverBody"] .stDateInput input {{
+  font-size: 12px !important;
+  min-height: 2rem !important;
 }}
 div[data-baseweb="popover"]:has([data-baseweb="calendar"]) {{
   z-index: 10050 !important;
@@ -3102,7 +3179,6 @@ def render_settings_popover(
     on_signout: Callable[[], None] | None = None,
     render_custom_dates: Callable[[], bool] | Callable[[], None] | None = None,
     on_range_change: Callable[[], None] | None = None,
-    on_open_custom_dates: Callable[[], None] | None = None,
     render_admin: Callable[[], None] | None = None,
     range_caption: str = "",
     trigger_label: str = "⚙",
@@ -3171,11 +3247,10 @@ def render_settings_popover(
                 preset_changed = preset != "Pick dates"
                 if preset_changed:
                     st.session_state[time_preset_key] = "Pick dates"
-                    if on_open_custom_dates:
-                        on_open_custom_dates()
+                dates_changed = False
                 if render_custom_dates:
-                    render_custom_dates()
-                if preset_changed and on_range_change:
+                    dates_changed = bool(render_custom_dates())
+                if (preset_changed or dates_changed) and on_range_change:
                     on_range_change()
             else:
                 if preset != range_opt:
@@ -3281,17 +3356,36 @@ def _fast_row_cell_style(*, is_sel: bool, is_alt: bool) -> str:
 def _render_table_row_actions(
     *,
     row_key: str,
+    is_sel: bool,
+    selected_key: str,
+    select_value: str,
+    select_button_key: str,
     row_data: dict[str, Any],
     row_id: str,
     row_actions_fn: Callable[[dict[str, Any], str], None] | None,
-    **_: object,
+    case_type_session_key: str | None = None,
 ) -> None:
-    """Single ⋮ control — selects row when unselected, opens menu when selected."""
+    """Select (●) + menu (⋮) in one horizontal action strip."""
     with st.container(
         horizontal=True,
         vertical_alignment="center",
         key=f"disp_row_actions_{row_key}",
     ):
+        if st.button(
+            "●",
+            key=select_button_key,
+            help="Select row",
+            type="primary" if is_sel else "secondary",
+        ):
+            st.session_state[selected_key] = select_value
+            if case_type_session_key:
+                selected_type = str(row_data.get("case_type") or "").strip()
+                st.session_state[case_type_session_key] = selected_type
+                if selected_type == "Resort":
+                    st.session_state["selected_sales_case"] = select_value
+                else:
+                    st.session_state["selected_sales_case"] = None
+            st.rerun()
         if row_actions_fn:
             row_actions_fn(row_data, row_id)
 
@@ -3638,7 +3732,6 @@ def render_ticket_table_fast(
     case_type_session_key: str | None = None,
 ) -> None:
     """Ticket grid — same column ratios as the full table, without per-row card containers."""
-    del selected_key, case_type_session_key
     if not tickets:
         st.markdown(
             '<div class="disp-table-empty">No tickets in this queue</div>',
@@ -3734,8 +3827,17 @@ def render_ticket_table_fast(
                     unsafe_allow_html=True,
                 )
             with c_actions:
-                if row_actions_fn:
-                    row_actions_fn(t, tnum)
+                _render_table_row_actions(
+                    row_key=tnum,
+                    is_sel=is_sel,
+                    selected_key=selected_key,
+                    select_value=tnum,
+                    select_button_key=f"sel_{tnum}",
+                    row_data=t,
+                    row_id=tnum,
+                    row_actions_fn=row_actions_fn,
+                    case_type_session_key=case_type_session_key,
+                )
 
 
 DISPATCH_TICKET_PAGE_SIZE = 20

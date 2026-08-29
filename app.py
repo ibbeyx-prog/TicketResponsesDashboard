@@ -512,7 +512,7 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v9"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v12"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
 
 
@@ -538,10 +538,16 @@ def _inject_css_into_head(element_id: str, css_text: str) -> None:
 
 def apply_theme(*, login: bool = False) -> None:
     """Global typography + colour system for the dispatch dashboard."""
+    if login:
+        if st.session_state.get(_LOGIN_THEME_APPLIED_KEY):
+            return
+        st.session_state[_LOGIN_THEME_APPLIED_KEY] = True
+        st.markdown(DISPATCH_LOGIN_CSS, unsafe_allow_html=True)
+        return
     if not st.session_state.get("_disp_row_popover_compact_injected"):
         inject_dispatch_row_popover_compact_css()
         st.session_state["_disp_row_popover_compact_injected"] = True
-    theme_key = _LOGIN_THEME_APPLIED_KEY if login else _DASH_THEME_APPLIED_KEY
+    theme_key = _DASH_THEME_APPLIED_KEY
     if st.session_state.get(theme_key):
         return
     st.session_state[theme_key] = True
@@ -624,7 +630,7 @@ def apply_theme(*, login: bool = False) -> None:
       width: fit-content !important;
       margin: 0 auto !important;
     }}
-    div.st-key-disp_header_lookup .stButton > button,
+    div.st-key-disp_header_lookup [data-testid="stPopover"] > button,
     div.st-key-disp_header_settings [data-testid="stPopover"] > button {{
       background: transparent !important;
       border: none !important;
@@ -642,7 +648,7 @@ def apply_theme(*, login: bool = False) -> None:
       align-items: center !important;
       justify-content: center !important;
     }}
-    div.st-key-disp_header_lookup .stButton > button:hover,
+    div.st-key-disp_header_lookup [data-testid="stPopover"] > button:hover,
     div.st-key-disp_header_settings [data-testid="stPopover"] > button:hover {{
       color: #f0f4fc !important;
       background: rgba(255, 255, 255, 0.05) !important;
@@ -861,8 +867,6 @@ def apply_theme(*, login: bool = False) -> None:
     }}
     """
     _inject_css_into_head("disp-dashboard-theme", css_text)
-    if login:
-        st.markdown(DISPATCH_LOGIN_CSS, unsafe_allow_html=True)
 
 
 _DISPATCH_QUEUE_MASK: dict[str, str] = {
@@ -1606,6 +1610,7 @@ ATTENDANCE_LOGS_TABLE = (
 # TicketQueued, TransferredFromSales, TransferredToSales, ReassignedFromOpen,
 # ReassignedFromInvestigation, ReassignedFromOnHold, ReassignedFromPending, Deleted,
 # LegacyLogin (shared-password dashboard sign-in; operator ID not cryptographically verified).
+# LoginPageView, LoginAttempt, LoginSuccess, LoginFailed (dashboard auth audit trail).
 TICKET_VISITS_TABLE = (
     _read_setting("TICKET_VISITS_TABLE", "ticket_visits")
     or "ticket_visits"
@@ -1657,7 +1662,8 @@ _DASH_TIME_PRESET_OPTIONS: tuple[str, ...] = (
 )
 _DASH_SEARCH_FROM_DATE_KEY = "_dash_search_from_date"
 _DASH_SEARCH_TO_DATE_KEY = "_dash_search_to_date"
-_DASH_CUSTOM_DATE_DIALOG_KEY = "_dash_custom_date_dialog_open"
+_DASH_CUSTOM_FROM_PREV_KEY = "_dash_custom_from_prev"
+_DASH_CUSTOM_TO_PREV_KEY = "_dash_custom_to_prev"
 _DASH_PREV_PRESET_KEY = "_dash_prev_preset"
 _DASH_RANGE_CUSTOM_OPEN_KEY = "_dash_range_custom_open"
 _DASH_TIME_PRESET_MENU: tuple[str, ...] = (
@@ -2072,6 +2078,8 @@ _LOGIN_PWD_WIDGET_KEY = "login_password_widget"
 _LOGIN_OID_WIDGET_KEY = "login_operator_id_widget"
 _LOGIN_SAVE_PW_KEY = "login_save_password"
 _LOGIN_REMEMBER_BOOT_KEY = "_login_remember_bootstrapped"
+_LOGIN_CONFIG_CACHE_KEY = "_login_users_configured_cache"
+_LOGIN_PAGE_AUDIT_KEY = "_login_page_audit_logged"
 _MIN_DASHBOARD_PASSWORD_LEN = 8
 _MAX_OPERATOR_ID_LEN = 64
 _MAX_DASHBOARD_USERNAME_LEN = 48
@@ -2198,6 +2206,7 @@ def _clear_auth_session() -> None:
         _AUTH_USERNAME_KEY,
         _OPERATOR_ID_KEY,
         "is_legacy_session",
+        _LOGIN_PAGE_AUDIT_KEY,
     ):
         st.session_state.pop(key, None)
 
@@ -2209,23 +2218,56 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_OPERATOR_ID_KEY] = operator_id
 
 
-def _log_legacy_login_attendance(operator_id: str) -> None:
-    """One audit row per legacy (shared-password) sign-in for weaker identity tracking."""
+def _log_dashboard_auth_event(
+    action_type: str,
+    *,
+    member_username: str = "",
+    note: str = "",
+) -> None:
+    """Append-only auth audit row in attendance logs (+ local logger)."""
+    user = str(member_username or "").strip() or "dashboard"
+    note_text = str(note or "").strip()
+    log.info("dashboard auth: %s user=%s %s", action_type, user, note_text)
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     try:
-        client = _get_supabase_client()
-        client.table(ATTENDANCE_LOGS_TABLE).insert(
+        _get_supabase_client().table(ATTENDANCE_LOGS_TABLE).insert(
             {
                 "ticket_number": None,
-                "member_username": operator_id,
-                "action_type": "LegacyLogin",
-                "note": "Session authenticated via shared password — identity unverified",
+                "member_username": user,
+                "action_type": action_type,
+                "note": note_text[:500] if note_text else None,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("dashboard auth log insert failed (%s): %s", action_type, exc)
+
+
+def _log_legacy_login_attendance(operator_id: str) -> None:
+    """One audit row per legacy (shared-password) sign-in for weaker identity tracking."""
+    _log_dashboard_auth_event(
+        "LegacyLogin",
+        member_username=operator_id,
+        note="Session authenticated via shared password — identity unverified",
+    )
+
+
+def _log_login_page_view(*, per_user: bool) -> None:
+    if st.session_state.get(_LOGIN_PAGE_AUDIT_KEY):
+        return
+    st.session_state[_LOGIN_PAGE_AUDIT_KEY] = True
+    mode = "per_user" if per_user else "legacy"
+    _log_dashboard_auth_event("LoginPageView", note=f"Login screen opened ({mode})")
+
+
+def _cached_dashboard_users_configured() -> bool | None:
+    """Cache per-user login probe for the session (avoids RPC on every login rerun)."""
+    if _LOGIN_CONFIG_CACHE_KEY in st.session_state:
+        return st.session_state[_LOGIN_CONFIG_CACHE_KEY]
+    result = _dashboard_users_configured()
+    st.session_state[_LOGIN_CONFIG_CACHE_KEY] = result
+    return result
 
 
 def _normalize_dashboard_username(raw: str) -> str:
@@ -2757,18 +2799,31 @@ def _handle_per_user_login(username: str, password: str, remember: bool) -> None
     except ValueError as ve:
         st.toast(str(ve).replace("**", ""), icon="⚠️")
         return
+    _log_dashboard_auth_event("LoginAttempt", member_username=uname, note="per_user")
     try:
-        payload = _rpc_dashboard_verify_login(uname, password)
+        with st.spinner("Signing in…"):
+            payload = _rpc_dashboard_verify_login(uname, password)
     except Exception as exc:
+        _log_dashboard_auth_event(
+            "LoginFailed",
+            member_username=uname,
+            note=f"rpc_error: {exc}",
+        )
         st.toast(f"Login failed: {exc}", icon="❌")
         return
     if not payload.get("ok"):
+        _log_dashboard_auth_event(
+            "LoginFailed",
+            member_username=uname,
+            note=str(payload.get("error") or "invalid_credentials"),
+        )
         st.toast("Invalid username or password", icon="❌")
         return
     op = str(payload.get("operator_id") or uname).strip()
     fp = _auth_session_fingerprint(username=uname, operator_id=op)
     st.session_state.pop("is_legacy_session", None)
     _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
+    _log_dashboard_auth_event("LoginSuccess", member_username=op, note=f"username={uname}")
     if remember:
         _login_remember_persist(username=uname, password=password)
     else:
@@ -2780,18 +2835,22 @@ def _handle_legacy_login(operator_id: str, shared_password: str, *, legacy_passw
     if not operator_id.strip() or not shared_password:
         st.toast("Enter both Operator ID and shared password", icon="⚠️")
         return
-    if not hmac.compare_digest(shared_password, legacy_password):
-        st.toast("Incorrect shared password", icon="❌")
-        return
     try:
         op = _normalize_operator_id(operator_id)
     except ValueError as ve:
         st.toast(str(ve).replace("**", ""), icon="❌")
         return
-    fp = _password_fingerprint(legacy_password)
-    _complete_auth_session(username=op.casefold(), operator_id=op, session_fp=fp)
-    st.session_state["is_legacy_session"] = True
-    _log_legacy_login_attendance(op)
+    _log_dashboard_auth_event("LoginAttempt", member_username=op, note="legacy")
+    if not hmac.compare_digest(shared_password, legacy_password):
+        _log_dashboard_auth_event("LoginFailed", member_username=op, note="bad_shared_password")
+        st.toast("Incorrect shared password", icon="❌")
+        return
+    with st.spinner("Signing in…"):
+        fp = _password_fingerprint(legacy_password)
+        _complete_auth_session(username=op.casefold(), operator_id=op, session_fp=fp)
+        st.session_state["is_legacy_session"] = True
+        _log_legacy_login_attendance(op)
+        _log_dashboard_auth_event("LoginSuccess", member_username=op, note="legacy")
     st.rerun()
 
 
@@ -2966,6 +3025,7 @@ def _render_login_screen(
 ) -> None:
     """Login screen matching the dispatch console design system."""
     _init_login_session_state()
+    _log_login_page_view(per_user=per_user)
     _render_login_page_styles()
 
     st.markdown(
@@ -2990,7 +3050,7 @@ def _render_login_screen(
             "Ticket data will not load until the connection works."
         )
 
-    _render_login_supabase_status()
+    _render_login_supabase_status(per_user_state=per_user_state)
 
     col_l, col_card, col_r = st.columns([1, 1.4, 1])
     with col_card:
@@ -3157,7 +3217,7 @@ def _read_dashboard_password() -> str:
 
 def _check_password() -> None:
     """Block until the viewer has a valid session (per-user or legacy shared password)."""
-    per_user_state = _dashboard_users_configured()
+    per_user_state = _cached_dashboard_users_configured()
     legacy_pw_raw = _read_dashboard_password()
     legacy_pw = legacy_pw_raw
 
@@ -3357,8 +3417,10 @@ def _maybe_run_unattended_close() -> None:
         log.exception("dashboard unattended auto-close failed")
 
 
-def _render_login_supabase_status() -> None:
+def _render_login_supabase_status(*, per_user_state: bool | None = None) -> None:
     """Show whether this PC can reach Supabase with the configured API key."""
+    if per_user_state is not None:
+        return
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     cache_key = "_dash_login_sb_status"
@@ -9263,18 +9325,8 @@ def _apply_dash_range_change() -> None:
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
 
 
-def _open_dash_custom_date_dialog() -> None:
-    st.session_state[_DASH_CUSTOM_DATE_DIALOG_KEY] = True
-
-
-def _close_dash_custom_date_dialog() -> None:
-    st.session_state[_DASH_CUSTOM_DATE_DIALOG_KEY] = False
-
-
-@st.dialog("Custom date range", width="small", on_dismiss=_close_dash_custom_date_dialog)
-def _dash_custom_date_dialog() -> None:
-    """From/To pickers in a dialog — calendar popovers fail inside st.popover."""
-    _init_dash_date_range_state()
+def _render_dash_custom_date_inputs() -> bool:
+    """From/To pickers inside the range popover. Returns True when dates changed."""
     c1, c2 = st.columns(2)
     with c1:
         st.date_input(
@@ -9288,44 +9340,28 @@ def _dash_custom_date_dialog() -> None:
             format="YYYY-MM-DD",
             key=_DASH_SEARCH_TO_DATE_KEY,
         )
-    if st.button("Apply range", key="dash_custom_date_apply", type="primary", width="stretch"):
-        from_d = st.session_state.get(_DASH_SEARCH_FROM_DATE_KEY)
-        to_d = st.session_state.get(_DASH_SEARCH_TO_DATE_KEY)
-        if from_d is None or to_d is None:
-            return
-        if from_d > to_d:
-            st.session_state[_DASH_SEARCH_TO_DATE_KEY] = from_d
-        st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
-        _sync_dash_range_from_ui("Pick dates")
-        _apply_dash_range_change()
-        _close_dash_custom_date_dialog()
-        st.rerun()
-
-
-def _render_dash_custom_date_inputs(*, trigger_key: str = "dash_custom_dates_btn") -> bool:
-    """Show current custom range and open the date dialog (popover-safe)."""
     from_d = st.session_state.get(_DASH_SEARCH_FROM_DATE_KEY)
     to_d = st.session_state.get(_DASH_SEARCH_TO_DATE_KEY)
-    if from_d and to_d:
-        st.caption(f"{from_d} → {to_d}")
-    if st.button("Choose dates…", key=trigger_key, width="stretch"):
-        _open_dash_custom_date_dialog()
-        st.rerun()
-    return False
+    prev_from = st.session_state.get(_DASH_CUSTOM_FROM_PREV_KEY)
+    prev_to = st.session_state.get(_DASH_CUSTOM_TO_PREV_KEY)
+    changed = (from_d, to_d) != (prev_from, prev_to) and prev_from is not None
+    st.session_state[_DASH_CUSTOM_FROM_PREV_KEY] = from_d
+    st.session_state[_DASH_CUSTOM_TO_PREV_KEY] = to_d
+    if from_d and to_d and from_d > to_d:
+        st.session_state[_DASH_SEARCH_TO_DATE_KEY] = from_d
+    _sync_dash_range_from_ui("Pick dates")
+    return changed
 
 
 def _init_lookup_state() -> None:
-    if "show_lookup" not in st.session_state:
-        st.session_state.show_lookup = False
     if "lookup_query" not in st.session_state:
         st.session_state.lookup_query = ""
     if "lookup_result" not in st.session_state:
         st.session_state.lookup_result = None
 
 
-def _close_lookup_dialog(*, clear_query: bool = False) -> None:
-    """Hide lookup dialog — call on dismiss, navigation, or tab change."""
-    st.session_state.show_lookup = False
+def _reset_lookup_state(*, clear_query: bool = False) -> None:
+    """Clear lookup results — e.g. on navigation away from Ticket."""
     st.session_state.lookup_result = None
     if clear_query:
         st.session_state.lookup_query = ""
@@ -9439,17 +9475,12 @@ def _lookup_navigate(rtype: str, data: dict[str, object]) -> None:
             data.get("status") or SC_STATUS_SALES_TICKET
         )
         st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
-    _close_lookup_dialog(clear_query=True)
+    _reset_lookup_state(clear_query=True)
     st.rerun()
 
 
-@st.dialog(
-    "🔍 Ticket / Case Lookup",
-    width="small",
-    on_dismiss=_close_lookup_dialog,
-)
-def render_lookup_popover() -> None:
-    """Lookup dialog for Residential tickets and Resort cases."""
+def _render_lookup_popover_content() -> None:
+    """Lookup panel for Residential tickets and Resort cases."""
     _init_lookup_state()
     st.markdown(
         '<p style="font-size:13px;color:#4a5a7a;margin-bottom:12px">'
@@ -9779,11 +9810,6 @@ def _render_dispatch_app_shell() -> None:
 
     _render_dispatch_context_strip(now_date=now_date, now_time=now_time)
 
-    if bool(st.session_state.get("show_lookup", False)):
-        render_lookup_popover()
-    if bool(st.session_state.get(_DASH_CUSTOM_DATE_DIALOG_KEY, False)):
-        _dash_custom_date_dialog()
-
 
 def _render_dispatch_header_utilities(*, chip: dict[str, str]) -> None:
     """Lookup, settings, and avatar — grouped in one toolbar capsule."""
@@ -9796,17 +9822,12 @@ def _render_dispatch_header_utilities(*, chip: dict[str, str]) -> None:
         )
         with c_lookup:
             with st.container(key="disp_header_lookup"):
-                if st.button(
+                with st.popover(
                     "Lookup",
-                    key="topbar_lookup_btn",
                     help="Search ticket or case ref",
                     width="content",
-                    type="secondary",
                 ):
-                    st.session_state.show_lookup = not bool(
-                        st.session_state.get("show_lookup", False)
-                    )
-                    st.rerun()
+                    _render_lookup_popover_content()
         with c_settings:
             with st.container(key="disp_header_settings"):
                 _render_dispatch_settings_popover(
@@ -9869,9 +9890,9 @@ def _render_dash_time_range_controls(*, radio_key: str, refresh_key: str) -> Non
         preset_changed = preset != "Pick dates"
         if preset_changed:
             st.session_state[_DASH_TIME_PRESET_KEY] = "Pick dates"
-            _open_dash_custom_date_dialog()
+        dates_changed = _render_dash_custom_date_inputs()
+        if preset_changed or dates_changed:
             _apply_dash_range_change()
-        _render_dash_custom_date_inputs(trigger_key="context_custom_dates_btn")
     else:
         if preset != range_opt:
             st.session_state[_DASH_TIME_PRESET_KEY] = range_opt
@@ -9908,7 +9929,7 @@ def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
     )
 
     with st.container(key="disp_context_strip"):
-        c_left, c_right = st.columns([3.2, 1], gap="small", vertical_alignment="center")
+        c_left, c_right = st.columns([3.4, 1.1], gap="small", vertical_alignment="center")
         with c_left:
             meta_cols = st.columns([0.95, 2.05], gap="small", vertical_alignment="center")
             with meta_cols[0]:
@@ -9968,13 +9989,10 @@ def _render_dispatch_settings_popover(
         st.rerun()
 
     def _custom_dates() -> bool:
-        return _render_dash_custom_date_inputs(trigger_key="settings_custom_dates_btn")
+        return _render_dash_custom_date_inputs()
 
     def _on_range_change() -> None:
         _apply_dash_range_change()
-
-    def _open_custom_dates() -> None:
-        _open_dash_custom_date_dialog()
 
     popover_kwargs: dict[str, object] = {
         "time_preset_options": list(_DASH_TIME_PRESET_OPTIONS),
@@ -9983,7 +10001,6 @@ def _render_dispatch_settings_popover(
         "on_signout": _signout,
         "render_custom_dates": _custom_dates,
         "on_range_change": _on_range_change,
-        "on_open_custom_dates": _open_custom_dates,
         "range_caption": _format_dash_range_caption(),
         "trigger_label": trigger_label,
         "trigger_help": trigger_help,
@@ -18057,7 +18074,7 @@ def _apply_pending_dashboard_nav() -> None:
     pending_engineer = st.session_state.pop(_DASH_PENDING_ENGINEER_FILTER_KEY, None)
     pending_case_type = st.session_state.pop(_DASH_PENDING_CASE_TYPE_FILTER_KEY, None)
     if pending_main is not None:
-        _close_lookup_dialog()
+        _reset_lookup_state()
         st.session_state[_DASH_MAIN_NAV_KEY] = _normalize_dash_main_nav(
             _DASH_NAV_LEGACY_REDIRECT.get(str(pending_main), pending_main)
         )
@@ -18350,7 +18367,7 @@ def _render_main_navigation() -> str:
             ):
                 if not is_active:
                     st.session_state[_DASH_MAIN_NAV_KEY] = opt
-                    _close_lookup_dialog()
+                    _reset_lookup_state()
                     st.rerun()
     return current
 
@@ -21070,6 +21087,10 @@ def _render_row_action_menu(
         return
     labels = [label for label, _ in items]
     handlers = dict(items)
+
+    def _select_row() -> None:
+        _row_menu_on_open(focus_ticket, focus_case_type)
+
     choice = menu_fn(
         "⋮",
         labels,
@@ -21077,9 +21098,9 @@ def _render_row_action_menu(
         help="Actions",
         type="secondary",
         width="content",
+        on_click=_select_row,
     )
     if choice:
-        _row_menu_on_open(focus_ticket, focus_case_type)
         handler = handlers.get(str(choice))
         if handler:
             handler()
