@@ -173,10 +173,12 @@ from unattended import (
     STATUS_DAILY_TASK,
     STATUS_UNATTENDED,
     UNATTENDED_NUDGE_HOURS,
+    assign_day_cutoff_time,
     has_field_response_since_assign,
     is_daily_task_status,
     run_unattended_close,
     should_close_as_unattended,
+    to_ops_local,
     visit_cycle_is_unattended,
 )
 
@@ -512,7 +514,7 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v12"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v17"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
 
 
@@ -870,6 +872,137 @@ def apply_theme(*, login: bool = False) -> None:
     }}
     .weekly-panel h4 {{
       font-size: 0.95rem; font-weight: 600; color: #e2e8f8; margin: 0 0 0.65rem;
+    }}
+    .weekly-hero-row {{
+      display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1.75rem 2.5rem;
+      padding: 1rem 1.15rem; margin: 0 0 0.65rem;
+      background: #0d1220; border: 0.5px solid #1a2035; border-radius: 8px;
+    }}
+    .weekly-hero-metric {{ display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }}
+    .weekly-hero-value {{
+      font-size: 2.35rem; font-weight: 600; color: #f0f4fc; line-height: 1;
+      font-variant-numeric: tabular-nums; letter-spacing: -0.03em;
+    }}
+    .weekly-hero-label {{
+      font-size: 0.78rem; font-weight: 500; color: #8a9ac0; letter-spacing: 0.02em;
+    }}
+    .weekly-hero-delta {{
+      font-size: 0.72rem; font-weight: 500; color: #34d399; margin-top: 0.15rem;
+    }}
+    .weekly-hero-delta.warn {{ color: #fbbf24; }}
+    .weekly-hero-delta.neutral {{ color: #8a9ac0; }}
+    .weekly-hero-period {{
+      font-size: 0.78rem; color: #6b7a99; margin: 0 0 1rem; padding-left: 0.15rem;
+    }}
+    .weekly-assign-panel {{
+      background: #0d1220; border: 0.5px solid #1a2035; border-radius: 8px;
+      padding: 0.95rem 1.1rem 0.85rem; margin: 0 0 0.85rem;
+    }}
+    .weekly-assign-bar {{
+      display: flex; width: 100%; height: 28px; border-radius: 6px; overflow: hidden;
+      background: #141e32; border: 0.5px solid #243047;
+    }}
+    .weekly-assign-seg {{
+      display: flex; align-items: center; justify-content: center;
+      min-width: 0; font-size: 11px; font-weight: 600; color: #f0f4fc;
+      font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
+      padding: 0 6px; box-sizing: border-box;
+    }}
+    .weekly-assign-seg.you {{ background: #166534; }}
+    .weekly-assign-seg.others {{ background: #92400e; }}
+    .weekly-assign-seg.open {{ background: #334155; }}
+    .weekly-assign-legend {{
+      display: flex; flex-wrap: wrap; gap: 0.65rem 1.1rem; margin: 0.55rem 0 0.35rem;
+      font-size: 11px; color: #8a9ac0;
+    }}
+    .weekly-assign-legend span {{ display: inline-flex; align-items: center; gap: 6px; }}
+    .weekly-assign-legend i {{
+      width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex-shrink: 0;
+    }}
+    .weekly-assign-caption {{
+      font-size: 0.78rem; color: #9aa8c4; margin: 0; line-height: 1.45;
+    }}
+    .weekly-reconcile-callout {{
+      background: #101828; border: 0.5px solid #2a3a55; border-left: 3px solid #3b82f6;
+      border-radius: 6px; padding: 0.75rem 0.95rem; margin: 0 0 0.85rem;
+      font-size: 0.78rem; color: #b8c4dc; line-height: 1.5;
+    }}
+    .weekly-reconcile-callout strong {{ color: #e8edf7; }}
+    .weekly-reconcile-callout ul {{
+      margin: 0.45rem 0 0; padding-left: 1.15rem;
+    }}
+    .weekly-reconcile-callout li {{ margin: 0.2rem 0; }}
+    .weekly-workload-row {{
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.65rem;
+      margin: 0 0 1rem;
+    }}
+    @media (max-width: 900px) {{
+      .weekly-workload-row {{ grid-template-columns: 1fr; }}
+    }}
+    .weekly-workload-card {{
+      background: #0a0f1a; border: 0.5px solid #243047; border-radius: 6px;
+      padding: 0.7rem 0.85rem; min-height: 72px; box-sizing: border-box;
+    }}
+    .weekly-workload-card .weekly-kpi-label {{ min-height: unset; margin-bottom: 0.3rem; }}
+    .weekly-workload-card .weekly-kpi-value {{ font-size: 1.45rem; }}
+    .weekly-workload-card .weekly-kpi-sub {{ min-height: unset; margin-top: 0.25rem; }}
+    .weekly-primary-kpi-row {{
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.65rem;
+      margin: 0 0 0.85rem;
+    }}
+    @media (max-width: 1100px) {{
+      .weekly-primary-kpi-row {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 560px) {{
+      .weekly-primary-kpi-row {{ grid-template-columns: 1fr; }}
+    }}
+    .weekly-primary-kpi-card {{
+      background: #0d1220; border: 0.5px solid #1a2035; border-radius: 8px;
+      padding: 0.85rem 0.95rem; min-height: 88px; box-sizing: border-box;
+    }}
+    .weekly-primary-kpi-card .weekly-kpi-label {{ min-height: unset; margin-bottom: 0.35rem; }}
+    .weekly-primary-kpi-card .weekly-kpi-value {{ font-size: 1.85rem; }}
+    .weekly-primary-kpi-card .weekly-kpi-sub {{ min-height: unset; margin-top: 0.3rem; }}
+    .weekly-attended-panel {{
+      background: #0d1220; border: 0.5px solid #1a2035; border-radius: 8px;
+      padding: 0.95rem 1.1rem 0.85rem; margin: 0 0 0.85rem;
+    }}
+    .weekly-attended-outcomes {{
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.55rem;
+      margin: 0.65rem 0 0.35rem;
+    }}
+    @media (max-width: 900px) {{
+      .weekly-attended-outcomes {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
+    .weekly-attended-outcome {{
+      background: #0a0f1a; border: 0.5px solid #243047; border-radius: 6px;
+      padding: 0.55rem 0.7rem;
+    }}
+    .weekly-attended-outcome .weekly-kpi-label {{ min-height: unset; margin-bottom: 0.25rem; font-size: 0.72rem; }}
+    .weekly-attended-outcome .weekly-kpi-value {{ font-size: 1.35rem; }}
+    .weekly-attended-bar {{
+      display: flex; width: 100%; height: 22px; border-radius: 5px; overflow: hidden;
+      background: #141e32; border: 0.5px solid #243047; margin-top: 0.5rem;
+    }}
+    .weekly-attended-seg.resolved {{ background: #166534; }}
+    .weekly-attended-seg.investigation {{ background: #6d28d9; }}
+    .weekly-attended-seg.admin {{ background: #475569; }}
+    .weekly-secondary-row {{
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.55rem;
+      margin: 0 0 0.85rem;
+    }}
+    @media (max-width: 900px) {{
+      .weekly-secondary-row {{ grid-template-columns: 1fr; }}
+    }}
+    .weekly-derived-row {{
+      display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0.55rem;
+      margin: 0 0 0.85rem;
+    }}
+    @media (max-width: 1200px) {{
+      .weekly-derived-row {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 640px) {{
+      .weekly-derived-row {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     }}
     """
     _inject_css_into_head("disp-dashboard-theme", css_text)
@@ -2003,10 +2136,12 @@ def _manual_field_response_session_keys(prefix: str) -> dict[str, str]:
 
 
 def _canonical_username_stem(stem: str) -> str:
-    """Map retired handles (e.g. ibbe → ibeyx)."""
+    """Map retired / mistaken handles (e.g. ibbe, ibex → ibeyx)."""
     s = stem.strip().lstrip("@").lower()
     if s.startswith("ibbe"):
         return "ibeyx" + s[4:]
+    if s == "ibex":
+        return "ibeyx"
     return s
 
 
@@ -6493,8 +6628,8 @@ def _visits_deactivate_ticket(client, ticket_number: str) -> None:
 
 def _normalize_visit_assignee(raw: object) -> str:
     """Canonical @username for ticket_visits.assignee."""
-    s = str(raw or "").strip().lstrip("@")
-    return f"@{s.lower()}" if s else ""
+    s = _canonical_username_stem(str(raw or ""))
+    return f"@{s}" if s else ""
 
 
 def _visits_current_assignee(client, ticket_number: str) -> str | None:
@@ -11402,6 +11537,272 @@ def _perf_assignment_cycles_in_range(
     return count
 
 
+def _perf_sales_case_ref_set(sales_all: pd.DataFrame | None) -> frozenset[str]:
+    """All resort case_ref values in the sales snapshot."""
+    if sales_all is None or sales_all.empty or "case_ref" not in sales_all.columns:
+        return frozenset()
+    return frozenset(
+        str(c).strip()
+        for c in sales_all["case_ref"].astype(str).unique().tolist()
+        if str(c).strip()
+    )
+
+
+def _perf_sales_assigned_ids_in_range(
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> frozenset[str]:
+    """Resort cases assigned/reassigned to ``focus`` in range (``last_assigned_at`` fallback)."""
+    if sales_all is None or sales_all.empty or focus in ("", "All"):
+        return frozenset()
+    if "last_assigned_at" not in sales_all.columns or "case_ref" not in sales_all.columns:
+        return frozenset()
+    la = _parse_ts(sales_all["last_assigned_at"])
+    mask = la.notna() & (la >= range_start) & (la <= range_end)
+    ids: set[str] = set()
+    for _, row in sales_all.loc[mask].iterrows():
+        if not _perf_row_credited_to_person(row, focus):
+            continue
+        cref = str(row.get("case_ref") or "").strip()
+        if cref:
+            ids.add(cref)
+    return frozenset(ids)
+
+
+def _perf_visit_same_day_response(
+    visit: pd.Series,
+    ticket_row: pd.Series | None,
+) -> bool:
+    """True when the engineer responded on the assign day before UTC+5 cutoff."""
+    if not _perf_visit_cycle_had_field_response(visit, ticket_row):
+        return False
+    start = _parse_ts(visit.get("visit_start"))
+    resp_raw = _perf_visit_cycle_responded_at_in_window(visit, ticket_row)
+    resp = _parse_ts(resp_raw)
+    if pd.isna(start):
+        return str(visit.get("outcome") or "").strip() == "responded"
+    if pd.isna(resp):
+        return str(visit.get("outcome") or "").strip() == "responded"
+    try:
+        assign_local = to_ops_local(start.to_pydatetime())
+        resp_local = to_ops_local(resp.to_pydatetime())
+    except Exception:
+        return str(visit.get("outcome") or "").strip() == "responded"
+    if assign_local.date() != resp_local.date():
+        return False
+    return resp_local.time() <= assign_day_cutoff_time()
+
+
+def _perf_engineer_range_assignment_metrics(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, int | frozenset[str]]:
+    """Unique tickets + assign/reassign task counts (residential + resort) for one engineer."""
+    focus_key = _perf_person_credit_key(focus)
+    empty: dict[str, int | frozenset[str]] = {
+        "assigned_in_range": 0,
+        "assigned_residential": 0,
+        "assigned_resort": 0,
+        "assignment_cycles_in_range": 0,
+        "assignment_cycles_residential": 0,
+        "assignment_cycles_resort": 0,
+        "revisit_tickets": 0,
+        "same_day_response_pct": 0,
+        "_assigned_ids": frozenset(),
+    }
+    if focus_key in ("", "(unknown)"):
+        return empty
+
+    sales_refs = _perf_sales_case_ref_set(sales_all)
+    res_ids_visit: set[str] = set()
+    rsr_ids_visit: set[str] = set()
+    res_cycles = 0
+    rsr_cycles = 0
+    ticket_cycle_counts: dict[str, int] = {}
+    same_day_count = 0
+    res_quality_cycles = 0
+    ticket_rows: dict[str, pd.Series] = {}
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                ticket_rows[tn] = row
+
+    visits_range = _fetch_visits_in_range(range_start, range_end)
+    prepared = _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
+    if not prepared.empty and "visit_start" in prepared.columns:
+        vs = _parse_ts(prepared["visit_start"])
+        in_range = vs.notna() & (vs >= range_start) & (vs <= range_end)
+        for _, visit in prepared.loc[in_range].iterrows():
+            keys = _perf_credit_keys_from_assignee_names([str(visit.get("assignee") or "")])
+            if focus_key not in keys:
+                continue
+            tn = str(visit.get("ticket_number") or "").strip()
+            if not tn:
+                continue
+            ticket_cycle_counts[tn] = ticket_cycle_counts.get(tn, 0) + 1
+            if tn in sales_refs:
+                rsr_ids_visit.add(tn)
+                rsr_cycles += 1
+            else:
+                res_ids_visit.add(tn)
+                res_cycles += 1
+                res_quality_cycles += 1
+                if _perf_visit_same_day_response(visit, ticket_rows.get(tn)):
+                    same_day_count += 1
+
+    visits_snapshot = _perf_filter_visits_by_person(
+        _perf_load_overview_visits_history(df_all),
+        focus,
+    )
+    df_for_assign = (
+        _perf_filter_by_person(df_all, focus) if not df_all.empty else df_all
+    )
+    res_fallback = set(
+        _perf_assigned_ticket_ids_in_range(
+            visits_snapshot,
+            df_for_assign,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    )
+    rsr_fallback = set(
+        _perf_sales_assigned_ids_in_range(
+            sales_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    )
+
+    res_ids = res_ids_visit | res_fallback
+    rsr_ids = rsr_ids_visit | rsr_fallback
+    res_cycles += len(res_fallback - res_ids_visit)
+    rsr_cycles += len(rsr_fallback - rsr_ids_visit)
+
+    all_ids = frozenset(res_ids | rsr_ids)
+    revisit_tickets = sum(1 for c in ticket_cycle_counts.values() if c >= 2)
+    same_day_pct = (
+        int(round(100 * same_day_count / res_quality_cycles))
+        if res_quality_cycles
+        else 0
+    )
+    return {
+        "assigned_in_range": len(all_ids),
+        "assigned_residential": len(res_ids),
+        "assigned_resort": len(rsr_ids),
+        "assignment_cycles_in_range": res_cycles + rsr_cycles,
+        "assignment_cycles_residential": res_cycles,
+        "assignment_cycles_resort": rsr_cycles,
+        "revisit_tickets": revisit_tickets,
+        "same_day_response_pct": same_day_pct,
+        "_assigned_ids": all_ids,
+    }
+
+
+def _perf_summary_derived_metrics(metrics: dict[str, object]) -> dict[str, float | int]:
+    """Ratios and rates derived from assignment + attended reconciliation."""
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
+    from_assigned = int(metrics.get("attended_from_assigned") or 0)
+    revisit = int(metrics.get("revisit_tickets") or 0)
+    snap = int(metrics.get("snapshot_residential") or 0) + int(
+        metrics.get("snapshot_resort") or 0
+    )
+    return {
+        "task_load_ratio": round(cycles / assigned, 2) if assigned else 0.0,
+        "snapshot_coverage_pct": int(round(100 * assigned / snap)) if snap else 0,
+        "response_rate_pct": int(round(100 * from_assigned / assigned)) if assigned else 0,
+        "revisit_rate_pct": int(round(100 * revisit / assigned)) if assigned else 0,
+    }
+
+
+def _perf_team_assignment_summary_df(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """All engineers — unique tickets vs assign/reassign tasks in the period."""
+    visits = _perf_load_overview_visits_history(df_all)
+    unatt_map = _perf_overview_unattended_counts_by_credit(
+        df_all,
+        focus="All",
+        visits=visits,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for handle in get_engineer_handles():
+        credit_key = _perf_person_credit_key(handle)
+        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+            continue
+        if credit_key in seen:
+            continue
+        seen.add(credit_key)
+        assign = _perf_engineer_range_assignment_metrics(
+            df_all,
+            sales_all,
+            focus=handle,
+            range_start=range_start,
+            range_end=range_end,
+        )
+        unique = int(assign.get("assigned_in_range") or 0)
+        tasks = int(assign.get("assignment_cycles_in_range") or 0)
+        if unique == 0 and tasks == 0:
+            continue
+        label = handle if str(handle).startswith("@") else f"@{handle}"
+        rows.append(
+            {
+                "Engineer": label,
+                "Unique tickets": unique,
+                "Tasks": tasks,
+                "Task load": round(tasks / unique, 2) if unique else 0.0,
+                "Revisit tickets": int(assign.get("revisit_tickets") or 0),
+                "Unattended": int(unatt_map.get(credit_key, 0)),
+                "Residential": int(assign.get("assigned_residential") or 0),
+                "Resort": int(assign.get("assigned_resort") or 0),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "Engineer",
+                "Unique tickets",
+                "Tasks",
+                "Task load",
+                "Revisit tickets",
+                "Unattended",
+                "Residential",
+                "Resort",
+            ]
+        )
+    return pd.DataFrame(rows).sort_values(
+        ["Tasks", "Unique tickets"], ascending=[False, False]
+    )
+
+
+def _perf_attended_track_counts(detail: pd.DataFrame) -> tuple[int, int]:
+    """Unique attended residential vs resort cases from weekly detail rows."""
+    if detail.empty or "ID" not in detail.columns:
+        return 0, 0
+    id_first = detail.drop_duplicates(subset=["ID"], keep="first")
+    if "Track" not in id_first.columns:
+        return int(id_first["ID"].astype(str).nunique()), 0
+    csm = id_first.loc[id_first["Track"].astype(str).eq("CSM")]
+    sales = id_first.loc[id_first["Track"].astype(str).eq("Sales")]
+    return int(csm["ID"].astype(str).nunique()), int(sales["ID"].astype(str).nunique())
+
+
 def _perf_summary_assigned_reconciliation(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame | None,
@@ -11448,7 +11849,11 @@ def _perf_summary_focus_engineer_metrics(
     credit_key = _perf_person_credit_key(focus)
     empty = {
         "assigned_in_range": 0,
+        "assigned_residential": 0,
+        "assigned_resort": 0,
         "assignment_cycles_in_range": 0,
+        "assignment_cycles_residential": 0,
+        "assignment_cycles_resort": 0,
         "closed_by_others": 0,
         "unattended_assignments": 0,
         "unattended_flagged_backlog": 0,
@@ -11456,18 +11861,18 @@ def _perf_summary_focus_engineer_metrics(
     if credit_key in ("", "(unknown)"):
         return empty
 
-    visits = _perf_load_overview_visits_history(df_all)
-    visits_for_assign = _perf_filter_visits_by_person(visits, focus)
-    df_for_assign = (
-        _perf_filter_by_person(df_all, focus) if not df_all.empty else df_all
-    )
-    assigned_ids = _perf_assigned_ticket_ids_in_range(
-        visits_for_assign,
-        df_for_assign,
+    assign_metrics = _perf_engineer_range_assignment_metrics(
+        df_all,
+        sales_all,
+        focus=focus,
         range_start=range_start,
         range_end=range_end,
     )
-    assigned_in_range = len(assigned_ids)
+    assigned_ids = assign_metrics.pop("_assigned_ids", frozenset())
+    if not isinstance(assigned_ids, frozenset):
+        assigned_ids = frozenset()
+
+    visits = _perf_load_overview_visits_history(df_all)
     closed_by_others = _perf_closed_by_others_count(
         df_all,
         sales_all,
@@ -11485,19 +11890,12 @@ def _perf_summary_focus_engineer_metrics(
             range_end=range_end,
         ).get(credit_key, 0)
     )
-    assignment_cycles = _perf_assignment_cycles_in_range(
-        visits_for_assign,
-        focus=focus,
-        range_start=range_start,
-        range_end=range_end,
-    )
     flagged = 0
     if not df_all.empty:
         flagged_rows = df_all.loc[_ticket_marked_unattended_mask(df_all)]
         flagged = len(_perf_filter_by_person(flagged_rows, focus))
     return {
-        "assigned_in_range": assigned_in_range,
-        "assignment_cycles_in_range": assignment_cycles,
+        **{k: int(v) for k, v in assign_metrics.items()},
         "closed_by_others": closed_by_others,
         "unattended_assignments": assignment_cases,
         "unattended_flagged_backlog": flagged,
@@ -11559,12 +11957,19 @@ def _perf_summary_focus_unattended_metrics(
     return metrics
 
 
-def _render_perf_summary_context_bar(metrics: dict[str, object], period_label: str) -> None:
+def _render_perf_summary_context_bar(
+    metrics: dict[str, object],
+    period_label: str,
+    *,
+    focus: str = "All",
+) -> None:
+    """Compact context strip — full chips for All; period only when one engineer is focused."""
     total = int(metrics.get("total") or 0)
     rate = int(metrics.get("resolution_rate") or 0)
     unattended = int(metrics.get("unattended_assignments") or 0)
     assigned = int(metrics.get("assigned_in_range") or 0)
     closed_other = int(metrics.get("closed_by_others") or 0)
+    engineer_focus = focus not in ("", "All") and "assigned_in_range" in metrics
 
     def _chip(label: str, value: str) -> str:
         return (
@@ -11574,35 +11979,346 @@ def _render_perf_summary_context_bar(metrics: dict[str, object], period_label: s
             f"</div>"
         )
 
-    chips = [
-        _chip("Period", period_label),
-        _chip("Assigned", str(assigned) if assigned else "—"),
-        _chip("Attended (yours)", str(total)),
-        _chip("Closed by others", str(closed_other) if closed_other else "—"),
-        _chip("Unattended", str(unattended) if unattended else "—"),
-        _chip("Field resolution", f"{rate}%"),
-    ]
+    if engineer_focus:
+        chips = [_chip("Period", period_label)]
+    else:
+        chips = [
+            _chip("Period", period_label),
+            _chip("Assigned", str(assigned) if assigned else "—"),
+            _chip("Attended (yours)", str(total)),
+            _chip("Handed off", str(closed_other) if closed_other else "—"),
+            _chip("Unattended", str(unattended) if unattended else "—"),
+            _chip("Field resolution", f"{rate}%"),
+        ]
     st.markdown(
         f'<div class="weekly-summary-context">{"".join(chips)}</div>',
         unsafe_allow_html=True,
     )
 
 
-def _render_perf_summary_volume_caption(*, show_engineer: bool) -> None:
+def _render_perf_summary_counting_help(*, show_engineer: bool) -> None:
     if not show_engineer:
         return
-    st.caption(
-        "**Unique tickets assigned** = distinct tickets assigned/reassigned to you in this range. "
-        "**Assignment cycles** = each assign/reassign event (same ticket can count more than once). "
-        "**Cases attended (yours)** = distinct cases you closed or moved to On Hold / Resolved / Investigation "
-        "(includes tickets assigned before this range). "
-        "**Closed by others** = you were assigned in range, but another engineer is credited at attended status. "
-        "**Unattended** = assign-day cycles with no field response before 23:59 UTC+5 (not the same as unique tickets)."
+    with st.expander("How we count these numbers", expanded=False):
+        st.markdown(
+            "- **Unique tickets assigned** — distinct residential tickets + resort cases assigned to you "
+            "in this period (each ticket once, even if reassigned).\n"
+            "- **Assign + reassign tasks** — every assign/reassign event; same ticket counts again on revisit.\n"
+            "- **Unattended cases** — residential assign-day cycles with no field response before 23:59 UTC+5.\n"
+            "- **Cases attended (yours)** — distinct cases credited to you at On Hold, Resolved, or Investigation.\n"
+            "- **Queue snapshot (Performance header)** — all tickets in the system now; not the same as period assignments.\n"
+            "- **Task load** — assign/reassign tasks ÷ unique tickets (e.g. 2.1x = ~2 tasks per ticket).\n"
+            "- **Snapshot coverage** — your unique assigned ÷ full queue snapshot.\n"
+            "- **Response rate** — attended cases from these assignments ÷ unique assigned.\n"
+            "- **Revisit rate** — tickets with 2+ assign/reassign tasks ÷ unique assigned.\n"
+            "- **Same-day response** — residential tasks with field reply before 23:59 UTC+5 on assign day."
+        )
+
+
+def _perf_summary_rate_delta_class(rate_delta: str) -> str:
+    if rate_delta.startswith("↓"):
+        return "weekly-hero-delta warn"
+    if rate_delta.startswith("Flat"):
+        return "weekly-hero-delta neutral"
+    return "weekly-hero-delta"
+
+
+def _render_perf_summary_snapshot_context(metrics: dict[str, object]) -> None:
+    """Clarify queue snapshot (332) vs assignments in the selected period."""
+    snap_res = int(metrics.get("snapshot_residential") or 0)
+    snap_rsr = int(metrics.get("snapshot_resort") or 0)
+    if snap_res <= 0 and snap_rsr <= 0:
+        return
+    snap_total = snap_res + snap_rsr
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    assigned_res = int(metrics.get("assigned_residential") or 0)
+    assigned_rsr = int(metrics.get("assigned_resort") or 0)
+    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
+    st.markdown(
+        f'<div class="weekly-reconcile-callout" style="border-left-color:#64748b">'
+        f"<strong>{snap_total} queue snapshot vs your assignment numbers</strong>"
+        f"<ul>"
+        f"<li><strong>{snap_total}</strong> = current queue snapshot "
+        f"(Residential <strong>{snap_res}</strong> + Resort <strong>{snap_rsr}</strong>) — "
+        f"all tickets/cases in the system right now, <em>not</em> filtered by your selected period.</li>"
+        f"<li><strong>{assigned}</strong> unique tickets/cases assigned to this engineer in the selected period "
+        f"(Residential <strong>{assigned_res}</strong> + Resort <strong>{assigned_rsr}</strong>) — "
+        f"each ticket counted once even if reassigned multiple times.</li>"
+        f"<li><strong>{cycles}</strong> assign + reassign <em>tasks</em> in the period — "
+        f"same ticket can count again on every reassignment (e.g. revisit after admin sends back).</li>"
+        f"</ul></div>",
+        unsafe_allow_html=True,
     )
 
 
-def _render_perf_summary_reconciliation(metrics: dict[str, object]) -> None:
-    """Show how assigned tickets partition vs attended volume."""
+def _render_perf_summary_engineer_derived_row(metrics: dict[str, object]) -> None:
+    """Recommended ratios — task load, coverage, response, revisit, same-day, handed off."""
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    if assigned <= 0 and int(metrics.get("assignment_cycles_in_range") or 0) <= 0:
+        return
+    task_load = metrics.get("task_load_ratio", 0)
+    snap_cov = int(metrics.get("snapshot_coverage_pct") or 0)
+    resp_rate = int(metrics.get("response_rate_pct") or 0)
+    revisit_rate = int(metrics.get("revisit_rate_pct") or 0)
+    revisit_n = int(metrics.get("revisit_tickets") or 0)
+    same_day = int(metrics.get("same_day_response_pct") or 0)
+    handed = int(metrics.get("closed_by_others") or 0)
+    still_open = int(metrics.get("still_open_assigned") or 0)
+    cards = [
+        ("Task load", f"{task_load}x", "Tasks ÷ unique tickets"),
+        ("Snapshot coverage", f"{snap_cov}%", "Your share of queue snapshot"),
+        ("Response rate", f"{resp_rate}%", "Attended from assigned ÷ unique"),
+        ("Revisit rate", f"{revisit_rate}%", f"{revisit_n} tickets with 2+ tasks"),
+        ("Same-day response", f"{same_day}%", "Residential · before 23:59 UTC+5"),
+        ("Handed off", str(handed), f"Still open {still_open}" if still_open else "Other engineer credited"),
+    ]
+    parts: list[str] = []
+    for label, value, sub in cards:
+        parts.append(
+            f'<div class="weekly-workload-card">'
+            f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+            f'<p class="weekly-kpi-value">{html.escape(str(value))}</p>'
+            f'<p class="weekly-kpi-sub neutral">{html.escape(sub)}</p>'
+            f"</div>"
+        )
+    st.markdown(
+        f'<p class="weekly-section-label" style="margin:0 0 8px">Performance ratios</p>'
+        f'<div class="weekly-derived-row">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_summary_team_assignment_table(
+    metrics: dict[str, object],
+    *,
+    focus: str = "",
+) -> None:
+    """Side-by-side unique tickets vs tasks for every engineer in the period."""
+    team_df = metrics.get("team_assignment_df")
+    if not isinstance(team_df, pd.DataFrame) or team_df.empty:
+        st.caption("No assignment activity for any engineer in this period.")
+        return
+    focus_label = ""
+    if focus not in ("", "All"):
+        focus_key = _perf_person_credit_key(focus)
+        focus_label = focus if str(focus).startswith("@") else f"@{focus_key}"
+    st.caption(
+        "Each engineer's unique tickets vs assign/reassign tasks. "
+        "Team totals can exceed the queue snapshot when tickets are shared or reassigned."
+    )
+    view = team_df.copy()
+    if focus_label and "Engineer" in view.columns:
+        view = view.copy()
+        view["_highlight"] = view["Engineer"].astype(str).eq(focus_label)
+        view = view.sort_values(["_highlight", "Tasks"], ascending=[False, False]).drop(
+            columns=["_highlight"]
+        )
+    _render_perf_dataframe(view)
+
+
+def _render_perf_summary_engineer_primary_kpis(
+    metrics: dict[str, object],
+    *,
+    period_label: str,
+) -> None:
+    """Top row — assignment volume + attended count for one engineer."""
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    assigned_res = int(metrics.get("assigned_residential") or 0)
+    assigned_rsr = int(metrics.get("assigned_resort") or 0)
+    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
+    cycles_res = int(metrics.get("assignment_cycles_residential") or 0)
+    cycles_rsr = int(metrics.get("assignment_cycles_resort") or 0)
+    unattended = int(metrics.get("unattended_assignments") or 0)
+    attended = int(metrics.get("total") or 0)
+    attended_res = int(metrics.get("attended_residential") or 0)
+    attended_rsr = int(metrics.get("attended_resort") or 0)
+    cards = [
+        (
+            "Unique tickets assigned",
+            str(assigned),
+            f"Residential {assigned_res} · Resort {assigned_rsr} · no duplicate tickets",
+        ),
+        (
+            "Assign + reassign tasks",
+            str(cycles),
+            f"Residential {cycles_res} · Resort {cycles_rsr} · same ticket may count again",
+        ),
+        (
+            "Unattended cases",
+            str(unattended),
+            "Assign days with no field response (residential)",
+        ),
+        (
+            "Cases attended (yours)",
+            str(attended),
+            f"Residential {attended_res} · Resort {attended_rsr}",
+        ),
+    ]
+    parts: list[str] = []
+    for label, value, sub in cards:
+        parts.append(
+            f'<div class="weekly-primary-kpi-card">'
+            f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+            f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
+            f'<p class="weekly-kpi-sub neutral">{html.escape(sub)}</p>'
+            f"</div>"
+        )
+    st.markdown(
+        f'<div class="weekly-primary-kpi-row">{"".join(parts)}</div>'
+        f'<p class="weekly-hero-period">{html.escape(period_label)} · {html.escape(LOCAL_TZ_LABEL)}</p>',
+        unsafe_allow_html=True,
+    )
+    _render_perf_summary_snapshot_context(metrics)
+
+
+def _render_perf_summary_attended_outcomes(metrics: dict[str, object]) -> None:
+    """Break down attended cases — resolved after visit vs investigation vs admin desk."""
+    attended = int(metrics.get("total") or 0)
+    if attended <= 0:
+        st.markdown(
+            '<p class="weekly-section-label">Attended outcomes</p>',
+            unsafe_allow_html=True,
+        )
+        st.caption("No attended cases credited to this engineer in this range.")
+        return
+
+    resolved_visit = int(metrics.get("attended_resolved_after_visit") or 0)
+    field_only = int(metrics.get("attended_field_resolved") or 0)
+    resort = int(metrics.get("attended_resort_resolved") or 0)
+    admin_visit = int(metrics.get("attended_admin_after_visit") or 0)
+    investigation = int(metrics.get("attended_investigation") or 0)
+    admin_desk = int(metrics.get("attended_admin_desk") or 0)
+    rate = int(metrics.get("resolution_rate") or 0)
+    rate_delta = str(metrics.get("rate_delta") or "")
+    delta_cls = _perf_summary_rate_delta_class(rate_delta)
+    delta_html = (
+        f' · <span class="{delta_cls}">{html.escape(rate_delta)}</span>'
+        if rate_delta
+        else ""
+    )
+
+    def _pct(n: int) -> float:
+        return max(0.0, min(100.0, 100.0 * n / attended))
+
+    res_w = _pct(resolved_visit)
+    inv_w = _pct(investigation)
+    adm_w = _pct(admin_desk)
+    scale = res_w + inv_w + adm_w
+    if scale > 100:
+        res_w = 100.0 * res_w / scale
+        inv_w = 100.0 * inv_w / scale
+        adm_w = 100.0 * adm_w / scale
+
+    def _seg(cls: str, width: float, count: int) -> str:
+        if count <= 0:
+            return ""
+        return (
+            f'<div class="weekly-attended-seg {cls}" style="width:{width:.2f}%" '
+            f'title="{html.escape(str(count))}"></div>'
+        )
+
+    bar = "".join(
+        [
+            _seg("resolved", res_w, resolved_visit),
+            _seg("investigation", inv_w, investigation),
+            _seg("admin", adm_w, admin_desk),
+        ]
+    )
+    detail_parts: list[str] = []
+    if field_only:
+        detail_parts.append(f"{field_only} field resolved")
+    if resort:
+        detail_parts.append(f"{resort} resort")
+    if admin_visit:
+        detail_parts.append(f"{admin_visit} admin after visit")
+    detail_line = " · ".join(detail_parts) if detail_parts else "—"
+
+    outcome_cards = [
+        ("Resolved after visit", str(resolved_visit), detail_line),
+        ("Investigation", str(investigation), "Visited — still open"),
+        ("Admin desk close", str(admin_desk), "Closed without field response"),
+        ("Field resolution rate", f"{rate}%", f"Resolved after visit ÷ attended{delta_html}"),
+    ]
+    card_html: list[str] = []
+    for label, value, sub in outcome_cards:
+        sub_content = sub if label == "Field resolution rate" else html.escape(sub)
+        card_html.append(
+            f'<div class="weekly-attended-outcome">'
+            f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+            f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
+            f'<p class="weekly-kpi-sub neutral">{sub_content}</p>'
+            f"</div>"
+        )
+
+    st.markdown(
+        f'<div class="weekly-attended-panel">'
+        f'<p class="weekly-section-label" style="margin:0">Attended outcomes</p>'
+        f'<p class="weekly-assign-caption" style="margin-top:6px">'
+        f"Of <strong>{attended}</strong> cases you attended in this range — "
+        f"how many were resolved after a field visit vs still in investigation."
+        f"</p>"
+        f'<div class="weekly-attended-bar">{bar}</div>'
+        f'<div class="weekly-attended-outcomes">{"".join(card_html)}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_summary_engineer_secondary_row(metrics: dict[str, object]) -> None:
+    """Supporting assignment metrics — handed off, still open, flagged backlog."""
+    closed_other = int(metrics.get("closed_by_others") or 0)
+    still_open = int(metrics.get("still_open_assigned") or 0)
+    flagged = int(metrics.get("unattended_flagged_backlog") or 0)
+    if closed_other == 0 and still_open == 0 and flagged == 0:
+        return
+    cards = [
+        ("Handed off", str(closed_other), "Assigned here — other engineer credited"),
+        ("Still open (assigned)", str(still_open), "Assigned in range — not attended yet"),
+        ("Flagged unattended", str(flagged), "Currently marked unattended in queue"),
+    ]
+    parts: list[str] = []
+    for label, value, sub in cards:
+        parts.append(
+            f'<div class="weekly-workload-card">'
+            f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+            f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
+            f'<p class="weekly-kpi-sub neutral">{html.escape(sub)}</p>'
+            f"</div>"
+        )
+    st.markdown(
+        f'<div class="weekly-secondary-row">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_summary_engineer_hero(metrics: dict[str, object], *, period_label: str) -> None:
+    total = int(metrics.get("total") or 0)
+    rate = int(metrics.get("resolution_rate") or 0)
+    rate_delta = str(metrics.get("rate_delta") or "")
+    delta_cls = _perf_summary_rate_delta_class(rate_delta)
+    delta_html = (
+        f'<span class="{delta_cls}">{html.escape(rate_delta)}</span>'
+        if rate_delta
+        else ""
+    )
+    st.markdown(
+        f'<div class="weekly-hero-row">'
+        f'<div class="weekly-hero-metric">'
+        f'<span class="weekly-hero-value">{total}</span>'
+        f'<span class="weekly-hero-label">Cases attended (yours)</span>'
+        f"</div>"
+        f'<div class="weekly-hero-metric">'
+        f'<span class="weekly-hero-value">{rate}%</span>'
+        f'<span class="weekly-hero-label">Field resolution rate</span>'
+        f"{delta_html}"
+        f"</div>"
+        f"</div>"
+        f'<p class="weekly-hero-period">{html.escape(period_label)} · {html.escape(LOCAL_TZ_LABEL)}</p>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_summary_assignment_bar(metrics: dict[str, object]) -> None:
     assigned = int(metrics.get("assigned_in_range") or 0)
     if assigned <= 0 or "attended_from_assigned" not in metrics:
         return
@@ -11610,44 +12326,193 @@ def _render_perf_summary_reconciliation(metrics: dict[str, object]) -> None:
     outside = int(metrics.get("attended_outside_assigned") or 0)
     closed_other = int(metrics.get("closed_by_others") or 0)
     still_open = int(metrics.get("still_open_assigned") or 0)
-    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
-    unattended = int(metrics.get("unattended_assignments") or 0)
     attended_total = int(metrics.get("total") or 0)
-    partition_ok = from_assigned + closed_other + still_open
+    unattended = int(metrics.get("unattended_assignments") or 0)
+
+    def _pct(n: int) -> float:
+        return max(0.0, min(100.0, 100.0 * n / assigned))
+
+    you_w = _pct(from_assigned)
+    other_w = _pct(closed_other)
+    open_w = _pct(still_open)
+    # Keep thin segments visible when non-zero.
+    if from_assigned > 0 and you_w < 8:
+        you_w = 8.0
+    if closed_other > 0 and other_w < 8:
+        other_w = 8.0
+    if still_open > 0 and open_w < 8:
+        open_w = 8.0
+    scale = you_w + other_w + open_w
+    if scale > 100:
+        you_w = 100.0 * you_w / scale
+        other_w = 100.0 * other_w / scale
+        open_w = 100.0 * open_w / scale
+
+    def _seg(cls: str, width: float, count: int, label: str) -> str:
+        if count <= 0:
+            return ""
+        show_n = width >= 12
+        inner = html.escape(str(count)) if show_n else ""
+        title = html.escape(f"{label}: {count}")
+        return (
+            f'<div class="weekly-assign-seg {cls}" style="width:{width:.2f}%" '
+            f'title="{title}">{inner}</div>'
+        )
+
+    segments = "".join(
+        [
+            _seg("you", you_w, from_assigned, "You attended"),
+            _seg("others", other_w, closed_other, "Handed off"),
+            _seg("open", open_w, still_open, "Still open"),
+        ]
+    )
     st.markdown(
-        '<p class="weekly-section-label" style="margin-top:10px">How the numbers connect</p>',
+        f'<div class="weekly-assign-panel">'
+        f'<p class="weekly-section-label" style="margin:0 0 10px">Your assignments in range</p>'
+        f'<div class="weekly-assign-bar">{segments}</div>'
+        f'<div class="weekly-assign-legend">'
+        f'<span><i style="background:#166534"></i>You attended · {from_assigned}</span>'
+        f'<span><i style="background:#92400e"></i>Handed off · {closed_other}</span>'
+        f'<span><i style="background:#334155"></i>Still open · {still_open}</span>'
+        f"</div>"
+        f'<p class="weekly-assign-caption">'
+        f"<strong>{assigned}</strong> unique tickets assigned = "
+        f"{from_assigned} you attended + {closed_other} handed off + {still_open} still open. "
+        f"<strong>{attended_total}</strong> cases attended (yours) = {from_assigned} from these assignments"
+        f"{f' + {outside} from earlier assignments' if outside else ''}. "
+        f"Unattended <strong>{unattended}</strong> is assign-day cycles — do not subtract from assigned."
+        f"</p></div>",
         unsafe_allow_html=True,
     )
-    r1a, r1b, r1c, r1d = st.columns(4)
-    reconcile_cards = [
-        (r1a, "Unique tickets assigned", str(assigned), f"{cycles} assignment cycles"),
-        (
-            r1b,
-            "You attended (from these)",
-            str(from_assigned),
-            f"+ {outside} from earlier assignments",
-        ),
-        (r1c, "Closed by others", str(closed_other), "Reassigned then credited elsewhere"),
-        (r1d, "Still open / pending", str(still_open), "Assigned in range, not yet attended"),
+
+
+def _render_perf_summary_reconciliation_callout(metrics: dict[str, object]) -> None:
+    """Explain why attended + unattended does not equal unique tickets assigned."""
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    if assigned <= 0 or "attended_from_assigned" not in metrics:
+        return
+    from_assigned = int(metrics.get("attended_from_assigned") or 0)
+    outside = int(metrics.get("attended_outside_assigned") or 0)
+    closed_other = int(metrics.get("closed_by_others") or 0)
+    still_open = int(metrics.get("still_open_assigned") or 0)
+    attended_total = int(metrics.get("total") or 0)
+    unattended = int(metrics.get("unattended_assignments") or 0)
+    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
+    phantom = assigned - attended_total - unattended
+    phantom_line = ""
+    if phantom != 0:
+        phantom_line = (
+            f"<li><strong>{abs(phantom)} cases look “missing”</strong> if you do "
+            f"{assigned} assigned − {attended_total} attended − {unattended} unattended — "
+            f"that mixes three different measures. Use the breakdown above instead.</li>"
+        )
+    outside_line = ""
+    if outside > 0:
+        outside_line = (
+            f"<li><strong>{outside}</strong> of your {attended_total} attended cases were assigned "
+            f"<em>before</em> this range — they are not in the {assigned} assigned count.</li>"
+        )
+    st.markdown(
+        f'<div class="weekly-reconcile-callout">'
+        f"<strong>Why these numbers do not add up simply</strong>"
+        f"<ul>"
+        f"<li><strong>{assigned} unique tickets</strong> assigned in range "
+        f"(<strong>{cycles}</strong> assign/reassign cycles if you need event count).</li>"
+        f"<li><strong>{attended_total} attended (yours)</strong> = {from_assigned} from those assignments"
+        f"{f' + {outside} from earlier work' if outside else ''}.</li>"
+        f"<li><strong>{unattended} unattended</strong> = assign-day cycles with no response — "
+        f"not a third bucket of unique tickets (some may later be attended).</li>"
+        f"<li><strong>Handed off ({closed_other})</strong> = assigned here, but another engineer "
+        f"is credited at attended status — not counted in your {attended_total} attended.</li>"
+        f"<li><strong>Still open ({still_open})</strong> = assigned in range, not yet at attended status.</li>"
+        f"{phantom_line}{outside_line}"
+        f"</ul></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_summary_workload_row(metrics: dict[str, object]) -> None:
+    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
+    unattended = int(metrics.get("unattended_assignments") or 0)
+    closed_other = int(metrics.get("closed_by_others") or 0)
+    cards = [
+        ("Assignment cycles", str(cycles), "Each assign + reassign in range"),
+        ("Unattended cycles", str(unattended), "Assign days without response · Unattended tab"),
+        ("Handed off", str(closed_other), "Other engineer credited at attended"),
     ]
-    for col, label, value, sub in reconcile_cards:
+    parts: list[str] = []
+    for label, value, sub in cards:
+        parts.append(
+            f'<div class="weekly-workload-card">'
+            f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+            f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
+            f'<p class="weekly-kpi-sub neutral">{html.escape(sub)}</p>'
+            f"</div>"
+        )
+    st.markdown(
+        f'<div class="weekly-workload-row">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_perf_summary_outcome_cards(metrics: dict[str, object]) -> None:
+    rate = int(metrics.get("resolution_rate") or 0)
+    investigation = int(metrics.get("investigation") or 0)
+    inv_pct = int(metrics.get("investigation_pct") or 0)
+    admin_desk = int(metrics.get("admin_desk") or 0)
+    rate_delta = str(metrics.get("rate_delta") or "")
+    delta_cls = "weekly-kpi-sub"
+    if rate_delta.startswith("↓"):
+        delta_cls = "weekly-kpi-sub warn"
+    elif rate_delta.startswith("Flat"):
+        delta_cls = "weekly-kpi-sub neutral"
+    r1, r2, r3 = st.columns(3)
+    cards = [
+        (r1, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
+        (r2, "Investigation", str(investigation), f"{inv_pct}% of attended", "weekly-kpi-sub neutral"),
+        (r3, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
+    ]
+    for col, label, value, sub, sub_class in cards:
         with col:
+            sub_html = f'<p class="{sub_class}">{html.escape(sub)}</p>' if sub else ""
             st.markdown(
-                f'<div class="weekly-kpi-card weekly-kpi-card-subtle">'
+                f'<div class="weekly-kpi-card">'
                 f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
-                f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
-                f'<p class="weekly-kpi-sub neutral">{html.escape(sub)}</p></div>',
+                f'<p class="weekly-kpi-value">{html.escape(value)}</p>{sub_html}</div>',
                 unsafe_allow_html=True,
             )
-    st.caption(
-        f"**Assigned tickets partition:** {from_assigned} you attended + {closed_other} closed by others "
-        f"+ {still_open} still open = **{partition_ok}** unique tickets "
-        f"(matches **{assigned}** assigned). "
-        f"**Cases attended (yours) = {attended_total}** = {from_assigned} from this range's assignments "
-        f"+ {outside} carried in from earlier assignments. "
-        f"**Unattended ({unattended})** counts assign-day cycles, not unique tickets — "
-        f"a ticket can appear in both attended and unattended if it failed one day and was handled later."
-    )
+
+
+def _render_perf_summary_engineer_overview(
+    metrics: dict[str, object],
+    *,
+    period_label: str,
+) -> None:
+    """Layered individual Summary — primary KPIs, ratios, attended outcomes, team table."""
+    _render_perf_summary_engineer_primary_kpis(metrics, period_label=period_label)
+    _render_perf_summary_engineer_derived_row(metrics)
+    _render_perf_summary_attended_outcomes(metrics)
+    with st.expander("Team assignment comparison", expanded=False):
+        _render_perf_summary_team_assignment_table(
+            metrics,
+            focus=str(metrics.get("summary_focus") or ""),
+        )
+    with st.expander("Assignment breakdown", expanded=False):
+        _render_perf_summary_assignment_bar(metrics)
+        _render_perf_summary_reconciliation_callout(metrics)
+    _render_perf_summary_counting_help(show_engineer=True)
+
+
+def _render_perf_summary_volume_caption(*, show_engineer: bool) -> None:
+    """Legacy inline definitions — replaced by expander on engineer overview."""
+    del show_engineer
+    return
+
+
+def _render_perf_summary_reconciliation(metrics: dict[str, object]) -> None:
+    """Legacy reconciliation cards — merged into assignment bar."""
+    del metrics
+    return
 
 
 def _perf_summary_staff_compact(summary: pd.DataFrame) -> pd.DataFrame:
@@ -11741,6 +12606,12 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
         "resolved": 0,
         "investigation": 0,
         "admin_desk": 0,
+        "attended_field_resolved": 0,
+        "attended_admin_after_visit": 0,
+        "attended_resort_resolved": 0,
+        "attended_resolved_after_visit": 0,
+        "attended_investigation": 0,
+        "attended_admin_desk": 0,
         "resolution_rate": 0,
         "top_inv_category": "—",
         "top_resolved_category": "—",
@@ -11765,6 +12636,10 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
     rate, _total_check, field_resolved = _perf_field_resolution_rate(detail_df)
     investigation = int(id_first["Closure"].eq(_PERF_CLOSURE_INVESTIGATION).sum())
     admin_desk = int(id_first["Closure"].eq(_PERF_CLOSURE_ADMIN_DESK).sum())
+    field_only = int(id_first["Closure"].eq(_PERF_CLOSURE_FIELD).sum())
+    admin_after_visit = int(id_first["Closure"].eq(_PERF_CLOSURE_ADMIN_RESP).sum())
+    resort_resolved = int(id_first["Closure"].eq(_PERF_CLOSURE_RESORT).sum())
+    resolved_after_visit = field_only + admin_after_visit + resort_resolved
 
     inv_by_cat = (
         id_first.loc[id_first["Closure"].eq(_PERF_CLOSURE_INVESTIGATION)]
@@ -11820,6 +12695,12 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
         "resolved": field_resolved,
         "investigation": investigation,
         "admin_desk": admin_desk,
+        "attended_field_resolved": field_only,
+        "attended_admin_after_visit": admin_after_visit,
+        "attended_resort_resolved": resort_resolved,
+        "attended_resolved_after_visit": resolved_after_visit,
+        "attended_investigation": investigation,
+        "attended_admin_desk": admin_desk,
         "resolution_rate": rate,
         "top_inv_category": str(inv_by_cat.index[0]) if len(inv_by_cat) else "—",
         "top_resolved_category": str(res_by_cat.index[0]) if len(res_by_cat) else "—",
@@ -11868,70 +12749,27 @@ def _perf_weekly_resolution_trend(
 
 
 def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
+    """Team (All) overview KPI row — individual engineers use layered overview instead."""
+    if "assigned_in_range" in metrics:
+        return
     total = int(metrics.get("total") or 0)
     rate = int(metrics.get("resolution_rate") or 0)
     investigation = int(metrics.get("investigation") or 0)
     inv_pct = int(metrics.get("investigation_pct") or 0)
     admin_desk = int(metrics.get("admin_desk") or 0)
-    unattended = int(metrics.get("unattended_assignments") or 0)
-    assigned = int(metrics.get("assigned_in_range") or 0)
-    closed_other = int(metrics.get("closed_by_others") or 0)
-    show_unattended = "unattended_assignments" in metrics
     rate_delta = str(metrics.get("rate_delta") or "")
     delta_cls = "weekly-kpi-sub"
     if rate_delta.startswith("↓"):
         delta_cls = "weekly-kpi-sub warn"
     elif rate_delta.startswith("Flat"):
         delta_cls = "weekly-kpi-sub neutral"
-
-    if show_unattended:
-        r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
-        volume_cards = [
-            (r1c1, "Unique tickets assigned", str(assigned), "Distinct tickets in range"),
-            (
-                r1c2,
-                "Assignment cycles",
-                str(int(metrics.get("assignment_cycles_in_range") or 0)),
-                "Each assign + reassign",
-            ),
-            (r1c3, "Unattended cycles", str(unattended), "Assign days without response"),
-            (r1c4, "Closed by others", str(closed_other), "Credited to another engineer"),
-            (
-                r1c5,
-                "Cases attended (yours)",
-                str(total),
-                "On Hold · Resolved · Investigation",
-            ),
-        ]
-        for col, label, value, sub, sub_class in [
-            (*row, "weekly-kpi-sub neutral") for row in volume_cards
-        ]:
-            with col:
-                st.markdown(
-                    f'<div class="weekly-kpi-card">'
-                    f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
-                    f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
-                    f'<p class="{sub_class}">{html.escape(sub)}</p></div>',
-                    unsafe_allow_html=True,
-                )
-        st.markdown(
-            '<p class="weekly-section-label" style="margin-top:14px">Outcomes</p>',
-            unsafe_allow_html=True,
-        )
-        r2c1, r2c2, r2c3 = st.columns(3)
-        cards = [
-            (r2c1, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
-            (r2c2, "Investigation", str(investigation), f"{inv_pct}% of attended", "weekly-kpi-sub neutral"),
-            (r2c3, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
-        ]
-    else:
-        k1, k2, k3, k4 = st.columns(4)
-        cards = [
-            (k1, "Cases attended", str(total), "", "weekly-kpi-sub neutral"),
-            (k2, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
-            (k3, "Investigation", str(investigation), f"{inv_pct}% of cases", "weekly-kpi-sub neutral"),
-            (k4, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
-        ]
+    k1, k2, k3, k4 = st.columns(4)
+    cards = [
+        (k1, "Cases attended", str(total), "", "weekly-kpi-sub neutral"),
+        (k2, "Field resolution rate", f"{rate}%", rate_delta, delta_cls),
+        (k3, "Investigation", str(investigation), f"{inv_pct}% of cases", "weekly-kpi-sub neutral"),
+        (k4, "Admin desk closes", str(admin_desk), "No field response", "weekly-kpi-sub warn"),
+    ]
     for col, label, value, sub, sub_class in cards:
         with col:
             sub_html = f'<p class="{sub_class}">{html.escape(sub)}</p>' if sub else ""
@@ -12001,14 +12839,20 @@ def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
     st.altair_chart(trend, width="stretch")
 
 
-def _render_perf_summary_overview_tab(metrics: dict[str, object]) -> None:
+def _render_perf_summary_overview_tab(
+    metrics: dict[str, object],
+    *,
+    period_label: str = "",
+) -> None:
     """Overview — KPIs, closure donut, resolution trend."""
     show_engineer = "assigned_in_range" in metrics
-    st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
-    _render_perf_summary_volume_caption(show_engineer=show_engineer)
-    _render_weekly_kpi_cards(metrics)
     if show_engineer:
-        _render_perf_summary_reconciliation(metrics)
+        _render_perf_summary_engineer_overview(metrics, period_label=period_label)
+    else:
+        st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
+        _render_weekly_kpi_cards(metrics)
+        with st.expander("Team assignment comparison", expanded=True):
+            _render_perf_summary_team_assignment_table(metrics)
     chart_left, chart_right = st.columns(2)
     with chart_left:
         _render_perf_summary_closure_donut(metrics)
@@ -12108,15 +12952,15 @@ def _render_perf_summary_unattended_section(metrics: dict[str, object]) -> None:
     u0, u1, u2, u3 = st.columns(4)
     with u0:
         st.metric(
-            "Total assigned (in range)",
+            "Unique tickets assigned",
             assigned,
-            help="Field tickets assigned or reassigned to this engineer in the header time range.",
+            help="Distinct tickets assigned or reassigned to this engineer in the time range (not assign/reassign cycle count).",
         )
     with u1:
         st.metric(
-            "Closed by others",
+            "Handed off",
             closed_other,
-            help="You were assigned in range, but another engineer is credited when the case reached On Hold, Resolved, or Investigation.",
+            help="Assigned to you in range, but another engineer is credited when the case reached On Hold, Resolved, or Investigation.",
         )
     with u2:
         st.metric(
@@ -12288,6 +13132,7 @@ def _render_perf_weekly_executive_dashboard(
     week_end: date,
     week_offset: int,
     period: str = "Weekly",
+    period_label: str = "",
     metrics: dict[str, object] | None = None,
     focus: str = "All",
 ) -> dict[str, object]:
@@ -12317,7 +13162,7 @@ def _render_perf_weekly_executive_dashboard(
         tab_unattended = None
 
     with tab_overview:
-        _render_perf_summary_overview_tab(metrics)
+        _render_perf_summary_overview_tab(metrics, period_label=period_label)
     with tab_breakdown:
         _render_perf_summary_breakdown_tab(metrics)
     with tab_staff:
@@ -12459,8 +13304,21 @@ def _render_perf_weekly_attended_report(
         week_offset=period_offset,
         focus=focus,
     )
+    metrics["team_assignment_df"] = _perf_team_assignment_summary_df(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    metrics["snapshot_residential"] = len(df_all) if not df_all.empty else 0
+    metrics["snapshot_resort"] = (
+        len(sales_all) if sales_all is not None and not sales_all.empty else 0
+    )
     if focus not in ("", "All"):
         visits = _perf_load_overview_visits_history(df_all)
+        detail_df = bundle.get("detail")
+        detail_for_tracks = detail_df if isinstance(detail_df, pd.DataFrame) else pd.DataFrame()
+        attended_res, attended_rsr = _perf_attended_track_counts(detail_for_tracks)
         metrics.update(
             _perf_summary_focus_engineer_metrics_with_reconciliation(
                 df_all,
@@ -12471,6 +13329,9 @@ def _render_perf_weekly_attended_report(
                 attended_yours_total=int(metrics.get("total") or 0),
             )
         )
+        metrics.update(_perf_summary_derived_metrics(metrics))
+        metrics["attended_residential"] = attended_res
+        metrics["attended_resort"] = attended_rsr
         metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
             df_all,
             focus=focus,
@@ -12483,7 +13344,7 @@ def _render_perf_weekly_attended_report(
             focus=focus,
         )
         metrics["summary_focus"] = focus
-    _render_perf_summary_context_bar(metrics, period_label)
+    _render_perf_summary_context_bar(metrics, period_label, focus=focus)
     has_attended = int(metrics.get("total") or 0) > 0
     has_unattended = int(metrics.get("unattended_assignments") or 0) > 0
     has_assigned = int(metrics.get("assigned_in_range") or 0) > 0
@@ -12502,6 +13363,7 @@ def _render_perf_weekly_attended_report(
         week_end=d1,
         week_offset=period_offset,
         period=period,
+        period_label=period_label,
         metrics=metrics,
         focus=focus,
     )
@@ -14845,7 +15707,7 @@ def _normalize_engineer_dir_handle(raw: str) -> str:
         raise ValueError("Handle is too long (max 32 characters).")
     if not re.match(r"^[A-Za-z0-9_]+$", cleaned):
         raise ValueError("Use only letters, digits, and underscores.")
-    return cleaned
+    return _canonical_username_stem(cleaned)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -24836,7 +25698,6 @@ def _render_perf_overview_board_fast(
             for key_suffix, btn_id, label in action_specs:
                 if st.button("●", key=f"ov_all_{key_suffix}", help=label, width="stretch"):
                     st.session_state[_PERF_SELECTED_ENGINEER_KEY] = btn_id
-                    st.rerun(scope="fragment")
 
 
 def _render_perf_overview_tab(
@@ -25216,7 +26077,6 @@ def _render_performance_detail_panel(
 
 def _perf_select_engineer(engineer: str) -> None:
     st.session_state[_PERF_SELECTED_ENGINEER_KEY] = engineer
-    st.rerun(scope="fragment")
 
 
 def _perf_jump_to_unattended_queue(engineer: str) -> None:
@@ -25633,6 +26493,15 @@ def _perf_apply_focus_change() -> None:
     )
 
 
+def _on_perf_focus_change() -> None:
+    """Fragment rerun follows widget interaction — no explicit scoped rerun."""
+    _perf_apply_focus_change()
+
+
+def _on_perf_view_change() -> None:
+    st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+
+
 def _render_performance_sidebar() -> None:
     """Focus assignee, range, and vertical view navigation."""
     st.markdown(
@@ -25641,20 +26510,16 @@ def _render_performance_sidebar() -> None:
     )
     engineers = get_engineer_handles()
     options = ["All engineers"] + engineers
-    cur_focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
-    if cur_focus not in options:
-        cur_focus = "All engineers"
-        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = cur_focus
-    focus = st.selectbox(
+    if st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY) not in options:
+        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = "All engineers"
+    st.selectbox(
         "Focus assignee",
         options,
-        index=options.index(cur_focus),
+        key=_PERF_FOCUS_ASSIGNEE_KEY,
+        on_change=_on_perf_focus_change,
         label_visibility="collapsed",
     )
-    if focus != cur_focus:
-        st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = focus
-        _perf_apply_focus_change()
-        st.rerun(scope="fragment")
+    focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
 
     if focus != "All engineers":
         st.markdown(
@@ -25691,20 +26556,15 @@ def _render_performance_sidebar() -> None:
     )
     _sync_perf_view_for_focus()
     views = list(_perf_sidebar_view_options(_perf_focus_for_filter()))
-    cur_view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
-    if cur_view not in views:
-        cur_view = views[0]
-        st.session_state[_PERF_ACTIVE_VIEW_KEY] = cur_view
-    selected_view = st.radio(
+    if st.session_state.get(_PERF_ACTIVE_VIEW_KEY) not in views:
+        st.session_state[_PERF_ACTIVE_VIEW_KEY] = views[0]
+    st.radio(
         "View",
         views,
-        index=views.index(cur_view),
+        key=_PERF_ACTIVE_VIEW_KEY,
+        on_change=_on_perf_view_change,
         label_visibility="collapsed",
     )
-    if selected_view != cur_view:
-        st.session_state[_PERF_ACTIVE_VIEW_KEY] = selected_view
-        st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
-        st.rerun(scope="fragment")
 
 
 def _render_perf_handled_tab(
