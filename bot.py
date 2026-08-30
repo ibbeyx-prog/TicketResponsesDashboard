@@ -230,7 +230,13 @@ def _normalize_username(name: str | None) -> str | None:
     if not name:
         return None
     cleaned = name.strip().lstrip("@").lower()
-    return cleaned if cleaned else None
+    if not cleaned:
+        return None
+    if cleaned.startswith("ibbe"):
+        cleaned = "ibeyx" + cleaned[4:]
+    elif cleaned == "ibex":
+        cleaned = "ibeyx"
+    return cleaned
 
 
 def _effective_allowed_handles() -> frozenset[str] | None:
