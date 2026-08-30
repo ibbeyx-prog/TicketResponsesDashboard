@@ -843,6 +843,12 @@ def apply_theme(*, login: bool = False) -> None:
       display: flex; flex-direction: column; justify-content: flex-start;
       box-sizing: border-box;
     }}
+    .weekly-kpi-card-subtle {{
+      background: #0a0f1a; border-color: #243047; min-height: 88px;
+    }}
+    .weekly-kpi-card-subtle .weekly-kpi-value {{
+      font-size: 1.45rem;
+    }}
     .weekly-kpi-label {{
       font-size: 0.78rem; color: #8a9ac0; margin: 0 0 0.45rem;
       line-height: 1.25; min-height: 2.5em;
@@ -11309,6 +11315,127 @@ def _perf_closed_by_others_count(
     return len(closed_ids)
 
 
+def _perf_attended_ticket_ids_in_range(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> frozenset[str]:
+    """Unique ticket/case IDs that reached attended status in the range (any credit)."""
+    ids: set[str] = set()
+    csm_attended = _perf_csm_attended_in_week(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if not csm_attended.empty and "ticket_number" in csm_attended.columns:
+        ids.update(
+            t
+            for t in csm_attended["ticket_number"].astype(str).str.strip().unique()
+            if t
+        )
+    sales_df = sales_all if sales_all is not None else pd.DataFrame()
+    sales_attended = _perf_sales_attended_in_week(
+        sales_df, range_start=range_start, range_end=range_end
+    )
+    if not sales_attended.empty and "case_ref" in sales_attended.columns:
+        ids.update(
+            t for t in sales_attended["case_ref"].astype(str).str.strip().unique() if t
+        )
+    return frozenset(ids)
+
+
+def _perf_attended_ticket_ids_credited_to(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> frozenset[str]:
+    """Unique IDs attended in range where performance credit goes to ``focus``."""
+    if focus in ("", "All"):
+        return frozenset()
+    ids: set[str] = set()
+    csm_attended = _perf_csm_attended_in_week(
+        df_all, range_start=range_start, range_end=range_end
+    )
+    if not csm_attended.empty and "ticket_number" in csm_attended.columns:
+        for _, row in csm_attended.iterrows():
+            if _perf_row_credited_to_person(row, focus):
+                tn = str(row.get("ticket_number") or "").strip()
+                if tn:
+                    ids.add(tn)
+    sales_df = sales_all if sales_all is not None else pd.DataFrame()
+    sales_attended = _perf_sales_attended_in_week(
+        sales_df, range_start=range_start, range_end=range_end
+    )
+    if not sales_attended.empty and "case_ref" in sales_attended.columns:
+        for _, row in sales_attended.iterrows():
+            if _perf_row_credited_to_person(row, focus):
+                cref = str(row.get("case_ref") or "").strip()
+                if cref:
+                    ids.add(cref)
+    return frozenset(ids)
+
+
+def _perf_assignment_cycles_in_range(
+    visits: pd.DataFrame,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> int:
+    """Assign/reassign visit cycles starting in range for one engineer."""
+    if visits.empty or focus in ("", "All"):
+        return 0
+    prepared = _perf_prepare_visits_df(visits)
+    if prepared.empty or "visit_start" not in prepared.columns:
+        return 0
+    focus_key = _perf_person_credit_key(focus)
+    vs = _parse_ts(prepared["visit_start"])
+    mask = vs.notna() & (vs >= range_start) & (vs <= range_end)
+    count = 0
+    for _, visit in prepared.loc[mask].iterrows():
+        keys = _perf_credit_keys_from_assignee_names([str(visit.get("assignee") or "")])
+        if focus_key in keys:
+            count += 1
+    return count
+
+
+def _perf_summary_assigned_reconciliation(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    assigned_ids: frozenset[str],
+    attended_yours_total: int,
+) -> dict[str, int]:
+    """Partition assigned tickets vs attended volume (different counting units)."""
+    assigned_set = set(assigned_ids)
+    attended_by_focus = _perf_attended_ticket_ids_credited_to(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    attended_any = _perf_attended_ticket_ids_in_range(
+        df_all, sales_all, range_start=range_start, range_end=range_end
+    )
+    from_assigned = assigned_set & attended_by_focus
+    outside_assigned = attended_by_focus - assigned_set
+    still_open = assigned_set - attended_any
+    return {
+        "attended_from_assigned": len(from_assigned),
+        "attended_outside_assigned": len(outside_assigned),
+        "still_open_assigned": len(still_open),
+        "attended_yours_unique": len(attended_by_focus),
+        "attended_yours_total_check": attended_yours_total,
+    }
+
+
 def _perf_summary_focus_engineer_metrics(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame | None,
@@ -11321,6 +11448,7 @@ def _perf_summary_focus_engineer_metrics(
     credit_key = _perf_person_credit_key(focus)
     empty = {
         "assigned_in_range": 0,
+        "assignment_cycles_in_range": 0,
         "closed_by_others": 0,
         "unattended_assignments": 0,
         "unattended_flagged_backlog": 0,
@@ -11357,16 +11485,58 @@ def _perf_summary_focus_engineer_metrics(
             range_end=range_end,
         ).get(credit_key, 0)
     )
+    assignment_cycles = _perf_assignment_cycles_in_range(
+        visits_for_assign,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
     flagged = 0
     if not df_all.empty:
         flagged_rows = df_all.loc[_ticket_marked_unattended_mask(df_all)]
         flagged = len(_perf_filter_by_person(flagged_rows, focus))
     return {
         "assigned_in_range": assigned_in_range,
+        "assignment_cycles_in_range": assignment_cycles,
         "closed_by_others": closed_by_others,
         "unattended_assignments": assignment_cases,
         "unattended_flagged_backlog": flagged,
+        "_assigned_ids": assigned_ids,
     }
+
+
+def _perf_summary_focus_engineer_metrics_with_reconciliation(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    attended_yours_total: int,
+) -> dict[str, int | frozenset[str]]:
+    """Engineer KPIs plus assigned-ticket partition for Summary reconciliation."""
+    base = _perf_summary_focus_engineer_metrics(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    assigned_ids = base.pop("_assigned_ids", frozenset())
+    if not isinstance(assigned_ids, frozenset):
+        assigned_ids = frozenset()
+    base.update(
+        _perf_summary_assigned_reconciliation(
+            df_all,
+            sales_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+            assigned_ids=assigned_ids,
+            attended_yours_total=attended_yours_total,
+        )
+    )
+    return base
 
 
 def _perf_summary_focus_unattended_metrics(
@@ -11378,13 +11548,15 @@ def _perf_summary_focus_unattended_metrics(
     sales_all: pd.DataFrame | None = None,
 ) -> dict[str, int]:
     """Backward-compatible alias — includes assigned + unattended focus KPIs."""
-    return _perf_summary_focus_engineer_metrics(
+    metrics = _perf_summary_focus_engineer_metrics(
         df_all,
         sales_all,
         focus=focus,
         range_start=range_start,
         range_end=range_end,
     )
+    metrics.pop("_assigned_ids", None)
+    return metrics
 
 
 def _render_perf_summary_context_bar(metrics: dict[str, object], period_label: str) -> None:
@@ -11420,10 +11592,61 @@ def _render_perf_summary_volume_caption(*, show_engineer: bool) -> None:
     if not show_engineer:
         return
     st.caption(
-        "**Assigned** = every field assign/reassign in range. "
-        "**Cases attended (yours)** = cases you closed or moved to On Hold / Resolved / Investigation. "
-        "**Closed by others** = you were assigned in range, but another engineer is credited when it reached attended status. "
-        "**Unattended assignments** = your assign days with no field response before 23:59 UTC+5."
+        "**Unique tickets assigned** = distinct tickets assigned/reassigned to you in this range. "
+        "**Assignment cycles** = each assign/reassign event (same ticket can count more than once). "
+        "**Cases attended (yours)** = distinct cases you closed or moved to On Hold / Resolved / Investigation "
+        "(includes tickets assigned before this range). "
+        "**Closed by others** = you were assigned in range, but another engineer is credited at attended status. "
+        "**Unattended** = assign-day cycles with no field response before 23:59 UTC+5 (not the same as unique tickets)."
+    )
+
+
+def _render_perf_summary_reconciliation(metrics: dict[str, object]) -> None:
+    """Show how assigned tickets partition vs attended volume."""
+    assigned = int(metrics.get("assigned_in_range") or 0)
+    if assigned <= 0 or "attended_from_assigned" not in metrics:
+        return
+    from_assigned = int(metrics.get("attended_from_assigned") or 0)
+    outside = int(metrics.get("attended_outside_assigned") or 0)
+    closed_other = int(metrics.get("closed_by_others") or 0)
+    still_open = int(metrics.get("still_open_assigned") or 0)
+    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
+    unattended = int(metrics.get("unattended_assignments") or 0)
+    attended_total = int(metrics.get("total") or 0)
+    partition_ok = from_assigned + closed_other + still_open
+    st.markdown(
+        '<p class="weekly-section-label" style="margin-top:10px">How the numbers connect</p>',
+        unsafe_allow_html=True,
+    )
+    r1a, r1b, r1c, r1d = st.columns(4)
+    reconcile_cards = [
+        (r1a, "Unique tickets assigned", str(assigned), f"{cycles} assignment cycles"),
+        (
+            r1b,
+            "You attended (from these)",
+            str(from_assigned),
+            f"+ {outside} from earlier assignments",
+        ),
+        (r1c, "Closed by others", str(closed_other), "Reassigned then credited elsewhere"),
+        (r1d, "Still open / pending", str(still_open), "Assigned in range, not yet attended"),
+    ]
+    for col, label, value, sub in reconcile_cards:
+        with col:
+            st.markdown(
+                f'<div class="weekly-kpi-card weekly-kpi-card-subtle">'
+                f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+                f'<p class="weekly-kpi-value">{html.escape(value)}</p>'
+                f'<p class="weekly-kpi-sub neutral">{html.escape(sub)}</p></div>',
+                unsafe_allow_html=True,
+            )
+    st.caption(
+        f"**Assigned tickets partition:** {from_assigned} you attended + {closed_other} closed by others "
+        f"+ {still_open} still open = **{partition_ok}** unique tickets "
+        f"(matches **{assigned}** assigned). "
+        f"**Cases attended (yours) = {attended_total}** = {from_assigned} from this range's assignments "
+        f"+ {outside} carried in from earlier assignments. "
+        f"**Unattended ({unattended})** counts assign-day cycles, not unique tickets — "
+        f"a ticket can appear in both attended and unattended if it failed one day and was handled later."
     )
 
 
@@ -11662,13 +11885,19 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
         delta_cls = "weekly-kpi-sub neutral"
 
     if show_unattended:
-        r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+        r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
         volume_cards = [
-            (r1c1, "Assigned in range", str(assigned), "All field assign + reassign"),
-            (r1c2, "Unattended assignments", str(unattended), "No response before cutoff"),
-            (r1c3, "Closed by others", str(closed_other), "Reassigned then resolved elsewhere"),
+            (r1c1, "Unique tickets assigned", str(assigned), "Distinct tickets in range"),
             (
-                r1c4,
+                r1c2,
+                "Assignment cycles",
+                str(int(metrics.get("assignment_cycles_in_range") or 0)),
+                "Each assign + reassign",
+            ),
+            (r1c3, "Unattended cycles", str(unattended), "Assign days without response"),
+            (r1c4, "Closed by others", str(closed_other), "Credited to another engineer"),
+            (
+                r1c5,
                 "Cases attended (yours)",
                 str(total),
                 "On Hold · Resolved · Investigation",
@@ -11778,6 +12007,8 @@ def _render_perf_summary_overview_tab(metrics: dict[str, object]) -> None:
     st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
     _render_perf_summary_volume_caption(show_engineer=show_engineer)
     _render_weekly_kpi_cards(metrics)
+    if show_engineer:
+        _render_perf_summary_reconciliation(metrics)
     chart_left, chart_right = st.columns(2)
     with chart_left:
         _render_perf_summary_closure_donut(metrics)
@@ -12231,12 +12462,13 @@ def _render_perf_weekly_attended_report(
     if focus not in ("", "All"):
         visits = _perf_load_overview_visits_history(df_all)
         metrics.update(
-            _perf_summary_focus_unattended_metrics(
+            _perf_summary_focus_engineer_metrics_with_reconciliation(
                 df_all,
+                sales_all,
                 focus=focus,
                 range_start=range_start,
                 range_end=range_end,
-                sales_all=sales_all,
+                attended_yours_total=int(metrics.get("total") or 0),
             )
         )
         metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
