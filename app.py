@@ -10677,6 +10677,231 @@ def _perf_filter_sales_by_account(df: pd.DataFrame, account: str) -> pd.DataFram
     ].copy()
 
 
+_PERF_RESORT_MATRIX_STATUSES: tuple[tuple[str, str], ...] = (
+    (SC_STATUS_SALES_TICKET, "Sales ticket"),
+    (SC_STATUS_INVESTIGATION, "Investigation"),
+    (SC_STATUS_REGIONAL, "Regional"),
+    (SC_STATUS_DESIGN, "Design"),
+)
+
+
+def _perf_resort_status_label(raw: object) -> str:
+    s = _sc_effective_status(raw)
+    for status, label in _PERF_RESORT_MATRIX_STATUSES:
+        if s == status:
+            return label
+    if s == SC_STATUS_RESOLVED:
+        return "Resolved"
+    return s or "—"
+
+
+def _perf_resort_sales_view(
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str = "All",
+) -> pd.DataFrame:
+    """Resort cases enriched for Performance — optional engineer focus."""
+    if sales_all is None or sales_all.empty:
+        return pd.DataFrame()
+    view = _perf_enrich_sales_cases(sales_all)
+    if focus not in ("", "All"):
+        view = view.loc[view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)].copy()
+    return view
+
+
+def _perf_resort_open_view(view: pd.DataFrame) -> pd.DataFrame:
+    """Snapshot rows that are not yet resolved."""
+    if view.empty or "status_eff" not in view.columns:
+        return pd.DataFrame()
+    return view.loc[~view["status_eff"].astype(str).eq(SC_STATUS_RESOLVED)].copy()
+
+
+def _perf_resort_account_matrix(open_view: pd.DataFrame) -> pd.DataFrame:
+    """Open resort cases grouped by account × status."""
+    if open_view.empty or "account_name" not in open_view.columns:
+        return pd.DataFrame(
+            columns=["Account", *[label for _, label in _PERF_RESORT_MATRIX_STATUSES], "Total open"]
+        )
+    rows: list[dict[str, object]] = []
+    accounts = open_view["account_name"].fillna("").astype(str).str.strip()
+    open_view = open_view.copy()
+    open_view["_account"] = accounts.mask(accounts.eq(""), "(no account)")
+    for account, grp in open_view.groupby("_account", sort=False):
+        st = grp["status_eff"].astype(str)
+        row: dict[str, object] = {"Account": account}
+        for status, label in _PERF_RESORT_MATRIX_STATUSES:
+            row[label] = int(st.eq(status).sum())
+        row["Total open"] = len(grp)
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame(
+            columns=["Account", *[label for _, label in _PERF_RESORT_MATRIX_STATUSES], "Total open"]
+        )
+    return pd.DataFrame(rows).sort_values(["Total open", "Account"], ascending=[False, True])
+
+
+def _perf_resort_unresolved_accounts(open_view: pd.DataFrame) -> list[dict[str, object]]:
+    """One row per account with open case count and status breakdown text."""
+    matrix = _perf_resort_account_matrix(open_view)
+    if matrix.empty:
+        return []
+    out: list[dict[str, object]] = []
+    for _, row in matrix.iterrows():
+        parts: list[str] = []
+        for _, label in _PERF_RESORT_MATRIX_STATUSES:
+            n = int(row.get(label) or 0)
+            if n > 0:
+                parts.append(f"{label} ({n})")
+        out.append(
+            {
+                "Account": str(row.get("Account") or ""),
+                "Open cases": int(row.get("Total open") or 0),
+                "Status mix": ", ".join(parts) if parts else "—",
+            }
+        )
+    return out
+
+
+def _perf_resort_open_cases_table(open_view: pd.DataFrame) -> pd.DataFrame:
+    """Open resort cases — account-first detail for weekly/monthly review."""
+    if open_view.empty:
+        return pd.DataFrame(
+            columns=[
+                "Account",
+                "Case ref",
+                "Status",
+                "Region",
+                "Sales category",
+                "Field category",
+                "Priority",
+                "Field engineer",
+                "Days open",
+                "Updated (local)",
+            ]
+        )
+    now_local = pd.Timestamp.now(tz=LOCAL_TZ)
+    rows: list[dict[str, object]] = []
+    for _, row in open_view.iterrows():
+        created = _parse_ts(row.get("created_at"))
+        days_open = "—"
+        if pd.notna(created):
+            days_open = str(max(0, (now_local - created.tz_convert(LOCAL_TZ)).days))
+        updated = row.get("_local")
+        updated_s = (
+            updated.strftime("%Y-%m-%d %H:%M")
+            if hasattr(updated, "strftime") and pd.notna(updated)
+            else "—"
+        )
+        assignees = _perf_ticket_credit_assignees(row)
+        engineer = ", ".join(assignees) if assignees else str(row.get("staff") or "—")
+        rows.append(
+            {
+                "Account": str(row.get("account_name") or "").strip() or "(no account)",
+                "Case ref": str(row.get("case_ref") or "").strip(),
+                "Status": _perf_resort_status_label(row.get("status_eff")),
+                "Region": str(row.get("account_region") or row.get("dispatch_region") or "").strip() or "—",
+                "Sales category": str(row.get("sales_category") or "").strip() or "—",
+                "Field category": str(row.get("field_task_category") or "").strip() or "—",
+                "Priority": str(row.get("sales_priority") or "").strip() or "—",
+                "Field engineer": engineer,
+                "Days open": days_open,
+                "Updated (local)": updated_s,
+            }
+        )
+    out = pd.DataFrame(rows)
+    return out.sort_values(["Account", "Status", "Case ref"], ascending=[True, True, True])
+
+
+def _perf_resort_period_cases_table(attended: pd.DataFrame) -> pd.DataFrame:
+    """Resort cases with attended activity in the selected period."""
+    if attended.empty:
+        return pd.DataFrame(
+            columns=[
+                "Account",
+                "Case ref",
+                "Status",
+                "Closure",
+                "Region",
+                "Sales category",
+                "Field category",
+                "Priority",
+                "Field engineer",
+                "Activity (local)",
+            ]
+        )
+    view = _perf_enrich_sales_cases(attended)
+    rows: list[dict[str, object]] = []
+    for _, row in view.iterrows():
+        attended_status = str(row.get("_attended_status") or row.get("status_eff") or "")
+        if attended_status in (STATUS_RESOLVED, SC_STATUS_RESOLVED):
+            closure = _PERF_CLOSURE_RESORT
+        elif attended_status == SC_STATUS_INVESTIGATION:
+            closure = _PERF_CLOSURE_INVESTIGATION
+        else:
+            closure = attended_status
+        assignees = _perf_ticket_credit_assignees(row)
+        engineer = ", ".join(assignees) if assignees else str(row.get("staff") or "—")
+        rows.append(
+            {
+                "Account": str(row.get("account_name") or "").strip() or "(no account)",
+                "Case ref": str(row.get("case_ref") or "").strip(),
+                "Status": _perf_resort_status_label(attended_status),
+                "Closure": closure,
+                "Region": str(row.get("account_region") or row.get("dispatch_region") or "").strip() or "—",
+                "Sales category": str(row.get("sales_category") or "").strip() or "—",
+                "Field category": str(row.get("field_task_category") or "").strip() or "—",
+                "Priority": str(row.get("sales_priority") or "").strip() or "—",
+                "Field engineer": engineer,
+                "Activity (local)": row["_local"].strftime("%Y-%m-%d %H:%M")
+                if pd.notna(row.get("_local"))
+                else "—",
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["Account", "Activity (local)"], ascending=[True, True])
+
+
+def _perf_resort_summary_metrics(
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    focus: str = "All",
+) -> dict[str, object]:
+    """Resort Performance — snapshot open by account + period activity."""
+    view = _perf_resort_sales_view(sales_all, focus=focus)
+    open_view = _perf_resort_open_view(view)
+    attended = _perf_sales_attended_in_week(
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+    )
+    if focus not in ("", "All") and not attended.empty:
+        attended = attended.loc[
+            attended.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)
+        ].copy()
+    resolved_period = attended.loc[
+        attended["_attended_status"].astype(str).isin((STATUS_RESOLVED, SC_STATUS_RESOLVED))
+    ] if not attended.empty and "_attended_status" in attended.columns else pd.DataFrame()
+
+    opened_period = pd.DataFrame()
+    if not view.empty and "created_at" in view.columns:
+        ca = _parse_ts(view["created_at"])
+        opened_period = view.loc[ca.notna() & (ca >= range_start) & (ca <= range_end)].copy()
+
+    unresolved = _perf_resort_unresolved_accounts(open_view)
+    return {
+        "open_snapshot": len(open_view),
+        "accounts_with_open": len(unresolved),
+        "attended_in_period": int(attended["case_ref"].astype(str).nunique()) if not attended.empty and "case_ref" in attended.columns else 0,
+        "resolved_in_period": int(resolved_period["case_ref"].astype(str).nunique()) if not resolved_period.empty and "case_ref" in resolved_period.columns else 0,
+        "opened_in_period": len(opened_period),
+        "account_matrix": _perf_resort_account_matrix(open_view),
+        "unresolved_accounts": unresolved,
+        "open_cases": _perf_resort_open_cases_table(open_view),
+        "period_cases": _perf_resort_period_cases_table(attended),
+    }
+
+
 def _perf_enrich_tickets(df: pd.DataFrame) -> pd.DataFrame:
     """Add ``staff``, ``category``, and local time from ``_ts``."""
     view = df.copy()
@@ -11011,11 +11236,16 @@ def _perf_build_weekly_attended_tables(
     detail_cols = [
         "Track",
         "ID",
+        "Account",
         "Status",
         "Closure",
         "Attended by",
         "Credit",
         "Category",
+        "Region",
+        "Sales category",
+        "Field category",
+        "Priority",
         "Activity (local)",
     ]
     detail_parts: list[pd.DataFrame] = []
@@ -11054,9 +11284,14 @@ def _perf_build_weekly_attended_tables(
             base = {
                 "Track": "CSM",
                 "ID": str(row.get("ticket_number") or ""),
+                "Account": "",
                 "Status": attended_status,
                 "Closure": closure,
                 "Category": str(row.get("category") or "(uncategorized)"),
+                "Region": "",
+                "Sales category": "",
+                "Field category": "",
+                "Priority": "",
                 "Activity (local)": row["_local"].strftime("%Y-%m-%d %H:%M"),
                 "Credit": credit,
             }
@@ -11090,9 +11325,14 @@ def _perf_build_weekly_attended_tables(
             base = {
                 "Track": "Sales",
                 "ID": str(row.get("case_ref") or ""),
+                "Account": str(row.get("account_name") or "").strip() or "—",
                 "Status": attended_status,
                 "Closure": closure,
                 "Category": str(category.loc[idx] if idx in category.index else "(uncategorized)"),
+                "Region": str(row.get("account_region") or row.get("dispatch_region") or "").strip() or "—",
+                "Sales category": str(row.get("sales_category") or "").strip() or "—",
+                "Field category": str(row.get("field_task_category") or "").strip() or "—",
+                "Priority": str(row.get("sales_priority") or "").strip() or "—",
                 "Activity (local)": row["_local"].strftime("%Y-%m-%d %H:%M"),
                 "Credit": credit,
             }
@@ -11996,24 +12236,6 @@ def _render_perf_summary_context_bar(
     )
 
 
-def _render_perf_summary_counting_help(*, show_engineer: bool) -> None:
-    if not show_engineer:
-        return
-    with st.expander("How we count these numbers", expanded=False):
-        st.markdown(
-            "- **Unique tickets assigned** — distinct residential tickets + resort cases assigned to you "
-            "in this period (each ticket once, even if reassigned).\n"
-            "- **Assign + reassign tasks** — every assign/reassign event; same ticket counts again on revisit.\n"
-            "- **Unattended cases** — residential assign-day cycles with no field response before 23:59 UTC+5.\n"
-            "- **Cases attended (yours)** — distinct cases credited to you at On Hold, Resolved, or Investigation.\n"
-            "- **Queue snapshot (Performance header)** — all tickets in the system now; not the same as period assignments.\n"
-            "- **Task load** — assign/reassign tasks ÷ unique tickets (e.g. 2.1x = ~2 tasks per ticket).\n"
-            "- **Snapshot coverage** — your unique assigned ÷ full queue snapshot.\n"
-            "- **Response rate** — attended cases from these assignments ÷ unique assigned.\n"
-            "- **Revisit rate** — tickets with 2+ assign/reassign tasks ÷ unique assigned.\n"
-            "- **Same-day response** — residential tasks with field reply before 23:59 UTC+5 on assign day."
-        )
-
 
 def _perf_summary_rate_delta_class(rate_delta: str) -> str:
     if rate_delta.startswith("↓"):
@@ -12021,34 +12243,6 @@ def _perf_summary_rate_delta_class(rate_delta: str) -> str:
     if rate_delta.startswith("Flat"):
         return "weekly-hero-delta neutral"
     return "weekly-hero-delta"
-
-
-def _render_perf_summary_snapshot_context(metrics: dict[str, object]) -> None:
-    """Clarify queue snapshot (332) vs assignments in the selected period."""
-    snap_res = int(metrics.get("snapshot_residential") or 0)
-    snap_rsr = int(metrics.get("snapshot_resort") or 0)
-    if snap_res <= 0 and snap_rsr <= 0:
-        return
-    snap_total = snap_res + snap_rsr
-    assigned = int(metrics.get("assigned_in_range") or 0)
-    assigned_res = int(metrics.get("assigned_residential") or 0)
-    assigned_rsr = int(metrics.get("assigned_resort") or 0)
-    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
-    st.markdown(
-        f'<div class="weekly-reconcile-callout" style="border-left-color:#64748b">'
-        f"<strong>{snap_total} queue snapshot vs your assignment numbers</strong>"
-        f"<ul>"
-        f"<li><strong>{snap_total}</strong> = current queue snapshot "
-        f"(Residential <strong>{snap_res}</strong> + Resort <strong>{snap_rsr}</strong>) — "
-        f"all tickets/cases in the system right now, <em>not</em> filtered by your selected period.</li>"
-        f"<li><strong>{assigned}</strong> unique tickets/cases assigned to this engineer in the selected period "
-        f"(Residential <strong>{assigned_res}</strong> + Resort <strong>{assigned_rsr}</strong>) — "
-        f"each ticket counted once even if reassigned multiple times.</li>"
-        f"<li><strong>{cycles}</strong> assign + reassign <em>tasks</em> in the period — "
-        f"same ticket can count again on every reassignment (e.g. revisit after admin sends back).</li>"
-        f"</ul></div>",
-        unsafe_allow_html=True,
-    )
 
 
 def _render_perf_summary_engineer_derived_row(metrics: dict[str, object]) -> None:
@@ -12168,7 +12362,6 @@ def _render_perf_summary_engineer_primary_kpis(
         f'<p class="weekly-hero-period">{html.escape(period_label)} · {html.escape(LOCAL_TZ_LABEL)}</p>',
         unsafe_allow_html=True,
     )
-    _render_perf_summary_snapshot_context(metrics)
 
 
 def _render_perf_summary_attended_outcomes(metrics: dict[str, object]) -> None:
@@ -12386,51 +12579,6 @@ def _render_perf_summary_assignment_bar(metrics: dict[str, object]) -> None:
     )
 
 
-def _render_perf_summary_reconciliation_callout(metrics: dict[str, object]) -> None:
-    """Explain why attended + unattended does not equal unique tickets assigned."""
-    assigned = int(metrics.get("assigned_in_range") or 0)
-    if assigned <= 0 or "attended_from_assigned" not in metrics:
-        return
-    from_assigned = int(metrics.get("attended_from_assigned") or 0)
-    outside = int(metrics.get("attended_outside_assigned") or 0)
-    closed_other = int(metrics.get("closed_by_others") or 0)
-    still_open = int(metrics.get("still_open_assigned") or 0)
-    attended_total = int(metrics.get("total") or 0)
-    unattended = int(metrics.get("unattended_assignments") or 0)
-    cycles = int(metrics.get("assignment_cycles_in_range") or 0)
-    phantom = assigned - attended_total - unattended
-    phantom_line = ""
-    if phantom != 0:
-        phantom_line = (
-            f"<li><strong>{abs(phantom)} cases look “missing”</strong> if you do "
-            f"{assigned} assigned − {attended_total} attended − {unattended} unattended — "
-            f"that mixes three different measures. Use the breakdown above instead.</li>"
-        )
-    outside_line = ""
-    if outside > 0:
-        outside_line = (
-            f"<li><strong>{outside}</strong> of your {attended_total} attended cases were assigned "
-            f"<em>before</em> this range — they are not in the {assigned} assigned count.</li>"
-        )
-    st.markdown(
-        f'<div class="weekly-reconcile-callout">'
-        f"<strong>Why these numbers do not add up simply</strong>"
-        f"<ul>"
-        f"<li><strong>{assigned} unique tickets</strong> assigned in range "
-        f"(<strong>{cycles}</strong> assign/reassign cycles if you need event count).</li>"
-        f"<li><strong>{attended_total} attended (yours)</strong> = {from_assigned} from those assignments"
-        f"{f' + {outside} from earlier work' if outside else ''}.</li>"
-        f"<li><strong>{unattended} unattended</strong> = assign-day cycles with no response — "
-        f"not a third bucket of unique tickets (some may later be attended).</li>"
-        f"<li><strong>Handed off ({closed_other})</strong> = assigned here, but another engineer "
-        f"is credited at attended status — not counted in your {attended_total} attended.</li>"
-        f"<li><strong>Still open ({still_open})</strong> = assigned in range, not yet at attended status.</li>"
-        f"{phantom_line}{outside_line}"
-        f"</ul></div>",
-        unsafe_allow_html=True,
-    )
-
-
 def _render_perf_summary_workload_row(metrics: dict[str, object]) -> None:
     cycles = int(metrics.get("assignment_cycles_in_range") or 0)
     unattended = int(metrics.get("unattended_assignments") or 0)
@@ -12499,8 +12647,6 @@ def _render_perf_summary_engineer_overview(
         )
     with st.expander("Assignment breakdown", expanded=False):
         _render_perf_summary_assignment_bar(metrics)
-        _render_perf_summary_reconciliation_callout(metrics)
-    _render_perf_summary_counting_help(show_engineer=True)
 
 
 def _render_perf_summary_volume_caption(*, show_engineer: bool) -> None:
@@ -13105,11 +13251,16 @@ def _render_perf_summary_staff_tab(
         preferred = [
             "Track",
             "ID",
+            "Account",
             "Status",
             "Closure",
             "Attended by",
             "Credit",
             "Category",
+            "Region",
+            "Sales category",
+            "Field category",
+            "Priority",
             "Activity (local)",
         ]
         cols = [c for c in preferred if c in detail_view.columns]
@@ -13121,6 +13272,135 @@ def _render_perf_summary_staff_tab(
                 "Category": st.column_config.TextColumn(width="medium"),
             },
         )
+
+
+def _render_perf_summary_resort_tab(
+    metrics: dict[str, object],
+    *,
+    d0: date,
+    d1: date,
+) -> None:
+    """Resort — open snapshot by account × status + period attended activity."""
+    resort = metrics.get("resort")
+    if not isinstance(resort, dict):
+        st.caption("No resort data for this range.")
+        return
+
+    focus_suffix = _perf_focus_heading_suffix(str(metrics.get("summary_focus") or ""))
+    st.markdown(
+        f'<p class="weekly-section-label">Resort accounts{html.escape(focus_suffix)}</p>',
+        unsafe_allow_html=True,
+    )
+
+    open_n = int(resort.get("open_snapshot") or 0)
+    accounts_n = int(resort.get("accounts_with_open") or 0)
+    attended_n = int(resort.get("attended_in_period") or 0)
+    resolved_n = int(resort.get("resolved_in_period") or 0)
+    opened_n = int(resort.get("opened_in_period") or 0)
+
+    if open_n == 0 and attended_n == 0 and opened_n == 0:
+        st.caption("No open resort cases in queue and no resort activity in this range.")
+        return
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    cards = [
+        (k1, "Open (snapshot)", str(open_n), f"{accounts_n} accounts"),
+        (k2, "Attended (period)", str(attended_n), "Distinct cases"),
+        (k3, "Resolved (period)", str(resolved_n), "After field visit"),
+        (k4, "Opened (period)", str(opened_n), "New in range"),
+        (k5, "Accounts w/ open", str(accounts_n), "Queue now"),
+    ]
+    for col, label, value, sub in cards:
+        with col:
+            sub_html = (
+                f'<p class="weekly-kpi-sub neutral">{html.escape(sub)}</p>' if sub else ""
+            )
+            st.markdown(
+                f'<div class="weekly-kpi-card">'
+                f'<p class="weekly-kpi-label">{html.escape(label)}</p>'
+                f'<p class="weekly-kpi-value">{html.escape(value)}</p>{sub_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+    unresolved = resort.get("unresolved_accounts")
+    unresolved_list = list(unresolved) if isinstance(unresolved, list) else []
+    if unresolved_list:
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">Unresolved by account</p>',
+            unsafe_allow_html=True,
+        )
+        unresolved_df = pd.DataFrame(unresolved_list)
+        _render_perf_dataframe(
+            unresolved_df,
+            column_config={
+                "Account": st.column_config.TextColumn(width="medium"),
+                "Open cases": st.column_config.NumberColumn(format="%d"),
+                "Status mix": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+    matrix = resort.get("account_matrix")
+    if isinstance(matrix, pd.DataFrame) and not matrix.empty:
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">Open cases — account × status</p>',
+            unsafe_allow_html=True,
+        )
+        num_cols = [c for c in matrix.columns if c != "Account"]
+        col_config = {
+            "Account": st.column_config.TextColumn(width="medium"),
+        }
+        for c in num_cols:
+            col_config[c] = st.column_config.NumberColumn(format="%d")
+        _render_perf_dataframe(matrix, column_config=col_config)
+
+    file_stamp = f"{d0.isoformat()}_{d1.isoformat()}"
+    open_cases = resort.get("open_cases")
+    if isinstance(open_cases, pd.DataFrame) and not open_cases.empty:
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">Open case detail (snapshot)</p>',
+            unsafe_allow_html=True,
+        )
+        _render_perf_dataframe(
+            open_cases,
+            column_config={
+                "Account": st.column_config.TextColumn(width="medium"),
+                "Case ref": st.column_config.TextColumn(width="medium"),
+                "Status": st.column_config.TextColumn(width="small"),
+                "Days open": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.download_button(
+            "Download open cases CSV",
+            data=open_cases.to_csv(index=False).encode("utf-8"),
+            file_name=f"resort_open_{file_stamp}.csv",
+            mime="text/csv",
+            key=f"perf_resort_open_csv_{file_stamp}",
+        )
+
+    period_cases = resort.get("period_cases")
+    if isinstance(period_cases, pd.DataFrame) and not period_cases.empty:
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">Period activity (attended)</p>',
+            unsafe_allow_html=True,
+        )
+        _render_perf_dataframe(
+            period_cases,
+            column_config={
+                "Account": st.column_config.TextColumn(width="medium"),
+                "Case ref": st.column_config.TextColumn(width="medium"),
+                "Closure": st.column_config.TextColumn(width="medium"),
+                "Activity (local)": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.download_button(
+            "Download period activity CSV",
+            data=period_cases.to_csv(index=False).encode("utf-8"),
+            file_name=f"resort_period_{file_stamp}.csv",
+            mime="text/csv",
+            key=f"perf_resort_period_csv_{file_stamp}",
+        )
+    elif attended_n == 0:
+        st.caption("No resort cases with attended activity in this range.")
 
 
 def _render_perf_weekly_executive_dashboard(
@@ -13152,12 +13432,12 @@ def _render_perf_weekly_executive_dashboard(
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
 
     if focus not in ("", "All"):
-        tab_overview, tab_breakdown, tab_staff, tab_unattended = st.tabs(
-            ["Overview", "Breakdown", "Staff & export", "Unattended"]
+        tab_overview, tab_breakdown, tab_resort, tab_staff, tab_unattended = st.tabs(
+            ["Overview", "Breakdown", "Resort", "Staff & export", "Unattended"]
         )
     else:
-        tab_overview, tab_breakdown, tab_staff = st.tabs(
-            ["Overview", "Breakdown", "Staff & export"]
+        tab_overview, tab_breakdown, tab_resort, tab_staff = st.tabs(
+            ["Overview", "Breakdown", "Resort", "Staff & export"]
         )
         tab_unattended = None
 
@@ -13165,6 +13445,8 @@ def _render_perf_weekly_executive_dashboard(
         _render_perf_summary_overview_tab(metrics, period_label=period_label)
     with tab_breakdown:
         _render_perf_summary_breakdown_tab(metrics)
+    with tab_resort:
+        _render_perf_summary_resort_tab(metrics, d0=week_start, d1=week_end)
     with tab_staff:
         _render_perf_summary_staff_tab(
             summary_df, detail_df, d0=week_start, d1=week_end, metrics=metrics
@@ -13314,6 +13596,12 @@ def _render_perf_weekly_attended_report(
     metrics["snapshot_resort"] = (
         len(sales_all) if sales_all is not None and not sales_all.empty else 0
     )
+    metrics["resort"] = _perf_resort_summary_metrics(
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+    )
     if focus not in ("", "All"):
         visits = _perf_load_overview_visits_history(df_all)
         detail_df = bundle.get("detail")
@@ -13345,11 +13633,23 @@ def _render_perf_weekly_attended_report(
         )
         metrics["summary_focus"] = focus
     _render_perf_summary_context_bar(metrics, period_label, focus=focus)
+    resort_block = metrics.get("resort")
+    resort_open = (
+        int(resort_block.get("open_snapshot") or 0)
+        if isinstance(resort_block, dict)
+        else 0
+    )
+    resort_attended = (
+        int(resort_block.get("attended_in_period") or 0)
+        if isinstance(resort_block, dict)
+        else 0
+    )
     has_attended = int(metrics.get("total") or 0) > 0
+    has_resort = resort_open > 0 or resort_attended > 0
     has_unattended = int(metrics.get("unattended_assignments") or 0) > 0
     has_assigned = int(metrics.get("assigned_in_range") or 0) > 0
     has_closed_by_others = int(metrics.get("closed_by_others") or 0) > 0
-    if not has_attended and not (
+    if not has_attended and not has_resort and not (
         focus not in ("", "All")
         and (has_unattended or has_assigned or has_closed_by_others)
     ):
@@ -26526,13 +26826,6 @@ def _render_performance_sidebar() -> None:
             f'<div style="font-size:11px;color:#e2e8f8;background:#0d1e3a;'
             f'border:0.5px solid #1a3460;padding:2px 6px;border-radius:3px;'
             f'display:inline-block;margin-bottom:14px">● Filtering: {html.escape(focus)}</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div style="font-size:11px;color:#8a9ac0;line-height:1.45;margin-bottom:14px">'
-            "Unattended accountability is per engineer — pick **Focus assignee** "
-            "to open **Unattended** or see it under **Summary**.</div>",
             unsafe_allow_html=True,
         )
 
