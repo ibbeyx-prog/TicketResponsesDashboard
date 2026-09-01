@@ -70,6 +70,8 @@ import logging
 import math
 import os
 import re
+import time as _perf_time
+from contextlib import contextmanager
 from collections import Counter
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
@@ -1618,6 +1620,58 @@ log = logging.getLogger(__name__)
 
 LOCAL_TZ = timezone(timedelta(hours=5))
 LOCAL_TZ_LABEL = "UTC+5"
+
+_DASH_PERF_LOG_ENABLED = os.getenv("DASH_PERF_LOG", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+_DASH_PERF_MIN_MS = max(0.0, float(os.getenv("DASH_PERF_MIN_MS", "50") or "50"))
+_DASH_PERF_LOG_PATH = Path(__file__).resolve().parent / "logs" / "dashboard-perf.log"
+
+
+def _dash_perf_write(name: str, ms: float, **ctx: object) -> None:
+    """Append one timing line to logs/dashboard-perf.log (never raises)."""
+    if not _DASH_PERF_LOG_ENABLED:
+        return
+    try:
+        _DASH_PERF_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(tz=LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        run_id = st.session_state.get("_dash_perf_run")
+        parts = [f"run={run_id}"] if run_id is not None else []
+        for key, val in ctx.items():
+            if val is not None and val != "":
+                parts.append(f"{key}={val}")
+        suffix = (" " + " ".join(parts)) if parts else ""
+        line = f"{ts} {ms:7.1f}ms {name}{suffix}\n"
+        with _DASH_PERF_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
+
+
+@contextmanager
+def _dash_perf_span(name: str, **ctx: object):
+    """Time a block; log when duration >= DASH_PERF_MIN_MS (default 50ms)."""
+    if not _DASH_PERF_LOG_ENABLED:
+        yield
+        return
+    t0 = _perf_time.perf_counter()
+    try:
+        yield
+    finally:
+        ms = (_perf_time.perf_counter() - t0) * 1000.0
+        if ms >= _DASH_PERF_MIN_MS:
+            _dash_perf_write(name, ms, **ctx)
+
+
+def _dash_perf_bump_run() -> int:
+    n = int(st.session_state.get("_dash_perf_run") or 0) + 1
+    st.session_state["_dash_perf_run"] = n
+    return n
+
+
 _TS_COLS: tuple[str, ...] = (
     "created_at",
     "updated_at",
@@ -3444,6 +3498,9 @@ _DASH_DATA_CACHE_TTL_SEC = max(
 )
 _DISPATCH_CTX_SESSION_KEY = "_dispatch_ticket_ctx_run"
 _PERF_CTX_SESSION_KEY = "_perf_ctx_run"
+_PERF_SUMMARY_CACHE_KEY = "_perf_summary_report_cache"
+_PERF_VISITS_HISTORY_KEY = "_perf_visits_history_cache"
+_PERF_SUMMARY_SECTION_KEY = "_perf_summary_active_section"
 
 _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
     "ticket_number",
@@ -3513,7 +3570,11 @@ def _invalidate_dashboard_data_cache(
         clearable.clear()
     if tickets or attendance or visits:
         _get_dispatch_ticket_case_activity.clear()
+    if tickets or sales_cases:
+        st.session_state.pop(_DISPATCH_CTX_SESSION_KEY, None)
     st.session_state.pop(_DASH_MISMATCH_CACHE_KEY, None)
+    st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
+    st.session_state.pop(_PERF_VISITS_HISTORY_KEY, None)
 
 
 # Ticket/dispatch writes can never change the sales-case list, the field
@@ -9464,6 +9525,7 @@ def _apply_dash_range_change() -> None:
     """Refresh cached reads after the header time-range picker changes."""
     _invalidate_dashboard_data_cache()
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+    st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
 
 
 def _render_dash_custom_date_inputs() -> bool:
@@ -11560,6 +11622,79 @@ def _perf_closure_totals_from_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
 _WEEKLY_SUMMARY_TOP_CATEGORIES = 8
 
 
+def _perf_data_signature(df: pd.DataFrame) -> str:
+    """Cheap cache key — row count + latest updated_at when present."""
+    if df is None or df.empty:
+        return "0"
+    n = len(df)
+    if "updated_at" in df.columns:
+        ts = _parse_ts(df["updated_at"]).max()
+        if pd.notna(ts):
+            return f"{n}:{ts.isoformat()}"
+    return str(n)
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_weekly_resolution_trend_cached(
+    end_week_offset: int,
+    weeks: int,
+    focus: str,
+    tickets_sig: str,
+    sales_sig: str,
+) -> pd.DataFrame:
+    del tickets_sig, sales_sig
+    df_all = _fetch_tickets_cached()
+    sales_all = _fetch_sales_cases_cached()
+    return _perf_weekly_resolution_trend(
+        df_all,
+        sales_all if sales_all is not None else pd.DataFrame(),
+        end_week_offset=end_week_offset,
+        weeks=weeks,
+        focus=focus,
+    )
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_monthly_resolution_trend_cached(
+    end_month_offset: int,
+    months: int,
+    focus: str,
+    tickets_sig: str,
+    sales_sig: str,
+) -> pd.DataFrame:
+    del tickets_sig, sales_sig
+    df_all = _fetch_tickets_cached()
+    sales_all = _fetch_sales_cases_cached()
+    return _perf_monthly_resolution_trend(
+        df_all,
+        sales_all if sales_all is not None else pd.DataFrame(),
+        end_month_offset=end_month_offset,
+        months=months,
+        focus=focus,
+    )
+
+
+def _perf_clear_summary_cache() -> None:
+    st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
+
+
+def _perf_summary_report_cache_key(
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    focus: str,
+    period: str,
+    period_offset: int,
+) -> tuple[object, ...]:
+    return (
+        range_start.isoformat(),
+        range_end.isoformat(),
+        focus,
+        period,
+        period_offset,
+    )
+
+
 def _perf_rate_delta_from_trend(trend_df: pd.DataFrame, current_rate: int) -> str:
     """Human-readable delta vs the prior trend bucket."""
     if not isinstance(trend_df, pd.DataFrame) or len(trend_df) < 2:
@@ -11625,13 +11760,23 @@ def _perf_weekly_summary_metrics(
     detail = bundle.get("detail")
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
     metrics = _perf_weekly_executive_metrics(detail_df)
+    tickets_sig = _perf_data_signature(df_all)
+    sales_sig = _perf_data_signature(sales_all)
     if period == "Monthly":
-        metrics["trend_df"] = _perf_monthly_resolution_trend(
-            df_all, sales_all, end_month_offset=week_offset, months=4, focus=focus
+        metrics["trend_df"] = _perf_monthly_resolution_trend_cached(
+            end_month_offset=week_offset,
+            months=4,
+            focus=focus,
+            tickets_sig=tickets_sig,
+            sales_sig=sales_sig,
         )
     else:
-        metrics["trend_df"] = _perf_weekly_resolution_trend(
-            df_all, sales_all, end_week_offset=week_offset, weeks=4, focus=focus
+        metrics["trend_df"] = _perf_weekly_resolution_trend_cached(
+            end_week_offset=week_offset,
+            weeks=4,
+            focus=focus,
+            tickets_sig=tickets_sig,
+            sales_sig=sales_sig,
         )
     total = int(metrics.get("total") or 0)
     investigation = int(metrics.get("investigation") or 0)
@@ -11843,6 +11988,7 @@ def _perf_engineer_range_assignment_metrics(
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
 ) -> dict[str, int | frozenset[str]]:
     """Unique tickets + assign/reassign task counts (residential + resort) for one engineer."""
     focus_key = _perf_person_credit_key(focus)
@@ -11899,7 +12045,9 @@ def _perf_engineer_range_assignment_metrics(
                     same_day_count += 1
 
     visits_snapshot = _perf_filter_visits_by_person(
-        _perf_load_overview_visits_history(df_all),
+        visits_history
+        if visits_history is not None
+        else _perf_load_overview_visits_history(df_all),
         focus,
     )
     df_for_assign = (
@@ -12084,6 +12232,7 @@ def _perf_summary_focus_engineer_metrics(
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
 ) -> dict[str, int]:
     """Per-engineer Summary KPIs when Focus assignee is set."""
     credit_key = _perf_person_credit_key(focus)
@@ -12107,12 +12256,17 @@ def _perf_summary_focus_engineer_metrics(
         focus=focus,
         range_start=range_start,
         range_end=range_end,
+        visits_history=visits_history,
     )
     assigned_ids = assign_metrics.pop("_assigned_ids", frozenset())
     if not isinstance(assigned_ids, frozenset):
         assigned_ids = frozenset()
 
-    visits = _perf_load_overview_visits_history(df_all)
+    visits = (
+        visits_history
+        if visits_history is not None
+        else _perf_load_overview_visits_history(df_all)
+    )
     closed_by_others = _perf_closed_by_others_count(
         df_all,
         sales_all,
@@ -12151,6 +12305,7 @@ def _perf_summary_focus_engineer_metrics_with_reconciliation(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
     attended_yours_total: int,
+    visits_history: pd.DataFrame | None = None,
 ) -> dict[str, int | frozenset[str]]:
     """Engineer KPIs plus assigned-ticket partition for Summary reconciliation."""
     base = _perf_summary_focus_engineer_metrics(
@@ -12159,6 +12314,7 @@ def _perf_summary_focus_engineer_metrics_with_reconciliation(
         focus=focus,
         range_start=range_start,
         range_end=range_end,
+        visits_history=visits_history,
     )
     assigned_ids = base.pop("_assigned_ids", frozenset())
     if not isinstance(assigned_ids, frozenset):
@@ -13416,7 +13572,7 @@ def _render_perf_weekly_executive_dashboard(
     metrics: dict[str, object] | None = None,
     focus: str = "All",
 ) -> dict[str, object]:
-    """Executive summary — tabbed layout; returns metrics for context bar."""
+    """Executive summary — one section at a time (avoids rendering all tabs each rerun)."""
     if metrics is None:
         metrics = _perf_weekly_summary_metrics(
             df_all,
@@ -13431,29 +13587,32 @@ def _render_perf_weekly_executive_dashboard(
     summary_df = summary if isinstance(summary, pd.DataFrame) else pd.DataFrame()
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
 
+    section_options = ["Overview", "Breakdown", "Resort", "Staff & export"]
     if focus not in ("", "All"):
-        tab_overview, tab_breakdown, tab_resort, tab_staff, tab_unattended = st.tabs(
-            ["Overview", "Breakdown", "Resort", "Staff & export", "Unattended"]
-        )
-    else:
-        tab_overview, tab_breakdown, tab_resort, tab_staff = st.tabs(
-            ["Overview", "Breakdown", "Resort", "Staff & export"]
-        )
-        tab_unattended = None
+        section_options.append("Unattended")
+    if st.session_state.get(_PERF_SUMMARY_SECTION_KEY) not in section_options:
+        st.session_state[_PERF_SUMMARY_SECTION_KEY] = section_options[0]
+    selected = st.radio(
+        "Summary section",
+        section_options,
+        horizontal=True,
+        key=_PERF_SUMMARY_SECTION_KEY,
+        label_visibility="collapsed",
+    )
+    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
-    with tab_overview:
+    if selected == "Overview":
         _render_perf_summary_overview_tab(metrics, period_label=period_label)
-    with tab_breakdown:
+    elif selected == "Breakdown":
         _render_perf_summary_breakdown_tab(metrics)
-    with tab_resort:
+    elif selected == "Resort":
         _render_perf_summary_resort_tab(metrics, d0=week_start, d1=week_end)
-    with tab_staff:
+    elif selected == "Staff & export":
         _render_perf_summary_staff_tab(
             summary_df, detail_df, d0=week_start, d1=week_end, metrics=metrics
         )
-    if tab_unattended is not None:
-        with tab_unattended:
-            _render_perf_summary_unattended_tab(metrics)
+    elif selected == "Unattended":
+        _render_perf_summary_unattended_tab(metrics)
     return metrics
 
 
@@ -13490,6 +13649,113 @@ def _perf_monthly_resolution_trend(
             }
         )
     return pd.DataFrame(rows).sort_values("sort")
+
+
+def _perf_load_summary_report_package(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    focus: str,
+    period: str,
+    period_offset: int,
+    this_week_bundle: dict[str, object] | None = None,
+    d0: date,
+    d1: date,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Cached bundle + metrics for Performance → Summary."""
+    cache_key = _perf_summary_report_cache_key(
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+        period=period,
+        period_offset=period_offset,
+    )
+    cached = st.session_state.get(_PERF_SUMMARY_CACHE_KEY)
+    if isinstance(cached, dict) and cached.get("_key") == cache_key:
+        bundle = cached.get("bundle")
+        metrics = cached.get("metrics")
+        if isinstance(bundle, dict) and isinstance(metrics, dict):
+            return bundle, metrics
+
+    _, _, this_week_start, this_week_end = _perf_calendar_week_range_utc(week_offset=0)
+    if (
+        this_week_bundle is not None
+        and d0 == this_week_start
+        and d1 == this_week_end
+    ):
+        bundle = this_week_bundle
+    else:
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+            focus=focus,
+        )
+    metrics = _perf_weekly_summary_metrics(
+        df_all,
+        sales_all,
+        bundle,
+        period=period,
+        week_offset=period_offset,
+        focus=focus,
+    )
+    metrics["team_assignment_df"] = _perf_team_assignment_summary_df(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    metrics["snapshot_residential"] = len(df_all) if not df_all.empty else 0
+    metrics["snapshot_resort"] = (
+        len(sales_all) if sales_all is not None and not sales_all.empty else 0
+    )
+    metrics["resort"] = _perf_resort_summary_metrics(
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+    )
+    if focus not in ("", "All"):
+        visits = _perf_load_overview_visits_history(df_all)
+        detail_df = bundle.get("detail")
+        detail_for_tracks = detail_df if isinstance(detail_df, pd.DataFrame) else pd.DataFrame()
+        attended_res, attended_rsr = _perf_attended_track_counts(detail_for_tracks)
+        metrics.update(
+            _perf_summary_focus_engineer_metrics_with_reconciliation(
+                df_all,
+                sales_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+                attended_yours_total=int(metrics.get("total") or 0),
+                visits_history=visits,
+            )
+        )
+        metrics.update(_perf_summary_derived_metrics(metrics))
+        metrics["attended_residential"] = attended_res
+        metrics["attended_resort"] = attended_rsr
+        metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
+            df_all,
+            focus=focus,
+            visits=visits,
+            range_start=range_start,
+            range_end=range_end,
+        )
+        metrics["unattended_flagged_rows"] = _perf_flagged_unattended_ticket_rows(
+            df_all,
+            focus=focus,
+        )
+        metrics["summary_focus"] = focus
+
+    st.session_state[_PERF_SUMMARY_CACHE_KEY] = {
+        "_key": cache_key,
+        "bundle": bundle,
+        "metrics": metrics,
+    }
+    return bundle, metrics
 
 
 def _render_perf_weekly_attended_report(
@@ -13562,76 +13828,19 @@ def _render_perf_weekly_attended_report(
         unsafe_allow_html=True,
     )
 
-    _, _, this_week_start, this_week_end = _perf_calendar_week_range_utc(week_offset=0)
-    if (
-        this_week_bundle is not None
-        and d0 == this_week_start
-        and d1 == this_week_end
-    ):
-        bundle = this_week_bundle
-    else:
-        bundle = _perf_weekly_attended_bundle(
-            df_all,
-            sales_all,
-            range_start=range_start,
-            range_end=range_end,
-            focus=focus,
-        )
     _inject_weekly_summary_styles()
-    metrics = _perf_weekly_summary_metrics(
+    bundle, metrics = _perf_load_summary_report_package(
         df_all,
         sales_all,
-        bundle,
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
         period=period,
-        week_offset=period_offset,
-        focus=focus,
+        period_offset=period_offset,
+        this_week_bundle=this_week_bundle,
+        d0=d0,
+        d1=d1,
     )
-    metrics["team_assignment_df"] = _perf_team_assignment_summary_df(
-        df_all,
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
-    )
-    metrics["snapshot_residential"] = len(df_all) if not df_all.empty else 0
-    metrics["snapshot_resort"] = (
-        len(sales_all) if sales_all is not None and not sales_all.empty else 0
-    )
-    metrics["resort"] = _perf_resort_summary_metrics(
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
-        focus=focus,
-    )
-    if focus not in ("", "All"):
-        visits = _perf_load_overview_visits_history(df_all)
-        detail_df = bundle.get("detail")
-        detail_for_tracks = detail_df if isinstance(detail_df, pd.DataFrame) else pd.DataFrame()
-        attended_res, attended_rsr = _perf_attended_track_counts(detail_for_tracks)
-        metrics.update(
-            _perf_summary_focus_engineer_metrics_with_reconciliation(
-                df_all,
-                sales_all,
-                focus=focus,
-                range_start=range_start,
-                range_end=range_end,
-                attended_yours_total=int(metrics.get("total") or 0),
-            )
-        )
-        metrics.update(_perf_summary_derived_metrics(metrics))
-        metrics["attended_residential"] = attended_res
-        metrics["attended_resort"] = attended_rsr
-        metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
-            df_all,
-            focus=focus,
-            visits=visits,
-            range_start=range_start,
-            range_end=range_end,
-        )
-        metrics["unattended_flagged_rows"] = _perf_flagged_unattended_ticket_rows(
-            df_all,
-            focus=focus,
-        )
-        metrics["summary_focus"] = focus
     _render_perf_summary_context_bar(metrics, period_label, focus=focus)
     resort_block = metrics.get("resort")
     resort_open = (
@@ -17384,6 +17593,12 @@ def main() -> None:
 
     _check_password()
 
+    run_id = _dash_perf_bump_run()
+    main_nav = _normalize_dash_main_nav(
+        st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET)
+    )
+    perf_view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, ""))
+
     if not SUPABASE_URL or not SUPABASE_KEY:
         missing = [k for k, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
         on_cloud = str(_ENV_PATH).startswith("/mount/src/")
@@ -17421,7 +17636,13 @@ def main() -> None:
             str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
         )
         lookback_days, _, _ = _dash_date_range_lookback()
-        _render_dashboard(lookback_days=lookback_days)
+        with _dash_perf_span(
+            "app.rerun",
+            nav=main_nav,
+            view=perf_view or None,
+            run=run_id,
+        ):
+            _render_dashboard(lookback_days=lookback_days)
 
     _dashboard_body_fragment()
     _render_supabase_unreachable_banner()
@@ -24869,53 +25090,55 @@ def _render_dashboard(
         st.session_state.get(_DASH_MAIN_NAV_KEY, _DASH_NAV_TICKET)
     )
 
-    if main_nav == "Log":
-        _render_attendance_tab(lookback_days=lookback_days)
-        return
-    if main_nav == "Performance":
-        _render_field_performance_tab(lookback_days=lookback_days)
-        return
+    with _dash_perf_span("dashboard.render", nav=main_nav, lookback=lookback_days):
+        if main_nav == "Log":
+            _render_attendance_tab(lookback_days=lookback_days)
+            return
+        if main_nav == "Performance":
+            _render_field_performance_tab(lookback_days=lookback_days)
+            return
 
-    _maybe_run_unattended_close()
-    _maybe_toast_new_telegram_activity()
-    st.session_state.pop(_DISPATCH_CTX_SESSION_KEY, None)
+        _maybe_run_unattended_close()
+        _maybe_toast_new_telegram_activity()
 
-    try:
-        df_all = _fetch_tickets_cached()
-    except _TableMissingError as missing:
-        _render_missing_table_help(missing.table)
-        return
-    except Exception as exc:
-        st.error(f"Could not load tickets from Supabase: {exc}")
-        st.caption(
-            "Check `SUPABASE_URL` / `SUPABASE_KEY` / `TICKETS_TABLE` in env or Streamlit "
-            "Secrets. If the key is the **anon** publishable key, ensure RLS policies on "
-            f"`{TICKETS_TABLE}` allow **select** (and **update** for Command Center). "
-            "Apply pending SQL migrations if this project recently renamed `tickets` → "
-            "`tickets_active`."
-        )
-        return
-
-    if df_all.empty:
-        st.warning(
-            "No ticket rows returned (empty ``tickets_active`` or connection issue). "
-            "Queue counts are zero — **Performance** and **Log** still use attendance history."
-        )
-    elif "status" not in df_all.columns:
-        st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
-        return
-    elif not df_all.empty and "status" in df_all.columns:
-        mismatches = _fetch_pending_with_response_mismatch()
-        if mismatches:
-            shown = ", ".join(mismatches[:5])
-            st.error(
-                f"**{len(mismatches)}** ticket(s) look stuck in **Daily Task** after a field reply "
-                f"(e.g. {shown}). Use **Record response** on Daily Task, or check Railway bot logs "
-                "and `supabase/migrations/20260516_tickets_active_anon_policies.sql`. "
-                "Tickets **reassigned** for another visit are not listed here."
+        try:
+            with _dash_perf_span("dashboard.fetch_tickets"):
+                df_all = _fetch_tickets_cached()
+        except _TableMissingError as missing:
+            _render_missing_table_help(missing.table)
+            return
+        except Exception as exc:
+            st.error(f"Could not load tickets from Supabase: {exc}")
+            st.caption(
+                "Check `SUPABASE_URL` / `SUPABASE_KEY` / `TICKETS_TABLE` in env or Streamlit "
+                "Secrets. If the key is the **anon** publishable key, ensure RLS policies on "
+                f"`{TICKETS_TABLE}` allow **select** (and **update** for Command Center). "
+                "Apply pending SQL migrations if this project recently renamed `tickets` → "
+                "`tickets_active`."
             )
+            return
 
-    _render_dispatch_csm_dashboard(lookback_days=lookback_days)
+        if df_all.empty:
+            st.warning(
+                "No ticket rows returned (empty ``tickets_active`` or connection issue). "
+                "Queue counts are zero — **Performance** and **Log** still use attendance history."
+            )
+        elif "status" not in df_all.columns:
+            st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
+            return
+        elif not df_all.empty and "status" in df_all.columns:
+            mismatches = _fetch_pending_with_response_mismatch()
+            if mismatches:
+                shown = ", ".join(mismatches[:5])
+                st.error(
+                    f"**{len(mismatches)}** ticket(s) look stuck in **Daily Task** after a field reply "
+                    f"(e.g. {shown}). Use **Record response** on Daily Task, or check Railway bot logs "
+                    "and `supabase/migrations/20260516_tickets_active_anon_policies.sql`. "
+                    "Tickets **reassigned** for another visit are not listed here."
+                )
+
+        with _dash_perf_span("dashboard.dispatch_csm"):
+            _render_dispatch_csm_dashboard(lookback_days=lookback_days)
 
 
 def _get_performance_snapshot_counts(
@@ -25086,7 +25309,14 @@ def _perf_load_overview_visits_history(df_all: pd.DataFrame) -> pd.DataFrame:
     tnums = _perf_overview_ticket_numbers(df_all)
     if not tnums:
         return pd.DataFrame()
-    return _fetch_visits_for_snapshot_cached("\n".join(tnums))
+    cache_key = "\n".join(tnums)
+    cached = st.session_state.get(_PERF_VISITS_HISTORY_KEY)
+    if isinstance(cached, dict) and cached.get("_key") == cache_key:
+        visits = cached.get("visits")
+        return visits if isinstance(visits, pd.DataFrame) else pd.DataFrame()
+    visits = _fetch_visits_for_snapshot_cached(cache_key)
+    st.session_state[_PERF_VISITS_HISTORY_KEY] = {"_key": cache_key, "visits": visits}
+    return visits
 
 
 def _perf_overview_assignment_solo_shared_counts(
@@ -26281,11 +26511,20 @@ def _render_performance_detail_panel(
         )
         return
 
+    visits_for_detail = visits_all
+    if visits_for_detail is None or visits_for_detail.empty:
+        try:
+            with _dash_perf_span("perf.detail_fetch_visits"):
+                raw = _fetch_visits_in_range(range_start, range_end)
+            visits_for_detail = _perf_filter_visits_by_person(raw, str(selected))
+        except Exception:
+            visits_for_detail = pd.DataFrame()
+
     detail = _get_engineer_performance_detail(
         str(selected),
         df_all=df_all,
         sales_all=sales_all,
-        visits_all=visits_all,
+        visits_all=visits_for_detail,
         range_start=range_start,
         range_end=range_end,
         visits_history=visits_history,
@@ -26786,6 +27025,8 @@ def _render_perf_unattended_tab(
 def _perf_apply_focus_change() -> None:
     """Session-state only — run when Focus assignee changes."""
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+    _perf_clear_summary_cache()
+    st.session_state.pop(_PERF_VISITS_HISTORY_KEY, None)
     _sync_perf_detail_to_focus()
     _sync_perf_view_for_focus()
     st.session_state[_PERF_FOCUS_REV_KEY] = (
@@ -26800,6 +27041,7 @@ def _on_perf_focus_change() -> None:
 
 def _on_perf_view_change() -> None:
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+    _perf_clear_summary_cache()
 
 
 def _render_performance_sidebar() -> None:
@@ -26994,55 +27236,60 @@ def _render_perf_handled_tab(
 def _build_perf_context(lookback_days: int) -> dict[str, object]:
     """Performance tab context — slices, counts, and optional visit history."""
     del lookback_days
-    _init_perf_session_state()
-    _init_dash_date_range_state()
-    _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week")))
-    range_start, range_end = _get_dash_range()
-    focus = _perf_focus_for_filter()
-    try:
-        df_all = _fetch_tickets_cached()
-    except Exception:
-        df_all = pd.DataFrame()
-    field_has_data = not df_all.empty and "status" in df_all.columns
-    slices = _perf_prepare_snapshot_slices(
-        df_all if field_has_data else pd.DataFrame()
-    )
-    sales_all = pd.DataFrame()
-    try:
-        raw_sales = _fetch_sales_cases_cached()
-        sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
-    except Exception:
-        pass
-    counts = _get_performance_snapshot_counts(
-        slices=slices, sales_all=sales_all, focus=focus
-    )
-    view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
-    needs_range_visits = view == "Handled" or bool(
-        st.session_state.get(_PERF_SELECTED_ENGINEER_KEY)
-    )
-    visits_all = pd.DataFrame()
-    if needs_range_visits:
+    with _dash_perf_span("perf.build_context.total"):
+        _init_perf_session_state()
+        _init_dash_date_range_state()
+        _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week")))
+        range_start, range_end = _get_dash_range()
+        focus = _perf_focus_for_filter()
+        view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
         try:
-            visits_all = _fetch_visits_in_range(range_start, range_end)
+            with _dash_perf_span("perf.fetch_tickets"):
+                df_all = _fetch_tickets_cached()
+        except Exception:
+            df_all = pd.DataFrame()
+        field_has_data = not df_all.empty and "status" in df_all.columns
+        with _dash_perf_span("perf.prepare_slices"):
+            slices = _perf_prepare_snapshot_slices(
+                df_all if field_has_data else pd.DataFrame()
+            )
+        sales_all = pd.DataFrame()
+        try:
+            with _dash_perf_span("perf.fetch_sales"):
+                raw_sales = _fetch_sales_cases_cached()
+                sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
         except Exception:
             pass
-    visits_f = _perf_filter_visits_by_person(visits_all, focus)
-    visits_history = pd.DataFrame()
-    if field_has_data and view in ("Overview", "Unattended", "Summary"):
-        visits_history = _perf_load_overview_visits_history(df_all)
-    return {
-        "range_start": range_start,
-        "range_end": range_end,
-        "focus": focus,
-        "df_all": df_all,
-        "sales_all": sales_all,
-        "slices": slices,
-        "counts": counts,
-        "view": view,
-        "visits_all": visits_all,
-        "visits_f": visits_f,
-        "visits_history": visits_history,
-    }
+        with _dash_perf_span("perf.snapshot_counts"):
+            counts = _get_performance_snapshot_counts(
+                slices=slices, sales_all=sales_all, focus=focus
+            )
+        needs_range_visits = view == "Handled"
+        visits_all = pd.DataFrame()
+        if needs_range_visits:
+            try:
+                with _dash_perf_span("perf.fetch_visits_range", view=view):
+                    visits_all = _fetch_visits_in_range(range_start, range_end)
+            except Exception:
+                pass
+        visits_f = _perf_filter_visits_by_person(visits_all, focus)
+        visits_history = pd.DataFrame()
+        if field_has_data and view in ("Overview", "Unattended"):
+            with _dash_perf_span("perf.load_visits_history", view=view):
+                visits_history = _perf_load_overview_visits_history(df_all)
+        return {
+            "range_start": range_start,
+            "range_end": range_end,
+            "focus": focus,
+            "df_all": df_all,
+            "sales_all": sales_all,
+            "slices": slices,
+            "counts": counts,
+            "view": view,
+            "visits_all": visits_all,
+            "visits_f": visits_f,
+            "visits_history": visits_history,
+        }
 
 
 def _perf_context_cache_key(lookback_days: int) -> tuple[object, ...]:
@@ -27068,6 +27315,7 @@ def _load_perf_context(lookback_days: int) -> dict[str, object]:
     cache_key = _perf_context_cache_key(lookback_days)
     cached = st.session_state.get(_PERF_CTX_SESSION_KEY)
     if isinstance(cached, dict) and cached.get("_cache_key") == cache_key:
+        _dash_perf_write("perf.context_cache_hit", 0.0, view=cached.get("view"))
         return cached
     ctx = _build_perf_context(lookback_days)
     st.session_state[_PERF_CTX_SESSION_KEY] = {
@@ -27092,89 +27340,92 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
     visits_f = ctx["visits_f"]
     visits_history = ctx.get("visits_history", pd.DataFrame())
 
-    if view == "Overview":
-        _render_performance_metric_strip(counts=counts)
-        st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
-    elif view == "On hold":
-        _render_performance_metric_strip(counts=counts)
-        st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
-    elif view != "Summary":
-        st.caption(
-            "Queue snapshot cards apply to **Overview** and **On hold** only. "
-            "This view uses the header **time range**."
-        )
-        st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
-    if view == "Overview":
-        _render_perf_overview_tab(
-            df_all,
-            sales_all,
-            focus=focus,
-            range_start=range_start,
-            range_end=range_end,
-            visits_history=visits_history,
-        )
-    elif view == "Summary":
-        _render_perf_weekly_tab(
-            df_all,
-            sales_all,
-            focus=focus,
-            range_start=range_start,
-            range_end=range_end,
-        )
-    elif view == "Case info":
-        _render_perf_case_info_tab(
-            visits_all,
-            focus=focus,
-            sales_all=sales_all,
-            tickets_all=df_all,
-            range_start=range_start,
-            range_end=range_end,
-        )
-    elif view == "Handled":
-        handled_ctx = _perf_handled_tab_context(
-            df_all,
-            sales_all,
-            visits_all,
-            focus=focus,
-            range_start=range_start,
-            range_end=range_end,
-        )
-        _render_perf_handled_tab(**handled_ctx)
-    elif view == "On hold":
-        _render_perf_on_hold_tab(slices["on_hold"], focus=focus)
-    elif view == "Unattended":
-        _render_perf_unattended_tab(
-            df_all,
-            focus=focus,
-            range_start=range_start,
-            range_end=range_end,
-            visits_history=visits_history,
-        )
+    with _dash_perf_span("perf.render_view", view=view, focus=focus):
+        if view == "Overview":
+            _render_performance_metric_strip(counts=counts)
+            st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+        elif view == "On hold":
+            _render_performance_metric_strip(counts=counts)
+            st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+        elif view != "Summary":
+            st.caption(
+                "Queue snapshot cards apply to **Overview** and **On hold** only. "
+                "This view uses the header **time range**."
+            )
+            st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
+        if view == "Overview":
+            _render_perf_overview_tab(
+                df_all,
+                sales_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+                visits_history=visits_history,
+            )
+        elif view == "Summary":
+            _render_perf_weekly_tab(
+                df_all,
+                sales_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+            )
+        elif view == "Case info":
+            _render_perf_case_info_tab(
+                visits_all,
+                focus=focus,
+                sales_all=sales_all,
+                tickets_all=df_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
+        elif view == "Handled":
+            handled_ctx = _perf_handled_tab_context(
+                df_all,
+                sales_all,
+                visits_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            _render_perf_handled_tab(**handled_ctx)
+        elif view == "On hold":
+            _render_perf_on_hold_tab(slices["on_hold"], focus=focus)
+        elif view == "Unattended":
+            _render_perf_unattended_tab(
+                df_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+                visits_history=visits_history,
+            )
 
 
 @st.fragment
 def _perf_workspace_fragment(lookback_days: int) -> None:
     """Performance sidebar, main charts, and detail — one partial rerun on filter changes."""
-    board_col, detail_col = st.columns([6.8, 2.4], gap="small")
-    with board_col:
-        sb, main = st.columns([1.5, 7.0], gap="small")
-        with sb:
-            _render_performance_sidebar()
-        with main:
+    with _dash_perf_span("perf.workspace", lookback=lookback_days):
+        board_col, detail_col = st.columns([6.8, 2.4], gap="small")
+        with board_col:
+            sb, main = st.columns([1.5, 7.0], gap="small")
+            with sb:
+                _render_performance_sidebar()
+            with main:
+                ctx = _load_perf_context(lookback_days)
+                _render_performance_main(ctx)
+        with detail_col:
             ctx = _load_perf_context(lookback_days)
-            _render_performance_main(ctx)
-    with detail_col:
-        ctx = _load_perf_context(lookback_days)
-        focus_rev = int(st.session_state.get(_PERF_FOCUS_REV_KEY) or 0)
-        with st.container(key=f"perf_detail_{focus_rev}"):
-            _render_performance_detail_panel(
-                df_all=ctx["df_all"],
-                sales_all=ctx["sales_all"],
-                visits_all=ctx["visits_f"],
-                range_start=ctx["range_start"],
-                range_end=ctx["range_end"],
-                visits_history=ctx.get("visits_history"),
-            )
+            focus_rev = int(st.session_state.get(_PERF_FOCUS_REV_KEY) or 0)
+            with st.container(key=f"perf_detail_{focus_rev}"):
+                with _dash_perf_span("perf.detail_panel"):
+                    _render_performance_detail_panel(
+                        df_all=ctx["df_all"],
+                        sales_all=ctx["sales_all"],
+                        visits_all=ctx["visits_f"],
+                        range_start=ctx["range_start"],
+                        range_end=ctx["range_end"],
+                        visits_history=ctx.get("visits_history"),
+                    )
 
 
 def _render_performance_tab(*, lookback_days: int) -> None:
