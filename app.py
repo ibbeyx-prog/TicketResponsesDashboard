@@ -3531,6 +3531,18 @@ _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
 )
 
 
+def _invalidate_sales_cases_cache() -> None:
+    """Refresh resort queue routing after any sales-case write."""
+    _invalidate_dashboard_data_cache(
+        tickets=False,
+        sales_cases=True,
+        attendance=False,
+        visits=False,
+        field_engineers=False,
+        task_categories=False,
+    )
+
+
 def _invalidate_dashboard_data_cache(
     *,
     tickets: bool = True,
@@ -20098,17 +20110,20 @@ def _sales_cases_update_row(row_id: str, payload: dict) -> None:
     client = _get_supabase_client()
     body = {**payload, "updated_at": _cc_utc_now_iso()}
     client.table(SALES_CASES_TABLE).update(body).eq("id", row_id).execute()
+    _invalidate_sales_cases_cache()
 
 
 def _sales_cases_insert_row(payload: dict) -> None:
     client = _get_supabase_client()
     row = {**payload, "updated_at": _cc_utc_now_iso(), "created_at": _cc_utc_now_iso()}
     client.table(SALES_CASES_TABLE).insert(row).execute()
+    _invalidate_sales_cases_cache()
 
 
 def _sales_cases_delete_row(row_id: str) -> None:
     client = _get_supabase_client()
     client.table(SALES_CASES_TABLE).delete().eq("id", row_id).execute()
+    _invalidate_sales_cases_cache()
 
 
 def _sc_filter_sales_df(df: pd.DataFrame, statuses: tuple[str, ...]) -> pd.DataFrame:
@@ -21437,7 +21452,6 @@ def _sales_floor_move(case_ref: str, destination: str) -> None:
     if err:
         st.toast(str(err).replace("**", ""), icon="⚠️")
         return
-    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
     st.toast(f"{case_ref} → {destination}", icon="✅")
     _rerun_dispatch_after_ticket_write()
 
