@@ -3501,6 +3501,8 @@ _PERF_CTX_SESSION_KEY = "_perf_ctx_run"
 _PERF_SUMMARY_CACHE_KEY = "_perf_summary_report_cache"
 _PERF_VISITS_HISTORY_KEY = "_perf_visits_history_cache"
 _PERF_SUMMARY_SECTION_KEY = "_perf_summary_active_section"
+_PERF_BREAKDOWN_FILTER_CAT_KEY = "_perf_breakdown_filter_cat"
+_PERF_BREAKDOWN_FILTER_CLOSURE_KEY = "_perf_breakdown_filter_closure"
 
 _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
     "ticket_number",
@@ -9534,8 +9536,12 @@ def _render_dash_menu_time_range() -> str:
 
 
 def _apply_dash_range_change() -> None:
-    """Refresh cached reads after the header time-range picker changes."""
-    _invalidate_dashboard_data_cache()
+    """Refresh range-scoped caches after the header time-range picker changes."""
+    # Tickets/sales snapshots do not depend on the header range — avoid refetching them.
+    _fetch_visits_in_range_cached.clear()
+    _perf_weekly_resolution_trend_cached.clear()
+    _perf_monthly_resolution_trend_cached.clear()
+    _perf_breakdown_notes_cached.clear()
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
     st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
 
@@ -11759,6 +11765,302 @@ def _perf_priority_action_pill(action: str) -> str:
     return f'<span class="weekly-action-pill {cls}">{html.escape(label)}</span>'
 
 
+_PERF_BREAKDOWN_ADMIN_ACTIONS: frozenset[str] = _ADMIN_COMMENT_ACTION_TYPES | frozenset(
+    {"AdminCorrection"}
+)
+
+
+def _perf_breakdown_category_options(detail_df: pd.DataFrame) -> list[str]:
+    if detail_df.empty or "Category" not in detail_df.columns:
+        return []
+    counts = detail_df.drop_duplicates(subset=["ID"], keep="first")["Category"].astype(str).value_counts()
+    return counts.index.tolist()
+
+
+def _perf_breakdown_closure_options(detail_df: pd.DataFrame) -> list[str]:
+    if detail_df.empty or "Closure" not in detail_df.columns:
+        return []
+    counts = detail_df.drop_duplicates(subset=["ID"], keep="first")["Closure"].astype(str).value_counts()
+    ordered = [c for c in _WEEKLY_EXEC_OUTCOME_ORDER if c in counts.index]
+    extras = [c for c in counts.index.tolist() if c not in ordered]
+    return ordered + extras
+
+
+def _perf_filter_breakdown_detail(
+    detail_df: pd.DataFrame,
+    *,
+    category: str,
+    closure: str,
+) -> pd.DataFrame:
+    if detail_df.empty:
+        return detail_df.iloc[0:0].copy()
+    work = detail_df.drop_duplicates(subset=["ID"], keep="first").copy()
+    cat = str(category or "All").strip()
+    clo = str(closure or "All").strip()
+    if cat and cat != "All":
+        work = work.loc[work["Category"].astype(str).eq(cat)]
+    if clo and clo != "All":
+        work = work.loc[work["Closure"].astype(str).eq(clo)]
+    if "Activity (local)" in work.columns:
+        return work.sort_values("Activity (local)", ascending=False)
+    return work
+
+
+def _perf_truncate_table_cell(text: object, *, max_len: int = 140) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return "—"
+    one_line = " · ".join(part.strip() for part in raw.splitlines() if part.strip())
+    if len(one_line) <= max_len:
+        return one_line
+    return one_line[: max_len - 1] + "…"
+
+
+def _perf_format_breakdown_log_timeline(
+    logs_df: pd.DataFrame,
+    *,
+    allowed_actions: frozenset[str],
+) -> dict[str, str]:
+    if logs_df.empty or "ticket_number" not in logs_df.columns:
+        return {}
+    out: dict[str, list[str]] = {}
+    sub = logs_df[
+        logs_df["action_type"].astype(str).str.strip().isin(allowed_actions)
+    ].copy()
+    if sub.empty:
+        return {}
+    if "timestamp" in sub.columns:
+        sub = sub.sort_values("timestamp", ascending=True)
+    for _, row in sub.iterrows():
+        tn = str(row.get("ticket_number") or "").strip()
+        if not tn:
+            continue
+        at_label, _ = _perf_matrix_case_info_ts(row.get("timestamp"))
+        author = _clean_display_value(row.get("member_username"), default="—") or "—"
+        note = _clean_display_value(row.get("note"))
+        if note:
+            note = _PERF_MATRIX_COMMENT_PREFIX_RE.sub("", note).strip()
+        photo = _clean_display_value(row.get("photo_url"))
+        if not note and photo.startswith("http"):
+            note = "(photo)"
+        if not note:
+            continue
+        out.setdefault(tn, []).append(f"{at_label} · {author}: {note}")
+    return {tn: "\n".join(lines) for tn, lines in out.items()}
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_breakdown_notes_cached(
+    csm_ids: tuple[str, ...],
+    sales_ids: tuple[str, ...],
+) -> dict[str, str]:
+    notes: dict[str, str] = {}
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return notes
+    client = _get_supabase_client()
+    chunk_size = 80
+    for i in range(0, len(csm_ids), chunk_size):
+        chunk = list(csm_ids[i : i + chunk_size])
+        if not chunk:
+            continue
+        try:
+            res = (
+                client.table(TICKETS_TABLE)
+                .select("ticket_number, additional_info")
+                .in_("ticket_number", chunk)
+                .execute()
+            )
+        except Exception:
+            continue
+        for row in res.data or []:
+            tn = str(row.get("ticket_number") or "").strip()
+            note = _clean_display_value(row.get("additional_info"))
+            if tn and note:
+                notes[tn] = note
+    for i in range(0, len(sales_ids), chunk_size):
+        chunk = list(sales_ids[i : i + chunk_size])
+        if not chunk:
+            continue
+        try:
+            res = (
+                client.table(SALES_CASES_TABLE)
+                .select("case_ref, description, additional_info")
+                .in_("case_ref", chunk)
+                .execute()
+            )
+        except Exception:
+            continue
+        for row in res.data or []:
+            ref = str(row.get("case_ref") or "").strip()
+            note = _clean_display_value(row.get("additional_info")) or _clean_display_value(
+                row.get("description")
+            )
+            if ref and note:
+                notes[ref] = note
+    return notes
+
+
+def _perf_build_breakdown_drilldown_df(
+    filtered: pd.DataFrame,
+    *,
+    notes_map: dict[str, str],
+    field_map: dict[str, str],
+    admin_map: dict[str, str],
+    table_preview: bool = True,
+) -> pd.DataFrame:
+    if filtered.empty:
+        return pd.DataFrame(
+            columns=[
+                "Ticket #",
+                "Track",
+                "Closure",
+                "Notes",
+                "Field responses",
+                "Admin responses",
+            ]
+        )
+    rows: list[dict[str, str]] = []
+    for _, row in filtered.iterrows():
+        case_id = str(row.get("ID") or "").strip()
+        notes = notes_map.get(case_id, "")
+        field_text = field_map.get(case_id, "")
+        admin_text = admin_map.get(case_id, "")
+        if table_preview:
+            notes = _perf_truncate_table_cell(notes)
+            field_text = _perf_truncate_table_cell(field_text)
+            admin_text = _perf_truncate_table_cell(admin_text)
+        rows.append(
+            {
+                "Ticket #": case_id,
+                "Track": str(row.get("Track") or ""),
+                "Closure": str(row.get("Closure") or ""),
+                "Notes": notes or "—",
+                "Field responses": field_text or "—",
+                "Admin responses": admin_text or "—",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _perf_summary_attach_trend_metrics(
+    metrics: dict[str, object],
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    period: str,
+    week_offset: int,
+    focus: str = "All",
+) -> None:
+    """Lazy-load resolution trend (4 prior buckets) — Overview only."""
+    if metrics.get("_trend_loaded"):
+        return
+    tickets_sig = _perf_data_signature(df_all)
+    sales_sig = _perf_data_signature(sales_all)
+    if period == "Monthly":
+        trend_df = _perf_monthly_resolution_trend_cached(
+            end_month_offset=week_offset,
+            months=4,
+            focus=focus,
+            tickets_sig=tickets_sig,
+            sales_sig=sales_sig,
+        )
+    else:
+        trend_df = _perf_weekly_resolution_trend_cached(
+            end_week_offset=week_offset,
+            weeks=4,
+            focus=focus,
+            tickets_sig=tickets_sig,
+            sales_sig=sales_sig,
+        )
+    metrics["trend_df"] = trend_df
+    metrics["rate_delta"] = _perf_rate_delta_from_trend(
+        trend_df if isinstance(trend_df, pd.DataFrame) else pd.DataFrame(),
+        int(metrics.get("resolution_rate") or 0),
+    )
+    metrics["_trend_loaded"] = True
+
+
+def _perf_summary_attach_team_assignment(
+    metrics: dict[str, object],
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    if isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
+        return
+    metrics["team_assignment_df"] = _perf_team_assignment_summary_df(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+
+
+def _perf_summary_attach_resort_block(
+    metrics: dict[str, object],
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    focus: str,
+) -> None:
+    if isinstance(metrics.get("resort"), dict):
+        return
+    metrics["resort"] = _perf_resort_summary_metrics(
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+    )
+
+
+def _perf_summary_attach_focus_engineer_block(
+    metrics: dict[str, object],
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    bundle: dict[str, object],
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    focus: str,
+) -> None:
+    if focus in ("", "All") or "assigned_in_range" in metrics:
+        return
+    with _dash_perf_span("perf.summary_focus_block"):
+        visits = _perf_load_overview_visits_history(df_all)
+        detail = bundle.get("detail")
+        detail_for_tracks = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+        attended_res, attended_rsr = _perf_attended_track_counts(detail_for_tracks)
+        metrics.update(
+            _perf_summary_focus_engineer_metrics_with_reconciliation(
+                df_all,
+                sales_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+                attended_yours_total=int(metrics.get("total") or 0),
+                visits_history=visits,
+            )
+        )
+        metrics.update(_perf_summary_derived_metrics(metrics))
+        metrics["attended_residential"] = attended_res
+        metrics["attended_resort"] = attended_rsr
+        metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
+            df_all,
+            focus=focus,
+            visits=visits,
+            range_start=range_start,
+            range_end=range_end,
+        )
+        metrics["unattended_flagged_rows"] = _perf_flagged_unattended_ticket_rows(
+            df_all,
+            focus=focus,
+        )
+        metrics["summary_focus"] = focus
+
+
 def _perf_weekly_summary_metrics(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
@@ -11768,35 +12070,17 @@ def _perf_weekly_summary_metrics(
     week_offset: int,
     focus: str = "All",
 ) -> dict[str, object]:
-    """Executive Summary metrics + trend frame for the selected period."""
+    """Executive Summary metrics for the selected period (trend/resort loaded lazily)."""
     detail = bundle.get("detail")
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
     metrics = _perf_weekly_executive_metrics(detail_df)
-    tickets_sig = _perf_data_signature(df_all)
-    sales_sig = _perf_data_signature(sales_all)
-    if period == "Monthly":
-        metrics["trend_df"] = _perf_monthly_resolution_trend_cached(
-            end_month_offset=week_offset,
-            months=4,
-            focus=focus,
-            tickets_sig=tickets_sig,
-            sales_sig=sales_sig,
-        )
-    else:
-        metrics["trend_df"] = _perf_weekly_resolution_trend_cached(
-            end_week_offset=week_offset,
-            weeks=4,
-            focus=focus,
-            tickets_sig=tickets_sig,
-            sales_sig=sales_sig,
-        )
     total = int(metrics.get("total") or 0)
     investigation = int(metrics.get("investigation") or 0)
     metrics["investigation_pct"] = int(round(100 * investigation / total)) if total else 0
-    metrics["rate_delta"] = _perf_rate_delta_from_trend(
-        metrics["trend_df"] if isinstance(metrics["trend_df"], pd.DataFrame) else pd.DataFrame(),
-        int(metrics.get("resolution_rate") or 0),
-    )
+    metrics["rate_delta"] = ""
+    metrics["_summary_period"] = period
+    metrics["_summary_offset"] = week_offset
+    metrics["_summary_focus"] = focus
     return metrics
 
 
@@ -12935,6 +13219,7 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
             columns=["Closure", "Assigned category", "Tickets", "Action Required"]
         ),
         "trend_df": empty_trend,
+        "detail_df": pd.DataFrame(),
     }
     if detail_df.empty:
         return base
@@ -13024,6 +13309,7 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
         "category_df": category_df,
         "priority_df": priority,
         "trend_df": empty_trend,
+        "detail_df": view,
     }
 
 
@@ -13175,13 +13461,21 @@ def _render_perf_summary_overview_tab(
 
 
 def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
-    """Breakdown — category chart and top priority rows."""
+    """Breakdown — category chart, drill-down list, and top priority rows."""
     st.markdown('<p class="weekly-section-label">By category & closure</p>', unsafe_allow_html=True)
+    detail_df = metrics.get("detail_df")
+    if not isinstance(detail_df, pd.DataFrame):
+        detail_df = pd.DataFrame()
     category_df = metrics.get("category_df")
+    chart_event = None
     if isinstance(category_df, pd.DataFrame) and not category_df.empty:
         plot_df = _perf_category_chart_top_n(category_df)
         cat_domains, cat_colors = _perf_exec_outcome_color_scale(plot_df["outcome"])
         category_plot = _perf_with_closure_order(plot_df, "outcome")
+        breakdown_pick = alt.selection_point(
+            name="breakdown_pick",
+            fields=["category", "outcome"],
+        )
         bar = _weekly_altair_theme(
             alt.Chart(category_plot)
             .mark_bar()
@@ -13198,6 +13492,7 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
                     scale=alt.Scale(domain=cat_domains, range=cat_colors),
                     legend=alt.Legend(title="Closure"),
                 ),
+                opacity=alt.condition(breakdown_pick, alt.value(1.0), alt.value(0.72)),
                 order=alt.Order("_closure_order:Q"),
                 tooltip=[
                     alt.Tooltip("category:N", title="Category"),
@@ -13205,15 +13500,196 @@ def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
                     alt.Tooltip("count:Q", title="Tickets"),
                 ],
             )
+            .add_params(breakdown_pick)
             .properties(height=300)
         )
-        st.altair_chart(bar, width="stretch")
+        chart_event = st.altair_chart(
+            bar,
+            width="stretch",
+            on_select="rerun",
+            key="perf_breakdown_category_chart",
+        )
         if len(category_df["category"].astype(str).unique()) > _WEEKLY_SUMMARY_TOP_CATEGORIES:
             st.caption(
-                f"Showing top {_WEEKLY_SUMMARY_TOP_CATEGORIES} categories; remainder grouped as Other."
+                f"Showing top {_WEEKLY_SUMMARY_TOP_CATEGORIES} categories; remainder grouped as Other. "
+                "Click a bar segment to filter the ticket list below."
             )
+        else:
+            st.caption("Click a bar segment to filter the ticket list below.")
     else:
         st.caption("No category breakdown for this range.")
+
+    if not detail_df.empty:
+        if chart_event is not None and getattr(chart_event, "selection", None):
+            picks = chart_event.selection.get("breakdown_pick", [])
+            if picks:
+                first = picks[0] if isinstance(picks[0], dict) else {}
+                picked_cat = str(first.get("category") or "").strip()
+                picked_closure = str(first.get("outcome") or "").strip()
+                if picked_cat:
+                    st.session_state[_PERF_BREAKDOWN_FILTER_CAT_KEY] = picked_cat
+                if picked_closure:
+                    st.session_state[_PERF_BREAKDOWN_FILTER_CLOSURE_KEY] = picked_closure
+
+        category_options = ["All"] + _perf_breakdown_category_options(detail_df)
+        closure_options = ["All"] + _perf_breakdown_closure_options(detail_df)
+        if st.session_state.get(_PERF_BREAKDOWN_FILTER_CAT_KEY) not in category_options:
+            st.session_state[_PERF_BREAKDOWN_FILTER_CAT_KEY] = "All"
+        if st.session_state.get(_PERF_BREAKDOWN_FILTER_CLOSURE_KEY) not in closure_options:
+            st.session_state[_PERF_BREAKDOWN_FILTER_CLOSURE_KEY] = "All"
+
+        st.markdown(
+            '<p class="weekly-section-label" style="margin-top:14px">Category detail</p>',
+            unsafe_allow_html=True,
+        )
+        f_cat, f_closure = st.columns(2)
+        with f_cat:
+            selected_category = st.selectbox(
+                "Category",
+                category_options,
+                key=_PERF_BREAKDOWN_FILTER_CAT_KEY,
+            )
+        with f_closure:
+            selected_closure = st.selectbox(
+                "Closure",
+                closure_options,
+                key=_PERF_BREAKDOWN_FILTER_CLOSURE_KEY,
+            )
+
+        filtered = _perf_filter_breakdown_detail(
+            detail_df,
+            category=str(selected_category),
+            closure=str(selected_closure),
+        )
+        if filtered.empty:
+            st.info("No tickets match this category and closure filter.")
+        else:
+            filter_bits = []
+            if str(selected_category) != "All":
+                filter_bits.append(str(selected_category))
+            if str(selected_closure) != "All":
+                filter_bits.append(str(selected_closure))
+            filter_label = " · ".join(filter_bits) if filter_bits else "All categories"
+            load_responses = str(selected_category) != "All" or str(selected_closure) != "All"
+
+            if load_responses:
+                with _dash_perf_span(
+                    "perf.breakdown_drilldown",
+                    category=selected_category,
+                    closure=selected_closure,
+                    tickets=len(filtered),
+                ):
+                    case_ids = [
+                        str(v).strip()
+                        for v in filtered["ID"].astype(str).tolist()
+                        if str(v).strip()
+                    ]
+                    csm_ids = tuple(
+                        sorted(
+                            {
+                                str(r["ID"]).strip()
+                                for _, r in filtered.iterrows()
+                                if str(r.get("Track") or "") == "CSM"
+                                and str(r.get("ID") or "").strip()
+                            }
+                        )
+                    )
+                    sales_ids = tuple(
+                        sorted(
+                            {
+                                str(r["ID"]).strip()
+                                for _, r in filtered.iterrows()
+                                if str(r.get("Track") or "") == "Sales"
+                                and str(r.get("ID") or "").strip()
+                            }
+                        )
+                    )
+                    logs_df = _fetch_attendance_for_matrix_tickets(case_ids)
+                    field_map = _perf_format_breakdown_log_timeline(
+                        logs_df,
+                        allowed_actions=frozenset({"Response"}),
+                    )
+                    admin_map = _perf_format_breakdown_log_timeline(
+                        logs_df,
+                        allowed_actions=_PERF_BREAKDOWN_ADMIN_ACTIONS,
+                    )
+                    notes_map = _perf_breakdown_notes_cached(csm_ids, sales_ids)
+                    drill_preview = _perf_build_breakdown_drilldown_df(
+                        filtered,
+                        notes_map=notes_map,
+                        field_map=field_map,
+                        admin_map=admin_map,
+                        table_preview=True,
+                    )
+                    drill_full = _perf_build_breakdown_drilldown_df(
+                        filtered,
+                        notes_map=notes_map,
+                        field_map=field_map,
+                        admin_map=admin_map,
+                        table_preview=False,
+                    )
+            else:
+                basic_cols = [
+                    c
+                    for c in (
+                        "ID",
+                        "Track",
+                        "Closure",
+                        "Category",
+                        "Attended by",
+                        "Activity (local)",
+                    )
+                    if c in filtered.columns
+                ]
+                drill_preview = filtered[basic_cols].rename(columns={"ID": "Ticket #"})
+                drill_full = drill_preview.copy()
+                st.caption(
+                    "Select a **category** or **closure** (or click a chart bar) "
+                    "to load notes and field/admin responses."
+                )
+
+            st.caption(f"**{len(drill_preview)}** ticket(s) — {filter_label}")
+            _render_perf_dataframe(
+                drill_preview,
+                column_config={
+                    "Ticket #": st.column_config.TextColumn(width="small"),
+                    "Closure": st.column_config.TextColumn(width="medium"),
+                    "Notes": st.column_config.TextColumn(width="medium"),
+                    "Field responses": st.column_config.TextColumn(width="large"),
+                    "Admin responses": st.column_config.TextColumn(width="large"),
+                },
+            )
+            if load_responses:
+                with st.expander("Full response history", expanded=False):
+                    for _, row in drill_full.iterrows():
+                        ticket_no = str(row.get("Ticket #") or "")
+                        st.markdown(
+                            f"**{html.escape(ticket_no)}** · "
+                            f"{html.escape(str(row.get('Track') or ''))}"
+                        )
+                        st.markdown(
+                            f"<span style='color:#8a9ac0;font-size:12px'>Closure: "
+                            f"{html.escape(str(row.get('Closure') or '—'))}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown("**Notes**")
+                        st.text(str(row.get("Notes") or "—"))
+                        st.markdown("**Field responses**")
+                        st.text(str(row.get("Field responses") or "—"))
+                        st.markdown("**Admin responses**")
+                        st.text(str(row.get("Admin responses") or "—"))
+                        st.markdown(
+                            "<hr style='border-color:#1a2035;margin:10px 0'>",
+                            unsafe_allow_html=True,
+                        )
+            stamp = f"{selected_category}_{selected_closure}".replace(" ", "_")
+            st.download_button(
+                "Download filtered detail CSV",
+                data=drill_full.to_csv(index=False).encode("utf-8"),
+                file_name=f"breakdown_{stamp}.csv",
+                mime="text/csv",
+                key=f"perf_breakdown_csv_{stamp}",
+            )
 
     priority_df = metrics.get("priority_df")
     if isinstance(priority_df, pd.DataFrame) and not priority_df.empty:
@@ -13583,6 +14059,8 @@ def _render_perf_weekly_executive_dashboard(
     period_label: str = "",
     metrics: dict[str, object] | None = None,
     focus: str = "All",
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> dict[str, object]:
     """Executive summary — one section at a time (avoids rendering all tabs each rerun)."""
     if metrics is None:
@@ -13594,6 +14072,8 @@ def _render_perf_weekly_executive_dashboard(
             week_offset=week_offset,
             focus=focus,
         )
+    if range_start is None or range_end is None:
+        range_start, range_end = _get_dash_range()
     summary = bundle.get("summary")
     detail = bundle.get("detail")
     summary_df = summary if isinstance(summary, pd.DataFrame) else pd.DataFrame()
@@ -13614,17 +14094,78 @@ def _render_perf_weekly_executive_dashboard(
     st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
     if selected == "Overview":
-        _render_perf_summary_overview_tab(metrics, period_label=period_label)
+        with _dash_perf_span("perf.summary_section", section="Overview"):
+            _perf_summary_attach_trend_metrics(
+                metrics,
+                df_all,
+                sales_all,
+                period=period,
+                week_offset=week_offset,
+                focus=focus,
+            )
+            _perf_summary_attach_team_assignment(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            if focus not in ("", "All"):
+                _perf_summary_attach_focus_engineer_block(
+                    metrics,
+                    df_all,
+                    sales_all,
+                    bundle,
+                    range_start=range_start,
+                    range_end=range_end,
+                    focus=focus,
+                )
+            _render_perf_summary_overview_tab(metrics, period_label=period_label)
     elif selected == "Breakdown":
-        _render_perf_summary_breakdown_tab(metrics)
+        with _dash_perf_span("perf.summary_section", section="Breakdown"):
+            if not isinstance(metrics.get("detail_df"), pd.DataFrame):
+                fallback_detail = detail_df.copy()
+                if not fallback_detail.empty and "Closure" not in fallback_detail.columns:
+                    fallback_detail["Closure"] = _perf_detail_outcome_series(fallback_detail)
+                metrics = {**metrics, "detail_df": fallback_detail}
+            _render_perf_summary_breakdown_tab(metrics)
     elif selected == "Resort":
-        _render_perf_summary_resort_tab(metrics, d0=week_start, d1=week_end)
+        with _dash_perf_span("perf.summary_section", section="Resort"):
+            _perf_summary_attach_resort_block(
+                metrics,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                focus=focus,
+            )
+            _render_perf_summary_resort_tab(metrics, d0=week_start, d1=week_end)
     elif selected == "Staff & export":
-        _render_perf_summary_staff_tab(
-            summary_df, detail_df, d0=week_start, d1=week_end, metrics=metrics
-        )
+        with _dash_perf_span("perf.summary_section", section="Staff"):
+            if focus not in ("", "All"):
+                _perf_summary_attach_focus_engineer_block(
+                    metrics,
+                    df_all,
+                    sales_all,
+                    bundle,
+                    range_start=range_start,
+                    range_end=range_end,
+                    focus=focus,
+                )
+            _render_perf_summary_staff_tab(
+                summary_df, detail_df, d0=week_start, d1=week_end, metrics=metrics
+            )
     elif selected == "Unattended":
-        _render_perf_summary_unattended_tab(metrics)
+        with _dash_perf_span("perf.summary_section", section="Unattended"):
+            _perf_summary_attach_focus_engineer_block(
+                metrics,
+                df_all,
+                sales_all,
+                bundle,
+                range_start=range_start,
+                range_end=range_end,
+                focus=focus,
+            )
+            _render_perf_summary_unattended_tab(metrics)
     return metrics
 
 
@@ -13714,53 +14255,10 @@ def _perf_load_summary_report_package(
         week_offset=period_offset,
         focus=focus,
     )
-    metrics["team_assignment_df"] = _perf_team_assignment_summary_df(
-        df_all,
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
-    )
     metrics["snapshot_residential"] = len(df_all) if not df_all.empty else 0
     metrics["snapshot_resort"] = (
         len(sales_all) if sales_all is not None and not sales_all.empty else 0
     )
-    metrics["resort"] = _perf_resort_summary_metrics(
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
-        focus=focus,
-    )
-    if focus not in ("", "All"):
-        visits = _perf_load_overview_visits_history(df_all)
-        detail_df = bundle.get("detail")
-        detail_for_tracks = detail_df if isinstance(detail_df, pd.DataFrame) else pd.DataFrame()
-        attended_res, attended_rsr = _perf_attended_track_counts(detail_for_tracks)
-        metrics.update(
-            _perf_summary_focus_engineer_metrics_with_reconciliation(
-                df_all,
-                sales_all,
-                focus=focus,
-                range_start=range_start,
-                range_end=range_end,
-                attended_yours_total=int(metrics.get("total") or 0),
-                visits_history=visits,
-            )
-        )
-        metrics.update(_perf_summary_derived_metrics(metrics))
-        metrics["attended_residential"] = attended_res
-        metrics["attended_resort"] = attended_rsr
-        metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
-            df_all,
-            focus=focus,
-            visits=visits,
-            range_start=range_start,
-            range_end=range_end,
-        )
-        metrics["unattended_flagged_rows"] = _perf_flagged_unattended_ticket_rows(
-            df_all,
-            focus=focus,
-        )
-        metrics["summary_focus"] = focus
 
     st.session_state[_PERF_SUMMARY_CACHE_KEY] = {
         "_key": cache_key,
@@ -13841,32 +14339,33 @@ def _render_perf_weekly_attended_report(
     )
 
     _inject_weekly_summary_styles()
-    bundle, metrics = _perf_load_summary_report_package(
-        df_all,
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
-        focus=focus,
-        period=period,
-        period_offset=period_offset,
-        this_week_bundle=this_week_bundle,
-        d0=d0,
-        d1=d1,
-    )
+    with st.spinner("Loading summary…"):
+        with _dash_perf_span("perf.load_summary_package"):
+            bundle, metrics = _perf_load_summary_report_package(
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                focus=focus,
+                period=period,
+                period_offset=period_offset,
+                this_week_bundle=this_week_bundle,
+                d0=d0,
+                d1=d1,
+            )
     _render_perf_summary_context_bar(metrics, period_label, focus=focus)
-    resort_block = metrics.get("resort")
-    resort_open = (
-        int(resort_block.get("open_snapshot") or 0)
-        if isinstance(resort_block, dict)
-        else 0
-    )
-    resort_attended = (
-        int(resort_block.get("attended_in_period") or 0)
-        if isinstance(resort_block, dict)
-        else 0
-    )
+    if focus not in ("", "All"):
+        _perf_summary_attach_focus_engineer_block(
+            metrics,
+            df_all,
+            sales_all,
+            bundle,
+            range_start=range_start,
+            range_end=range_end,
+            focus=focus,
+        )
     has_attended = int(metrics.get("total") or 0) > 0
-    has_resort = resort_open > 0 or resort_attended > 0
+    has_resort = int(bundle.get("n_sales") or 0) > 0
     has_unattended = int(metrics.get("unattended_assignments") or 0) > 0
     has_assigned = int(metrics.get("assigned_in_range") or 0) > 0
     has_closed_by_others = int(metrics.get("closed_by_others") or 0) > 0
@@ -13887,6 +14386,8 @@ def _render_perf_weekly_attended_report(
         period_label=period_label,
         metrics=metrics,
         focus=focus,
+        range_start=range_start,
+        range_end=range_end,
     )
 
 
@@ -27419,16 +27920,15 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
 def _perf_workspace_fragment(lookback_days: int) -> None:
     """Performance sidebar, main charts, and detail — one partial rerun on filter changes."""
     with _dash_perf_span("perf.workspace", lookback=lookback_days):
+        ctx = _load_perf_context(lookback_days)
         board_col, detail_col = st.columns([6.8, 2.4], gap="small")
         with board_col:
             sb, main = st.columns([1.5, 7.0], gap="small")
             with sb:
                 _render_performance_sidebar()
             with main:
-                ctx = _load_perf_context(lookback_days)
                 _render_performance_main(ctx)
         with detail_col:
-            ctx = _load_perf_context(lookback_days)
             focus_rev = int(st.session_state.get(_PERF_FOCUS_REV_KEY) or 0)
             with st.container(key=f"perf_detail_{focus_rev}"):
                 with _dash_perf_span("perf.detail_panel"):
