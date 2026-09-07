@@ -1128,7 +1128,7 @@ def _sc_sync_region_engineer_widgets(
     engineer_manual2_key: str | None = None,
     restore_handle_2: str = "",
 ) -> bool:
-    """When Region Team is not CENTRAL, clear engineer; restore when switching back."""
+    """Track region changes; restore engineer widgets when switching back to CENTRAL."""
     region = str(st.session_state.get(region_key, "")).strip()
     central = _sc_region_is_central(region)
     prev = st.session_state.get(region_watch_key)
@@ -1136,12 +1136,7 @@ def _sc_sync_region_engineer_widgets(
     man2 = engineer_manual2_key or f"{engineer_manual_key}_2"
     if prev != region:
         st.session_state[region_watch_key] = region
-        if not central:
-            st.session_state.pop(engineer_select_key, None)
-            st.session_state.pop(engineer_manual_key, None)
-            st.session_state.pop(sel2, None)
-            st.session_state.pop(man2, None)
-        else:
+        if central:
             if restore_handle:
                 handle = restore_handle.lstrip("@").lower()
                 _sync_engineer_widget_value(
@@ -1176,30 +1171,21 @@ def _render_sc_engineer_field(
     select2_key: str | None = None,
     manual2_key: str | None = None,
 ) -> None:
-    """Engineer picker(s) for CENTRAL; blank disabled field for regional teams."""
-    if central:
-        eng2_key = select2_key or f"{select_key}_2"
-        man2_key = manual2_key or f"{manual_key}_2"
-        if select2_key is None and manual2_key is None:
-            _render_engineer_pair_fields(
-                fe_names=fe_names,
-                fe_missing=fe_missing,
-                engineer_key=select_key if fe_names and not fe_missing else manual_key,
-                engineer2_key=eng2_key if fe_names and not fe_missing else man2_key,
-            )
-        else:
-            _render_engineer_pair_fields(
-                fe_names=fe_names,
-                fe_missing=fe_missing,
-                engineer_key=select_key if fe_names and not fe_missing else manual_key,
-                engineer2_key=eng2_key if fe_names and not fe_missing else man2_key,
-            )
-    else:
+    """Primary + optional co-assignee — all region teams (CENTRAL posts Telegram at intake)."""
+    del blank_key
+    if not central:
         st.caption(
-            "Regional team — leave engineer blank; assign from **Site Visit** "
-            "when the case is **Regional for site visit**."
+            "Regional team — assign one or two engineers below, or leave blank "
+            "for desk-only intake (assign later via **Reassign**)."
         )
-        st.text_input("Engineer", value="", disabled=True, key=blank_key)
+    eng2_key = select2_key or f"{select_key}_2"
+    man2_key = manual2_key or f"{manual_key}_2"
+    _render_engineer_pair_fields(
+        fe_names=fe_names,
+        fe_missing=fe_missing,
+        engineer_key=select_key if fe_names and not fe_missing else manual_key,
+        engineer2_key=eng2_key if fe_names and not fe_missing else man2_key,
+    )
 
 
 def _sc_resolve_sales_engineer_handle(
@@ -1211,9 +1197,9 @@ def _sc_resolve_sales_engineer_handle(
     manual_key: str,
     select2_key: str | None = None,
     manual2_key: str | None = None,
+    required_primary: bool = True,
 ) -> str | None:
-    if not central:
-        return None
+    del central
     eng2 = select2_key or f"{select_key}_2"
     man2 = manual2_key or f"{manual_key}_2"
     h1, _h2 = _resolve_engineer_pair(
@@ -1221,7 +1207,7 @@ def _sc_resolve_sales_engineer_handle(
         fe_missing=fe_missing,
         engineer_key=select_key if fe_names and not fe_missing else manual_key,
         engineer2_key=eng2 if fe_names and not fe_missing else man2,
-        required_primary=True,
+        required_primary=required_primary,
     )
     return h1
 
@@ -1235,9 +1221,9 @@ def _sc_resolve_sales_engineer_pair(
     manual_key: str,
     select2_key: str | None = None,
     manual2_key: str | None = None,
+    required_primary: bool = True,
 ) -> tuple[str | None, str | None]:
-    if not central:
-        return None, None
+    del central
     eng2 = select2_key or f"{select_key}_2"
     man2 = manual2_key or f"{manual_key}_2"
     return _resolve_engineer_pair(
@@ -1245,7 +1231,7 @@ def _sc_resolve_sales_engineer_pair(
         fe_missing=fe_missing,
         engineer_key=select_key if fe_names and not fe_missing else manual_key,
         engineer2_key=eng2 if fe_names and not fe_missing else man2,
-        required_primary=True,
+        required_primary=required_primary,
     )
 
 
@@ -16314,7 +16300,6 @@ def _render_sales_assignment_editor(
     account_key = f"{edit_key_prefix}_sc_edit_assign_account"
     synced_key = f"{edit_key_prefix}_sc_edit_assign_synced"
     region_watch_key = f"{edit_key_prefix}_sc_edit_assign_region_watch"
-    engineer_blank_key = f"{edit_key_prefix}_sc_edit_assign_engineer_blank"
     if st.session_state.get(synced_key) != cref:
         st.session_state[synced_key] = cref
         cur_region = _sc_row_text(r0.get("account_region"))
@@ -16324,7 +16309,6 @@ def _render_sales_assignment_editor(
         st.session_state[account_key] = _sc_row_text(r0.get("account_name"))
         st.session_state.pop(region_watch_key, None)
 
-    central_on_load = _sc_region_is_central(st.session_state.get(region_key))
     _sync_assignment_edit_widgets(
         keys=keys,
         picked=cref,
@@ -16335,7 +16319,6 @@ def _render_sales_assignment_editor(
         cats=cats,
         fe_names=fe_names,
         fe_missing=fe_missing,
-        skip_engineer=not central_on_load,
     )
 
     with st.form(f"{edit_key_prefix}_sc_assignment_edit_form", clear_on_submit=False):
@@ -16361,15 +16344,16 @@ def _render_sales_assignment_editor(
             engineer_manual2_key=keys["engineer_2"],
             restore_handle_2=current_handle_2,
         )
-        _render_sc_engineer_field(
-            central=central,
+        if not central:
+            st.caption(
+                "Regional team — Telegram intake posts only for **CENTRAL**; "
+                "engineer co-assign saves to the case either way."
+            )
+        _render_engineer_pair_fields(
             fe_names=fe_names,
             fe_missing=fe_missing,
-            select_key=keys["engineer"],
-            manual_key=keys["engineer"],
-            blank_key=engineer_blank_key,
-            select2_key=keys["engineer_2"],
-            manual2_key=keys["engineer_2"],
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
         )
         _render_category_selectbox("Category", cats, key=keys["category"])
         st.text_area(
@@ -16392,15 +16376,12 @@ def _render_sales_assignment_editor(
 
     try:
         region = str(st.session_state.get(region_key, "")).strip()
-        central = _sc_region_is_central(region)
-        handle, handle2 = _sc_resolve_sales_engineer_pair(
-            central=central,
+        handle, handle2 = _resolve_engineer_pair(
             fe_names=fe_names,
             fe_missing=fe_missing,
-            select_key=keys["engineer"],
-            manual_key=keys["engineer"],
-            select2_key=keys["engineer_2"],
-            manual2_key=keys["engineer_2"],
+            engineer_key=keys["engineer"],
+            engineer2_key=keys["engineer_2"],
+            required_primary=True,
         )
         cat = str(st.session_state.get(keys["category"], "")).strip()
         if not cat:
@@ -17716,7 +17697,7 @@ def _sidebar_sales_intake() -> None:
         field_cat: str | None = None
         post_telegram = not skip_assign and central
 
-        if not skip_assign and central:
+        if not skip_assign:
             field_cat = sales_cat
             try:
                 assigned_to, assigned_to_2 = _sc_resolve_sales_engineer_pair(
@@ -17727,6 +17708,7 @@ def _sidebar_sales_intake() -> None:
                     manual_key=_SC_CC_FE_MANUAL_KEY,
                     select2_key=_SC_CC_FE_SELECT_2_KEY,
                     manual2_key=_SC_CC_FE_MANUAL_2_KEY,
+                    required_primary=central,
                 )
             except ValueError as exc:
                 _sc_set_sales_flash(str(exc), level="error")
@@ -21056,6 +21038,9 @@ def _cc_transfer_ticket_to_sales_case(
         sales_row["additional_info"] = notes
     if assigned:
         sales_row["assigned_to"] = assigned
+        assigned_2 = str(row.get("assigned_to_2") or "").strip() or None
+        if assigned_2:
+            sales_row["assigned_to_2"] = assigned_2
         sales_row["field_task_category"] = task_cat
         sales_row["dispatch_region"] = region
         la = row.get("last_assigned_at")
@@ -21580,9 +21565,8 @@ def _render_sales_right_rail() -> None:
 
 def _render_sales_assign_panel(*, layout: str = "bar") -> None:
     """New resort case panel — ``bar`` = horizontal, ``rail`` = right sidebar stack."""
-    engineers = get_engineer_handles()
+    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
     categories = get_task_categories() or list(DEFAULT_ASSIGNMENT_TASK_CATEGORIES)
-    unassigned = "— unassigned —"
     mode = str(
         st.session_state.get(_SALES_ASSIGN_MODE_KEY, _SALES_ASSIGN_MODE_INTAKE)
     )
@@ -21665,28 +21649,18 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
                     key="sap_priority",
                     label_visibility="collapsed",
                 )
-            engineer = unassigned
             if not intake_only:
-                _render_assign_plain_label("Engineer")
+                _render_assign_plain_label("Engineers")
                 eng_row, eng_mgr = _assign_field_btn_columns()
                 with eng_row:
-                    if engineers:
-                        engineer = st.selectbox(
-                            "Engineer",
-                            options=engineers,
-                            index=None,
-                            placeholder="Select engineer",
-                            key="sap_eng",
-                            label_visibility="collapsed",
-                        )
-                    else:
-                        engineer = st.selectbox(
-                            "Engineer",
-                            options=["—"],
-                            key="sap_eng",
-                            disabled=True,
-                            label_visibility="collapsed",
-                        )
+                    _render_engineer_pair_fields(
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        engineer_key="sap_eng",
+                        engineer2_key="sap_eng_2",
+                        engineer_label="Engineer",
+                        engineer2_label="Engineer 2 (optional)",
+                    )
                 with eng_mgr:
                     _render_assign_manage_icon_btn(
                         manage_key="sap_btn_manage_eng",
@@ -21728,8 +21702,9 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
                     region,
                     sales_category,
                     priority,
-                    engineer,
                     require_engineer=not intake_only,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
                 )
             return
 
@@ -21767,30 +21742,20 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
                 label_visibility="collapsed",
             )
 
-        engineer = unassigned
         if not intake_only:
             r_eng, _r_pad = st.columns([1.18, 2.82], gap="small")
             with r_eng:
-                _render_assign_plain_label("Engineer")
+                _render_assign_plain_label("Engineers")
                 eng_sel, eng_mgr = _assign_field_btn_columns()
                 with eng_sel:
-                    if engineers:
-                        engineer = st.selectbox(
-                            "Engineer",
-                            options=engineers,
-                            index=None,
-                            placeholder="Select engineer",
-                            key="sap_eng",
-                            label_visibility="collapsed",
-                        )
-                    else:
-                        engineer = st.selectbox(
-                            "Engineer",
-                            options=["—"],
-                            key="sap_eng",
-                            disabled=True,
-                            label_visibility="collapsed",
-                        )
+                    _render_engineer_pair_fields(
+                        fe_names=fe_names,
+                        fe_missing=fe_missing,
+                        engineer_key="sap_eng",
+                        engineer2_key="sap_eng_2",
+                        engineer_label="Engineer",
+                        engineer2_label="Engineer 2 (optional)",
+                    )
                 with eng_mgr:
                     _render_assign_manage_icon_btn(
                         manage_key="sap_btn_manage_eng",
@@ -21839,8 +21804,9 @@ def _render_sales_assign_panel(*, layout: str = "bar") -> None:
                     region,
                     sales_category,
                     priority,
-                    engineer,
                     require_engineer=not intake_only,
+                    fe_names=fe_names,
+                    fe_missing=fe_missing,
                 )
 
 
@@ -21850,9 +21816,10 @@ def _handle_sales_floor_submit(
     region: str,
     sales_category: str,
     priority: str,
-    engineer: str,
     *,
     require_engineer: bool = False,
+    fe_names: list[str] | None = None,
+    fe_missing: bool = False,
 ) -> None:
     if not str(case_ref or "").strip():
         st.toast("Enter a case reference", icon="⚠️")
@@ -21865,11 +21832,25 @@ def _handle_sales_floor_submit(
         return
 
     operator_id = _session_operator_id() or "unknown"
-    eng = None if not engineer or engineer in ("— unassigned —", "—", "") else engineer
-    if require_engineer and not eng:
-        st.toast("Select an engineer", icon="⚠️")
-        return
-    notes = str(st.session_state.get("sap_notes") or "").strip() or None
+    eng: str | None = None
+    eng2: str | None = None
+    if require_engineer:
+        try:
+            eng, eng2 = _resolve_engineer_pair(
+                fe_names=fe_names or [],
+                fe_missing=fe_missing,
+                engineer_key="sap_eng",
+                engineer2_key="sap_eng_2",
+                required_primary=True,
+            )
+        except ValueError as exc:
+            st.toast(str(exc), icon="⚠️")
+            return
+        if not eng:
+            st.toast("Select an engineer", icon="⚠️")
+            return
+    notes_raw = str(st.session_state.get("sap_notes") or "").strip() or None
+    notes = _coassignee_telegram_note(eng2, notes_raw)
     cat = canonical_task_category(str(sales_category).strip()) or str(sales_category).strip()
 
     row: dict[str, object] = {
@@ -21884,10 +21865,17 @@ def _handle_sales_floor_submit(
     }
     if eng:
         row["assigned_to"] = eng
+        if eng2:
+            row["assigned_to_2"] = eng2
+        row["field_task_category"] = cat
+        row["dispatch_region"] = region
         row["last_assigned_at"] = _cc_utc_now_iso()
     if notes:
         row["description"] = notes
         row["additional_info"] = notes
+    elif notes_raw:
+        row["description"] = notes_raw
+        row["additional_info"] = notes_raw
 
     try:
         _sales_cases_insert_row(row)
@@ -23317,7 +23305,7 @@ def _reset_dispatch_sales_assign_form() -> None:
     st.session_state["sap_ref"] = ""
     st.session_state["sap_acc"] = ""
     st.session_state["sap_notes"] = ""
-    for k in ("sap_eng", "sap_category", "sap_region", "sap_priority"):
+    for k in ("sap_eng", "sap_eng_2", "sap_category", "sap_region", "sap_priority"):
         st.session_state.pop(k, None)
 
 
