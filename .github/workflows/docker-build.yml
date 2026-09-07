@@ -1,0 +1,20 @@
+name: Docker build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t coverage-eye:ci .
+
+      - name: Verify Python stack in image
+        run: |
+          docker run --rm coverage-eye:ci python -c "import streamlit, uvicorn, supabase; print('ok')"
