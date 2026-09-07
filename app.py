@@ -16503,9 +16503,11 @@ def _sc_dashboard_reassign_case(
         "field_responded_by": None,
         "responded_at": None,
     }
-    # Leave Needs Review (Open) and put the case back in field work.
+    # Leave Needs Review (Open) in investigation; send On Hold (Design) back to Daily Task.
     if status == "Open":
         patch["status"] = SC_STATUS_INVESTIGATION
+    elif status == SC_STATUS_DESIGN:
+        patch["status"] = SC_STATUS_SALES_TICKET
     if additional_info is not None:
         patch["additional_info"] = additional_info
     _sc_stamp_last_assigned_at(patch)
@@ -16517,12 +16519,16 @@ def _sc_dashboard_reassign_case(
         handle = f"@{handle.lstrip('@')}"
     if cref and handle:
         client = _get_supabase_client()
+        log_note = _cc_assignment_log_note(additional_info, operator_id)
+        if status == SC_STATUS_DESIGN:
+            design_note = "Reassigned from Design; moved to Sales ticket for field work."
+            log_note = f"{design_note}\n\n{log_note}" if log_note else design_note
         _cc_insert_attendance_log(
             client,
             ticket_number=cref,
             member_username=handle,
             action_type="Assignment",
-            note=_cc_assignment_log_note(additional_info, operator_id),
+            note=log_note,
         )
         _visits_reassign(client, cref, handle)
     return updated or row
