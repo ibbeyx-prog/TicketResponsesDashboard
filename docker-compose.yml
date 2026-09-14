@@ -1,0 +1,60 @@
+# Coverage Eye — local / on-prem stack (dashboard + Telegram bot).
+#
+# Prerequisites:
+#   cp .env.example .env   # fill Supabase + Telegram values
+#
+# Start:
+#   docker compose up --build
+#
+# Dashboard: http://localhost:8501
+# Bot health: http://localhost:8000/health
+
+services:
+  dashboard:
+    build: .
+    image: coverage-eye:latest
+    container_name: coverage-eye-dashboard
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    command:
+      [
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+      ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  bot:
+    build: .
+    image: coverage-eye:latest
+    container_name: coverage-eye-bot
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PORT: "8000"
+    command: ["python", "bot.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    # Optional: persist Telethon session files across restarts (uncomment if needed).
+    # volumes:
+    #   - bot-sessions:/app
+
+# volumes:
+#   bot-sessions:
