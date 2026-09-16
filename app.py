@@ -7290,10 +7290,10 @@ def _perf_attended_credit_is_admin_bucket(assignees: list[str]) -> bool:
 def _perf_attended_credit_assignees(row: object) -> list[str]:
     """Who receives Performance **attended** credit for this row.
 
-    - **No field engineer** on the ticket/case → **Admin** (undispatched queue).
-    - **Field response present** (Needs Review, or admin **Closed** after a reply) →
-      field assignee(s), never Admin. Shared co-assign → **both** engineers.
-    - **Dispatched, no field response** (e.g. admin desk close) → assignee(s) still.
+    Credit follows **assignee** on the ticket (``assigned_to`` / both on shared), not
+    ``field_responded_by``. Example: assignee **@dissiby** with a reply logged as
+    **@DHRTemsX6** or a test phone still credits **@dissiby**. Shared co-assign → both
+    engineers. No field engineer on the case → **Admin**.
     """
     assignees = _perf_ticket_credit_assignees(row)
     if _perf_attended_credit_is_admin_bucket(assignees):
@@ -7302,8 +7302,6 @@ def _perf_attended_credit_assignees(row: object) -> list[str]:
     if _ticket_row_has_field_response(row):
         if get_credit_type(row) == "shared":
             return assignees
-        # Solo dispatch: credit the assigned engineer, not a different ``field_responded_by``
-        # handle (e.g. test/admin Telegram labels) when the ticket is on their queue.
         if assignees and not _perf_attended_credit_is_admin_bucket(assignees):
             return assignees
 
