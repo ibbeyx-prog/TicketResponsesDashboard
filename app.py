@@ -7302,16 +7302,10 @@ def _perf_attended_credit_assignees(row: object) -> list[str]:
     if _ticket_row_has_field_response(row):
         if get_credit_type(row) == "shared":
             return assignees
-        if isinstance(row, pd.Series):
-            data = row
-        else:
-            data = pd.Series(row if isinstance(row, dict) else {})
-        replier = _clean_display_value(data.get("field_responded_by"))
-        if replier:
-            eng = _perf_norm_member(replier)
-            if eng and eng not in ("(unknown)", ""):
-                return [eng]
-        return assignees
+        # Solo dispatch: credit the assigned engineer, not a different ``field_responded_by``
+        # handle (e.g. test/admin Telegram labels) when the ticket is on their queue.
+        if assignees and not _perf_attended_credit_is_admin_bucket(assignees):
+            return assignees
 
     return assignees
 
@@ -12478,6 +12472,36 @@ def _perf_summary_derived_metrics(metrics: dict[str, object]) -> dict[str, float
     }
 
 
+def _perf_attended_unique_counts_by_credit(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> dict[str, int]:
+    """Unique attended cases per engineer credit key (same rules as Summary attended)."""
+    bundle = _perf_weekly_attended_bundle(
+        df_all,
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+        focus="All",
+    )
+    detail = bundle.get("detail")
+    if not isinstance(detail, pd.DataFrame) or detail.empty:
+        return {}
+    if "Attended by" not in detail.columns or "ID" not in detail.columns:
+        return {}
+    counts: dict[str, int] = {}
+    attended_by = detail["Attended by"].astype(str).str.strip()
+    for eng, grp in detail.groupby(attended_by, sort=False):
+        if not eng:
+            continue
+        credit_key = _perf_person_credit_key(eng)
+        counts[credit_key] = int(grp["ID"].astype(str).nunique())
+    return counts
+
+
 def _perf_team_assignment_summary_df(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame | None,
@@ -12491,6 +12515,12 @@ def _perf_team_assignment_summary_df(
         df_all,
         focus="All",
         visits=visits,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    attended_map = _perf_attended_unique_counts_by_credit(
+        df_all,
+        sales_all,
         range_start=range_start,
         range_end=range_end,
     )
@@ -12512,7 +12542,8 @@ def _perf_team_assignment_summary_df(
         )
         unique = int(assign.get("assigned_in_range") or 0)
         tasks = int(assign.get("assignment_cycles_in_range") or 0)
-        if unique == 0 and tasks == 0:
+        attended = int(attended_map.get(credit_key, 0))
+        if unique == 0 and tasks == 0 and attended == 0:
             continue
         label = handle if str(handle).startswith("@") else f"@{handle}"
         rows.append(
@@ -12523,6 +12554,7 @@ def _perf_team_assignment_summary_df(
                 "Task load": round(tasks / unique, 2) if unique else 0.0,
                 "Revisit tickets": int(assign.get("revisit_tickets") or 0),
                 "Unattended": int(unatt_map.get(credit_key, 0)),
+                "Attended": attended,
                 "Residential": int(assign.get("assigned_residential") or 0),
                 "Resort": int(assign.get("assigned_resort") or 0),
             }
@@ -12536,6 +12568,7 @@ def _perf_team_assignment_summary_df(
                 "Task load",
                 "Revisit tickets",
                 "Unattended",
+                "Attended",
                 "Residential",
                 "Resort",
             ]
