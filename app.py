@@ -1906,7 +1906,6 @@ _PERF_VIEW_OPTIONS_FOCUSED: tuple[str, ...] = (
     "Overview",
     "Case info",
     "Handled",
-    "Unattended",
 )
 _PERF_OVERVIEW_COL_RESIDENTIAL = "Residential"
 _PERF_OVERVIEW_COL_RESORT = "Resort"
@@ -9364,8 +9363,8 @@ def _sync_perf_view_for_focus() -> None:
     focus = _perf_focus_for_filter()
     views = list(_perf_sidebar_view_options(focus))
     cur = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
-    if cur == "Unattended" and focus in ("", "All"):
-        cur = "Overview"
+    if cur == "Unattended":
+        cur = "Summary" if focus not in ("", "All") else "Overview"
     if cur not in views:
         cur = views[0]
     st.session_state[_PERF_ACTIVE_VIEW_KEY] = cur
@@ -12799,11 +12798,10 @@ def _perf_summary_rate_delta_class(rate_delta: str) -> str:
 
 
 def _render_perf_summary_engineer_derived_row(metrics: dict[str, object]) -> None:
-    """Recommended ratios — task load, coverage, response, revisit, same-day, handed off."""
+    """Recommended ratios when Focus assignee is set (task load lives on team table)."""
     assigned = int(metrics.get("assigned_in_range") or 0)
     if assigned <= 0 and int(metrics.get("assignment_cycles_in_range") or 0) <= 0:
         return
-    task_load = metrics.get("task_load_ratio", 0)
     snap_cov = int(metrics.get("snapshot_coverage_pct") or 0)
     resp_rate = int(metrics.get("response_rate_pct") or 0)
     revisit_rate = int(metrics.get("revisit_rate_pct") or 0)
@@ -12812,7 +12810,6 @@ def _render_perf_summary_engineer_derived_row(metrics: dict[str, object]) -> Non
     handed = int(metrics.get("closed_by_others") or 0)
     still_open = int(metrics.get("still_open_assigned") or 0)
     cards = [
-        ("Task load", f"{task_load}x", "Tasks ÷ unique tickets"),
         ("Snapshot coverage", f"{snap_cov}%", "Your share of queue snapshot"),
         ("Response rate", f"{resp_rate}%", "Attended from assigned ÷ unique"),
         ("Revisit rate", f"{revisit_rate}%", f"{revisit_n} tickets with 2+ tasks"),
@@ -12875,7 +12872,6 @@ def _render_perf_summary_engineer_primary_kpis(
     cycles = int(metrics.get("assignment_cycles_in_range") or 0)
     cycles_res = int(metrics.get("assignment_cycles_residential") or 0)
     cycles_rsr = int(metrics.get("assignment_cycles_resort") or 0)
-    unattended = int(metrics.get("unattended_assignments") or 0)
     attended = int(metrics.get("total") or 0)
     attended_res = int(metrics.get("attended_residential") or 0)
     attended_rsr = int(metrics.get("attended_resort") or 0)
@@ -12889,11 +12885,6 @@ def _render_perf_summary_engineer_primary_kpis(
             "Assign + reassign tasks",
             str(cycles),
             f"Residential {cycles_res} · Resort {cycles_rsr} · same ticket may count again",
-        ),
-        (
-            "Unattended cases",
-            str(unattended),
-            "Assign days with no field response (residential)",
         ),
         (
             "Cases attended (yours)",
@@ -13138,7 +13129,7 @@ def _render_perf_summary_workload_row(metrics: dict[str, object]) -> None:
     closed_other = int(metrics.get("closed_by_others") or 0)
     cards = [
         ("Assignment cycles", str(cycles), "Each assign + reassign in range"),
-        ("Unattended cycles", str(unattended), "Assign days without response · Unattended tab"),
+        ("Unattended cycles", str(unattended), "Assign days without response · Overview / team table"),
         ("Handed off", str(closed_other), "Other engineer credited at attended"),
     ]
     parts: list[str] = []
@@ -13189,9 +13180,8 @@ def _render_perf_summary_engineer_overview(
     *,
     period_label: str,
 ) -> None:
-    """Layered individual Summary — primary KPIs, ratios, attended outcomes, team table."""
+    """Layered individual Summary — primary KPIs, attended outcomes, team table."""
     _render_perf_summary_engineer_primary_kpis(metrics, period_label=period_label)
-    _render_perf_summary_engineer_derived_row(metrics)
     _render_perf_summary_attended_outcomes(metrics)
     with st.expander("Team assignment comparison", expanded=False):
         _render_perf_summary_team_assignment_table(
@@ -14181,8 +14171,6 @@ def _render_perf_weekly_executive_dashboard(
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
 
     section_options = ["Overview", "Breakdown", "Resort", "Staff & export"]
-    if focus not in ("", "All"):
-        section_options.append("Unattended")
     if st.session_state.get(_PERF_SUMMARY_SECTION_KEY) not in section_options:
         st.session_state[_PERF_SUMMARY_SECTION_KEY] = section_options[0]
     selected = st.radio(
@@ -14255,18 +14243,6 @@ def _render_perf_weekly_executive_dashboard(
             _render_perf_summary_staff_tab(
                 summary_df, detail_df, d0=week_start, d1=week_end, metrics=metrics
             )
-    elif selected == "Unattended":
-        with _dash_perf_span("perf.summary_section", section="Unattended"):
-            _perf_summary_attach_focus_engineer_block(
-                metrics,
-                df_all,
-                sales_all,
-                bundle,
-                range_start=range_start,
-                range_end=range_end,
-                focus=focus,
-            )
-            _render_perf_summary_unattended_tab(metrics)
     return metrics
 
 
@@ -27642,7 +27618,7 @@ def _render_perf_unattended_tab(
         )
         if focus not in ("", "All"):
             st.caption(
-                "Flagged backlog detail is under **Summary → Unattended** for this engineer."
+                "Flagged backlog counts appear on **Overview** and **Summary** (team table / KPIs)."
             )
 
 
@@ -27898,7 +27874,7 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
                 pass
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
         visits_history = pd.DataFrame()
-        if field_has_data and view in ("Overview", "Unattended"):
+        if field_has_data and view == "Overview":
             with _dash_perf_span("perf.load_visits_history", view=view):
                 visits_history = _perf_load_overview_visits_history(df_all)
         return {
@@ -28015,14 +27991,6 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
             _render_perf_handled_tab(**handled_ctx)
         elif view == "On hold":
             _render_perf_on_hold_tab(slices["on_hold"], focus=focus)
-        elif view == "Unattended":
-            _render_perf_unattended_tab(
-                df_all,
-                focus=focus,
-                range_start=range_start,
-                range_end=range_end,
-                visits_history=visits_history,
-            )
 
 
 @st.fragment
