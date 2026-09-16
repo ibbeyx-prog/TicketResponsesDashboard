@@ -7378,21 +7378,45 @@ def _perf_ticket_collaboration_map(visits: pd.DataFrame) -> dict[str, int]:
 
 _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
     "#3b82f6",
-    "#60a5fa",
+    "#f97316",
     "#22c55e",
+    "#ec4899",
     "#a78bfa",
-    "#f59e0b",
-    "#818cf8",
-    "#34d399",
+    "#eab308",
+    "#06b6d4",
     "#ef4444",
 )
 
+# Stable chart colors (case-insensitive @handle) — avoids similar hues for common pairs.
+_PERF_ENGINEER_COLOR_OVERRIDES: dict[str, str] = {
+    "@dissiby": "#3b82f6",
+    "@fatrixshaquiell": "#f97316",
+}
+
 
 def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
-    return {
-        eng: _PERF_ENG_LINE_COLORS[i % len(_PERF_ENG_LINE_COLORS)]
-        for i, eng in enumerate(engineers)
+    palette = _PERF_ENG_LINE_COLORS
+    overrides = {
+        _perf_norm_member(k): v for k, v in _PERF_ENGINEER_COLOR_OVERRIDES.items()
     }
+    used_colors: set[str] = set()
+    result: dict[str, str] = {}
+    for eng in engineers:
+        norm = _perf_norm_member(eng)
+        if norm in overrides:
+            result[eng] = overrides[norm]
+            used_colors.add(overrides[norm])
+    palette_idx = 0
+    for eng in sorted(engineers, key=str.lower):
+        if eng in result:
+            continue
+        while palette_idx < len(palette) and palette[palette_idx] in used_colors:
+            palette_idx += 1
+        color = palette[palette_idx % len(palette)]
+        result[eng] = color
+        used_colors.add(color)
+        palette_idx += 1
+    return result
 
 
 _PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
@@ -12059,6 +12083,24 @@ def _perf_summary_attach_team_assignment(
     )
 
 
+def _perf_summary_attach_daily_assignment(
+    metrics: dict[str, object],
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    if isinstance(metrics.get("daily_assignment_df"), pd.DataFrame):
+        return
+    metrics["daily_assignment_df"] = _perf_daily_assignment_tasks_by_engineer_df(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+
+
 def _perf_summary_attach_resort_block(
     metrics: dict[str, object],
     sales_all: pd.DataFrame,
@@ -12573,6 +12615,166 @@ def _perf_team_assignment_summary_df(
     return pd.DataFrame(rows).sort_values(
         ["Tasks", "Unique tickets"], ascending=[False, False]
     )
+
+
+def _perf_ticket_last_assigned_local_day(
+    df_all: pd.DataFrame,
+    ticket_number: str,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> date | None:
+    """Calendar day (UTC+5) of ``last_assigned_at`` when it falls in the sidebar range."""
+    if df_all.empty or "ticket_number" not in df_all.columns or "last_assigned_at" not in df_all.columns:
+        return None
+    tn = str(ticket_number).strip()
+    if not tn:
+        return None
+    sub = df_all.loc[df_all["ticket_number"].astype(str).str.strip() == tn]
+    if sub.empty:
+        return None
+    la = _parse_ts(sub["last_assigned_at"])
+    valid = la.notna() & (la >= range_start) & (la <= range_end)
+    if not valid.any():
+        return None
+    ts = la.loc[valid].iloc[-1]
+    return _to_local(pd.Series([ts])).iloc[0].date()
+
+
+def _perf_sales_case_last_assigned_local_day(
+    sales_all: pd.DataFrame,
+    case_ref: str,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> date | None:
+    if (
+        sales_all.empty
+        or "case_ref" not in sales_all.columns
+        or "last_assigned_at" not in sales_all.columns
+    ):
+        return None
+    cref = str(case_ref).strip()
+    if not cref:
+        return None
+    sub = sales_all.loc[sales_all["case_ref"].astype(str).str.strip() == cref]
+    for _, row in sub.iterrows():
+        if not _perf_row_credited_to_person(row, focus):
+            continue
+        la = _parse_ts(pd.Series([row.get("last_assigned_at")]))
+        if la.isna().iloc[0]:
+            continue
+        ts = la.iloc[0]
+        if ts < range_start or ts > range_end:
+            continue
+        return _to_local(pd.Series([ts])).iloc[0].date()
+    return None
+
+
+def _perf_daily_assignment_tasks_by_engineer_df(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Daily assignment task counts per engineer (Tasks definition, UTC+5)."""
+    from collections import defaultdict
+
+    day_counts: dict[tuple[date, str], int] = defaultdict(int)
+    credit_to_label: dict[str, str] = {}
+    for handle in get_engineer_handles():
+        credit_key = _perf_person_credit_key(handle)
+        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+            continue
+        label = handle if str(handle).startswith("@") else f"@{handle}"
+        credit_to_label[credit_key] = label
+
+    if not credit_to_label:
+        return pd.DataFrame(columns=["day", "Engineer", "tasks"])
+
+    sales_refs = _perf_sales_case_ref_set(sales_all)
+    visits_range = _fetch_visits_in_range(range_start, range_end)
+    prepared = _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
+    visits_history = _perf_load_overview_visits_history(df_all)
+    engineer_visit_res: dict[str, set[str]] = defaultdict(set)
+    engineer_visit_rsr: dict[str, set[str]] = defaultdict(set)
+
+    if not prepared.empty and "visit_start" in prepared.columns:
+        vs = _parse_ts(prepared["visit_start"])
+        in_range = vs.notna() & (vs >= range_start) & (vs <= range_end)
+        for idx, visit in prepared.loc[in_range].iterrows():
+            keys = _perf_credit_keys_from_assignee_names([str(visit.get("assignee") or "")])
+            start = vs.loc[idx]
+            if pd.isna(start):
+                continue
+            day = _to_local(pd.Series([start])).iloc[0].date()
+            tn = str(visit.get("ticket_number") or "").strip()
+            for key in keys:
+                if key not in credit_to_label:
+                    continue
+                day_counts[(day, credit_to_label[key])] += 1
+                if tn:
+                    if tn in sales_refs:
+                        engineer_visit_rsr[key].add(tn)
+                    else:
+                        engineer_visit_res[key].add(tn)
+
+    for handle in get_engineer_handles():
+        focus_key = _perf_person_credit_key(handle)
+        if focus_key not in credit_to_label:
+            continue
+        label = credit_to_label[focus_key]
+        visits_snapshot = _perf_filter_visits_by_person(visits_history, handle)
+        df_for_assign = (
+            _perf_filter_by_person(df_all, handle) if not df_all.empty else df_all
+        )
+        res_fallback = set(
+            _perf_assigned_ticket_ids_in_range(
+                visits_snapshot,
+                df_for_assign,
+                range_start=range_start,
+                range_end=range_end,
+            )
+        )
+        rsr_fallback = set(
+            _perf_sales_assigned_ids_in_range(
+                sales_all,
+                focus=handle,
+                range_start=range_start,
+                range_end=range_end,
+            )
+        )
+        res_ids_visit = engineer_visit_res.get(focus_key, set())
+        rsr_ids_visit = engineer_visit_rsr.get(focus_key, set())
+        for tn in res_fallback - res_ids_visit:
+            day = _perf_ticket_last_assigned_local_day(
+                df_all,
+                tn,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            if day is not None:
+                day_counts[(day, label)] += 1
+        for cref in rsr_fallback - rsr_ids_visit:
+            day = _perf_sales_case_last_assigned_local_day(
+                sales_all if sales_all is not None else pd.DataFrame(),
+                cref,
+                focus=handle,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            if day is not None:
+                day_counts[(day, label)] += 1
+
+    if not day_counts:
+        return pd.DataFrame(columns=["day", "Engineer", "tasks"])
+    rows = [
+        {"day": pd.Timestamp(day), "Engineer": eng, "tasks": int(n)}
+        for (day, eng), n in day_counts.items()
+    ]
+    return pd.DataFrame(rows).sort_values(["day", "Engineer"])
 
 
 def _perf_attended_track_counts(detail: pd.DataFrame) -> tuple[int, int]:
@@ -13530,6 +13732,57 @@ def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
     st.altair_chart(trend, width="stretch")
 
 
+def _render_perf_summary_daily_assignment_chart(
+    metrics: dict[str, object],
+    *,
+    period_label: str = "",
+) -> None:
+    st.markdown(
+        '<p class="weekly-section-label" style="margin-top:14px">Daily assignment tasks</p>',
+        unsafe_allow_html=True,
+    )
+    plot_df = metrics.get("daily_assignment_df")
+    if not isinstance(plot_df, pd.DataFrame) or plot_df.empty:
+        st.caption("No assignment tasks in this range.")
+        return
+    cap_parts = [
+        LOCAL_TZ_LABEL,
+        "same definition as Tasks (visit cycles + assign fallback)",
+    ]
+    if period_label:
+        cap_parts.insert(0, period_label)
+    st.caption(" · ".join(cap_parts))
+    engineers = sorted(plot_df["Engineer"].astype(str).unique().tolist(), key=str.lower)
+    color_map = _perf_engineer_color_map(engineers)
+    chart = _weekly_altair_theme(
+        alt.Chart(plot_df)
+        .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5)
+        .encode(
+            x=alt.X(
+                "day:T",
+                title="Day",
+                axis=alt.Axis(format="%d %b", labelAngle=-35),
+            ),
+            y=alt.Y("tasks:Q", title="Tasks", axis=alt.Axis(tickMinStep=1)),
+            color=alt.Color(
+                "Engineer:N",
+                scale=alt.Scale(
+                    domain=engineers,
+                    range=[color_map[e] for e in engineers],
+                ),
+                legend=alt.Legend(title="Engineer"),
+            ),
+            tooltip=[
+                alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+                alt.Tooltip("Engineer:N", title="Engineer"),
+                alt.Tooltip("tasks:Q", title="Tasks"),
+            ],
+        )
+        .properties(height=280)
+    )
+    st.altair_chart(chart, width="stretch")
+
+
 def _render_perf_summary_overview_tab(
     metrics: dict[str, object],
     *,
@@ -13544,6 +13797,7 @@ def _render_perf_summary_overview_tab(
         _render_weekly_kpi_cards(metrics)
         with st.expander("Team assignment comparison", expanded=True):
             _render_perf_summary_team_assignment_table(metrics)
+        _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
     chart_left, chart_right = st.columns(2)
     with chart_left:
         _render_perf_summary_closure_donut(metrics)
@@ -14199,6 +14453,14 @@ def _render_perf_weekly_executive_dashboard(
                 range_start=range_start,
                 range_end=range_end,
             )
+            if focus in ("", "All"):
+                _perf_summary_attach_daily_assignment(
+                    metrics,
+                    df_all,
+                    sales_all,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
             if focus not in ("", "All"):
                 _perf_summary_attach_focus_engineer_block(
                     metrics,
