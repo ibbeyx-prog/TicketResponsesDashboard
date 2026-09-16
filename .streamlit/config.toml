@@ -5,6 +5,14 @@ secondaryBackgroundColor = "#080b14"
 textColor = "#e2e8f8"
 font = "sans serif"
 
+[server]
+# Public URL: https://netops.dhiraagu.com.mv/coverage-eye/
+# Behind a reverse proxy, the browser Origin is the public site while Host is
+# often the internal service — add the public origin so WebSockets are accepted.
+enableCORS = true
+corsAllowedOrigins = ["https://netops.dhiraagu.com.mv"]
+baseUrlPath = "coverage-eye"
+
 [client]
 toolbarMode = "minimal"
 showSidebarNavigation = false
