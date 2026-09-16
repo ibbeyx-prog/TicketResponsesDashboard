@@ -1061,6 +1061,7 @@ _PERF_CLOSURE_FIELD = "Field resolved"
 _PERF_CLOSURE_ADMIN_RESP = "Admin closed (responded)"
 _PERF_CLOSURE_ADMIN_DESK = "Admin closed (no response)"
 _PERF_CLOSURE_INVESTIGATION = "Investigation"
+_PERF_CLOSURE_NEEDS_REVIEW = "Field responded (Needs Review)"
 _PERF_CLOSURE_RESORT = "Resort resolved"
 _PERF_SUMMARY_COL_FIELD = f"CSM {_PERF_CLOSURE_FIELD}"
 _PERF_SUMMARY_COL_ADMIN_RESP = "CSM Admin closed (resp.)"
@@ -1282,18 +1283,22 @@ _SC_ACTIVE_QUEUE_STATUSES: frozenset[str] = frozenset(
 # Weekly attended report — Sales cases that count as "attended" (no On Hold track).
 _SC_ATTENDED_STATUSES: frozenset[str] = frozenset(
     {
+        "Open",
         SC_STATUS_INVESTIGATION,
         SC_STATUS_REGIONAL,
         SC_STATUS_RESOLVED,
     }
 )
-# CSM rows counted in Weekly attended (excludes Daily Task / Open / Unattended).
+# CSM rows in Weekly attended (Daily Task / bare Unattended excluded).
+# ``open`` = Needs Review — only rows with a field response (see filter in fetch).
 _CSM_WEEKLY_ATTENDED_KEYS: tuple[str, ...] = (
+    "open",
     "on_hold",
     "completed",
     "investigation",
 )
 _CSM_WEEKLY_ATTENDED_LABELS: dict[str, str] = {
+    "open": "Open",
     "on_hold": STATUS_ON_HOLD,
     "completed": STATUS_RESOLVED,
     "investigation": STATUS_UNDER_INVESTIGATION,
@@ -7273,6 +7278,54 @@ def _perf_prepare_credit_count_view(df: pd.DataFrame) -> pd.DataFrame:
     return _perf_explode_credit_rows(view)
 
 
+def _perf_attended_credit_is_admin_bucket(assignees: list[str]) -> bool:
+    """True when performance credit is the undispatched **Admin** bucket."""
+    if len(assignees) != 1:
+        return False
+    return _perf_person_credit_key(assignees[0]) == _perf_person_credit_key(
+        _perf_undispatched_credit_label()
+    )
+
+
+def _perf_attended_credit_assignees(row: object) -> list[str]:
+    """Who receives Performance **attended** credit for this row.
+
+    - **No field engineer** on the ticket/case → **Admin** (undispatched queue).
+    - **Field response present** (Needs Review, or admin **Closed** after a reply) →
+      field assignee(s), never Admin. Shared co-assign → **both** engineers.
+    - **Dispatched, no field response** (e.g. admin desk close) → assignee(s) still.
+    """
+    assignees = _perf_ticket_credit_assignees(row)
+    if _perf_attended_credit_is_admin_bucket(assignees):
+        return assignees
+
+    if _ticket_row_has_field_response(row):
+        if get_credit_type(row) == "shared":
+            return assignees
+        if isinstance(row, pd.Series):
+            data = row
+        else:
+            data = pd.Series(row if isinstance(row, dict) else {})
+        replier = _clean_display_value(data.get("field_responded_by"))
+        if replier:
+            eng = _perf_norm_member(replier)
+            if eng and eng not in ("(unknown)", ""):
+                return [eng]
+        return assignees
+
+    return assignees
+
+
+def _perf_row_attended_credited_to_person(row: object, person: str) -> bool:
+    if person in ("", "All"):
+        return True
+    key = _perf_person_credit_key(person)
+    for assignee in _perf_attended_credit_assignees(row):
+        if _perf_person_credit_key(assignee) == key:
+            return True
+    return False
+
+
 def _perf_row_credited_to_person(row: object, person: str) -> bool:
     if person in ("", "All"):
         return True
@@ -10721,7 +10774,10 @@ def _perf_filter_by_person(df: pd.DataFrame, person: str) -> pd.DataFrame:
         view = _perf_enrich_sales_cases(df) if "staff" not in df.columns else df.copy()
     else:
         view = _perf_enrich_tickets(df) if "staff" not in df.columns else df.copy()
-    mask = view.apply(lambda r: _perf_row_credited_to_person(r, person), axis=1)
+    if "_attended_status" in view.columns:
+        mask = view.apply(lambda r: _perf_row_attended_credited_to_person(r, person), axis=1)
+    else:
+        mask = view.apply(lambda r: _perf_row_credited_to_person(r, person), axis=1)
     return view.loc[mask].copy()
 
 
@@ -11129,12 +11185,15 @@ def _perf_weekly_attended_ts(df: pd.DataFrame) -> pd.Series:
         SC_STATUS_INVESTIGATION.casefold(),
     }
     on_hold_keys = {STATUS_ON_HOLD.casefold()}
+    open_keys = {"open"}
     resolved = st_col.isin(resolved_keys)
     inv = st_col.isin(inv_keys)
     on_hold = st_col.isin(on_hold_keys)
+    open_status = st_col.isin(open_keys)
 
     ts = u.copy()
     ts = ts.where(~resolved, pd.concat([r, u], axis=1).max(axis=1, skipna=True))
+    ts = ts.where(~open_status, pd.concat([r, u], axis=1).max(axis=1, skipna=True))
     ts = ts.where(~inv, fu.where(fu.notna(), u))
     ts = ts.where(~on_hold, u)
     return ts
@@ -11174,12 +11233,15 @@ def _perf_csm_attended_in_week(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> pd.DataFrame:
-    """CSM tickets in On Hold / Resolved / Investigation with activity in the week.
+    """CSM tickets in Needs Review (field reply), On Hold, Resolved, or Investigation.
 
     Includes tickets that were earlier auto-unattended (``marked_unattended_at``)
     if they later reached an attended status — credit still goes to the assignee
     (or Admin when undispatched). The permanent unattended flag remains for the
     Unattended tab / Overview metric only.
+
+    Needs Review (``Open``) counts only when the row has a field response; admin
+    auto-close to Open without a reply does not count as attended.
     """
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
@@ -11191,7 +11253,15 @@ def _perf_csm_attended_in_week(
     if part.empty:
         return pd.DataFrame()
     norm = _normalized_status_series(part)
+    open_rows = norm.str.casefold().eq("open")
+    if open_rows.any():
+        has_response = part.apply(_ticket_row_has_field_response, axis=1)
+        part = part.loc[~open_rows | has_response].copy()
+        norm = _normalized_status_series(part)
+    if part.empty:
+        return pd.DataFrame()
     label_map = {
+        "open": "Open",
         STATUS_ON_HOLD.casefold(): STATUS_ON_HOLD,
         STATUS_RESOLVED.casefold(): STATUS_RESOLVED,
         STATUS_UNDER_INVESTIGATION.casefold(): STATUS_UNDER_INVESTIGATION,
@@ -11213,7 +11283,7 @@ def _perf_sales_attended_in_week(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Sales cases in Investigation / Regional / Resolved with activity in the week."""
+    """Sales cases in Needs Review (field reply), Investigation, Regional, or Resolved."""
     if df_all.empty or "status" not in df_all.columns:
         return pd.DataFrame()
     effective = df_all["status"].astype(str).str.strip().map(_sc_effective_status)
@@ -11221,7 +11291,15 @@ def _perf_sales_attended_in_week(
     part = df_all.loc[mask].copy()
     if part.empty:
         return pd.DataFrame()
-    part["_attended_status"] = effective.loc[mask].values
+    open_rows = effective.loc[mask].eq("Open")
+    if open_rows.any():
+        has_response = part.apply(_ticket_row_has_field_response, axis=1)
+        part = part.loc[~open_rows.values | has_response.values].copy()
+    if part.empty:
+        return pd.DataFrame()
+    part["_attended_status"] = (
+        part["status"].astype(str).str.strip().map(_sc_effective_status).values
+    )
     part = _apply_weekly_attended_range(
         part, range_start=range_start, range_end=range_end
     )
@@ -11332,7 +11410,7 @@ def _perf_build_weekly_attended_tables(
         csm = _perf_enrich_tickets(csm_raw)
         csm_rows: list[dict[str, object]] = []
         for _, row in csm.iterrows():
-            assignees = _perf_ticket_credit_assignees(row)
+            assignees = _perf_attended_credit_assignees(row)
             if not assignees:
                 assignees = [str(row.get("staff") or "(unknown)")]
             credit = get_credit_type(row)
@@ -11345,6 +11423,8 @@ def _perf_build_weekly_attended_tables(
                 )
             elif attended_status == STATUS_UNDER_INVESTIGATION:
                 closure = _PERF_CLOSURE_INVESTIGATION
+            elif attended_status.casefold() == "open":
+                closure = _PERF_CLOSURE_NEEDS_REVIEW
             else:
                 closure = attended_status
             base = {
@@ -11377,7 +11457,7 @@ def _perf_build_weekly_attended_tables(
         category = sales_cat.where(sales_cat.notna(), field_cat).fillna("(uncategorized)")
         sales_rows: list[dict[str, object]] = []
         for idx, row in sales.iterrows():
-            assignees = _perf_ticket_credit_assignees(row)
+            assignees = _perf_attended_credit_assignees(row)
             if not assignees:
                 assignees = [str(row.get("staff") or "(unknown)")]
             credit = get_credit_type(row)
@@ -11386,6 +11466,8 @@ def _perf_build_weekly_attended_tables(
                 closure = _PERF_CLOSURE_RESORT
             elif attended_status == SC_STATUS_INVESTIGATION:
                 closure = _PERF_CLOSURE_INVESTIGATION
+            elif attended_status.casefold() == "open":
+                closure = _PERF_CLOSURE_NEEDS_REVIEW
             else:
                 closure = attended_status
             base = {
@@ -11582,6 +11664,7 @@ _WEEKLY_ADMIN_DESK_COLOR = "#64748b"
 _WEEKLY_RESORT_COLOR = "#a78bfa"
 _WEEKLY_EXEC_OUTCOME_ORDER: tuple[str, ...] = (
     _PERF_CLOSURE_INVESTIGATION,
+    _PERF_CLOSURE_NEEDS_REVIEW,
     _PERF_CLOSURE_FIELD,
     _PERF_CLOSURE_ADMIN_RESP,
     _PERF_CLOSURE_ADMIN_DESK,
@@ -11589,6 +11672,7 @@ _WEEKLY_EXEC_OUTCOME_ORDER: tuple[str, ...] = (
 )
 _WEEKLY_EXEC_OUTCOME_COLORS: dict[str, str] = {
     _PERF_CLOSURE_INVESTIGATION: _WEEKLY_INV_COLOR,
+    _PERF_CLOSURE_NEEDS_REVIEW: "#2dd4bf",
     _PERF_CLOSURE_FIELD: _WEEKLY_RESOLVED_COLOR,
     _PERF_CLOSURE_ADMIN_RESP: _WEEKLY_ADMIN_RESP_COLOR,
     _PERF_CLOSURE_ADMIN_DESK: _WEEKLY_ADMIN_DESK_COLOR,
@@ -12163,7 +12247,7 @@ def _perf_attended_ticket_ids_credited_to(
     )
     if not csm_attended.empty and "ticket_number" in csm_attended.columns:
         for _, row in csm_attended.iterrows():
-            if _perf_row_credited_to_person(row, focus):
+            if _perf_row_attended_credited_to_person(row, focus):
                 tn = str(row.get("ticket_number") or "").strip()
                 if tn:
                     ids.add(tn)
@@ -12173,7 +12257,7 @@ def _perf_attended_ticket_ids_credited_to(
     )
     if not sales_attended.empty and "case_ref" in sales_attended.columns:
         for _, row in sales_attended.iterrows():
-            if _perf_row_credited_to_person(row, focus):
+            if _perf_row_attended_credited_to_person(row, focus):
                 cref = str(row.get("case_ref") or "").strip()
                 if cref:
                     ids.add(cref)
