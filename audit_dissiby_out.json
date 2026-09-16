@@ -1,0 +1,317 @@
+﻿{
+  "engineer": "@Dissiby",
+  "period": "2026-09-01 \u2013 2026-09-30 (UTC+5)",
+  "range_utc": [
+    "2026-08-31T19:00:00+00:00",
+    "2026-09-30T18:59:59.999999+00:00"
+  ],
+  "team_table_row": {
+    "Engineer": "@Dissiby",
+    "Unique tickets": 28,
+    "Tasks": 38,
+    "Task load": 1.36,
+    "Revisit tickets": 7,
+    "Unattended": 6,
+    "Attended": 8,
+    "Residential": 27,
+    "Resort": 1
+  },
+  "bundle_total_focus": 8,
+  "attended_ids_count": 8,
+  "assigned_unique": 28,
+  "assignment_tasks": 38,
+  "unattended_cycles": 6,
+  "attended_ticket_list": [
+    {
+      "id": "2026091510000011",
+      "track": "CSM",
+      "closure": "Field resolved",
+      "status": "Resolved",
+      "activity": "2026-09-16 09:37",
+      "in_assigned_range": true
+    },
+    {
+      "id": "100313444",
+      "track": "CSM",
+      "closure": "Field resolved",
+      "status": "Resolved",
+      "activity": "2026-09-16 10:39",
+      "in_assigned_range": true
+    },
+    {
+      "id": "2026091510000010",
+      "track": "CSM",
+      "closure": "Field resolved",
+      "status": "Resolved",
+      "activity": "2026-09-16 10:24",
+      "in_assigned_range": true
+    },
+    {
+      "id": "2019110472000123",
+      "track": "CSM",
+      "closure": "Field resolved",
+      "status": "Resolved",
+      "activity": "2026-09-16 10:39",
+      "in_assigned_range": true
+    },
+    {
+      "id": "2022062372000369",
+      "track": "CSM",
+      "closure": "Field responded (Needs Review)",
+      "status": "Open",
+      "activity": "2026-09-14 09:35",
+      "in_assigned_range": true
+    },
+    {
+      "id": "100735847",
+      "track": "CSM",
+      "closure": "Field responded (Needs Review)",
+      "status": "Open",
+      "activity": "2026-09-15 09:16",
+      "in_assigned_range": true
+    },
+    {
+      "id": "2022012572000392",
+      "track": "CSM",
+      "closure": "Field resolved",
+      "status": "Resolved",
+      "activity": "2026-09-09 09:09",
+      "in_assigned_range": true
+    },
+    {
+      "id": "2026081310000162",
+      "track": "CSM",
+      "closure": "Field resolved",
+      "status": "Resolved",
+      "activity": "2026-09-05 10:04",
+      "in_assigned_range": true
+    }
+  ],
+  "attended_ids": [
+    "100313444",
+    "100735847",
+    "2019110472000123",
+    "2022012572000392",
+    "2022062372000369",
+    "2026081310000162",
+    "2026091510000010",
+    "2026091510000011"
+  ],
+  "assigned_not_attended_count": 20,
+  "assigned_not_attended_sample": [
+    {
+      "id": "100337966",
+      "track": "CSM",
+      "status": "Open",
+      "has_field_response": true,
+      "responded_at": "2026-09-06T09:51:22",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Open+response in range but not credited \u2014 check assignee/filter"
+    },
+    {
+      "id": "100716668",
+      "track": "CSM",
+      "status": "Resolved",
+      "has_field_response": true,
+      "responded_at": "2026-09-08T06:50:40",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Resolved: still open work or timing"
+    },
+    {
+      "id": "100719874",
+      "track": "CSM",
+      "status": "Resolved",
+      "has_field_response": true,
+      "responded_at": "2026-09-01T09:35:58",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Resolved: still open work or timing"
+    },
+    {
+      "id": "100728575",
+      "track": "CSM",
+      "status": "Resolved",
+      "has_field_response": true,
+      "responded_at": "2026-09-08T11:05:29",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Resolved: still open work or timing"
+    },
+    {
+      "id": "100733721",
+      "track": "CSM",
+      "status": "Open",
+      "has_field_response": true,
+      "responded_at": "2026-09-12T07:38:24",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Open+response in range but not credited \u2014 check assignee/filter"
+    },
+    {
+      "id": "100737692",
+      "track": "CSM",
+      "status": "Daily Task",
+      "has_field_response": true,
+      "responded_at": "nan",
+      "in_csm_attended_pool": false,
+      "attended_ts_in_range": true,
+      "why_not_attended": "still Daily Task despite field data \u2014 status/timestamp may not have moved to Open"
+    },
+    {
+      "id": "100739796",
+      "track": "CSM",
+      "status": "Under Investigation",
+      "has_field_response": true,
+      "responded_at": "2026-09-08T11:00:55",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Under Investigation: still open work or timing"
+    },
+    {
+      "id": "100744138",
+      "track": "CSM",
+      "status": "Under Investigation",
+      "has_field_response": true,
+      "responded_at": "2026-09-09T10:48:45",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Under Investigation: still open work or timing"
+    },
+    {
+      "id": "100744929",
+      "track": "CSM",
+      "status": "Under Investigation",
+      "has_field_response": true,
+      "responded_at": "2026-09-08T09:35:10",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Under Investigation: still open work or timing"
+    },
+    {
+      "id": "100744980",
+      "track": "CSM",
+      "status": "Under Investigation",
+      "has_field_response": true,
+      "responded_at": "2026-09-09T08:17:42",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Under Investigation: still open work or timing"
+    },
+    {
+      "id": "100745086",
+      "track": "CSM",
+      "status": "Under Investigation",
+      "has_field_response": true,
+      "responded_at": "2026-09-09T08:03:21",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Under Investigation: still open work or timing"
+    },
+    {
+      "id": "100745742",
+      "track": "CSM",
+      "status": "Open",
+      "has_field_response": true,
+      "responded_at": "2026-09-14T06:42:00",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Open+response in range but not credited \u2014 check assignee/filter"
+    },
+    {
+      "id": "100746358",
+      "track": "CSM",
+      "status": "Open",
+      "has_field_response": true,
+      "responded_at": "2026-09-12T07:01:46",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Open+response in range but not credited \u2014 check assignee/filter"
+    },
+    {
+      "id": "2020091872000162",
+      "track": "CSM",
+      "status": "Open",
+      "has_field_response": true,
+      "responded_at": "2026-09-14T06:46:41",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Open+response in range but not credited \u2014 check assignee/filter"
+    },
+    {
+      "id": "2022030872000312",
+      "track": "CSM",
+      "status": "Resolved",
+      "has_field_response": true,
+      "responded_at": "2026-09-08T11:36:50",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Resolved: still open work or timing"
+    },
+    {
+      "id": "2022040372000356",
+      "track": "CSM",
+      "status": "Resolved",
+      "has_field_response": true,
+      "responded_at": "2026-09-06T11:52:28",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Resolved: still open work or timing"
+    },
+    {
+      "id": "2023010272000405",
+      "track": "CSM",
+      "status": "Open",
+      "has_field_response": true,
+      "responded_at": "2026-09-14T06:34:19",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Open+response in range but not credited \u2014 check assignee/filter"
+    },
+    {
+      "id": "2023081872000435",
+      "track": "CSM",
+      "status": "Open",
+      "has_field_response": true,
+      "responded_at": "2026-09-12T06:57:07",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Open+response in range but not credited \u2014 check assignee/filter"
+    },
+    {
+      "id": "2026083010000004",
+      "track": "CSM",
+      "status": "Resolved",
+      "has_field_response": true,
+      "responded_at": "2026-09-06T11:20:49",
+      "in_csm_attended_pool": true,
+      "attended_ts_in_range": true,
+      "why_not_attended": "Resolved: still open work or timing"
+    },
+    {
+      "id": "2026091510000121",
+      "track": "?",
+      "reason": "not in ticket snapshot"
+    }
+  ],
+  "attended_outside_assigned": [],
+  "visit_responded_not_attended": [
+    "100716668",
+    "100719874",
+    "100728575",
+    "100733721",
+    "100737692",
+    "100744138",
+    "100744929",
+    "100744980",
+    "100745086",
+    "100745742",
+    "2020091872000162",
+    "2022040372000356",
+    "2023010272000405",
+    "2023081872000435",
+    "2026083010000004"
+  ],
+  "explain": "Attended counts unique cases reaching attended STATUS with timestamp IN RANGE (Needs Review+response, Investigation, On Hold, Resolved). Unique assigned counts tickets/cycles ASSIGNED in range \u2014 many stay Daily Task until later. Attended + Unattended does NOT sum to Unique tickets (different units)."
+}
