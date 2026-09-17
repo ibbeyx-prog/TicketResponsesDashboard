@@ -211,12 +211,14 @@ async def start_telethon_sidecar(
         return None
 
     try:
-        from telethon import TelegramClient, events
+        from telethon import events
     except ImportError:
         log.warning("Telethon not installed; group ingest disabled")
         return None
 
-    client = TelegramClient(str(_SESSION), int(api_raw), api_hash)
+    from bot_utils import make_telegram_client
+
+    client = make_telegram_client(_SESSION, int(api_raw), api_hash)
     await client.start(bot_token=token)
 
     @client.on(events.NewMessage(chats=group_entity))

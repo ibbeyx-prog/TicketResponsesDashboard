@@ -82,6 +82,72 @@ def _env_str(*names: str) -> str:
     return ""
 
 
+def _truthy_env(*names: str) -> bool:
+    for n in names:
+        raw = os.getenv(n)
+        if raw is not None and raw.strip().lower() in ("1", "true", "yes", "on"):
+            return True
+    return False
+
+
+def telethon_proxy_from_env() -> tuple | None:
+    """PySocks proxy tuple for Telethon (HTTP/SOCKS from env).
+
+    Checks ``TELEGRAM_PROXY`` first, then ``HTTPS_PROXY``, ``HTTP_PROXY``,
+    ``ALL_PROXY``. Set ``TELEGRAM_PROXY_DISABLE=1`` to force direct connection.
+    """
+    if _truthy_env("TELEGRAM_PROXY_DISABLE", "TELETHON_NO_PROXY"):
+        return None
+    raw = _env_str("TELEGRAM_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+    if not raw:
+        return None
+    return _parse_proxy_url(raw)
+
+
+def _parse_proxy_url(raw: str) -> tuple | None:
+    from urllib.parse import unquote, urlparse
+
+    try:
+        import socks
+    except ImportError:
+        _log.warning("PySocks not installed; cannot use Telethon proxy")
+        return None
+
+    url = raw.strip()
+    if "://" not in url:
+        url = f"http://{url}"
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return None
+    scheme = (parsed.scheme or "http").lower()
+    port = parsed.port
+    if port is None:
+        port = 1080 if scheme.startswith("socks") else 8080
+    username = unquote(parsed.username) if parsed.username else None
+    password = unquote(parsed.password) if parsed.password else None
+    if scheme in ("socks5", "socks5h"):
+        kind = socks.SOCKS5
+    elif scheme in ("socks4", "socks4a"):
+        kind = socks.SOCKS4
+    else:
+        kind = socks.HTTP
+    return (kind, host, int(port), True, username, password)
+
+
+def make_telegram_client(
+    session: str | Path,
+    api_id: int,
+    api_hash: str,
+) -> TelegramClient:
+    """Telethon client with optional corporate proxy from env."""
+    proxy = telethon_proxy_from_env()
+    if proxy:
+        _log.info("Telethon using proxy %s:%s", proxy[1], proxy[2])
+        return TelegramClient(str(session), api_id, api_hash, proxy=proxy)
+    return TelegramClient(str(session), api_id, api_hash)
+
+
 def normalize_telegram_group_id_paste(raw: str) -> str:
     """Strip whitespace, BOM/zero-width, and one layer of matching quotes (copy/paste)."""
     s = raw.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").strip()
@@ -145,7 +211,7 @@ async def _send_via_telethon(
     text: str,
     parse_mode: str | None,
 ) -> AssignmentTelegramRef:
-    client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
+    client = make_telegram_client(_SESSION_BASE, api_id, api_hash)
     try:
         await client.start(bot_token=bot_token)
         msg = await client.send_message(group_entity, text, parse_mode=parse_mode)
@@ -179,7 +245,7 @@ async def _edit_via_telethon(
     message_id: int,
     text: str,
 ) -> None:
-    client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
+    client = make_telegram_client(_SESSION_BASE, api_id, api_hash)
     try:
         await client.start(bot_token=bot_token)
         await client.edit_message(int(chat_id), int(message_id), text=text)
@@ -214,7 +280,9 @@ async def find_assignment_telegram_ref(
         return None
 
     entity = _parse_group_entity(group_raw)
-    client = TelegramClient(str(_SESSION_BASE), int(str(api_id_res).strip()), api_hash_res)
+    client = make_telegram_client(
+        _SESSION_BASE, int(str(api_id_res).strip()), api_hash_res
+    )
     try:
         await client.start(bot_token=token)
         async for message in client.iter_messages(entity, limit=search_limit):
@@ -419,7 +487,7 @@ async def _delete_via_telethon(
     chat_id: int,
     message_id: int,
 ) -> None:
-    client = TelegramClient(str(_SESSION_BASE), api_id, api_hash)
+    client = make_telegram_client(_SESSION_BASE, api_id, api_hash)
     try:
         await client.start(bot_token=bot_token)
         await client.delete_messages(int(chat_id), int(message_id))
