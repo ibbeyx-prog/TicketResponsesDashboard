@@ -1,0 +1,24 @@
+# NetOps production overlay — use with base compose:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.netops.yml up -d --build
+#
+# Requires `.env` with Supabase, TELEGRAM_TOKEN, TELEGRAM_WEBHOOK_SECRET,
+# TG_API_ID, TG_API_HASH, TELEGRAM_GROUP_CHAT_ID.
+# Set WEBHOOK_BASE_URL in `.env` (see deploy/netops/.env.netops.example).
+
+services:
+  dashboard:
+    container_name: coverage-eye-dashboard
+    ports:
+      - "127.0.0.1:8501:8501"
+    restart: unless-stopped
+
+  bot:
+    container_name: coverage-eye-bot
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PORT: "8000"
+      # Origin only — webhook_config appends /webhook (never use /coverage-eye here).
+      WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:-https://netops.dhiraagu.com.mv}
+    restart: unless-stopped

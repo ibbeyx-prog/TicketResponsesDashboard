@@ -44,6 +44,9 @@ services:
       - .env
     environment:
       PORT: "8000"
+    # Persist Telethon session — required for field swipe-replies when bot privacy mode is on.
+    volumes:
+      - telethon-sidecar-session:/app/telethon_sidecar_session
     command: ["python", "bot.py"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -52,9 +55,6 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
-    # Optional: persist Telethon session files across restarts (uncomment if needed).
-    # volumes:
-    #   - bot-sessions:/app
 
-# volumes:
-#   bot-sessions:
+volumes:
+  telethon-sidecar-session:

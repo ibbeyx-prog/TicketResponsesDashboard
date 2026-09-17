@@ -95,7 +95,11 @@ from typing import Any
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from supabase_client import create_supabase_client, resolve_supabase_config
+from supabase_client import (
+    create_supabase_client,
+    resolve_supabase_config,
+    supabase_table_name,
+)
 from telegram import BotCommand, Message, MessageEntity, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -155,7 +159,9 @@ _FIELD_REPLY_STATUSES = frozenset({STATUS_DAILY_TASK, "Open", STATUS_ON_HOLD})
 ATTENDANCE_LOGS_TABLE = (
     os.getenv("ATTENDANCE_LOGS_TABLE") or "ticket_attendance_logs"
 ).strip()
-TICKET_VISITS_TABLE = (os.getenv("TICKET_VISITS_TABLE") or "ticket_visits").strip()
+TICKET_VISITS_TABLE = supabase_table_name(
+    os.getenv("TICKET_VISITS_TABLE") or "ticket_visits"
+)
 TICKET_PHOTOS_BUCKET = (os.getenv("TICKET_PHOTOS_BUCKET") or "ticket-photos").strip()
 TASK_CATEGORIES_TABLE = task_categories_table().strip()
 FIELD_RESPONSE_UNDO_MINUTES = max(
@@ -3424,7 +3430,22 @@ async def lifespan(_: FastAPI):
         log.exception("Telethon sidecar failed to start")
 
     webhook_url = resolve_telegram_webhook_url()
-    if webhook_url:
+    telethon_only = _truthy_env("BOT_SKIP_WEBHOOK") or _truthy_env("BOT_TELETHON_ONLY")
+    if telethon_only:
+        log.info(
+            "Telethon-only ingest (BOT_SKIP_WEBHOOK / BOT_TELETHON_ONLY): "
+            "group assignments and swipe-replies do not use the Bot API webhook."
+        )
+        if _truthy_env("BOT_DELETE_WEBHOOK_ON_START"):
+            try:
+                await bot_app.bot.delete_webhook(drop_pending_updates=False)
+                log.info(
+                    "Cleared Telegram webhook URL on start (pending queue kept). "
+                    "New group traffic is handled by the Telethon sidecar."
+                )
+            except Exception:
+                log.exception("delete_webhook on start failed")
+    elif webhook_url:
         try:
             await bot_app.bot.set_webhook(
                 url=webhook_url,
@@ -3518,9 +3539,11 @@ async def health() -> dict[str, str]:
     ``py -3 restore_webhook.py --probe`` from a machine with ``.env``.
     """
     url = resolve_telegram_webhook_url()
+    telethon_only = _truthy_env("BOT_SKIP_WEBHOOK") or _truthy_env("BOT_TELETHON_ONLY")
     return {
         "status": "ok",
-        "webhook_url_configured": "yes" if url else "no",
+        "ingest_mode": "telethon_only" if telethon_only else "webhook",
+        "webhook_url_configured": "yes" if url and not telethon_only else "no",
         # What Telegram is told to POST to (after normalizing env). Compare to
         # getWebhookInfo.url if you still see 404 — they must match exactly.
         "telegram_callback_url": url or "",
