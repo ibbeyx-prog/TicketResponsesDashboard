@@ -5,3 +5,4 @@
 # image defaults, and `tickets` was the common misconfiguration.
 [variables]
 TICKETS_TABLE = "tickets_active"
+TICKET_VISITS_TABLE = "ticket_visits"

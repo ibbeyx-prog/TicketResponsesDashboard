@@ -1,0 +1,22 @@
+# Interim NetOps: field replies WITHOUT public /webhook (Telethon sidecar only).
+#
+# Use until nginx routes /webhook to the bot:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.interim-netops.yml up -d bot
+#
+# Requires in `.env`: TELEGRAM_TOKEN, TG_API_ID, TG_API_HASH, TELEGRAM_GROUP_CHAT_ID,
+# Supabase keys. Clears the broken Railway webhook on bot start.
+
+services:
+  bot:
+    container_name: coverage-eye-bot
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PORT: "8000"
+      BOT_TELETHON_ONLY: "1"
+      BOT_DELETE_WEBHOOK_ON_START: "1"
+      WEBHOOK_BASE_URL: ""
+      RAILWAY_PUBLIC_DOMAIN: ""
+      WEBHOOK_FULL_URL: ""
+    restart: unless-stopped

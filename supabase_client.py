@@ -30,6 +30,14 @@ def _strip(s: str | None) -> str:
     return (s or "").strip()
 
 
+def supabase_table_name(raw: str) -> str:
+    """PostgREST ``client.table()`` name — ``ticket_visits``, not ``public.ticket_visits``."""
+    name = _strip(raw)
+    if name.lower().startswith("public."):
+        return name.split(".", 1)[1]
+    return name
+
+
 def _candidate_keys_from_env() -> list[tuple[str, str]]:
     """Return (env_var_name, key) pairs in probe order."""
     primary = _strip(os.getenv("SUPABASE_KEY"))

@@ -7,6 +7,8 @@ import os
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
+from supabase_client import supabase_table_name
+
 log = logging.getLogger("unattended")
 
 STATUS_UNATTENDED = "Unattended"
@@ -294,9 +296,9 @@ async def run_unattended_nudges(
     return {"sent": sent, "skipped": skipped, "scanned": len(pending)}
 
 
-TICKET_VISITS_TABLE = (
-    os.getenv("TICKET_VISITS_TABLE") or "public.ticket_visits"
-).strip()
+TICKET_VISITS_TABLE = supabase_table_name(
+    os.getenv("TICKET_VISITS_TABLE") or "ticket_visits"
+)
 
 
 def _close_open_visits_unattended(
@@ -337,7 +339,7 @@ def run_unattended_close(
     """
     pending = _fetch_daily_task_tickets(client, tickets_table=tickets_table)
     now_iso = datetime.now(timezone.utc).isoformat()
-    visits_tbl = (visits_table or TICKET_VISITS_TABLE).strip()
+    visits_tbl = supabase_table_name(visits_table or TICKET_VISITS_TABLE)
     closed = 0
     for row in pending:
         if not should_close_as_unattended(row):
