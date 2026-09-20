@@ -188,6 +188,20 @@ from unattended import (
 
 # ── Typography helpers (use in st.markdown f-strings) ──
 
+_CSS_HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def _sanitize_css_hex(color: object, *, fallback: str = "#8a9ac0") -> str:
+    """Valid #rgb / #rrggbb only — avoids DevTools ``color: #`` parse errors."""
+    c = str(color or "").strip()
+    if _CSS_HEX_RE.fullmatch(c):
+        return c
+    fb = str(fallback or "").strip()
+    if _CSS_HEX_RE.fullmatch(fb):
+        return fb
+    return "#8a9ac0"
+
+
 def tx(
     text: object,
     size: str = "13px",
@@ -197,9 +211,10 @@ def tx(
     tag: str = "span",
 ) -> str:
     safe = html.escape(str(text))
+    fg = _sanitize_css_hex(color)
     return (
         f'<{tag} style="font-size:{size};font-weight:{weight};'
-        f"color:{color};{extra}\">{safe}</{tag}>"
+        f"color:{fg};{extra}\">{safe}</{tag}>"
     )
 
 
@@ -3024,7 +3039,8 @@ def _handle_per_user_login(username: str, password: str, remember: bool) -> None
         return
     try:
         with st.spinner("Signing in…"):
-            payload = _rpc_dashboard_verify_login(uname, password)
+            with _dash_perf_span("login.rpc_verify", user=uname):
+                payload = _rpc_dashboard_verify_login(uname, password)
     except Exception as exc:
         _log_dashboard_auth_event(
             "LoginFailed",
@@ -7446,15 +7462,16 @@ def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
     for eng in engineers:
         norm = _perf_norm_member(eng)
         if norm in overrides:
-            result[eng] = overrides[norm]
-            used_colors.add(overrides[norm])
+            col = _sanitize_css_hex(overrides[norm])
+            result[eng] = col
+            used_colors.add(col)
     palette_idx = 0
     for eng in sorted(engineers, key=str.lower):
         if eng in result:
             continue
         while palette_idx < len(palette) and palette[palette_idx] in used_colors:
             palette_idx += 1
-        color = palette[palette_idx % len(palette)]
+        color = _sanitize_css_hex(palette[palette_idx % len(palette)])
         result[eng] = color
         used_colors.add(color)
         palette_idx += 1
@@ -8820,7 +8837,7 @@ def _render_perf_visit_staff_matrix(
     ]
     for eng in all_engineers:
         eng_short = eng if len(eng) <= 14 else eng[:11] + "…"
-        col = eng_colors.get(eng, "#3b82f6")
+        col = _sanitize_css_hex(eng_colors.get(eng, "#3b82f6"))
         header_cells.append(
             f'<th class="perf-matrix-ticket" title="{html.escape(eng)}" '
             f'style="color:{col}">{html.escape(eng_short)}</th>'
@@ -8862,6 +8879,10 @@ def _render_perf_visit_staff_matrix(
                                 outcome, ("·", "#a39e97")
                             )
                             title = label
+            if not sym:
+                cells.append('<td class="perf-matrix-empty">·</td>')
+                continue
+            sym_col = _sanitize_css_hex(sym_col)
             cells.append(
                 f'<td class="perf-matrix-cell" style="color:{sym_col}" '
                 f'title="{html.escape(title)}">{html.escape(sym)}</td>'
@@ -9048,7 +9069,7 @@ def _render_perf_matrix_html_from_payload(payload: dict[str, object]) -> None:
     header_cells = ['<th class="perf-matrix-sticky-col">Ticket</th>']
     for eng in all_engineers:
         eng_short = eng if len(str(eng)) <= 14 else str(eng)[:11] + "…"
-        col = eng_colors.get(eng, "#3b82f6")
+        col = _sanitize_css_hex(eng_colors.get(eng, "#3b82f6"))
         header_cells.append(
             f'<th class="perf-matrix-ticket" title="{html.escape(str(eng))}" '
             f'style="color:{col}">{html.escape(eng_short)}</th>'
@@ -9076,6 +9097,10 @@ def _render_perf_matrix_html_from_payload(payload: dict[str, object]) -> None:
                 sym, sym_col = "●", eng_colors.get(eng, "#3b82f6")
             else:
                 sym, sym_col = _PERF_MATRIX_OUTCOME_STYLE.get(outcome, ("·", "#a39e97"))
+            if not sym:
+                cells.append('<td class="perf-matrix-empty">·</td>')
+                continue
+            sym_col = _sanitize_css_hex(sym_col)
             cells.append(
                 f'<td class="perf-matrix-cell" style="color:{sym_col}" '
                 f'title="{html.escape(label)}">{html.escape(sym)}</td>'
@@ -10474,6 +10499,41 @@ def _perf_assigned_ticket_ids_in_range(
     mask = la.notna() & (la >= range_start) & (la <= range_end)
     tids = df_all.loc[mask, "ticket_number"].astype(str).str.strip()
     return frozenset(t for t in tids if t)
+
+
+def _perf_filter_ticket_ids_credited_to_focus(
+    ids: set[str] | frozenset[str],
+    *,
+    focus: str,
+    ticket_rows: dict[str, pd.Series],
+    sales_all: pd.DataFrame | None,
+    sales_refs: set[str],
+) -> set[str]:
+    """Drop tickets reassigned away — keep only rows still credited to ``focus``."""
+    if not ids:
+        return set()
+    sales_by_ref: dict[str, pd.Series] = {}
+    if sales_all is not None and not sales_all.empty and "case_ref" in sales_all.columns:
+        for _, row in sales_all.iterrows():
+            cref = str(row.get("case_ref") or "").strip()
+            if cref:
+                sales_by_ref[cref] = row
+    out: set[str] = set()
+    for tn in ids:
+        tn = str(tn).strip()
+        if not tn:
+            continue
+        if tn in sales_refs:
+            row = sales_by_ref.get(tn)
+            if row is None or _perf_row_credited_to_person(row, focus):
+                out.add(tn)
+            continue
+        row = ticket_rows.get(tn)
+        if row is None:
+            out.add(tn)
+        elif _perf_row_credited_to_person(row, focus):
+            out.add(tn)
+    return out
 
 
 def _perf_handled_range_activity_mask(
@@ -12606,6 +12666,20 @@ def _perf_engineer_range_assignment_metrics(
             res_cycles = log_res
             rsr_cycles = log_rsr
 
+    res_ids = _perf_filter_ticket_ids_credited_to_focus(
+        res_ids,
+        focus=focus,
+        ticket_rows=ticket_rows,
+        sales_all=sales_all,
+        sales_refs=sales_refs,
+    )
+    rsr_ids = _perf_filter_ticket_ids_credited_to_focus(
+        rsr_ids,
+        focus=focus,
+        ticket_rows=ticket_rows,
+        sales_all=sales_all,
+        sales_refs=sales_refs,
+    )
     all_ids = frozenset(res_ids | rsr_ids)
     revisit_tickets = sum(1 for c in ticket_cycle_counts.values() if c >= 2)
     same_day_pct = (
@@ -12689,12 +12763,6 @@ def _perf_team_assignment_summary_df(
         range_start=range_start,
         range_end=range_end,
     )
-    attended_map = _perf_attended_unique_counts_by_credit(
-        df_all,
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
-    )
     credit_to_label = _perf_engineer_credit_to_label_map()
     _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
         df_all,
@@ -12746,7 +12814,18 @@ def _perf_team_assignment_summary_df(
         )
         unique = int(assign.get("assigned_in_range") or 0)
         tasks = int(assign.get("assignment_cycles_in_range") or 0)
-        attended = int(attended_map.get(credit_key, 0))
+        assigned_ids = assign.get("_assigned_ids")
+        if isinstance(assigned_ids, frozenset) and assigned_ids:
+            attended_credited = _perf_attended_ticket_ids_credited_to(
+                df_all,
+                sales_all,
+                focus=handle,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            attended = len(assigned_ids & attended_credited)
+        else:
+            attended = 0
         if unique == 0 and tasks == 0 and attended == 0:
             continue
         label = handle if str(handle).startswith("@") else f"@{handle}"
@@ -12887,10 +12966,9 @@ def _perf_assignment_task_day_counts(
     if not logs.empty and "timestamp" in logs.columns:
         ts = _parse_ts(logs["timestamp"])
         in_range = ts.notna() & (ts >= range_start) & (ts <= range_end)
+        # Last ``Assignment`` per ticket per local day wins (skip brief reassign-away).
+        last_by_day_ticket: dict[tuple[date, str], tuple[pd.Timestamp, tuple[str, ...]]] = {}
         for idx, row in logs.loc[in_range].iterrows():
-            keys = _perf_credit_keys_from_assignee_names(
-                [str(row.get("member_username") or "")]
-            )
             stamp = ts.loc[idx]
             if pd.isna(stamp):
                 continue
@@ -12898,9 +12976,25 @@ def _perf_assignment_task_day_counts(
             tn = str(row.get("ticket_number") or "").strip()
             if tn and tn not in sales_refs and tn not in active_tickets:
                 continue
+            keys = tuple(
+                _perf_credit_keys_from_assignee_names(
+                    [str(row.get("member_username") or "")]
+                )
+            )
+            if not keys:
+                continue
+            slot = (day, tn) if tn else (day, f"__no_ticket_{idx}")
+            prev = last_by_day_ticket.get(slot)
+            if prev is None or stamp > prev[0]:
+                last_by_day_ticket[slot] = (stamp, keys)
+        for (day, tn), (_, keys) in last_by_day_ticket.items():
+            if tn.startswith("__no_ticket_"):
+                tn = ""
             for key in keys:
                 label = credit_to_label.get(key)
                 if not label:
+                    continue
+                if tn and logged_ticket_day.get((key, day, tn), 0) > 0:
                     continue
                 day_counts[(day, label)] += 1
                 if tn in sales_refs:
@@ -12908,7 +13002,7 @@ def _perf_assignment_task_day_counts(
                 else:
                     res_by_label[label] += 1
                 if tn:
-                    logged_ticket_day[(key, day, tn)] += 1
+                    logged_ticket_day[(key, day, tn)] = 1
 
     if not df_all.empty and "last_assigned_at" in df_all.columns:
         la = _parse_ts(df_all["last_assigned_at"])
@@ -13326,8 +13420,9 @@ def _render_perf_summary_team_assignment_table(
         focus_key = _perf_person_credit_key(focus)
         focus_label = focus if str(focus).startswith("@") else f"@{focus_key}"
     st.caption(
-        "Each engineer's unique tickets vs assign/reassign tasks. "
-        "Team totals can exceed the queue snapshot when tickets are shared or reassigned."
+        "Each engineer's unique tickets vs assign/reassign tasks (reassign-away same day "
+        "credits the final assignee only). Attended = field outcomes on tickets still "
+        "assigned to them in this period."
     )
     view = team_df.copy()
     if focus_label and "Engineer" in view.columns:
@@ -14038,7 +14133,7 @@ def _render_perf_summary_daily_assignment_chart(
         return
     cap_parts = [
         LOCAL_TZ_LABEL,
-        "same definition as Tasks (Assignment logs + Daily Task last_assigned_at gap fill)",
+        "Tasks = unique ticket per engineer per day (Assignment log + Daily Task gap fill)",
     ]
     if period_label:
         cap_parts.insert(0, period_label)
