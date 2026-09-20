@@ -70,6 +70,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time as _perf_time
 from contextlib import contextmanager
 from collections import Counter
@@ -2265,6 +2266,9 @@ _LOGIN_SAVE_PW_KEY = "login_save_password"
 _LOGIN_REMEMBER_BOOT_KEY = "_login_remember_bootstrapped"
 _LOGIN_CONFIG_CACHE_KEY = "_login_users_configured_cache"
 _LOGIN_PAGE_AUDIT_KEY = "_login_page_audit_logged"
+_DASH_SUPABASE_WARMED_KEY = "_dash_supabase_warmed_login"
+_DASH_POST_LOGIN_BOOTSTRAP_KEY = "_dash_post_login_bootstrap"
+_DASH_DEFER_MAINTENANCE_KEY = "_dash_defer_maintenance"
 _MIN_DASHBOARD_PASSWORD_LEN = 8
 _MAX_OPERATOR_ID_LEN = 64
 _MAX_DASHBOARD_USERNAME_LEN = 48
@@ -2392,6 +2396,9 @@ def _clear_auth_session() -> None:
         _OPERATOR_ID_KEY,
         "is_legacy_session",
         _LOGIN_PAGE_AUDIT_KEY,
+        _DASH_POST_LOGIN_BOOTSTRAP_KEY,
+        _DASH_DEFER_MAINTENANCE_KEY,
+        _DASH_SUPABASE_WARMED_KEY,
     ):
         st.session_state.pop(key, None)
 
@@ -2401,6 +2408,33 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_AUTH_PWD_VER_KEY] = session_fp
     st.session_state[_AUTH_USERNAME_KEY] = username
     st.session_state[_OPERATOR_ID_KEY] = operator_id
+    st.session_state[_DASH_POST_LOGIN_BOOTSTRAP_KEY] = True
+
+
+def _warm_supabase_for_login() -> None:
+    """Reuse TLS / HTTP pool before the login RPC (once per session on login screen)."""
+    if st.session_state.get(_DASH_SUPABASE_WARMED_KEY):
+        return
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    st.session_state[_DASH_SUPABASE_WARMED_KEY] = True
+    try:
+        _get_supabase_client()
+    except Exception:
+        st.session_state.pop(_DASH_SUPABASE_WARMED_KEY, None)
+
+
+def _run_dashboard_background_maintenance(*, allow_deferred: bool = True) -> None:
+    """Unattended close + attendance poll — skipped on first paint after login."""
+    if allow_deferred and st.session_state.pop(_DASH_DEFER_MAINTENANCE_KEY, False):
+        _maybe_run_unattended_close()
+        _maybe_toast_new_telegram_activity()
+        return
+    if st.session_state.pop(_DASH_POST_LOGIN_BOOTSTRAP_KEY, False):
+        st.session_state[_DASH_DEFER_MAINTENANCE_KEY] = True
+        return
+    _maybe_run_unattended_close()
+    _maybe_toast_new_telegram_activity()
 
 
 def _log_dashboard_auth_event(
@@ -2415,18 +2449,22 @@ def _log_dashboard_auth_event(
     log.info("dashboard auth: %s user=%s %s", action_type, user, note_text)
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
-    try:
-        _get_supabase_client().table(ATTENDANCE_LOGS_TABLE).insert(
-            {
-                "ticket_number": None,
-                "member_username": user,
-                "action_type": action_type,
-                "note": note_text[:500] if note_text else None,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        ).execute()
-    except Exception as exc:
-        log.warning("dashboard auth log insert failed (%s): %s", action_type, exc)
+
+    def _insert() -> None:
+        try:
+            _get_supabase_client().table(ATTENDANCE_LOGS_TABLE).insert(
+                {
+                    "ticket_number": None,
+                    "member_username": user,
+                    "action_type": action_type,
+                    "note": note_text[:500] if note_text else None,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ).execute()
+        except Exception as exc:
+            log.warning("dashboard auth log insert failed (%s): %s", action_type, exc)
+
+    threading.Thread(target=_insert, daemon=True).start()
 
 
 def _log_legacy_login_attendance(operator_id: str) -> None:
@@ -2984,7 +3022,6 @@ def _handle_per_user_login(username: str, password: str, remember: bool) -> None
     except ValueError as ve:
         st.toast(str(ve).replace("**", ""), icon="⚠️")
         return
-    _log_dashboard_auth_event("LoginAttempt", member_username=uname, note="per_user")
     try:
         with st.spinner("Signing in…"):
             payload = _rpc_dashboard_verify_login(uname, password)
@@ -3025,7 +3062,6 @@ def _handle_legacy_login(operator_id: str, shared_password: str, *, legacy_passw
     except ValueError as ve:
         st.toast(str(ve).replace("**", ""), icon="❌")
         return
-    _log_dashboard_auth_event("LoginAttempt", member_username=op, note="legacy")
     if not hmac.compare_digest(shared_password, legacy_password):
         _log_dashboard_auth_event("LoginFailed", member_username=op, note="bad_shared_password")
         st.toast("Incorrect shared password", icon="❌")
@@ -3210,6 +3246,7 @@ def _render_login_screen(
 ) -> None:
     """Login screen matching the dispatch console design system."""
     _init_login_session_state()
+    _warm_supabase_for_login()
     _log_login_page_view(per_user=per_user)
     _render_login_page_styles()
 
@@ -3488,6 +3525,7 @@ _DASH_DATA_CACHE_TTL_SEC = max(
 )
 _DISPATCH_CTX_SESSION_KEY = "_dispatch_ticket_ctx_run"
 _PERF_CTX_SESSION_KEY = "_perf_ctx_run"
+_PERF_ASSIGN_TASK_COUNTS_KEY = "_perf_assign_task_counts_memo"
 _PERF_SUMMARY_CACHE_KEY = "_perf_summary_report_cache"
 _PERF_VISITS_HISTORY_KEY = "_perf_visits_history_cache"
 _PERF_SUMMARY_SECTION_KEY = "_perf_summary_active_section"
@@ -3562,6 +3600,7 @@ def _invalidate_dashboard_data_cache(
         _cached_resort_unified_bundle.clear()
     if attendance:
         clearables.append(_fetch_latest_attendance_ts_cached)
+        clearables.append(_fetch_assignment_task_logs_in_range_cached)
         _cached_latest_admin_comment.clear()
     if visits:
         clearables.append(_fetch_visits_in_range_cached)
@@ -3578,7 +3617,10 @@ def _invalidate_dashboard_data_cache(
         st.session_state.pop(_DISPATCH_CTX_SESSION_KEY, None)
     st.session_state.pop(_DASH_MISMATCH_CACHE_KEY, None)
     st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
+    st.session_state.pop(_PERF_ASSIGN_TASK_COUNTS_KEY, None)
     st.session_state.pop(_PERF_VISITS_HISTORY_KEY, None)
+    if tickets or sales_cases or attendance:
+        st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
 
 
 # Ticket/dispatch writes can never change the sales-case list, the field
@@ -9593,10 +9635,12 @@ def _apply_dash_range_change() -> None:
     """Refresh range-scoped caches after the header time-range picker changes."""
     # Tickets/sales snapshots do not depend on the header range — avoid refetching them.
     _fetch_visits_in_range_cached.clear()
+    _fetch_assignment_task_logs_in_range_cached.clear()
     _perf_weekly_resolution_trend_cached.clear()
     _perf_monthly_resolution_trend_cached.clear()
     _perf_breakdown_notes_cached.clear()
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+    st.session_state.pop(_PERF_ASSIGN_TASK_COUNTS_KEY, None)
     st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
 
 
@@ -12380,6 +12424,58 @@ def _perf_visit_same_day_response(
     return resp_local.time() <= assign_day_cutoff_time()
 
 
+def _perf_empty_visit_range_stats() -> dict[str, object]:
+    return {
+        "res_ids_visit": set(),
+        "rsr_ids_visit": set(),
+        "res_cycles": 0,
+        "rsr_cycles": 0,
+        "ticket_cycle_counts": {},
+        "same_day_count": 0,
+        "res_quality_cycles": 0,
+    }
+
+
+def _perf_batch_visit_range_stats_by_credit(
+    prepared: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    sales_refs: frozenset[str],
+    ticket_rows: dict[str, pd.Series],
+) -> dict[str, dict[str, object]]:
+    """Visit-cycle stats in range — one pass for all engineers."""
+    by_key: dict[str, dict[str, object]] = {}
+    if prepared.empty or "visit_start" not in prepared.columns:
+        return by_key
+    vs = _parse_ts(prepared["visit_start"])
+    in_range = vs.notna() & (vs >= range_start) & (vs <= range_end)
+    for _, visit in prepared.loc[in_range].iterrows():
+        keys = _perf_credit_keys_from_assignee_names([str(visit.get("assignee") or "")])
+        tn = str(visit.get("ticket_number") or "").strip()
+        if not tn:
+            continue
+        for focus_key in keys:
+            stats = by_key.get(focus_key)
+            if stats is None:
+                stats = _perf_empty_visit_range_stats()
+                by_key[focus_key] = stats
+            res_ids: set[str] = stats["res_ids_visit"]  # type: ignore[assignment]
+            rsr_ids: set[str] = stats["rsr_ids_visit"]  # type: ignore[assignment]
+            tcc: dict[str, int] = stats["ticket_cycle_counts"]  # type: ignore[assignment]
+            tcc[tn] = tcc.get(tn, 0) + 1
+            if tn in sales_refs:
+                rsr_ids.add(tn)
+                stats["rsr_cycles"] = int(stats["rsr_cycles"]) + 1  # type: ignore[assignment]
+            else:
+                res_ids.add(tn)
+                stats["res_cycles"] = int(stats["res_cycles"]) + 1  # type: ignore[assignment]
+                stats["res_quality_cycles"] = int(stats["res_quality_cycles"]) + 1  # type: ignore[assignment]
+                if _perf_visit_same_day_response(visit, ticket_rows.get(tn)):
+                    stats["same_day_count"] = int(stats["same_day_count"]) + 1  # type: ignore[assignment]
+    return by_key
+
+
 def _perf_engineer_range_assignment_metrics(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame | None,
@@ -12388,6 +12484,9 @@ def _perf_engineer_range_assignment_metrics(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
     visits_history: pd.DataFrame | None = None,
+    prepared_visits_range: pd.DataFrame | None = None,
+    visit_range_stats: dict[str, object] | None = None,
+    assignment_cycles_by_label: tuple[dict[str, int], dict[str, int]] | None = None,
 ) -> dict[str, int | frozenset[str]]:
     """Unique tickets + assign/reassign task counts (residential + resort) for one engineer."""
     focus_key = _perf_person_credit_key(focus)
@@ -12406,13 +12505,6 @@ def _perf_engineer_range_assignment_metrics(
         return empty
 
     sales_refs = _perf_sales_case_ref_set(sales_all)
-    res_ids_visit: set[str] = set()
-    rsr_ids_visit: set[str] = set()
-    res_cycles = 0
-    rsr_cycles = 0
-    ticket_cycle_counts: dict[str, int] = {}
-    same_day_count = 0
-    res_quality_cycles = 0
     ticket_rows: dict[str, pd.Series] = {}
     if not df_all.empty and "ticket_number" in df_all.columns:
         for _, row in df_all.iterrows():
@@ -12420,28 +12512,49 @@ def _perf_engineer_range_assignment_metrics(
             if tn:
                 ticket_rows[tn] = row
 
-    visits_range = _fetch_visits_in_range(range_start, range_end)
-    prepared = _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
-    if not prepared.empty and "visit_start" in prepared.columns:
-        vs = _parse_ts(prepared["visit_start"])
-        in_range = vs.notna() & (vs >= range_start) & (vs <= range_end)
-        for _, visit in prepared.loc[in_range].iterrows():
-            keys = _perf_credit_keys_from_assignee_names([str(visit.get("assignee") or "")])
-            if focus_key not in keys:
-                continue
-            tn = str(visit.get("ticket_number") or "").strip()
-            if not tn:
-                continue
-            ticket_cycle_counts[tn] = ticket_cycle_counts.get(tn, 0) + 1
-            if tn in sales_refs:
-                rsr_ids_visit.add(tn)
-                rsr_cycles += 1
-            else:
-                res_ids_visit.add(tn)
-                res_cycles += 1
-                res_quality_cycles += 1
-                if _perf_visit_same_day_response(visit, ticket_rows.get(tn)):
-                    same_day_count += 1
+    if visit_range_stats is not None:
+        res_ids_visit = set(visit_range_stats.get("res_ids_visit") or ())
+        rsr_ids_visit = set(visit_range_stats.get("rsr_ids_visit") or ())
+        res_cycles = int(visit_range_stats.get("res_cycles") or 0)
+        rsr_cycles = int(visit_range_stats.get("rsr_cycles") or 0)
+        ticket_cycle_counts = dict(visit_range_stats.get("ticket_cycle_counts") or {})
+        same_day_count = int(visit_range_stats.get("same_day_count") or 0)
+        res_quality_cycles = int(visit_range_stats.get("res_quality_cycles") or 0)
+    else:
+        res_ids_visit = set()
+        rsr_ids_visit = set()
+        res_cycles = 0
+        rsr_cycles = 0
+        ticket_cycle_counts = {}
+        same_day_count = 0
+        res_quality_cycles = 0
+        if prepared_visits_range is not None:
+            prepared = prepared_visits_range
+        else:
+            visits_range = _fetch_visits_in_range(range_start, range_end)
+            prepared = (
+                _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
+            )
+        if not prepared.empty and "visit_start" in prepared.columns:
+            vs = _parse_ts(prepared["visit_start"])
+            in_range = vs.notna() & (vs >= range_start) & (vs <= range_end)
+            for _, visit in prepared.loc[in_range].iterrows():
+                keys = _perf_credit_keys_from_assignee_names([str(visit.get("assignee") or "")])
+                if focus_key not in keys:
+                    continue
+                tn = str(visit.get("ticket_number") or "").strip()
+                if not tn:
+                    continue
+                ticket_cycle_counts[tn] = ticket_cycle_counts.get(tn, 0) + 1
+                if tn in sales_refs:
+                    rsr_ids_visit.add(tn)
+                    rsr_cycles += 1
+                else:
+                    res_ids_visit.add(tn)
+                    res_cycles += 1
+                    res_quality_cycles += 1
+                    if _perf_visit_same_day_response(visit, ticket_rows.get(tn)):
+                        same_day_count += 1
 
     visits_snapshot = _perf_filter_visits_by_person(
         visits_history
@@ -12473,6 +12586,25 @@ def _perf_engineer_range_assignment_metrics(
     rsr_ids = rsr_ids_visit | rsr_fallback
     res_cycles += len(res_fallback - res_ids_visit)
     rsr_cycles += len(rsr_fallback - rsr_ids_visit)
+
+    credit_to_label = _perf_engineer_credit_to_label_map()
+    focus_label = credit_to_label.get(focus_key)
+    if focus_label and credit_to_label:
+        if assignment_cycles_by_label is not None:
+            res_by_label, rsr_by_label = assignment_cycles_by_label
+        else:
+            _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                credit_to_label=credit_to_label,
+            )
+        log_res = int(res_by_label.get(focus_label, 0))
+        log_rsr = int(rsr_by_label.get(focus_label, 0))
+        if log_res + log_rsr > 0:
+            res_cycles = log_res
+            rsr_cycles = log_rsr
 
     all_ids = frozenset(res_ids | rsr_ids)
     revisit_tickets = sum(1 for c in ticket_cycle_counts.values() if c >= 2)
@@ -12563,6 +12695,33 @@ def _perf_team_assignment_summary_df(
         range_start=range_start,
         range_end=range_end,
     )
+    credit_to_label = _perf_engineer_credit_to_label_map()
+    _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        credit_to_label=credit_to_label,
+    )
+    assignment_cycles_by_label = (res_by_label, rsr_by_label)
+    sales_refs = _perf_sales_case_ref_set(sales_all)
+    ticket_rows: dict[str, pd.Series] = {}
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                ticket_rows[tn] = row
+    visits_range = _fetch_visits_in_range(range_start, range_end)
+    prepared_visits = (
+        _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
+    )
+    visit_stats_by_credit = _perf_batch_visit_range_stats_by_credit(
+        prepared_visits,
+        range_start=range_start,
+        range_end=range_end,
+        sales_refs=sales_refs,
+        ticket_rows=ticket_rows,
+    )
     rows: list[dict[str, object]] = []
     seen: set[str] = set()
     for handle in get_engineer_handles():
@@ -12578,6 +12737,12 @@ def _perf_team_assignment_summary_df(
             focus=handle,
             range_start=range_start,
             range_end=range_end,
+            visits_history=visits,
+            prepared_visits_range=prepared_visits,
+            visit_range_stats=visit_stats_by_credit.get(
+                credit_key, _perf_empty_visit_range_stats()
+            ),
+            assignment_cycles_by_label=assignment_cycles_by_label,
         )
         unique = int(assign.get("assigned_in_range") or 0)
         tasks = int(assign.get("assignment_cycles_in_range") or 0)
@@ -12615,6 +12780,180 @@ def _perf_team_assignment_summary_df(
     return pd.DataFrame(rows).sort_values(
         ["Tasks", "Unique tickets"], ascending=[False, False]
     )
+
+
+# Field task cycles only — ``Assignment`` is written with ``member_username`` = assignee.
+# ``TicketQueued`` / ``ReassignedFromOpen`` audit the dashboard operator and must not
+# count as engineer tasks (reassign also emits ``Assignment`` for the assignee).
+_PERF_ASSIGNMENT_TASK_ACTIONS: frozenset[str] = frozenset({"Assignment"})
+
+
+def _perf_engineer_credit_to_label_map() -> dict[str, str]:
+    """Performance credit key → display label (@handle)."""
+    credit_to_label: dict[str, str] = {}
+    for handle in get_engineer_handles():
+        credit_key = _perf_person_credit_key(handle)
+        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+            continue
+        credit_to_label[credit_key] = (
+            handle if str(handle).startswith("@") else f"@{handle}"
+        )
+    return credit_to_label
+
+
+def _perf_assignment_task_day_counts_memo(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    credit_to_label: dict[str, str] | None = None,
+) -> tuple[dict[tuple[date, str], int], dict[str, int], dict[str, int]]:
+    """One assignment-log + gap-fill pass per range (reused across engineers/charts)."""
+    if credit_to_label is None:
+        credit_to_label = _perf_engineer_credit_to_label_map()
+    memo_key = (
+        range_start.isoformat(),
+        range_end.isoformat(),
+        _perf_data_signature(df_all),
+        _perf_data_signature(sales_all if sales_all is not None else pd.DataFrame()),
+        tuple(sorted(credit_to_label.items())),
+    )
+    bucket = st.session_state.get(_PERF_ASSIGN_TASK_COUNTS_KEY)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        st.session_state[_PERF_ASSIGN_TASK_COUNTS_KEY] = bucket
+    cached = bucket.get(memo_key)
+    if cached is not None:
+        return cached
+    result = _perf_assignment_task_day_counts(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        credit_to_label=credit_to_label,
+    )
+    bucket[memo_key] = result
+    return result
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_assignment_task_logs_in_range_cached(
+    range_start_iso: str,
+    range_end_iso: str,
+    limit: int = 8000,
+) -> pd.DataFrame:
+    """Assignment audit rows in range (for Tasks / daily assignment chart)."""
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    logs = _fetch_attendance(since_utc=range_start, until_utc=range_end, limit=limit)
+    if logs.empty or "action_type" not in logs.columns:
+        return pd.DataFrame()
+    actions = logs["action_type"].astype(str)
+    return logs.loc[actions.isin(_PERF_ASSIGNMENT_TASK_ACTIONS)].copy()
+
+
+def _perf_assignment_task_day_counts(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    credit_to_label: dict[str, str],
+) -> tuple[dict[tuple[date, str], int], dict[str, int], dict[str, int]]:
+    """Per-day task counts from assignment logs + ``last_assigned_at`` gap fill.
+
+    Returns ``(day_counts, res_cycles_by_label, rsr_cycles_by_label)`` for the range.
+    """
+    from collections import defaultdict
+
+    sales_refs = _perf_sales_case_ref_set(sales_all)
+    active_tickets: set[str] = set()
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        active_tickets = {
+            str(t).strip()
+            for t in df_all["ticket_number"].astype(str).unique().tolist()
+            if str(t).strip()
+        }
+    day_counts: dict[tuple[date, str], int] = defaultdict(int)
+    res_by_label: dict[str, int] = defaultdict(int)
+    rsr_by_label: dict[str, int] = defaultdict(int)
+    logged_ticket_day: dict[tuple[str, date, str], int] = defaultdict(int)
+
+    logs = _fetch_assignment_task_logs_in_range_cached(
+        range_start.isoformat(),
+        range_end.isoformat(),
+    )
+    if not logs.empty and "timestamp" in logs.columns:
+        ts = _parse_ts(logs["timestamp"])
+        in_range = ts.notna() & (ts >= range_start) & (ts <= range_end)
+        for idx, row in logs.loc[in_range].iterrows():
+            keys = _perf_credit_keys_from_assignee_names(
+                [str(row.get("member_username") or "")]
+            )
+            stamp = ts.loc[idx]
+            if pd.isna(stamp):
+                continue
+            day = _to_local(pd.Series([stamp])).iloc[0].date()
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn and tn not in sales_refs and tn not in active_tickets:
+                continue
+            for key in keys:
+                label = credit_to_label.get(key)
+                if not label:
+                    continue
+                day_counts[(day, label)] += 1
+                if tn in sales_refs:
+                    rsr_by_label[label] += 1
+                else:
+                    res_by_label[label] += 1
+                if tn:
+                    logged_ticket_day[(key, day, tn)] += 1
+
+    if not df_all.empty and "last_assigned_at" in df_all.columns:
+        la = _parse_ts(df_all["last_assigned_at"])
+        mask = la.notna() & (la >= range_start) & (la <= range_end)
+        for idx, row in df_all.loc[mask].iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn or tn in sales_refs:
+                continue
+            if str(row.get("status") or "").strip() != STATUS_DAILY_TASK:
+                continue
+            stamp = la.loc[idx]
+            if pd.isna(stamp):
+                continue
+            day = _to_local(pd.Series([stamp])).iloc[0].date()
+            for key in _perf_ticket_credit_assignees(row):
+                label = credit_to_label.get(key)
+                if not label:
+                    continue
+                if logged_ticket_day.get((key, day, tn), 0) > 0:
+                    continue
+                day_counts[(day, label)] += 1
+                res_by_label[label] += 1
+                logged_ticket_day[(key, day, tn)] = 1
+
+    if sales_all is not None and not sales_all.empty and "last_assigned_at" in sales_all.columns:
+        la = _parse_ts(sales_all["last_assigned_at"])
+        mask = la.notna() & (la >= range_start) & (la <= range_end)
+        for idx, row in sales_all.loc[mask].iterrows():
+            cref = str(row.get("case_ref") or "").strip()
+            if not cref:
+                continue
+            stamp = la.loc[idx]
+            if pd.isna(stamp):
+                continue
+            day = _to_local(pd.Series([stamp])).iloc[0].date()
+            for handle, label in credit_to_label.items():
+                if not _perf_row_credited_to_person(row, label):
+                    continue
+                if logged_ticket_day.get((handle, day, cref), 0) > 0:
+                    continue
+                day_counts[(day, label)] += 1
+                rsr_by_label[label] += 1
+                logged_ticket_day[(handle, day, cref)] = 1
+
+    return day_counts, res_by_label, rsr_by_label
 
 
 def _perf_ticket_last_assigned_local_day(
@@ -12680,93 +13019,17 @@ def _perf_daily_assignment_tasks_by_engineer_df(
     range_end: pd.Timestamp,
 ) -> pd.DataFrame:
     """Daily assignment task counts per engineer (Tasks definition, UTC+5)."""
-    from collections import defaultdict
-
-    day_counts: dict[tuple[date, str], int] = defaultdict(int)
-    credit_to_label: dict[str, str] = {}
-    for handle in get_engineer_handles():
-        credit_key = _perf_person_credit_key(handle)
-        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
-            continue
-        label = handle if str(handle).startswith("@") else f"@{handle}"
-        credit_to_label[credit_key] = label
-
+    credit_to_label = _perf_engineer_credit_to_label_map()
     if not credit_to_label:
         return pd.DataFrame(columns=["day", "Engineer", "tasks"])
 
-    sales_refs = _perf_sales_case_ref_set(sales_all)
-    visits_range = _fetch_visits_in_range(range_start, range_end)
-    prepared = _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
-    visits_history = _perf_load_overview_visits_history(df_all)
-    engineer_visit_res: dict[str, set[str]] = defaultdict(set)
-    engineer_visit_rsr: dict[str, set[str]] = defaultdict(set)
-
-    if not prepared.empty and "visit_start" in prepared.columns:
-        vs = _parse_ts(prepared["visit_start"])
-        in_range = vs.notna() & (vs >= range_start) & (vs <= range_end)
-        for idx, visit in prepared.loc[in_range].iterrows():
-            keys = _perf_credit_keys_from_assignee_names([str(visit.get("assignee") or "")])
-            start = vs.loc[idx]
-            if pd.isna(start):
-                continue
-            day = _to_local(pd.Series([start])).iloc[0].date()
-            tn = str(visit.get("ticket_number") or "").strip()
-            for key in keys:
-                if key not in credit_to_label:
-                    continue
-                day_counts[(day, credit_to_label[key])] += 1
-                if tn:
-                    if tn in sales_refs:
-                        engineer_visit_rsr[key].add(tn)
-                    else:
-                        engineer_visit_res[key].add(tn)
-
-    for handle in get_engineer_handles():
-        focus_key = _perf_person_credit_key(handle)
-        if focus_key not in credit_to_label:
-            continue
-        label = credit_to_label[focus_key]
-        visits_snapshot = _perf_filter_visits_by_person(visits_history, handle)
-        df_for_assign = (
-            _perf_filter_by_person(df_all, handle) if not df_all.empty else df_all
-        )
-        res_fallback = set(
-            _perf_assigned_ticket_ids_in_range(
-                visits_snapshot,
-                df_for_assign,
-                range_start=range_start,
-                range_end=range_end,
-            )
-        )
-        rsr_fallback = set(
-            _perf_sales_assigned_ids_in_range(
-                sales_all,
-                focus=handle,
-                range_start=range_start,
-                range_end=range_end,
-            )
-        )
-        res_ids_visit = engineer_visit_res.get(focus_key, set())
-        rsr_ids_visit = engineer_visit_rsr.get(focus_key, set())
-        for tn in res_fallback - res_ids_visit:
-            day = _perf_ticket_last_assigned_local_day(
-                df_all,
-                tn,
-                range_start=range_start,
-                range_end=range_end,
-            )
-            if day is not None:
-                day_counts[(day, label)] += 1
-        for cref in rsr_fallback - rsr_ids_visit:
-            day = _perf_sales_case_last_assigned_local_day(
-                sales_all if sales_all is not None else pd.DataFrame(),
-                cref,
-                focus=handle,
-                range_start=range_start,
-                range_end=range_end,
-            )
-            if day is not None:
-                day_counts[(day, label)] += 1
+    day_counts, _, _ = _perf_assignment_task_day_counts_memo(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        credit_to_label=credit_to_label,
+    )
 
     if not day_counts:
         return pd.DataFrame(columns=["day", "Engineer", "tasks"])
@@ -12775,6 +13038,20 @@ def _perf_daily_assignment_tasks_by_engineer_df(
         for (day, eng), n in day_counts.items()
     ]
     return pd.DataFrame(rows).sort_values(["day", "Engineer"])
+
+
+def _perf_filter_daily_assignment_df(
+    plot_df: pd.DataFrame,
+    focus: str,
+) -> pd.DataFrame:
+    """When Summary focus is one engineer, show only their daily task line."""
+    if plot_df.empty or focus in ("", "All", "All engineers"):
+        return plot_df
+    focus_key = _perf_person_credit_key(focus)
+    if focus_key in ("", "(unknown)"):
+        return plot_df.iloc[0:0]
+    keys = plot_df["Engineer"].astype(str).map(_perf_person_credit_key)
+    return plot_df.loc[keys == focus_key].copy()
 
 
 def _perf_attended_track_counts(detail: pd.DataFrame) -> tuple[int, int]:
@@ -13385,6 +13662,7 @@ def _render_perf_summary_engineer_overview(
     """Layered individual Summary — primary KPIs, attended outcomes, team table."""
     _render_perf_summary_engineer_primary_kpis(metrics, period_label=period_label)
     _render_perf_summary_attended_outcomes(metrics)
+    _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
     with st.expander("Team assignment comparison", expanded=False):
         _render_perf_summary_team_assignment_table(
             metrics,
@@ -13742,12 +14020,25 @@ def _render_perf_summary_daily_assignment_chart(
         unsafe_allow_html=True,
     )
     plot_df = metrics.get("daily_assignment_df")
-    if not isinstance(plot_df, pd.DataFrame) or plot_df.empty:
+    if not isinstance(plot_df, pd.DataFrame):
         st.caption("No assignment tasks in this range.")
+        return
+    focus = str(
+        metrics.get("summary_focus") or metrics.get("_summary_focus") or ""
+    ).strip()
+    plot_df = _perf_filter_daily_assignment_df(plot_df, focus)
+    if plot_df.empty:
+        if focus not in ("", "All", "All engineers"):
+            st.caption(
+                f"No assignment tasks in this range for "
+                f"{_perf_focus_heading_suffix(focus).lstrip(' —') or focus}."
+            )
+        else:
+            st.caption("No assignment tasks in this range.")
         return
     cap_parts = [
         LOCAL_TZ_LABEL,
-        "same definition as Tasks (visit cycles + assign fallback)",
+        "same definition as Tasks (Assignment logs + Daily Task last_assigned_at gap fill)",
     ]
     if period_label:
         cap_parts.insert(0, period_label)
@@ -14453,14 +14744,6 @@ def _render_perf_weekly_executive_dashboard(
                 range_start=range_start,
                 range_end=range_end,
             )
-            if focus in ("", "All"):
-                _perf_summary_attach_daily_assignment(
-                    metrics,
-                    df_all,
-                    sales_all,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
             if focus not in ("", "All"):
                 _perf_summary_attach_focus_engineer_block(
                     metrics,
@@ -14471,6 +14754,13 @@ def _render_perf_weekly_executive_dashboard(
                     range_end=range_end,
                     focus=focus,
                 )
+            _perf_summary_attach_daily_assignment(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
             _render_perf_summary_overview_tab(metrics, period_label=period_label)
     elif selected == "Breakdown":
         with _dash_perf_span("perf.summary_section", section="Breakdown"):
@@ -25960,8 +26250,8 @@ def _render_dashboard(
             _render_field_performance_tab(lookback_days=lookback_days)
             return
 
-        _maybe_run_unattended_close()
-        _maybe_toast_new_telegram_activity()
+        post_login_paint = bool(st.session_state.get(_DASH_POST_LOGIN_BOOTSTRAP_KEY))
+        _run_dashboard_background_maintenance()
 
         try:
             with _dash_perf_span("dashboard.fetch_tickets"):
@@ -25988,7 +26278,7 @@ def _render_dashboard(
         elif "status" not in df_all.columns:
             st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
             return
-        elif not df_all.empty and "status" in df_all.columns:
+        elif not df_all.empty and "status" in df_all.columns and not post_login_paint:
             mismatches = _fetch_pending_with_response_mismatch()
             if mismatches:
                 shown = ", ".join(mismatches[:5])
@@ -26000,7 +26290,11 @@ def _render_dashboard(
                 )
 
         with _dash_perf_span("dashboard.dispatch_csm"):
-            _render_dispatch_csm_dashboard(lookback_days=lookback_days)
+            if post_login_paint:
+                with st.spinner("Loading queues…"):
+                    _render_dispatch_csm_dashboard(lookback_days=lookback_days)
+            else:
+                _render_dispatch_csm_dashboard(lookback_days=lookback_days)
 
 
 def _get_performance_snapshot_counts(
