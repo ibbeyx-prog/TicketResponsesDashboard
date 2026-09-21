@@ -74,7 +74,7 @@ import threading
 import time as _perf_time
 from contextlib import contextmanager
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, time, timedelta, timezone
 from calendar import monthrange
 from pathlib import Path
@@ -2427,6 +2427,7 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_AUTH_USERNAME_KEY] = username
     st.session_state[_OPERATOR_ID_KEY] = operator_id
     st.session_state[_DASH_POST_LOGIN_BOOTSTRAP_KEY] = True
+    st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
 
 
@@ -3541,7 +3542,7 @@ _DASH_UNATTENDED_TICK_KEY = "_dash_unattended_last_tick"
 _DASH_MISMATCH_CACHE_KEY = "_dash_pending_mismatch_cache"
 _DASH_ATTENDANCE_POLL_KEY = "_dash_attendance_poll_ts"
 _DASH_ATTENDANCE_POLL_SEC = max(
-    30, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "60") or "60"))
+    30, int(float(os.getenv("DASH_ATTENDANCE_POLL_SEC", "120") or "120"))
 )
 _DASH_DATA_CACHE_TTL_SEC = max(
     15, int(float(os.getenv("DASH_DATA_CACHE_TTL_SEC", "120") or "120"))
@@ -3552,6 +3553,9 @@ _PERF_ASSIGN_TASK_COUNTS_KEY = "_perf_assign_task_counts_memo"
 _PERF_SUMMARY_CACHE_KEY = "_perf_summary_report_cache"
 _PERF_VISITS_HISTORY_KEY = "_perf_visits_history_cache"
 _PERF_SUMMARY_SECTION_KEY = "_perf_summary_active_section"
+_PERF_TEAM_ASSIGN_EXP_KEY = "perf_team_assign_expander"
+_PERF_SUMMARY_TEAM_EXP_KEY = "perf_summary_team_assign_expander"
+_DASH_QUEUES_STALE_KEY = "_dash_queues_stale_after_activity"
 _PERF_BREAKDOWN_FILTER_CAT_KEY = "_perf_breakdown_filter_cat"
 _PERF_BREAKDOWN_FILTER_CLOSURE_KEY = "_perf_breakdown_filter_closure"
 
@@ -13416,8 +13420,29 @@ def _render_perf_summary_team_assignment_table(
     metrics: dict[str, object],
     *,
     focus: str = "",
+    df_all: pd.DataFrame | None = None,
+    sales_all: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> None:
     """Side-by-side unique tickets vs tasks for every engineer in the period."""
+    if not isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
+        if (
+            df_all is None
+            or range_start is None
+            or range_end is None
+            or sales_all is None
+        ):
+            st.caption("Expand to load team assignment comparison.")
+            return
+        with _dash_perf_span("perf.team_assignment_summary"):
+            _perf_summary_attach_team_assignment(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
     team_df = metrics.get("team_assignment_df")
     if not isinstance(team_df, pd.DataFrame) or team_df.empty:
         st.caption("No assignment activity for any engineer in this period.")
@@ -13760,16 +13785,31 @@ def _render_perf_summary_engineer_overview(
     metrics: dict[str, object],
     *,
     period_label: str,
+    df_all: pd.DataFrame | None = None,
+    sales_all: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> None:
     """Layered individual Summary — primary KPIs, attended outcomes, team table."""
     _render_perf_summary_engineer_primary_kpis(metrics, period_label=period_label)
     _render_perf_summary_attended_outcomes(metrics)
     _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
-    with st.expander("Team assignment comparison", expanded=False):
-        _render_perf_summary_team_assignment_table(
-            metrics,
-            focus=str(metrics.get("summary_focus") or ""),
-        )
+    with st.expander(
+        "Team assignment comparison",
+        expanded=False,
+        key=_PERF_TEAM_ASSIGN_EXP_KEY,
+    ):
+        if st.session_state.get(_PERF_TEAM_ASSIGN_EXP_KEY):
+            _render_perf_summary_team_assignment_table(
+                metrics,
+                focus=str(metrics.get("summary_focus") or ""),
+                df_all=df_all,
+                sales_all=sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
+        else:
+            st.caption("Expand to load team assignment comparison for all engineers.")
     with st.expander("Assignment breakdown", expanded=False):
         _render_perf_summary_assignment_bar(metrics)
 
@@ -14180,16 +14220,52 @@ def _render_perf_summary_overview_tab(
     metrics: dict[str, object],
     *,
     period_label: str = "",
+    df_all: pd.DataFrame | None = None,
+    sales_all: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
+    period: str = "Weekly",
+    week_offset: int = 0,
+    focus: str = "All",
 ) -> None:
     """Overview — KPIs, closure donut, resolution trend."""
+    if df_all is not None and sales_all is not None and not metrics.get("_trend_loaded"):
+        _perf_summary_attach_trend_metrics(
+            metrics,
+            df_all,
+            sales_all,
+            period=period,
+            week_offset=week_offset,
+            focus=focus,
+        )
     show_engineer = "assigned_in_range" in metrics
     if show_engineer:
-        _render_perf_summary_engineer_overview(metrics, period_label=period_label)
+        _render_perf_summary_engineer_overview(
+            metrics,
+            period_label=period_label,
+            df_all=df_all,
+            sales_all=sales_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
     else:
         st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
         _render_weekly_kpi_cards(metrics)
-        with st.expander("Team assignment comparison", expanded=True):
-            _render_perf_summary_team_assignment_table(metrics)
+        with st.expander(
+            "Team assignment comparison",
+            expanded=False,
+            key=_PERF_SUMMARY_TEAM_EXP_KEY,
+        ):
+            if st.session_state.get(_PERF_SUMMARY_TEAM_EXP_KEY):
+                _render_perf_summary_team_assignment_table(
+                    metrics,
+                    df_all=df_all,
+                    sales_all=sales_all,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
+            else:
+                st.caption("Expand to load team assignment comparison for all engineers.")
         _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
     chart_left, chart_right = st.columns(2)
     with chart_left:
@@ -14831,21 +14907,6 @@ def _render_perf_weekly_executive_dashboard(
 
     if selected == "Overview":
         with _dash_perf_span("perf.summary_section", section="Overview"):
-            _perf_summary_attach_trend_metrics(
-                metrics,
-                df_all,
-                sales_all,
-                period=period,
-                week_offset=week_offset,
-                focus=focus,
-            )
-            _perf_summary_attach_team_assignment(
-                metrics,
-                df_all,
-                sales_all,
-                range_start=range_start,
-                range_end=range_end,
-            )
             if focus not in ("", "All"):
                 _perf_summary_attach_focus_engineer_block(
                     metrics,
@@ -14863,7 +14924,17 @@ def _render_perf_weekly_executive_dashboard(
                 range_start=range_start,
                 range_end=range_end,
             )
-            _render_perf_summary_overview_tab(metrics, period_label=period_label)
+            _render_perf_summary_overview_tab(
+                metrics,
+                period_label=period_label,
+                df_all=df_all,
+                sales_all=sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                period=period,
+                week_offset=week_offset,
+                focus=focus,
+            )
     elif selected == "Breakdown":
         with _dash_perf_span("perf.summary_section", section="Breakdown"):
             if not isinstance(metrics.get("detail_df"), pd.DataFrame):
@@ -15813,11 +15884,12 @@ def _maybe_toast_new_telegram_activity() -> None:
     if latest > prev_dt:
         st.session_state[_DASH_LAST_ATTENDANCE_TS_KEY] = latest_iso
         _invalidate_dashboard_data_cache(**_ATTENDANCE_TOAST_CACHE_SCOPE)
+        st.session_state[_DASH_QUEUES_STALE_KEY] = True
         st.toast(
-            "New field activity — refreshing **Open** / **Daily Task** queues.",
+            "New field activity — **Open** / **Daily Task** will refresh on your next "
+            "click or auto-refresh (no full-page reload).",
             icon="📥",
         )
-        st.rerun()
 
 
 def _parse_ts(series: pd.Series) -> pd.Series:
@@ -16456,6 +16528,36 @@ def _cc_resolve_telegram_credentials() -> tuple[str | None, int | str | None]:
     return token or None, chat_id
 
 
+def _cc_run_async_telegram_background(
+    coro_factory: Callable[[], Awaitable[object]],
+    *,
+    span_name: str = "assign.telegram",
+    on_success: Callable[[object], None] | None = None,
+) -> None:
+    """Run Telegram I/O on a daemon thread so the dashboard rerun is not blocked."""
+
+    def _worker() -> None:
+        with _dash_perf_span(span_name):
+            try:
+
+                async def _run() -> object:
+                    return await coro_factory()
+
+                result = asyncio.run(_run())
+            except Exception as exc:
+                log.warning("background Telegram task failed (%s): %s", span_name, exc)
+                return
+            if on_success is not None:
+                try:
+                    on_success(result)
+                except Exception as exc:
+                    log.warning(
+                        "Telegram post-save hook failed (%s): %s", span_name, exc
+                    )
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 async def _cc_sync_assignment_to_telegram(
     *,
     row: dict,
@@ -16639,15 +16741,16 @@ def _render_assignment_editor(
         return
 
     try:
-        updated = _cc_patch_assignment_fields(
-            picked,
-            required_status=required_status,
-            assigned_to=handle or "",
-            assigned_to_2=handle2,
-            task_category=cat,
-            additional_info=notes,
-            operator_id=op,
-        )
+        with _dash_perf_span("assign.upsert"):
+            updated = _cc_patch_assignment_fields(
+                picked,
+                required_status=required_status,
+                assigned_to=handle or "",
+                assigned_to_2=handle2,
+                task_category=cat,
+                additional_info=notes,
+                operator_id=op,
+            )
     except Exception as exc:
         st.error(f"Could not save: {exc}")
         return
@@ -16661,21 +16764,21 @@ def _render_assignment_editor(
                 "**TELEGRAM_GROUP_CHAT_ID** in `.env` / Secrets."
             )
         else:
-            try:
-                tg_note = asyncio.run(
-                    _cc_sync_assignment_to_telegram(
-                        row=updated,
-                        assigned_to=handle,
-                        task_category=cat,
-                        additional_info=notes,
-                        operator_id=op,
-                        token=token,
-                        chat_id=chat_id,
-                    )
+            row_for_tg = updated
+
+            def _tg_coro() -> Awaitable[object]:
+                return _cc_sync_assignment_to_telegram(
+                    row=row_for_tg,
+                    assigned_to=handle,
+                    task_category=cat,
+                    additional_info=notes,
+                    operator_id=op,
+                    token=token,
+                    chat_id=chat_id,
                 )
-            except Exception as exc:
-                st.warning(f"Saved in dashboard. Telegram update failed: {exc}")
-                tg_note = ""
+
+            _cc_run_async_telegram_background(_tg_coro, span_name="assign.telegram")
+            tg_note = "Telegram update is posting in the background."
 
     st.session_state[keys["show"]] = False
     for sk in clear_session_keys:
@@ -16685,7 +16788,8 @@ def _render_assignment_editor(
         f"Updated **{required_status}** assignment **{picked}**."
         + (f" {tg_note}" if tg_note else "")
     )
-    st.rerun()
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
+    _rerun_dispatch_after_ticket_write()
 
 
 def _render_reassign_editor(
@@ -16796,18 +16900,20 @@ def _render_reassign_editor(
         return
 
     try:
-        updated = _cc_dashboard_reassign_ticket(
-            picked,
-            assigned_to=handle or "",
-            assigned_to_2=handle2,
-            task_category=cat,
-            additional_info=notes,
-            operator_id=op,
-            from_status=actual_status,
-        )
+        with _dash_perf_span("assign.upsert"):
+            updated = _cc_dashboard_reassign_ticket(
+                picked,
+                assigned_to=handle or "",
+                assigned_to_2=handle2,
+                task_category=cat,
+                additional_info=notes,
+                operator_id=op,
+                from_status=actual_status,
+            )
     except Exception as exc:
         st.error(f"Could not reassign: {exc}")
         return
+    del updated
 
     tg_note = ""
     if st.session_state.get(keys["sync_tg"]):
@@ -16818,31 +16924,45 @@ def _render_reassign_editor(
                 "**TELEGRAM_GROUP_CHAT_ID**."
             )
         else:
-            try:
-                ref = asyncio.run(
-                    notify_telegram_group(
-                        handle,
-                        picked,
-                        cat,
-                        additional_info=notes,
-                        assigned_by=f"{op} (reassigned)",
-                        api_id=_read_setting("TG_API_ID")
-                        or _read_setting("TELEGRAM_API_ID")
-                        or None,
-                        api_hash=_read_setting("TG_API_HASH")
-                        or _read_setting("TELEGRAM_API_HASH")
-                        or None,
-                        bot_token=token,
-                        group_id=chat_id,
-                    )
+            picked_post = picked
+            handle_post = handle
+            cat_post = cat
+            notes_post = notes
+            op_post = op
+            token_post = token
+            chat_post = chat_id
+
+            def _reassign_notify() -> Awaitable[object]:
+                return notify_telegram_group(
+                    handle_post,
+                    picked_post,
+                    cat_post,
+                    additional_info=notes_post,
+                    assigned_by=f"{op_post} (reassigned)",
+                    api_id=_read_setting("TG_API_ID")
+                    or _read_setting("TELEGRAM_API_ID")
+                    or None,
+                    api_hash=_read_setting("TG_API_HASH")
+                    or _read_setting("TELEGRAM_API_HASH")
+                    or None,
+                    bot_token=token_post,
+                    group_id=chat_post,
                 )
-                _cc_save_assignment_telegram_ref(_get_supabase_client(), picked, ref)
-                tg_note = (
-                    "Posted a **new** assignment message in the group — "
-                    "field must swipe-reply to that line."
+
+            def _save_ref(ref: object) -> None:
+                _cc_save_assignment_telegram_ref(
+                    _get_supabase_client(), picked_post, ref
                 )
-            except Exception as exc:
-                st.warning(f"Reassigned in dashboard. Telegram post failed: {exc}")
+
+            _cc_run_async_telegram_background(
+                _reassign_notify,
+                span_name="assign.telegram",
+                on_success=_save_ref,
+            )
+            tg_note = (
+                "Posting a **new** assignment message in the group (background) — "
+                "field must swipe-reply to that line."
+            )
 
     st.session_state[keys["show"]] = False
     for sk in clear_session_keys:
@@ -18675,10 +18795,10 @@ def _sidebar_field_assign() -> None:
             _cc_set_flash(f"Could not queue ticket: {exc}", level="error")
             st.rerun()
             return
-        _invalidate_dashboard_data_cache()
+        _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
         _cc_set_flash(summary, level="success")
         _cc_schedule_assign_form_clear()
-        st.rerun()
+        _rerun_dispatch_after_ticket_write()
         return
 
     try:
@@ -18751,58 +18871,59 @@ def _sidebar_field_assign() -> None:
         return
 
     try:
-        summary = _cc_upsert_assignment(
-            handle,
-            tid,
-            cat,
-            additional_info=additional_info_val,
-            operator_id=op_assign,
-            assigned_to_2=handle2,
-        )
+        with _dash_perf_span("assign.upsert"):
+            summary = _cc_upsert_assignment(
+                handle,
+                tid,
+                cat,
+                additional_info=additional_info_val,
+                operator_id=op_assign,
+                assigned_to_2=handle2,
+            )
     except Exception as exc:
         _cc_set_flash(f"Supabase upsert failed: {exc}", level="error")
         st.rerun()
         return
 
-    try:
-        tg_ref = asyncio.run(
-            notify_telegram_group(
-                handle,
-                tid,
-                cat,
-                additional_info=additional_info_val,
-                assigned_by=op_assign,
-                api_id=_read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None,
-                api_hash=_read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None,
-                bot_token=token or None,
-                group_id=chat_id,
-            )
-        )
-        try:
-            _cc_save_assignment_telegram_ref(_get_supabase_client(), tid, tg_ref)
-        except Exception as link_exc:
-            _cc_set_flash(
-                f"{summary} Posted to Telegram but could not link message for edits: {link_exc}",
-                level="warning",
-            )
-            _cc_schedule_assign_form_clear()
-            st.rerun()
-            return
-    except Exception as exc:
-        _cc_set_flash(
-            f"{summary} Telegram post failed (saved in Supabase): {exc}",
-            level="warning",
-        )
-        _cc_schedule_assign_form_clear()
-        st.rerun()
-        return
+    api_id = _read_setting("TG_API_ID") or _read_setting("TELEGRAM_API_ID") or None
+    api_hash = _read_setting("TG_API_HASH") or _read_setting("TELEGRAM_API_HASH") or None
+    tid_post = tid
+    token_post = token
+    chat_post = chat_id
+    handle_post = handle
+    cat_post = cat
+    notes_post = additional_info_val
+    op_post = op_assign
 
+    def _notify_coro() -> Awaitable[object]:
+        return notify_telegram_group(
+            handle_post,
+            tid_post,
+            cat_post,
+            additional_info=notes_post,
+            assigned_by=op_post,
+            api_id=api_id,
+            api_hash=api_hash,
+            bot_token=token_post or None,
+            group_id=chat_post,
+        )
+
+    def _on_tg_ref(ref: object) -> None:
+        _cc_save_assignment_telegram_ref(_get_supabase_client(), tid_post, ref)
+
+    _cc_run_async_telegram_background(
+        _notify_coro,
+        span_name="assign.telegram",
+        on_success=_on_tg_ref,
+    )
+
+    _invalidate_dashboard_data_cache(**_TICKET_WRITE_CACHE_SCOPE)
     _cc_set_flash(
-        f"{summary} Posted to Telegram ({NOTIFY_BUILD_ID}, one message).",
+        f"{summary} Posting to Telegram in the background ({NOTIFY_BUILD_ID}).",
         level="success",
     )
     _cc_schedule_assign_form_clear()
-    st.rerun()
+    _rerun_dispatch_after_ticket_write()
 
 
 def _sidebar_command_center() -> None:
@@ -26146,6 +26267,10 @@ def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
     aq_key = str(ctx["aq_key"])
     is_admin = bool(ctx["is_admin"])
     sales_df = ctx.get("sales_df")
+    if st.session_state.pop(_DASH_QUEUES_STALE_KEY, False):
+        st.caption(
+            "Field activity detected — queue counts refresh here; no full-page reload was needed."
+        )
     selected_queue = _normalize_sidebar_queue(st.session_state.get(aq_key))
     if selected_queue != st.session_state.get(aq_key):
         st.session_state[aq_key] = selected_queue
