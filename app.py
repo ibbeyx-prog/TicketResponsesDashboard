@@ -2281,6 +2281,7 @@ _LOGIN_SAVE_PW_KEY = "login_save_password"
 _LOGIN_REMEMBER_BOOT_KEY = "_login_remember_bootstrapped"
 _LOGIN_CONFIG_CACHE_KEY = "_login_users_configured_cache"
 _LOGIN_PAGE_AUDIT_KEY = "_login_page_audit_logged"
+_LOGIN_PAGE_STYLES_KEY = "_login_page_styles_applied"
 _DASH_SUPABASE_WARMED_KEY = "_dash_supabase_warmed_login"
 _DASH_POST_LOGIN_BOOTSTRAP_KEY = "_dash_post_login_bootstrap"
 _DASH_DEFER_MAINTENANCE_KEY = "_dash_defer_maintenance"
@@ -2414,8 +2415,10 @@ def _clear_auth_session() -> None:
         _DASH_POST_LOGIN_BOOTSTRAP_KEY,
         _DASH_DEFER_MAINTENANCE_KEY,
         _DASH_SUPABASE_WARMED_KEY,
+        _LOGIN_PAGE_STYLES_KEY,
     ):
         st.session_state.pop(key, None)
+    st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
 
 
 def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) -> None:
@@ -2424,6 +2427,7 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_AUTH_USERNAME_KEY] = username
     st.session_state[_OPERATOR_ID_KEY] = operator_id
     st.session_state[_DASH_POST_LOGIN_BOOTSTRAP_KEY] = True
+    st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
 
 
 def _warm_supabase_for_login() -> None:
@@ -2917,6 +2921,9 @@ def _init_login_session_state() -> None:
 
 
 def _render_login_page_styles() -> None:
+    if st.session_state.get(_LOGIN_PAGE_STYLES_KEY):
+        return
+    st.session_state[_LOGIN_PAGE_STYLES_KEY] = True
     st.markdown(
         """
         <style>
@@ -3061,11 +3068,11 @@ def _handle_per_user_login(username: str, password: str, remember: bool) -> None
     fp = _auth_session_fingerprint(username=uname, operator_id=op)
     st.session_state.pop("is_legacy_session", None)
     _complete_auth_session(username=uname, operator_id=op, session_fp=fp)
-    _log_dashboard_auth_event("LoginSuccess", member_username=op, note=f"username={uname}")
     if remember:
         _login_remember_persist(username=uname, password=password)
     else:
         _login_remember_clear()
+    _log_dashboard_auth_event("LoginSuccess", member_username=op, note=f"username={uname}")
     st.rerun()
 
 
@@ -26338,15 +26345,19 @@ def _render_dashboard(
     )
 
     with _dash_perf_span("dashboard.render", nav=main_nav, lookback=lookback_days):
+        post_login_paint = bool(st.session_state.get(_DASH_POST_LOGIN_BOOTSTRAP_KEY))
+        _run_dashboard_background_maintenance()
+
         if main_nav == "Log":
             _render_attendance_tab(lookback_days=lookback_days)
             return
         if main_nav == "Performance":
-            _render_field_performance_tab(lookback_days=lookback_days)
+            if post_login_paint:
+                with st.spinner("Loading performance…"):
+                    _render_field_performance_tab(lookback_days=lookback_days)
+            else:
+                _render_field_performance_tab(lookback_days=lookback_days)
             return
-
-        post_login_paint = bool(st.session_state.get(_DASH_POST_LOGIN_BOOTSTRAP_KEY))
-        _run_dashboard_background_maintenance()
 
         try:
             with _dash_perf_span("dashboard.fetch_tickets"):
