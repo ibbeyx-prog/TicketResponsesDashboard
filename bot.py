@@ -907,31 +907,6 @@ def _field_reply_row_accepting_response(row: dict[str, Any]) -> bool:
     return str(row.get("status") or "").strip() in _FIELD_REPLY_STATUSES
 
 
-def _assignment_telegram_message_id(row: dict[str, Any]) -> int | None:
-    raw = row.get("assignment_telegram_message_id")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-def _field_reply_swipe_parent_ok(
-    row: dict[str, Any],
-    parent_msg_id: int | None,
-    *,
-    trust_nudge: bool,
-) -> bool:
-    """When the dashboard stored an assignment message id, swipe-replies must target it."""
-    if trust_nudge:
-        return True
-    expected = _assignment_telegram_message_id(row)
-    if expected is None or parent_msg_id is None:
-        return True
-    return parent_msg_id == expected
-
-
 def _sender_matches_assigned_to(assigned_to_db: object, replier_username: str | None) -> bool:
     if not replier_username:
         return False
@@ -2719,16 +2694,6 @@ async def ingest_telethon_field_media_reply(event: object) -> bool:
     if not row or not _field_reply_row_accepting_response(row):
         return False
 
-    if not _field_reply_swipe_parent_ok(
-        row, parent_msg_id, trust_nudge=bool(nudge_ticket)
-    ):
-        log.warning(
-            "telethon media reply rejected stale parent msg_id=%s ticket=%s",
-            parent_msg_id,
-            ticket_number,
-        )
-        return False
-
     client = getattr(event, "client", None)
     image_bytes = b""
     if client is not None:
@@ -2974,25 +2939,6 @@ async def handle_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             update,
             f"Case {ticket_number} is already {label} — no new field reply needed.",
         )
-        return
-
-    if not _field_reply_swipe_parent_ok(
-        row, parent_msg_id_int, trust_nudge=trust_nudge
-    ):
-        expected = _assignment_telegram_message_id(row)
-        log.warning(
-            "field_reply rejected stale parent msg_id=%s expected assignment msg_id=%s ticket=%s",
-            parent_msg_id_int,
-            expected,
-            ticket_number,
-        )
-        if _is_group_chat(update):
-            await _group_field_nudge(
-                update,
-                context,
-                "Swipe-reply to the **current** assignment message for this ticket "
-                "(not an older assignment in the chat).",
-            )
         return
 
     ids_in_reply = _extract_ticket_ids(reply_text) if reply_text else []
