@@ -104,6 +104,7 @@ from bot_utils import (
 )
 from task_categories import (
     DEFAULT_ASSIGNMENT_TASK_CATEGORIES,
+    _is_category_rls_error,
     canonical_task_category,
     delete_task_category,
     dedupe_canonical_categories,
@@ -1821,6 +1822,7 @@ FIELD_ENGINEERS_TABLE = (
 )
 TASK_CATEGORIES_TABLE = task_categories_table()
 _CATEGORIES_SYNCED_ONCE_KEY = "_dashboard_categories_synced_once"
+_CATEGORIES_SYNC_RLS_BLOCKED_KEY = "_dashboard_categories_sync_rls_blocked"
 
 _TICKETS_MISSING_COLUMNS: set[str] = set()
 _CC_FLASH_KEY = "_ticket_dashboard_cc_flash"
@@ -4511,15 +4513,22 @@ def _fetch_pending_with_response_mismatch() -> list[str]:
     return mismatches
 
 
+def _tickets_dashboard_select_arg() -> str:
+    cols = [
+        c for c in _TICKETS_DASHBOARD_SELECT if c not in _TICKETS_MISSING_COLUMNS
+    ]
+    return ",".join(cols) if cols else "*"
+
+
 @st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
 def _fetch_tickets_cached() -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
     client = _get_supabase_client()
     order_col = _get_order_column()
-    select_cols = ",".join(_TICKETS_DASHBOARD_SELECT)
     last_exc: Exception | None = None
-    for select_arg in (select_cols, "*"):
+    for _attempt in range(len(_TICKETS_DASHBOARD_SELECT) + 2):
+        select_arg = _tickets_dashboard_select_arg()
         try:
             res = (
                 client.table(TICKETS_TABLE)
@@ -4531,13 +4540,28 @@ def _fetch_tickets_cached() -> pd.DataFrame:
             return pd.DataFrame(rows) if rows else pd.DataFrame()
         except Exception as exc:
             last_exc = exc
-            if select_arg == "*":
-                if _looks_like_missing_table_error(exc):
-                    raise _TableMissingError(TICKETS_TABLE, exc) from exc
-                if is_transient_supabase_error(exc):
-                    _note_supabase_unreachable(exc)
-                    return pd.DataFrame()
-                raise
+            col = _cc_parse_missing_column(str(exc))
+            if col and col in _TICKETS_DASHBOARD_SELECT:
+                _TICKETS_MISSING_COLUMNS.add(col)
+                continue
+            if select_arg != "*":
+                try:
+                    res = (
+                        client.table(TICKETS_TABLE)
+                        .select("*")
+                        .order(order_col, desc=True)
+                        .execute()
+                    )
+                    rows = res.data or []
+                    return pd.DataFrame(rows) if rows else pd.DataFrame()
+                except Exception as fallback_exc:
+                    last_exc = fallback_exc
+            if _looks_like_missing_table_error(last_exc):
+                raise _TableMissingError(TICKETS_TABLE, last_exc) from last_exc
+            if is_transient_supabase_error(last_exc):
+                _note_supabase_unreachable(last_exc)
+                return pd.DataFrame()
+            raise
     if last_exc is not None:
         raise last_exc
     return pd.DataFrame()
@@ -17908,7 +17932,10 @@ def manage_categories_dialog() -> None:
 
 def _ensure_task_categories_synced(client) -> None:
     """Backfill ``dashboard_task_categories`` from ticket rows (once per session)."""
-    if st.session_state.get(_CATEGORIES_SYNCED_ONCE_KEY):
+    if (
+        st.session_state.get(_CATEGORIES_SYNCED_ONCE_KEY)
+        or st.session_state.get(_CATEGORIES_SYNC_RLS_BLOCKED_KEY)
+    ):
         return
     try:
         sync_ticket_categories_into_table(
@@ -17916,8 +17943,13 @@ def _ensure_task_categories_synced(client) -> None:
             tickets_table=TICKETS_TABLE,
             categories_table=TASK_CATEGORIES_TABLE,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        if _is_category_rls_error(exc):
+            st.session_state[_CATEGORIES_SYNC_RLS_BLOCKED_KEY] = True
+            log.warning(
+                "category sync skipped: dashboard_task_categories RLS blocks anon insert "
+                "(apply migration 20260921_task_categories_rls_and_assigned_by.sql)"
+            )
     st.session_state[_CATEGORIES_SYNCED_ONCE_KEY] = True
 
 
