@@ -46,6 +46,17 @@ def _at_username(username: str) -> str:
     return u if u.startswith("@") else f"@{u}"
 
 
+def _telegram_bot_cannot_read_history(exc: BaseException) -> bool:
+    """True when Telethon tried ``GetHistory`` / message search as a **bot** user."""
+    msg = str(exc).casefold()
+    needles = (
+        "gethistoryrequest",
+        "cannot be executed as a bot",
+        "api access for bot users is restricted",
+    )
+    return any(n in msg for n in needles)
+
+
 def _build_assignment_notify_text(
     assigned_to: str,
     ticket_id: str,
@@ -285,18 +296,28 @@ async def find_assignment_telegram_ref(
     )
     try:
         await client.start(bot_token=token)
-        async for message in client.iter_messages(entity, limit=search_limit):
-            if not getattr(message, "out", False):
-                continue
-            blob = (message.text or message.message or "").strip()
-            if tid not in blob:
-                continue
-            if message.chat_id is None or message.id is None:
-                continue
-            return AssignmentTelegramRef(
-                chat_id=int(message.chat_id),
-                message_id=int(message.id),
-            )
+        try:
+            async for message in client.iter_messages(entity, limit=search_limit):
+                if not getattr(message, "out", False):
+                    continue
+                blob = (message.text or message.message or "").strip()
+                if tid not in blob:
+                    continue
+                if message.chat_id is None or message.id is None:
+                    continue
+                return AssignmentTelegramRef(
+                    chat_id=int(message.chat_id),
+                    message_id=int(message.id),
+                )
+        except Exception as exc:
+            if _telegram_bot_cannot_read_history(exc):
+                _log.info(
+                    "find_assignment_telegram_ref: bot cannot read group history for %s "
+                    "(skip search; caller should post a new assignment message)",
+                    tid,
+                )
+                return None
+            raise
     finally:
         if client.is_connected():
             await client.disconnect()

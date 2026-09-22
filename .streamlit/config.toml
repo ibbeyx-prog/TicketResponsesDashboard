@@ -16,3 +16,6 @@ baseUrlPath = "coverage-eye"
 [client]
 toolbarMode = "minimal"
 showSidebarNavigation = false
+
+[browser]
+gatherUsageStats = false

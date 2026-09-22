@@ -110,14 +110,26 @@ def fetch_task_category_names(
     return names, False
 
 
+def _is_duplicate_category_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "23505" in msg or "duplicate key" in msg or "already exists" in msg
+
+
+def _is_category_rls_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "42501" in msg or "row-level security" in msg
+
+
 def upsert_task_category(client: Any, name: str, *, table: str | None = None) -> None:
-    """Insert category into Supabase (idempotent)."""
+    """Insert category into Supabase (idempotent; insert-only to avoid UPDATE RLS)."""
     norm = normalize_task_category_name(name)
     tbl = table or task_categories_table()
-    client.table(tbl).upsert(
-        {"name": norm, "sort_order": 0},
-        on_conflict="name",
-    ).execute()
+    try:
+        client.table(tbl).insert({"name": norm, "sort_order": 0}).execute()
+    except Exception as exc:
+        if _is_duplicate_category_error(exc):
+            return
+        raise
 
 
 def delete_task_category(client: Any, name: str, *, table: str | None = None) -> None:
@@ -163,8 +175,9 @@ def sync_ticket_categories_into_table(
         try:
             upsert_task_category(client, norm, table=tbl)
             added += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            if _is_category_rls_error(exc):
+                raise
     return added
 
 
