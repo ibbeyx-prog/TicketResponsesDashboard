@@ -4425,45 +4425,11 @@ def _apply_admin_close_ticket(
     )
 
 
-_RESPONSE_VOID_STATUS_NOTE_MARKERS = (
-    "reverted false needs review",
-    "prior response cleared",
-    "cleared false unattended",
-)
-
-
-def _field_response_log_voided_after(
-    client,
-    ticket_number: str,
-    response_at: datetime,
-) -> bool:
-    """True when a later StatusChange marks the Response log as invalid for this cycle."""
-    try:
-        rows = (
-            client.table(ATTENDANCE_LOGS_TABLE)
-            .select("note")
-            .eq("ticket_number", ticket_number)
-            .eq("action_type", "StatusChange")
-            .gt("timestamp", response_at.isoformat())
-            .order("timestamp")
-            .limit(15)
-            .execute()
-        ).data or []
-    except Exception:
-        return False
-    for entry in rows:
-        note = str(entry.get("note") or "").lower()
-        if any(marker in note for marker in _RESPONSE_VOID_STATUS_NOTE_MARKERS):
-            return True
-    return False
-
-
 def _fetch_pending_with_response_mismatch_uncached() -> list[str]:
     """Daily Task tickets that look stuck after a field reply (bot UPDATE likely failed).
 
     Ignores **old** Response log rows and stale ``responded_at`` from before
     ``last_assigned_at`` — e.g. after **Reassign** for next-day work.
-    Also ignores Response logs voided by a later **StatusChange** (admin/bot revert).
     """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
@@ -4523,8 +4489,6 @@ def _fetch_pending_with_response_mismatch_uncached() -> list[str]:
                 continue
             for resp_at in resp_times:
                 if resp_at >= assigned_at:
-                    if _field_response_log_voided_after(client, tn, resp_at):
-                        continue
                     mismatches.append(tn)
                     break
 
