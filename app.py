@@ -938,6 +938,10 @@ def apply_theme(*, login: bool = False) -> None:
     .weekly-assign-legend i {{
       width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex-shrink: 0;
     }}
+    .perf-daily-tasks-legend i {{
+      width: 10px; height: 10px; border-radius: 50%;
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+    }}
     .weekly-assign-caption {{
       font-size: 0.78rem; color: #9aa8c4; margin: 0; line-height: 1.45;
     }}
@@ -6774,6 +6778,57 @@ def _fetch_attendance(
     return pd.DataFrame(rows)
 
 
+def _fetch_attendance_in_range_paginated(
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    action_types: frozenset[str] | None = None,
+    page_size: int = 1000,
+    max_rows: int = 50_000,
+) -> pd.DataFrame:
+    """Paginated attendance logs in a UTC window (Supabase caps ~1000 rows per request)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return pd.DataFrame()
+    client = _get_supabase_client()
+    start_s = range_start.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_s = range_end.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+    parts: list[pd.DataFrame] = []
+    offset = 0
+    while offset < max_rows:
+        q = (
+            client.table(ATTENDANCE_LOGS_TABLE)
+            .select("*")
+            .gte("timestamp", start_s)
+            .lte("timestamp", end_s)
+        )
+        if action_types:
+            types = sorted(action_types)
+            if len(types) == 1:
+                q = q.eq("action_type", types[0])
+            else:
+                q = q.in_("action_type", types)
+        try:
+            res = (
+                q.order("timestamp", desc=False)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+        except Exception as exc:
+            if _looks_like_missing_table_error(exc):
+                raise _TableMissingError(ATTENDANCE_LOGS_TABLE, exc) from exc
+            break
+        rows = res.data or []
+        if not rows:
+            break
+        parts.append(pd.DataFrame(rows))
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
 def _visits_deactivate_ticket(client, ticket_number: str) -> None:
     """Mark all active visits for a ticket inactive before opening a new cycle."""
     try:
@@ -7469,22 +7524,27 @@ def _perf_ticket_collaboration_map(visits: pd.DataFrame) -> dict[str, int]:
     return out
 
 
+# High-contrast hues for dark charts (spread around the wheel — avoid similar pastels).
 _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
-    "#3b82f6",
-    "#f97316",
-    "#22c55e",
-    "#ec4899",
-    "#a78bfa",
-    "#eab308",
-    "#06b6d4",
-    "#ef4444",
+    "#60a5fa",  # blue
+    "#fb923c",  # orange
+    "#4ade80",  # green
+    "#f472b6",  # pink
+    "#a78bfa",  # violet
+    "#facc15",  # yellow
+    "#22d3ee",  # cyan
+    "#f87171",  # red
+    "#2dd4bf",  # teal
+    "#c084fc",  # purple
+    "#fb7185",  # rose
+    "#38bdf8",  # sky
 )
 
 # Stable chart colors (case-insensitive @handle) — same hue everywhere (Daily tasks, matrix, etc.).
 _PERF_ENGINEER_COLOR_OVERRIDES: dict[str, str] = {
-    "@dissiby": "#9ec5e8",
-    "@fatrixshaquiell": "#d7b491",
-    "@nallu10": "#b8d4a8",
+    "@dissiby": "#60a5fa",
+    "@fatrixshaquiell": "#fb923c",
+    "@nallu10": "#4ade80",
 }
 
 
@@ -7548,6 +7608,51 @@ def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
         norm = _perf_norm_member(eng)
         out[eng] = stable.get(norm, fallback)
     return out
+
+
+def _perf_dedicated_engineer_label_set() -> set[str]:
+    return {_perf_norm_member(k) for k in _PERF_ENGINEER_COLOR_OVERRIDES}
+
+
+def _perf_legend_engineer_order(engineers: list[str]) -> list[str]:
+    """Dedicated field staff first (stable override order), then others A–Z."""
+    dedicated_order = [_perf_norm_member(k) for k in _PERF_ENGINEER_COLOR_OVERRIDES]
+    by_norm: dict[str, str] = {}
+    for eng in engineers:
+        by_norm[_perf_norm_member(eng)] = eng
+    ordered: list[str] = []
+    for norm in dedicated_order:
+        if norm in by_norm:
+            ordered.append(by_norm[norm])
+    for eng in sorted(engineers, key=str.lower):
+        if eng not in ordered:
+            ordered.append(eng)
+    return ordered
+
+
+def _perf_engineer_line_legend_html(engineers: list[str]) -> str:
+    """Colored swatches + labels for Daily assignment / line charts."""
+    if not engineers:
+        return ""
+    ordered = _perf_legend_engineer_order(engineers)
+    color_map = _perf_engineer_color_map(ordered)
+    dedicated = _perf_dedicated_engineer_label_set()
+    parts: list[str] = []
+    for eng in ordered:
+        col = html.escape(color_map[eng])
+        norm = _perf_norm_member(eng)
+        if norm in dedicated:
+            name = (
+                f'<span style="color:{col};font-weight:600">'
+                f"{html.escape(eng)}</span>"
+            )
+        else:
+            name = html.escape(eng)
+        parts.append(f'<span><i style="background:{col}"></i>{name}</span>')
+    return (
+        f'<div class="weekly-assign-legend perf-daily-tasks-legend">'
+        f'{"".join(parts)}</div>'
+    )
 
 
 _PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
@@ -12992,16 +13097,54 @@ def _perf_assignment_task_day_counts_memo(
 def _fetch_assignment_task_logs_in_range_cached(
     range_start_iso: str,
     range_end_iso: str,
-    limit: int = 8000,
 ) -> pd.DataFrame:
     """Assignment audit rows in range (for Tasks / daily assignment chart)."""
     range_start = pd.to_datetime(range_start_iso, utc=True)
     range_end = pd.to_datetime(range_end_iso, utc=True)
-    logs = _fetch_attendance(since_utc=range_start, until_utc=range_end, limit=limit)
-    if logs.empty or "action_type" not in logs.columns:
-        return pd.DataFrame()
-    actions = logs["action_type"].astype(str)
-    return logs.loc[actions.isin(_PERF_ASSIGNMENT_TASK_ACTIONS)].copy()
+    return _fetch_attendance_in_range_paginated(
+        range_start=range_start,
+        range_end=range_end,
+        action_types=_PERF_ASSIGNMENT_TASK_ACTIONS,
+    )
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_field_response_logs_in_range_cached(
+    range_start_iso: str,
+    range_end_iso: str,
+) -> pd.DataFrame:
+    """Field ``Response`` rows in range (carry-over task gap fill)."""
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    return _fetch_attendance_in_range_paginated(
+        range_start=range_start,
+        range_end=range_end,
+        action_types=frozenset({"Response"}),
+    )
+
+
+def _perf_add_assignment_task_day_count(
+    day_counts: dict[tuple[date, str], int],
+    res_by_label: dict[str, int],
+    rsr_by_label: dict[str, int],
+    logged_ticket_day: dict[tuple[str, date, str], int],
+    *,
+    day: date,
+    tn: str,
+    credit_key: str,
+    label: str,
+    sales_refs: set[str],
+) -> None:
+    """One task for engineer ``credit_key`` on ``day`` for ticket/case ``tn``."""
+    if tn and logged_ticket_day.get((credit_key, day, tn), 0) > 0:
+        return
+    day_counts[(day, label)] += 1
+    if tn in sales_refs:
+        rsr_by_label[label] += 1
+    else:
+        res_by_label[label] += 1
+    if tn:
+        logged_ticket_day[(credit_key, day, tn)] = 1
 
 
 def _perf_assignment_task_day_counts(
@@ -13012,7 +13155,7 @@ def _perf_assignment_task_day_counts(
     range_end: pd.Timestamp,
     credit_to_label: dict[str, str],
 ) -> tuple[dict[tuple[date, str], int], dict[str, int], dict[str, int]]:
-    """Per-day task counts from assignment logs + ``last_assigned_at`` gap fill.
+    """Per-day task counts from assignment logs + gap fill (Daily Task + field response).
 
     Returns ``(day_counts, res_cycles_by_label, rsr_cycles_by_label)`` for the range.
     """
@@ -13020,12 +13163,20 @@ def _perf_assignment_task_day_counts(
 
     sales_refs = _perf_sales_case_ref_set(sales_all)
     active_tickets: set[str] = set()
+    ticket_rows: dict[str, pd.Series] = {}
     if not df_all.empty and "ticket_number" in df_all.columns:
-        active_tickets = {
-            str(t).strip()
-            for t in df_all["ticket_number"].astype(str).unique().tolist()
-            if str(t).strip()
-        }
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn:
+                continue
+            active_tickets.add(tn)
+            ticket_rows[tn] = row
+    sales_rows: dict[str, pd.Series] = {}
+    if sales_all is not None and not sales_all.empty and "case_ref" in sales_all.columns:
+        for _, row in sales_all.iterrows():
+            cref = str(row.get("case_ref") or "").strip()
+            if cref:
+                sales_rows[cref] = row
     day_counts: dict[tuple[date, str], int] = defaultdict(int)
     res_by_label: dict[str, int] = defaultdict(int)
     rsr_by_label: dict[str, int] = defaultdict(int)
@@ -13066,15 +13217,17 @@ def _perf_assignment_task_day_counts(
                 label = credit_to_label.get(key)
                 if not label:
                     continue
-                if tn and logged_ticket_day.get((key, day, tn), 0) > 0:
-                    continue
-                day_counts[(day, label)] += 1
-                if tn in sales_refs:
-                    rsr_by_label[label] += 1
-                else:
-                    res_by_label[label] += 1
-                if tn:
-                    logged_ticket_day[(key, day, tn)] = 1
+                _perf_add_assignment_task_day_count(
+                    day_counts,
+                    res_by_label,
+                    rsr_by_label,
+                    logged_ticket_day,
+                    day=day,
+                    tn=tn,
+                    credit_key=key,
+                    label=label,
+                    sales_refs=sales_refs,
+                )
 
     if not df_all.empty and "last_assigned_at" in df_all.columns:
         la = _parse_ts(df_all["last_assigned_at"])
@@ -13090,14 +13243,21 @@ def _perf_assignment_task_day_counts(
                 continue
             day = _to_local(pd.Series([stamp])).iloc[0].date()
             for key in _perf_ticket_credit_assignees(row):
-                label = credit_to_label.get(key)
+                credit_key = _perf_person_credit_key(key)
+                label = credit_to_label.get(credit_key)
                 if not label:
                     continue
-                if logged_ticket_day.get((key, day, tn), 0) > 0:
-                    continue
-                day_counts[(day, label)] += 1
-                res_by_label[label] += 1
-                logged_ticket_day[(key, day, tn)] = 1
+                _perf_add_assignment_task_day_count(
+                    day_counts,
+                    res_by_label,
+                    rsr_by_label,
+                    logged_ticket_day,
+                    day=day,
+                    tn=tn,
+                    credit_key=credit_key,
+                    label=label,
+                    sales_refs=sales_refs,
+                )
 
     if sales_all is not None and not sales_all.empty and "last_assigned_at" in sales_all.columns:
         la = _parse_ts(sales_all["last_assigned_at"])
@@ -13113,11 +13273,77 @@ def _perf_assignment_task_day_counts(
             for handle, label in credit_to_label.items():
                 if not _perf_row_credited_to_person(row, label):
                     continue
-                if logged_ticket_day.get((handle, day, cref), 0) > 0:
+                _perf_add_assignment_task_day_count(
+                    day_counts,
+                    res_by_label,
+                    rsr_by_label,
+                    logged_ticket_day,
+                    day=day,
+                    tn=cref,
+                    credit_key=handle,
+                    label=label,
+                    sales_refs=sales_refs,
+                )
+
+    response_logs = _fetch_field_response_logs_in_range_cached(
+        range_start.isoformat(),
+        range_end.isoformat(),
+    )
+    if not response_logs.empty and "timestamp" in response_logs.columns:
+        ts = _parse_ts(response_logs["timestamp"])
+        in_range = ts.notna() & (ts >= range_start) & (ts <= range_end)
+        for idx, row in response_logs.loc[in_range].iterrows():
+            stamp = ts.loc[idx]
+            if pd.isna(stamp):
+                continue
+            note = str(row.get("note") or "").strip()
+            photo = str(row.get("photo_url") or "").strip()
+            if not note and not photo.startswith("http"):
+                continue
+            day = _to_local(pd.Series([stamp])).iloc[0].date()
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn:
+                continue
+            if tn in sales_refs:
+                case_row = sales_rows.get(tn)
+                if case_row is None:
                     continue
-                day_counts[(day, label)] += 1
-                rsr_by_label[label] += 1
-                logged_ticket_day[(handle, day, cref)] = 1
+                for handle, label in credit_to_label.items():
+                    if not _perf_row_credited_to_person(case_row, label):
+                        continue
+                    _perf_add_assignment_task_day_count(
+                        day_counts,
+                        res_by_label,
+                        rsr_by_label,
+                        logged_ticket_day,
+                        day=day,
+                        tn=tn,
+                        credit_key=handle,
+                        label=label,
+                        sales_refs=sales_refs,
+                    )
+                continue
+            if tn not in active_tickets:
+                continue
+            ticket_row = ticket_rows.get(tn)
+            if ticket_row is None:
+                continue
+            for key in _perf_ticket_credit_assignees(ticket_row):
+                credit_key = _perf_person_credit_key(key)
+                label = credit_to_label.get(credit_key)
+                if not label:
+                    continue
+                _perf_add_assignment_task_day_count(
+                    day_counts,
+                    res_by_label,
+                    rsr_by_label,
+                    logged_ticket_day,
+                    day=day,
+                    tn=tn,
+                    credit_key=credit_key,
+                    label=label,
+                    sales_refs=sales_refs,
+                )
 
     return day_counts, res_by_label, rsr_by_label
 
@@ -13494,7 +13720,7 @@ def _render_perf_summary_team_assignment_table(
             or range_end is None
             or sales_all is None
         ):
-            st.caption("Expand to load team assignment comparison.")
+            st.caption("Team assignment comparison is unavailable for this view.")
             return
         with _dash_perf_span("perf.team_assignment_summary"):
             _perf_summary_attach_team_assignment(
@@ -13860,17 +14086,14 @@ def _render_perf_summary_engineer_overview(
         expanded=False,
         key=_PERF_TEAM_ASSIGN_EXP_KEY,
     ):
-        if st.session_state.get(_PERF_TEAM_ASSIGN_EXP_KEY):
-            _render_perf_summary_team_assignment_table(
-                metrics,
-                focus=str(metrics.get("summary_focus") or ""),
-                df_all=df_all,
-                sales_all=sales_all,
-                range_start=range_start,
-                range_end=range_end,
-            )
-        else:
-            st.caption("Expand to load team assignment comparison for all engineers.")
+        _render_perf_summary_team_assignment_table(
+            metrics,
+            focus=str(metrics.get("summary_focus") or ""),
+            df_all=df_all,
+            sales_all=sales_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
     with st.expander("Assignment breakdown", expanded=False):
         _render_perf_summary_assignment_bar(metrics)
 
@@ -14213,6 +14436,46 @@ def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
     st.altair_chart(trend, width="stretch")
 
 
+def _perf_daily_assignment_tooltip_columns(plot_df: pd.DataFrame) -> pd.DataFrame:
+    """Per-day tooltip text so overlapping line points list every engineer."""
+    out = plot_df.copy()
+    engineers_on_day: dict[object, str] = {}
+    tasks_on_day: dict[object, str] = {}
+    for day, grp in out.groupby("day", sort=False):
+        g = grp.sort_values("Engineer", key=lambda s: s.str.lower())
+        engineers_on_day[day] = ", ".join(g["Engineer"].astype(str).tolist())
+        tasks = g["tasks"].astype(int)
+        if tasks.nunique() == 1:
+            tasks_on_day[day] = str(int(tasks.iloc[0]))
+        else:
+            tasks_on_day[day] = ", ".join(
+                f"{row.Engineer}: {int(row.tasks)}" for _, row in g.iterrows()
+            )
+    out["tooltip_engineers"] = out["day"].map(engineers_on_day)
+    out["tooltip_tasks"] = out["day"].map(tasks_on_day)
+    return out
+
+
+def _perf_daily_assignment_line_segments(plot_df: pd.DataFrame) -> pd.DataFrame:
+    """Break line strokes when an engineer has no task row for 2+ calendar days."""
+    if plot_df.empty:
+        return plot_df
+    out = plot_df.sort_values(["Engineer", "day"]).copy()
+    day_dates = pd.to_datetime(out["day"], utc=True).dt.tz_convert(LOCAL_TZ).dt.date
+    state: dict[str, tuple[date | None, int]] = {}
+    seg_keys: list[str] = []
+    for eng, day_d in zip(out["Engineer"].astype(str), day_dates):
+        prev_day, seg = state.get(eng, (None, 0))
+        if prev_day is not None and (day_d - prev_day).days > 1:
+            seg += 1
+        elif prev_day is None:
+            seg = 0
+        state[eng] = (day_d, seg)
+        seg_keys.append(f"{eng}::{seg}")
+    out["line_segment"] = seg_keys
+    return out
+
+
 def _render_perf_summary_daily_assignment_chart(
     metrics: dict[str, object],
     *,
@@ -14241,7 +14504,7 @@ def _render_perf_summary_daily_assignment_chart(
         return
     cap_parts = [
         LOCAL_TZ_LABEL,
-        "Tasks = unique ticket per engineer per day (Assignment log + Daily Task gap fill)",
+        "Tasks = unique ticket per engineer per day (Assignment log, Daily Task gap fill, field response on assigned ticket)",
     ]
     if period_label:
         cap_parts.insert(0, period_label)
@@ -14250,16 +14513,9 @@ def _render_perf_summary_daily_assignment_chart(
     plot_df["Engineer"] = plot_df["Engineer"].astype(str).map(_perf_norm_member)
     engineers = sorted(plot_df["Engineer"].unique().tolist(), key=str.lower)
     color_map = _perf_engineer_color_map(engineers)
-    legend_html = " ".join(
-        f'<span style="margin-right:12px;white-space:nowrap">'
-        f'<span style="color:{html.escape(color_map[e])};font-weight:700">●</span> '
-        f"{html.escape(e)}</span>"
-        for e in engineers
-    )
-    st.markdown(
-        f'<p style="margin:4px 0 8px;font-size:0.85rem;color:#8a9ac0">{legend_html}</p>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(_perf_engineer_line_legend_html(engineers), unsafe_allow_html=True)
+    plot_df = _perf_daily_assignment_tooltip_columns(plot_df)
+    plot_df = _perf_daily_assignment_line_segments(plot_df)
     chart = _weekly_altair_theme(
         alt.Chart(plot_df)
         .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5)
@@ -14278,10 +14534,11 @@ def _render_perf_summary_daily_assignment_chart(
                 ),
                 legend=None,
             ),
+            detail=alt.Detail("line_segment:N"),
             tooltip=[
                 alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
-                alt.Tooltip("Engineer:N", title="Engineer"),
-                alt.Tooltip("tasks:Q", title="Tasks"),
+                alt.Tooltip("tooltip_engineers:N", title="Engineer"),
+                alt.Tooltip("tooltip_tasks:N", title="Tasks"),
             ],
         )
         .properties(height=280)
@@ -14329,16 +14586,13 @@ def _render_perf_summary_overview_tab(
             expanded=False,
             key=_PERF_SUMMARY_TEAM_EXP_KEY,
         ):
-            if st.session_state.get(_PERF_SUMMARY_TEAM_EXP_KEY):
-                _render_perf_summary_team_assignment_table(
-                    metrics,
-                    df_all=df_all,
-                    sales_all=sales_all,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-            else:
-                st.caption("Expand to load team assignment comparison for all engineers.")
+            _render_perf_summary_team_assignment_table(
+                metrics,
+                df_all=df_all,
+                sales_all=sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
         _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
     chart_left, chart_right = st.columns(2)
     with chart_left:
