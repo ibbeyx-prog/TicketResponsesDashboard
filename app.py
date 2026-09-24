@@ -7480,37 +7480,74 @@ _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
     "#ef4444",
 )
 
-# Stable chart colors (case-insensitive @handle) — avoids similar hues for common pairs.
+# Stable chart colors (case-insensitive @handle) — same hue everywhere (Daily tasks, matrix, etc.).
 _PERF_ENGINEER_COLOR_OVERRIDES: dict[str, str] = {
-    "@dissiby": "#3b82f6",
-    "@fatrixshaquiell": "#f97316",
+    "@dissiby": "#9ec5e8",
+    "@fatrixshaquiell": "#d7b491",
+    "@nallu10": "#b8d4a8",
 }
 
 
-def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
+def _perf_roster_engineer_labels() -> list[str]:
+    """Active field engineers as normalized @labels (stable color roster)."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for handle in get_engineer_handles():
+        credit = _perf_person_credit_key(handle)
+        if credit in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+            continue
+        label = _perf_norm_member(
+            handle if str(handle).startswith("@") else f"@{handle}"
+        )
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return sorted(labels, key=str.lower)
+
+
+def _perf_build_engineer_color_map(sorted_labels: list[str]) -> dict[str, str]:
     palette = _PERF_ENG_LINE_COLORS
     overrides = {
         _perf_norm_member(k): v for k, v in _PERF_ENGINEER_COLOR_OVERRIDES.items()
     }
     used_colors: set[str] = set()
     result: dict[str, str] = {}
-    for eng in engineers:
-        norm = _perf_norm_member(eng)
+    for label in sorted_labels:
+        norm = _perf_norm_member(label)
         if norm in overrides:
             col = _sanitize_css_hex(overrides[norm])
-            result[eng] = col
+            result[norm] = col
             used_colors.add(col)
     palette_idx = 0
-    for eng in sorted(engineers, key=str.lower):
-        if eng in result:
+    for label in sorted_labels:
+        norm = _perf_norm_member(label)
+        if norm in result:
             continue
         while palette_idx < len(palette) and palette[palette_idx] in used_colors:
             palette_idx += 1
         color = _sanitize_css_hex(palette[palette_idx % len(palette)])
-        result[eng] = color
+        result[norm] = color
         used_colors.add(color)
         palette_idx += 1
     return result
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _perf_stable_engineer_color_map_cached(roster_key: tuple[str, ...]) -> dict[str, str]:
+    return _perf_build_engineer_color_map(list(roster_key))
+
+
+def _perf_engineer_color_map(engineers: list[str]) -> dict[str, str]:
+    """Map engineer label → hex color; roster-wide so hues do not shift by date filter."""
+    roster = _perf_roster_engineer_labels()
+    stable = _perf_stable_engineer_color_map_cached(tuple(roster))
+    fallback = _sanitize_css_hex(_PERF_ENG_LINE_COLORS[0])
+    out: dict[str, str] = {}
+    for eng in engineers:
+        norm = _perf_norm_member(eng)
+        out[eng] = stable.get(norm, fallback)
+    return out
 
 
 _PERF_MATRIX_LOOKUP_KEY = "perf_matrix_ticket_lookup"
@@ -14209,8 +14246,20 @@ def _render_perf_summary_daily_assignment_chart(
     if period_label:
         cap_parts.insert(0, period_label)
     st.caption(" · ".join(cap_parts))
-    engineers = sorted(plot_df["Engineer"].astype(str).unique().tolist(), key=str.lower)
+    plot_df = plot_df.copy()
+    plot_df["Engineer"] = plot_df["Engineer"].astype(str).map(_perf_norm_member)
+    engineers = sorted(plot_df["Engineer"].unique().tolist(), key=str.lower)
     color_map = _perf_engineer_color_map(engineers)
+    legend_html = " ".join(
+        f'<span style="margin-right:12px;white-space:nowrap">'
+        f'<span style="color:{html.escape(color_map[e])};font-weight:700">●</span> '
+        f"{html.escape(e)}</span>"
+        for e in engineers
+    )
+    st.markdown(
+        f'<p style="margin:4px 0 8px;font-size:0.85rem;color:#8a9ac0">{legend_html}</p>',
+        unsafe_allow_html=True,
+    )
     chart = _weekly_altair_theme(
         alt.Chart(plot_df)
         .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5)
@@ -14227,7 +14276,7 @@ def _render_perf_summary_daily_assignment_chart(
                     domain=engineers,
                     range=[color_map[e] for e in engineers],
                 ),
-                legend=alt.Legend(title="Engineer"),
+                legend=None,
             ),
             tooltip=[
                 alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
