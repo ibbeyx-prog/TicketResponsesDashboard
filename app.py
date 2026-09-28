@@ -183,6 +183,7 @@ from unattended import (
     run_unattended_close,
     should_close_as_unattended,
     to_ops_local,
+    is_accidental_reassign_cycle,
     visit_cycle_is_unattended,
 )
 
@@ -1910,6 +1911,7 @@ _DASH_PENDING_ENGINEER_FILTER_KEY = "_dash_pending_engineer_filter"
 _DASH_PENDING_SALES_SELECT_KEY = "_dash_pending_sales_select"
 _DASH_PENDING_CASE_TYPE_FILTER_KEY = "_dash_pending_case_type_filter"
 _PERF_FOCUS_ASSIGNEE_KEY = "perf_focus_assignee"
+_PERF_FOCUS_ADMIN_UI = "🔒 Admin"
 _PERF_RANGE_PRESET_KEY = "perf_range"
 _PERF_ACTIVE_VIEW_KEY = "perf_active_view"
 _PERF_SELECTED_ENGINEER_KEY = "perf_selected_engineer"
@@ -9588,11 +9590,25 @@ def _init_perf_session_state() -> None:
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
 
 
+def _perf_focus_assignee_to_credit_key(focus_ui: str) -> str:
+    """Map Focus selectbox value → performance credit key (or ``All``)."""
+    s = str(focus_ui or "").strip()
+    if s in ("", "All engineers"):
+        return "All"
+    if s == _PERF_FOCUS_ADMIN_UI or s.lstrip("🔒 ").strip() == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        return _SC_SALES_OVERVIEW_ADMIN_LABEL
+    key = _perf_person_credit_key(s)
+    return key if key not in ("", "(unknown)") else "All"
+
+
 def _perf_focus_for_filter() -> str:
     """Map sidebar Focus assignee to ``_perf_filter_by_person`` person arg."""
     focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
-    if focus == "All engineers":
+    key = _perf_focus_assignee_to_credit_key(focus)
+    if key == "All":
         return "All"
+    if key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        return _SC_SALES_OVERVIEW_ADMIN_LABEL
     return _perf_norm_member(focus)
 
 
@@ -9621,9 +9637,8 @@ def _sync_perf_detail_to_focus() -> None:
     if focus == "All engineers":
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
     else:
-        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = _perf_overview_button_key(
-            _perf_person_credit_key(focus)
-        )
+        credit = _perf_focus_assignee_to_credit_key(focus)
+        st.session_state[_PERF_SELECTED_ENGINEER_KEY] = _perf_overview_button_key(credit)
 
 
 def _sync_perf_view_for_focus() -> None:
@@ -9840,6 +9855,7 @@ def _apply_dash_range_change() -> None:
     _fetch_assignment_task_logs_in_range_cached.clear()
     _perf_weekly_resolution_trend_cached.clear()
     _perf_monthly_resolution_trend_cached.clear()
+    _perf_range_resolution_trend_cached.clear()
     _perf_breakdown_notes_cached.clear()
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
     st.session_state.pop(_PERF_ASSIGN_TASK_COUNTS_KEY, None)
@@ -12058,6 +12074,28 @@ def _perf_monthly_resolution_trend_cached(
     )
 
 
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_range_resolution_trend_cached(
+    range_start_iso: str,
+    range_end_iso: str,
+    focus: str,
+    tickets_sig: str,
+    sales_sig: str,
+) -> pd.DataFrame:
+    del tickets_sig, sales_sig
+    df_all = _fetch_tickets_cached()
+    sales_all = _fetch_sales_cases_cached()
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    return _perf_range_resolution_trend(
+        df_all,
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+    )
+
+
 def _perf_clear_summary_cache() -> None:
     st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
 
@@ -12313,31 +12351,22 @@ def _perf_summary_attach_trend_metrics(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
     *,
-    period: str,
-    week_offset: int,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
     focus: str = "All",
 ) -> None:
-    """Lazy-load resolution trend (4 prior buckets) — Overview only."""
+    """Lazy-load field resolution trend buckets inside the header time range."""
     if metrics.get("_trend_loaded"):
         return
     tickets_sig = _perf_data_signature(df_all)
     sales_sig = _perf_data_signature(sales_all)
-    if period == "Monthly":
-        trend_df = _perf_monthly_resolution_trend_cached(
-            end_month_offset=week_offset,
-            months=4,
-            focus=focus,
-            tickets_sig=tickets_sig,
-            sales_sig=sales_sig,
-        )
-    else:
-        trend_df = _perf_weekly_resolution_trend_cached(
-            end_week_offset=week_offset,
-            weeks=4,
-            focus=focus,
-            tickets_sig=tickets_sig,
-            sales_sig=sales_sig,
-        )
+    trend_df = _perf_range_resolution_trend_cached(
+        range_start_iso=range_start.isoformat(),
+        range_end_iso=range_end.isoformat(),
+        focus=focus,
+        tickets_sig=tickets_sig,
+        sales_sig=sales_sig,
+    )
     metrics["trend_df"] = trend_df
     metrics["rate_delta"] = _perf_rate_delta_from_trend(
         trend_df if isinstance(trend_df, pd.DataFrame) else pd.DataFrame(),
@@ -12356,11 +12385,17 @@ def _perf_summary_attach_team_assignment(
 ) -> None:
     if isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
         return
-    metrics["team_assignment_df"] = _perf_team_assignment_summary_df(
+    team_df = _perf_team_assignment_summary_df(
         df_all,
         sales_all,
         range_start=range_start,
         range_end=range_end,
+    )
+    metrics["team_assignment_df"] = team_df
+    metrics["team_unique_in_range"] = int(
+        team_df.attrs.get("team_unique_in_range", 0)
+        if isinstance(team_df, pd.DataFrame)
+        else 0
     )
 
 
@@ -12427,6 +12462,13 @@ def _perf_summary_attach_focus_engineer_block(
                 attended_yours_total=int(metrics.get("total") or 0),
                 visits_history=visits,
             )
+        )
+        _perf_summary_attach_team_assignment(
+            metrics,
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
         )
         metrics.update(_perf_summary_derived_metrics(metrics))
         metrics["attended_residential"] = attended_res
@@ -12883,12 +12925,12 @@ def _perf_summary_derived_metrics(metrics: dict[str, object]) -> dict[str, float
     cycles = int(metrics.get("assignment_cycles_in_range") or 0)
     from_assigned = int(metrics.get("attended_from_assigned") or 0)
     revisit = int(metrics.get("revisit_tickets") or 0)
-    snap = int(metrics.get("snapshot_residential") or 0) + int(
-        metrics.get("snapshot_resort") or 0
-    )
+    team_unique = int(metrics.get("team_unique_in_range") or 0)
     return {
         "task_load_ratio": round(cycles / assigned, 2) if assigned else 0.0,
-        "snapshot_coverage_pct": int(round(100 * assigned / snap)) if snap else 0,
+        "team_range_share_pct": int(round(100 * assigned / team_unique))
+        if team_unique
+        else 0,
         "response_rate_pct": int(round(100 * from_assigned / assigned)) if assigned else 0,
         "revisit_rate_pct": int(round(100 * revisit / assigned)) if assigned else 0,
     }
@@ -12940,7 +12982,7 @@ def _perf_team_assignment_summary_df(
         range_start=range_start,
         range_end=range_end,
     )
-    credit_to_label = _perf_engineer_credit_to_label_map()
+    credit_to_label = _perf_team_assignment_credit_to_label_map()
     _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
         df_all,
         sales_all,
@@ -12968,18 +13010,21 @@ def _perf_team_assignment_summary_df(
         ticket_rows=ticket_rows,
     )
     rows: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for handle in get_engineer_handles():
-        credit_key = _perf_person_credit_key(handle)
-        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+    team_union: set[str] = set()
+    for credit_key in _perf_team_assignment_comparison_people(
+        df_all, sales_all, visits_history=visits
+    ):
+        if credit_key in ("", "(unknown)"):
             continue
-        if credit_key in seen:
-            continue
-        seen.add(credit_key)
+        focus = (
+            _SC_SALES_OVERVIEW_ADMIN_LABEL
+            if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL
+            else credit_key
+        )
         assign = _perf_engineer_range_assignment_metrics(
             df_all,
             sales_all,
-            focus=handle,
+            focus=focus,
             range_start=range_start,
             range_end=range_end,
             visits_history=visits,
@@ -12992,50 +13037,115 @@ def _perf_team_assignment_summary_df(
         unique = int(assign.get("assigned_in_range") or 0)
         tasks = int(assign.get("assignment_cycles_in_range") or 0)
         assigned_ids = assign.get("_assigned_ids")
-        if isinstance(assigned_ids, frozenset) and assigned_ids:
-            attended_credited = _perf_attended_ticket_ids_credited_to(
+        is_admin_row = credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL
+        assign_frozen = assigned_ids if isinstance(assigned_ids, frozenset) else frozenset()
+        if is_admin_row:
+            admin_res, admin_rsr = _perf_admin_range_res_rsr_ids(
                 df_all,
                 sales_all,
-                focus=handle,
+                range_start=range_start,
+                range_end=range_end,
+                assign_ids=assign_frozen,
+            )
+            admin_all_ids = frozenset(admin_res | admin_rsr)
+            attended = _perf_team_attended_assigned_count(
+                admin_all_ids,
+                df_all=df_all,
+                sales_all=sales_all,
+                focus=focus,
                 range_start=range_start,
                 range_end=range_end,
             )
-            attended = len(assigned_ids & attended_credited)
+        elif assign_frozen:
+            attended = _perf_team_attended_assigned_count(
+                assign_frozen,
+                df_all=df_all,
+                sales_all=sales_all,
+                focus=focus,
+                range_start=range_start,
+                range_end=range_end,
+            )
         else:
             attended = 0
-        if unique == 0 and tasks == 0 and attended == 0:
+        unattended_cases = int(unatt_map.get(credit_key, 0))
+        still_open = max(0, unique - attended)
+        if is_admin_row:
+            (
+                unique,
+                tasks,
+                attended,
+                still_open,
+                res_n,
+                rsr_n,
+            ) = _perf_admin_team_assignment_row_metrics(
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                assign=assign,
+                attended_assigned=attended,
+                res_by_label=res_by_label,
+                rsr_by_label=rsr_by_label,
+            )
+            team_union.update(admin_res)
+            team_union.update(admin_rsr)
+        else:
+            res_n = int(assign.get("assigned_residential") or 0)
+            rsr_n = int(assign.get("assigned_resort") or 0)
+            if assign_frozen:
+                team_union.update(str(t).strip() for t in assign_frozen if str(t).strip())
+        if not is_admin_row and unique == 0 and tasks == 0 and attended == 0:
             continue
-        label = handle if str(handle).startswith("@") else f"@{handle}"
         rows.append(
             {
-                "Engineer": label,
+                "Engineer": _perf_team_assignment_table_label(credit_key),
                 "Unique tickets": unique,
                 "Tasks": tasks,
                 "Task load": round(tasks / unique, 2) if unique else 0.0,
                 "Revisit tickets": int(assign.get("revisit_tickets") or 0),
-                "Unattended": int(unatt_map.get(credit_key, 0)),
-                "Attended": attended,
-                "Residential": int(assign.get("assigned_residential") or 0),
-                "Resort": int(assign.get("assigned_resort") or 0),
+                "Unattended cases": unattended_cases,
+                "Attended (assigned)": attended,
+                "Still open (assigned)": still_open,
+                "Residential": res_n,
+                "Resort": rsr_n,
             }
         )
     if not rows:
-        return pd.DataFrame(
+        out = pd.DataFrame(
             columns=[
                 "Engineer",
                 "Unique tickets",
                 "Tasks",
                 "Task load",
                 "Revisit tickets",
-                "Unattended",
-                "Attended",
+                "Unattended cases",
+                "Attended (assigned)",
+                "Still open (assigned)",
                 "Residential",
                 "Resort",
             ]
         )
-    return pd.DataFrame(rows).sort_values(
+        out.attrs["team_unique_in_range"] = 0
+        return out
+    out = pd.DataFrame(rows)
+    out.attrs["team_unique_in_range"] = len(team_union)
+    admin_label = _perf_team_assignment_table_label(_SC_SALES_OVERVIEW_ADMIN_LABEL)
+
+    def _team_row_dedupe_key(label: str) -> str:
+        s = str(label or "").strip()
+        if s == admin_label or s.rstrip().endswith("Admin"):
+            return _SC_SALES_OVERVIEW_ADMIN_LABEL
+        return _perf_norm_member(s)
+
+    out["_dedupe_key"] = out["Engineer"].astype(str).map(_team_row_dedupe_key)
+    out = out.drop_duplicates(subset=["_dedupe_key"], keep="first").drop(
+        columns=["_dedupe_key"]
+    )
+    field = out.loc[out["Engineer"].astype(str) != admin_label].sort_values(
         ["Tasks", "Unique tickets"], ascending=[False, False]
     )
+    admin = out.loc[out["Engineer"].astype(str) == admin_label]
+    return pd.concat([field, admin], ignore_index=True)
 
 
 # Field task cycles only — ``Assignment`` is written with ``member_username`` = assignee.
@@ -13055,6 +13165,289 @@ def _perf_engineer_credit_to_label_map() -> dict[str, str]:
             handle if str(handle).startswith("@") else f"@{handle}"
         )
     return credit_to_label
+
+
+def _perf_field_engineer_credit_keys() -> list[str]:
+    """Active field engineers only — one credit key per @handle (deduped)."""
+    seen: set[str] = set()
+    keys: list[str] = []
+    for handle in get_engineer_handles():
+        credit_key = _perf_person_credit_key(handle)
+        if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+            continue
+        norm = _perf_norm_member(credit_key)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        keys.append(credit_key)
+    return sorted(keys, key=str.lower)
+
+
+def _perf_team_assignment_credit_to_label_map() -> dict[str, str]:
+    """Field engineers + Admin bucket (for task-cycle totals in team table)."""
+    credit_to_label = _perf_engineer_credit_to_label_map()
+    credit_to_label[_SC_SALES_OVERVIEW_ADMIN_LABEL] = _SC_SALES_OVERVIEW_ADMIN_LABEL
+    return credit_to_label
+
+
+def _perf_admin_sales_last_assigned_in_range(
+    row: pd.Series,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> bool:
+    return _perf_sales_activity_in_range(
+        row,
+        range_start=range_start,
+        range_end=range_end,
+    )
+
+
+def _perf_sales_case_ticket_id(row: object) -> str:
+    """Resort/sales track ticket number (``case_ref`` — one ID per case)."""
+    if isinstance(row, pd.Series):
+        data = row
+    else:
+        data = pd.Series(row if isinstance(row, dict) else {})
+    return str(data.get("case_ref") or "").strip()
+
+
+def _perf_field_ticket_activity_in_range(
+    row: pd.Series,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> bool:
+    for col in ("last_assigned_at", "updated_at", "created_at"):
+        if col not in row.index:
+            continue
+        raw = row.get(col)
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            continue
+        ts = pd.to_datetime(raw, utc=True, errors="coerce")
+        if pd.isna(ts):
+            continue
+        if range_start <= ts <= range_end:
+            return True
+    return False
+
+
+def _perf_admin_range_res_rsr_ids(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    assign_ids: frozenset[str] | None = None,
+) -> tuple[set[str], set[str]]:
+    """Admin field ``ticket_number`` + resort ``case_ref`` (ticket ID) in sidebar range."""
+    admin = _SC_SALES_OVERVIEW_ADMIN_LABEL
+    sales_refs = _perf_sales_case_ref_set(sales_all)
+    res_ids: set[str] = set()
+    if assign_ids:
+        res_ids.update(
+            str(t).strip()
+            for t in assign_ids
+            if str(t).strip() and str(t).strip() not in sales_refs
+        )
+    credited = _perf_credited_field_tickets(df_all, person=admin)
+    if not credited.empty:
+        for _, row in credited.iterrows():
+            if not _perf_field_ticket_activity_in_range(
+                row,
+                range_start=range_start,
+                range_end=range_end,
+            ):
+                continue
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                res_ids.add(tn)
+    rsr_ids: set[str] = set()
+    sales_df = sales_all if sales_all is not None else pd.DataFrame()
+    if not sales_df.empty:
+        for _, row in sales_df.iterrows():
+            if _perf_sales_credited_person(row) != admin:
+                continue
+            if not _perf_sales_activity_in_range(
+                row,
+                range_start=range_start,
+                range_end=range_end,
+            ):
+                continue
+            tid = _perf_sales_case_ticket_id(row)
+            if tid:
+                rsr_ids.add(tid)
+    return res_ids, rsr_ids
+
+
+def _perf_admin_solo_shared_for_ids(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    res_ids: set[str],
+    rsr_ids: set[str],
+) -> tuple[int, int, int, int]:
+    """Solo/shared split for Admin range ticket + case IDs (one count per ID)."""
+    ticket_rows: dict[str, pd.Series] = {}
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                ticket_rows[tn] = row
+    res_solo = res_shared = 0
+    for tn in res_ids:
+        row = ticket_rows.get(tn)
+        if row is None:
+            res_solo += 1
+            continue
+        if get_credit_type(row) == "shared":
+            res_shared += 1
+        else:
+            res_solo += 1
+    sales_df = sales_all if sales_all is not None else pd.DataFrame()
+    sales_by_ref: dict[str, pd.Series] = {}
+    if not sales_df.empty and "case_ref" in sales_df.columns:
+        for _, row in sales_df.iterrows():
+            cref = str(row.get("case_ref") or "").strip()
+            if cref:
+                sales_by_ref[cref] = row
+    rsr_solo = rsr_shared = 0
+    for cref in rsr_ids:
+        row = sales_by_ref.get(cref)
+        if row is None:
+            rsr_solo += 1
+            continue
+        if get_credit_type(row) == "shared":
+            rsr_shared += 1
+        else:
+            rsr_solo += 1
+    return res_solo, res_shared, rsr_solo, rsr_shared
+
+
+def _perf_admin_assign_ids_for_range(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
+) -> frozenset[str]:
+    """Assignment-ID set for Admin (same basis as team comparison row)."""
+    admin = _SC_SALES_OVERVIEW_ADMIN_LABEL
+    visits = (
+        visits_history
+        if visits_history is not None
+        else _perf_load_overview_visits_history(df_all)
+    )
+    sales_refs = _perf_sales_case_ref_set(sales_all)
+    ticket_rows: dict[str, pd.Series] = {}
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                ticket_rows[tn] = row
+    visits_range = _fetch_visits_in_range(range_start, range_end)
+    prepared_visits = (
+        _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
+    )
+    credit_to_label = _perf_team_assignment_credit_to_label_map()
+    _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        credit_to_label=credit_to_label,
+    )
+    visit_stats = _perf_batch_visit_range_stats_by_credit(
+        prepared_visits,
+        range_start=range_start,
+        range_end=range_end,
+        sales_refs=sales_refs,
+        ticket_rows=ticket_rows,
+    ).get(admin, _perf_empty_visit_range_stats())
+    assign = _perf_engineer_range_assignment_metrics(
+        df_all,
+        sales_all,
+        focus=admin,
+        range_start=range_start,
+        range_end=range_end,
+        visits_history=visits,
+        prepared_visits_range=prepared_visits,
+        visit_range_stats=visit_stats,
+        assignment_cycles_by_label=(res_by_label, rsr_by_label),
+    )
+    raw = assign.get("_assigned_ids")
+    return raw if isinstance(raw, frozenset) else frozenset()
+
+
+def _perf_admin_team_assignment_row_metrics(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    assign: dict[str, int | frozenset[str]],
+    attended_assigned: int,
+    res_by_label: dict[str, int],
+    rsr_by_label: dict[str, int],
+) -> tuple[int, int, int, int, int, int]:
+    """Admin queue — undispatched residential + resort assigned in sidebar range."""
+    assign_ids = assign.get("_assigned_ids")
+    assign_frozen = assign_ids if isinstance(assign_ids, frozenset) else frozenset()
+    res_ids, rsr_ids = _perf_admin_range_res_rsr_ids(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        assign_ids=assign_frozen,
+    )
+    unique = len(res_ids | rsr_ids)
+    tasks = 0
+    attended = attended_assigned
+    still_open = max(0, unique - attended)
+    return unique, tasks, attended, still_open, len(res_ids), len(rsr_ids)
+
+
+def _perf_team_assignment_comparison_people(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    visits_history: pd.DataFrame | None,
+) -> list[str]:
+    """Field engineers + Admin queue (Overview-aligned roster, no duplicate @admin)."""
+    del df_all, sales_all, visits_history
+    keys = _perf_field_engineer_credit_keys()
+    if _SC_SALES_OVERVIEW_ADMIN_LABEL not in keys:
+        keys.append(_SC_SALES_OVERVIEW_ADMIN_LABEL)
+    return sorted(keys, key=str.lower)
+
+
+def _perf_team_assignment_table_label(credit_key: str) -> str:
+    label = _perf_overview_row_label(credit_key)
+    if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        return f"🔒 {label.lstrip('🔒 ')}"
+    return label
+
+
+def _perf_team_attended_assigned_count(
+    assigned_ids: frozenset[str],
+    *,
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> int:
+    """Attended in range, limited to tickets/cases assigned to this engineer in range."""
+    if not assigned_ids or focus in ("", "All"):
+        return 0
+    attended_credited = _perf_attended_ticket_ids_credited_to(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    return len(assigned_ids & attended_credited)
 
 
 def _perf_assignment_task_day_counts_memo(
@@ -13673,7 +14066,7 @@ def _render_perf_summary_engineer_derived_row(metrics: dict[str, object]) -> Non
     assigned = int(metrics.get("assigned_in_range") or 0)
     if assigned <= 0 and int(metrics.get("assignment_cycles_in_range") or 0) <= 0:
         return
-    snap_cov = int(metrics.get("snapshot_coverage_pct") or 0)
+    team_share = int(metrics.get("team_range_share_pct") or 0)
     resp_rate = int(metrics.get("response_rate_pct") or 0)
     revisit_rate = int(metrics.get("revisit_rate_pct") or 0)
     revisit_n = int(metrics.get("revisit_tickets") or 0)
@@ -13681,7 +14074,7 @@ def _render_perf_summary_engineer_derived_row(metrics: dict[str, object]) -> Non
     handed = int(metrics.get("closed_by_others") or 0)
     still_open = int(metrics.get("still_open_assigned") or 0)
     cards = [
-        ("Snapshot coverage", f"{snap_cov}%", "Your share of queue snapshot"),
+        ("Team share (range)", f"{team_share}%", "Your unique ÷ team unique tickets"),
         ("Response rate", f"{resp_rate}%", "Attended from assigned ÷ unique"),
         ("Revisit rate", f"{revisit_rate}%", f"{revisit_n} tickets with 2+ tasks"),
         ("Same-day response", f"{same_day}%", "Residential · before 23:59 UTC+5"),
@@ -13734,22 +14127,32 @@ def _render_perf_summary_team_assignment_table(
     if not isinstance(team_df, pd.DataFrame) or team_df.empty:
         st.caption("No assignment activity for any engineer in this period.")
         return
-    focus_label = ""
-    if focus not in ("", "All"):
-        focus_key = _perf_person_credit_key(focus)
-        focus_label = focus if str(focus).startswith("@") else f"@{focus_key}"
+    focus_all = str(focus or "").strip() in ("", "All", "All engineers")
+    admin_label = _perf_team_assignment_table_label(_SC_SALES_OVERVIEW_ADMIN_LABEL)
+    team_unique = int(metrics.get("team_unique_in_range") or 0)
+    range_label = _format_perf_range_caption() or "sidebar date range"
     st.caption(
-        "Each engineer's unique tickets vs assign/reassign tasks (reassign-away same day "
-        "credits the final assignee only). Attended = field outcomes on tickets still "
-        "assigned to them in this period."
+        f"All columns use **{range_label}** (same scope as Performance Overview bars). "
+        "**Unique tickets** = distinct IDs assigned to that engineer; "
+        "**Residential** + **Resort** = the same split of unique. "
+        "**Attended (assigned)** + **Still open (assigned)** = unique. "
+        f"Team distinct assigned in range: **{team_unique}** (no double-count across engineers). "
+        "**🔒 Admin** — field **ticket_number** + resort **case_ref** (one ticket ID per case); "
+        "always shown (pinned under the focused engineer when Focus is one person)."
     )
     view = team_df.copy()
-    if focus_label and "Engineer" in view.columns:
-        view = view.copy()
-        view["_highlight"] = view["Engineer"].astype(str).eq(focus_label)
-        view = view.sort_values(["_highlight", "Tasks"], ascending=[False, False]).drop(
-            columns=["_highlight"]
-        )
+    if not focus_all and "Engineer" in view.columns:
+        focus_key = _perf_focus_assignee_to_credit_key(str(focus or ""))
+        if focus_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+            view = view.loc[view["Engineer"].astype(str) == admin_label]
+        else:
+            focus_label = focus if str(focus).startswith("@") else f"@{focus_key}"
+            engineer = view.loc[
+                view["Engineer"].astype(str).map(_perf_norm_member)
+                == _perf_norm_member(focus_label)
+            ]
+            admin = view.loc[view["Engineer"].astype(str) == admin_label]
+            view = pd.concat([engineer, admin], ignore_index=True)
     _render_perf_dataframe(view)
 
 
@@ -14310,6 +14713,87 @@ def _perf_weekly_executive_metrics(detail_df: pd.DataFrame) -> dict[str, object]
     }
 
 
+_PERF_TREND_MAX_BUCKETS = 14
+
+
+def _perf_resolution_trend_buckets(d0: date, d1: date) -> list[tuple[date, date, str]]:
+    """Split inclusive local dates ``d0..d1`` into chart buckets (all inside the range)."""
+    if d1 < d0:
+        d0, d1 = d1, d0
+    span = (d1 - d0).days + 1
+    if span <= 0:
+        return []
+    if span == 1:
+        return [(d0, d1, d0.strftime("%d %b %Y"))]
+    if span <= _PERF_TREND_MAX_BUCKETS:
+        rows: list[tuple[date, date, str]] = []
+        day = d0
+        while day <= d1:
+            fmt = "%d %b %Y" if span > 7 else "%d %b"
+            rows.append((day, day, day.strftime(fmt)))
+            day += timedelta(days=1)
+        return rows
+    chunk_days = max(7, (span + _PERF_TREND_MAX_BUCKETS - 1) // _PERF_TREND_MAX_BUCKETS)
+    rows = []
+    cur = d0
+    while cur <= d1:
+        end = min(cur + timedelta(days=chunk_days - 1), d1)
+        if cur == end:
+            label = cur.strftime("%d %b")
+        elif cur.year == end.year:
+            label = f"{cur.strftime('%d %b')}–{end.strftime('%d %b')}"
+        else:
+            label = f"{cur.strftime('%d %b %Y')}–{end.strftime('%d %b %Y')}"
+        rows.append((cur, end, label))
+        cur = end + timedelta(days=1)
+    return rows
+
+
+def _perf_range_resolution_trend(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    focus: str = "All",
+) -> pd.DataFrame:
+    """Field resolution rate over sub-periods of the selected header range (UTC+5)."""
+    d0 = range_start.tz_convert(LOCAL_TZ).date()
+    d1 = range_end.tz_convert(LOCAL_TZ).date()
+    buckets = _perf_resolution_trend_buckets(d0, d1)
+    if not buckets:
+        return pd.DataFrame(columns=["week", "rate", "total", "sort"])
+    rows: list[dict[str, object]] = []
+    for sort_i, (b0, b1, label) in enumerate(buckets):
+        rs = _local_date_start(b0)
+        re = _local_date_end(b1)
+        if rs < range_start:
+            rs = range_start
+        if re > range_end:
+            re = range_end
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all if sales_all is not None else pd.DataFrame(),
+            range_start=rs,
+            range_end=re,
+            focus=focus,
+        )
+        detail = bundle.get("detail")
+        detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+        rate, total, _field_n = _perf_field_resolution_rate(detail_df)
+        if total == 0:
+            rate = 0
+        rows.append(
+            {
+                "week": label,
+                "rate": rate,
+                "total": total,
+                "sort": sort_i,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("sort")
+
+
 def _perf_weekly_resolution_trend(
     df_all: pd.DataFrame,
     sales_all: pd.DataFrame,
@@ -14405,11 +14889,17 @@ def _render_perf_summary_closure_donut(metrics: dict[str, object]) -> None:
     st.altair_chart(donut, width="stretch")
 
 
-def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
+def _render_perf_summary_resolution_trend(
+    metrics: dict[str, object],
+    *,
+    period_label: str = "",
+) -> None:
     st.markdown('<div class="weekly-panel"><h4>Field resolution trend</h4></div>', unsafe_allow_html=True)
+    if period_label:
+        st.caption(f"Within report period · {period_label} ({LOCAL_TZ_LABEL})")
     trend_df = metrics.get("trend_df")
     if not isinstance(trend_df, pd.DataFrame) or trend_df.empty:
-        st.caption("Not enough history for trends.")
+        st.caption("No attended cases in this range for a trend.")
         return
     trend = _weekly_altair_theme(
         alt.Chart(trend_df)
@@ -14419,6 +14909,7 @@ def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
                 "week:N",
                 title="Period",
                 sort=alt.EncodingSortField(field="sort", order="ascending"),
+                axis=alt.Axis(labelAngle=-28, labelOverlap=False),
             ),
             y=alt.Y(
                 "rate:Q",
@@ -14431,7 +14922,7 @@ def _render_perf_summary_resolution_trend(metrics: dict[str, object]) -> None:
                 alt.Tooltip("total:Q", title="Tickets"),
             ],
         )
-        .properties(height=220)
+        .properties(height=300)
     )
     st.altair_chart(trend, width="stretch")
 
@@ -14559,13 +15050,19 @@ def _render_perf_summary_overview_tab(
     focus: str = "All",
 ) -> None:
     """Overview — KPIs, closure donut, resolution trend."""
-    if df_all is not None and sales_all is not None and not metrics.get("_trend_loaded"):
+    if (
+        df_all is not None
+        and sales_all is not None
+        and range_start is not None
+        and range_end is not None
+        and not metrics.get("_trend_loaded")
+    ):
         _perf_summary_attach_trend_metrics(
             metrics,
             df_all,
             sales_all,
-            period=period,
-            week_offset=week_offset,
+            range_start=range_start,
+            range_end=range_end,
             focus=focus,
         )
     show_engineer = "assigned_in_range" in metrics
@@ -14581,6 +15078,19 @@ def _render_perf_summary_overview_tab(
     else:
         st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
         _render_weekly_kpi_cards(metrics)
+        if (
+            df_all is not None
+            and sales_all is not None
+            and range_start is not None
+            and range_end is not None
+        ):
+            _perf_summary_attach_team_assignment(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
         with st.expander(
             "Team assignment comparison",
             expanded=False,
@@ -14594,11 +15104,10 @@ def _render_perf_summary_overview_tab(
                 range_end=range_end,
             )
         _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
-    chart_left, chart_right = st.columns(2)
-    with chart_left:
+    donut_col, _ = st.columns([1, 1])
+    with donut_col:
         _render_perf_summary_closure_donut(metrics)
-    with chart_right:
-        _render_perf_summary_resolution_trend(metrics)
+    _render_perf_summary_resolution_trend(metrics, period_label=period_label)
 
 
 def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
@@ -27095,6 +27604,68 @@ def _perf_overview_visit_solo_shared_counts(
     return solo, shared
 
 
+def _perf_visit_solo_shared_in_range(
+    visits: pd.DataFrame,
+    *,
+    credit_key: str,
+    df_all: pd.DataFrame | None,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> tuple[int, int]:
+    """Visit-cycle solo/shared for tickets with activity in the sidebar range."""
+    if credit_key in ("", "(unknown)", _SC_SALES_OVERVIEW_ADMIN_LABEL):
+        return 0, 0
+    if visits.empty:
+        return 0, 0
+    prepared = _perf_prepare_visits_df(visits)
+    if "visit_start" in prepared.columns:
+        vs = _parse_ts(prepared["visit_start"])
+        prepared = prepared.loc[vs.notna() & (vs >= range_start) & (vs <= range_end)]
+    if prepared.empty:
+        return 0, 0
+    if df_all is not None and not df_all.empty:
+        df_res = _perf_overview_df_for_solo_shared(df_all)
+        all_nums = set(_perf_overview_ticket_numbers(df_res))
+        if all_nums and "ticket_number" in prepared.columns:
+            prepared = prepared[
+                prepared["ticket_number"].astype(str).str.strip().isin(all_nums)
+            ]
+    if prepared.empty:
+        return 0, 0
+    key = _perf_norm_member(credit_key)
+    detail = _perf_ticket_detail_rows(prepared, person=key)
+    if detail.empty:
+        return 0, 0
+    solo = int((detail["Type"] == "Solo").sum())
+    shared = int((detail["Type"] == "Shared").sum())
+    return solo, shared
+
+
+def _perf_admin_res_solo_shared_in_range(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    assign_ids: frozenset[str] | None = None,
+) -> tuple[int, int, int, int]:
+    """Admin residential + resort solo/shared in range (matches team comparison row)."""
+    res_ids, rsr_ids = _perf_admin_range_res_rsr_ids(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        assign_ids=assign_ids or frozenset(),
+    )
+    res_solo, res_shared, rsr_solo, rsr_shared = _perf_admin_solo_shared_for_ids(
+        df_all,
+        sales_all,
+        res_ids,
+        rsr_ids,
+    )
+    return res_solo, res_shared, rsr_solo, rsr_shared
+
+
 def _perf_visit_solo_shared_counts(
     visits: pd.DataFrame,
     *,
@@ -27168,8 +27739,13 @@ def _perf_overview_people(
     visits_history: pd.DataFrame | None = None,
 ) -> list[str]:
     """Field engineers (incl. visit history assignees) + Admin sales bucket."""
-    if focus not in ("", "All"):
-        return [_perf_person_credit_key(focus)]
+    if focus not in ("", "All", "All engineers"):
+        credit_key = _perf_focus_assignee_to_credit_key(focus)
+        if credit_key in ("", "All", "(unknown)"):
+            return []
+        if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+            return [credit_key]
+        return [credit_key, _SC_SALES_OVERVIEW_ADMIN_LABEL]
 
     people: set[str] = set()
     people.add(_SC_SALES_OVERVIEW_ADMIN_LABEL)
@@ -27259,22 +27835,20 @@ def _get_solo_shared_data(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
     visits_history: pd.DataFrame | None = None,
+    admin_assign_ids: frozenset[str] | None = None,
 ) -> list[dict[str, object]]:
-    """Visit-cycle solo/shared fair credit per engineer (all residential tickets).
-
-    Undispatched residential tickets (no field assignee) credit **Admin** via
-    assignment counts — visit history does not apply.
-    """
-    del sales_all, range_start, range_end
-
-    if visits_history is None:
-        visits_history = _perf_load_overview_visits_history(df_all)
+    """Visit-cycle solo/shared fair credit per engineer in the sidebar date range."""
     df_res_credit = _perf_overview_df_for_solo_shared(df_all)
+    if visits_history is None or visits_history.empty:
+        try:
+            visits_history = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            visits_history = pd.DataFrame()
 
     engineers = _perf_overview_people(
         focus=focus,
         df_all=df_all,
-        sales_all=pd.DataFrame(),
+        sales_all=sales_all,
         visits_history=visits_history,
     )
 
@@ -27283,14 +27857,20 @@ def _get_solo_shared_data(
         if credit_key in ("", "(unknown)"):
             continue
         if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
-            solo, shared = _perf_overview_assignment_solo_shared_counts(
-                df_res_credit, credit_key=credit_key
+            solo, shared, _, _ = _perf_admin_res_solo_shared_in_range(
+                df_res_credit,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                assign_ids=admin_assign_ids,
             )
         else:
-            solo, shared = _perf_overview_visit_solo_shared_counts(
+            solo, shared = _perf_visit_solo_shared_in_range(
                 visits_history,
                 credit_key=credit_key,
                 df_all=df_res_credit,
+                range_start=range_start,
+                range_end=range_end,
             )
         if solo > 0 or shared > 0:
             results.append(
@@ -27312,10 +27892,31 @@ def _get_resort_solo_shared_data(
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    admin_assign_ids: frozenset[str] | None = None,
 ) -> list[dict[str, object]]:
-    """Solo vs shared resort-case credit per person (all resort cases)."""
-    del range_start, range_end
+    """Solo vs shared resort-case credit per person in the sidebar date range."""
+    del admin_assign_ids
+    admin = _SC_SALES_OVERVIEW_ADMIN_LABEL
     resort_view = sales_all.copy() if not sales_all.empty else pd.DataFrame()
+    if not resort_view.empty:
+        resort_view = resort_view.loc[
+            resort_view.apply(
+                lambda r: (
+                    _perf_admin_sales_last_assigned_in_range(
+                        r,
+                        range_start=range_start,
+                        range_end=range_end,
+                    )
+                    if _perf_sales_credited_person(r) == admin
+                    else _perf_sales_activity_in_range(
+                        r,
+                        range_start=range_start,
+                        range_end=range_end,
+                    )
+                ),
+                axis=1,
+            )
+        ]
     if focus not in ("", "All"):
         resort_view = resort_view.loc[
             resort_view.apply(lambda r: _perf_sales_matches_focus(r, focus), axis=1)
@@ -27437,6 +28038,12 @@ def _perf_overview_visit_cycle_unattended(
     if outcome_s == "unattended":
         return True
     if outcome_s == "reassigned":
+        if is_accidental_reassign_cycle(
+            visit_start=v.get("visit_start"),
+            visit_end=v.get("visit_end"),
+            outcome=outcome_s,
+        ):
+            return False
         return True
 
     start = _parse_ts(v.get("visit_start"))
@@ -27465,6 +28072,37 @@ def _perf_overview_visit_cycle_unattended(
     return False
 
 
+def _perf_sidebar_local_date_bounds(
+    range_start: pd.Timestamp | None,
+    range_end: pd.Timestamp | None,
+) -> tuple[date | None, date | None]:
+    """Inclusive UTC+5 calendar dates for the Performance sidebar range."""
+    if range_start is None or range_end is None:
+        return None, None
+    lo = range_start.tz_convert(LOCAL_TZ).date()
+    hi = range_end.tz_convert(LOCAL_TZ).date()
+    if lo > hi:
+        lo, hi = hi, lo
+    return lo, hi
+
+
+def _perf_assign_day_in_sidebar_range(
+    ts: object,
+    *,
+    range_start: pd.Timestamp | None,
+    range_end: pd.Timestamp | None,
+) -> bool:
+    """True when the UTC+5 assign day of ``ts`` falls in the sidebar date span."""
+    parsed = pd.to_datetime(ts, utc=True, errors="coerce")
+    if pd.isna(parsed):
+        return False
+    lo, hi = _perf_sidebar_local_date_bounds(range_start, range_end)
+    if lo is None or hi is None:
+        return True
+    assign_day = parsed.tz_convert(LOCAL_TZ).date()
+    return lo <= assign_day <= hi
+
+
 def _perf_overview_unattended_cycle_dedupe_key(visit: object, ticket_number: str) -> str:
     """One unattended case per ticket + assignee + assign day (UTC+5)."""
     v = visit if isinstance(visit, pd.Series) else pd.Series(visit if isinstance(visit, dict) else {})
@@ -27485,7 +28123,7 @@ def _perf_overview_unattended_counts_by_credit(
     range_start: pd.Timestamp | None = None,
     range_end: pd.Timestamp | None = None,
 ) -> dict[str, int]:
-    """Unattended = one count per assignment cycle, assignee only (reassign = new case)."""
+    """Unattended = one count per assign-day cycle (UTC+5), assignee only (reassign = new case)."""
     if df_all.empty or "ticket_number" not in df_all.columns:
         return {}
 
@@ -27528,9 +28166,12 @@ def _perf_overview_unattended_counts_by_credit(
             visit_start = _parse_ts(visit.get("visit_start"))
             if pd.isna(visit_start):
                 continue
-            if range_start is not None and range_end is not None:
-                if visit_start < range_start or visit_start > range_end:
-                    continue
+            if not _perf_assign_day_in_sidebar_range(
+                visit_start,
+                range_start=range_start,
+                range_end=range_end,
+            ):
+                continue
 
             if not _perf_overview_visit_cycle_unattended(visit, ticket_row):
                 continue
@@ -27581,9 +28222,12 @@ def _perf_overview_unattended_counts_by_credit(
         assigned_ts = _parse_ts(row.get("last_assigned_at"))
         if pd.isna(assigned_ts):
             continue
-        if range_start is not None and range_end is not None:
-            if assigned_ts < range_start or assigned_ts > range_end:
-                continue
+        if not _perf_assign_day_in_sidebar_range(
+            assigned_ts,
+            range_start=range_start,
+            range_end=range_end,
+        ):
+            continue
 
         assign_day = assigned_ts.tz_convert(LOCAL_TZ).date().isoformat()
         dedupe_key = f"pending:{tn}:{primary}:{assign_day}"
@@ -27665,9 +28309,12 @@ def _perf_unattended_assignment_rows(
             visit_start = _parse_ts(visit.get("visit_start"))
             if pd.isna(visit_start):
                 continue
-            if range_start is not None and range_end is not None:
-                if visit_start < range_start or visit_start > range_end:
-                    continue
+            if not _perf_assign_day_in_sidebar_range(
+                visit_start,
+                range_start=range_start,
+                range_end=range_end,
+            ):
+                continue
 
             if not _perf_overview_visit_cycle_unattended(visit, ticket_row):
                 continue
@@ -27727,9 +28374,12 @@ def _perf_unattended_assignment_rows(
         assigned_ts = _parse_ts(row.get("last_assigned_at"))
         if pd.isna(assigned_ts):
             continue
-        if range_start is not None and range_end is not None:
-            if assigned_ts < range_start or assigned_ts > range_end:
-                continue
+        if not _perf_assign_day_in_sidebar_range(
+            assigned_ts,
+            range_start=range_start,
+            range_end=range_end,
+        ):
+            continue
 
         assign_day = assigned_ts.tz_convert(LOCAL_TZ).date().isoformat()
         dedupe_key = f"pending:{tn}:{primary}:{assign_day}"
@@ -27793,10 +28443,10 @@ def _render_combined_overview_legend() -> None:
         background:#ef4444;display:inline-block;margin-right:4px"></span>Unattended</span>
     </div>
     <p style="font-size:11px;color:#4a5a7a;margin:0 0 8px;line-height:1.4">
-      <strong>Residential</strong> = visit fair credit (full snapshot; unattended excluded) ·
-      <strong>Resort</strong> = assignment credit (full snapshot) ·
+      <strong>Residential</strong> = visit fair credit in sidebar range (unattended excluded) ·
+      <strong>Resort</strong> = resort case credit in sidebar range ·
       <strong>Admin</strong> = no field engineer (residential or resort) ·
-      <strong>Unattended</strong> = one case per assign day after cutoff (assignee only; nudges excluded).</p>
+      <strong>Unattended</strong> = missed assign-day cycles (UTC+5 assign day in sidebar range; assignee only).</p>
     """,
         unsafe_allow_html=True,
     )
@@ -27962,8 +28612,18 @@ def _render_perf_overview_tab(
     visits_history: pd.DataFrame | None = None,
 ) -> None:
     """Overview: residential + resort solo/shared combined per engineer."""
-    if visits_history is None:
-        visits_history = _perf_load_overview_visits_history(df_all)
+    if visits_history is None or visits_history.empty:
+        try:
+            visits_history = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            visits_history = pd.DataFrame()
+    admin_assign_ids = _perf_admin_assign_ids_for_range(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        visits_history=visits_history,
+    )
     res_rows = _get_solo_shared_data(
         df_all,
         sales_all,
@@ -27971,13 +28631,39 @@ def _render_perf_overview_tab(
         range_start=range_start,
         range_end=range_end,
         visits_history=visits_history,
+        admin_assign_ids=admin_assign_ids,
     )
     rsr_rows = _get_resort_solo_shared_data(
         sales_all,
         focus=focus,
         range_start=range_start,
         range_end=range_end,
+        admin_assign_ids=admin_assign_ids,
     )
+    admin = _SC_SALES_OVERVIEW_ADMIN_LABEL
+    _, _, admin_rsr_solo, admin_rsr_shared = _perf_admin_res_solo_shared_in_range(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        assign_ids=admin_assign_ids,
+    )
+    if admin_rsr_solo > 0 or admin_rsr_shared > 0:
+        rsr_rows = [
+            r
+            for r in rsr_rows
+            if str(r.get("credit_key") or "") != admin
+        ]
+        rsr_rows.append(
+            {
+                "credit_key": admin,
+                "engineer": _perf_overview_button_key(admin),
+                "label": _perf_overview_row_label(admin),
+                "solo": admin_rsr_solo,
+                "shared": admin_rsr_shared,
+                "is_admin_credit": True,
+            }
+        )
     res_map = _solo_shared_rows_by_credit_key(res_rows)
     rsr_map = _solo_shared_rows_by_credit_key(rsr_rows)
     unattended_map = _perf_overview_unattended_counts_by_credit(
@@ -27988,12 +28674,14 @@ def _render_perf_overview_tab(
         range_end=range_end,
     )
 
-    if focus not in ("", "All"):
-        focus_key = _perf_person_credit_key(focus)
-        if focus_key and focus_key != "(unknown)":
+    if focus not in ("", "All", "All engineers"):
+        focus_key = _perf_focus_assignee_to_credit_key(focus)
+        if focus_key in ("", "All", "(unknown)"):
+            all_keys = []
+        elif focus_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
             all_keys = [focus_key]
         else:
-            all_keys = []
+            all_keys = [focus_key, _SC_SALES_OVERVIEW_ADMIN_LABEL]
     else:
         all_keys = sorted(
             set(res_map) | set(rsr_map) | set(unattended_map),
@@ -28020,7 +28708,8 @@ def _render_perf_overview_tab(
     focus_suffix = html.escape(_perf_focus_heading_suffix(focus))
     st.markdown(
         f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
-        f'margin:6px 0 8px">Solo vs shared — Residential + Resort (all cases){focus_suffix}</p>',
+        f'margin:6px 0 8px">Solo vs shared — Residential + Resort '
+        f"({_format_perf_range_caption() or 'sidebar range'}){focus_suffix}</p>",
         unsafe_allow_html=True,
     )
     _render_combined_overview_legend()
@@ -28038,9 +28727,9 @@ def _render_perf_overview_tab(
     )
     range_label = _format_perf_range_caption() or "sidebar range"
     st.caption(
-        f"**Unatt assignments ({range_label}):** {total_unatt_cases} case(s) · "
+        f"**Unatt assignments ({range_label}, by assign day UTC+5):** {total_unatt_cases} case(s) · "
         f"**Flagged backlog (snapshot):** {flagged_backlog} ticket(s). "
-        "Assignment = one per assign day, assignee only; sticks after cutoff even if later attended."
+        "Counts assign-day misses (same calendar rule as Daily Tasks), not raw visit timestamp alone."
     )
 
     st.markdown(
@@ -28064,29 +28753,52 @@ def _get_engineer_performance_detail(
     """Breakdown for one engineer in the Performance detail panel."""
     credit_key = _perf_resolve_overview_credit_key(engineer)
     df_res_credit = _perf_overview_df_for_solo_shared(df_all)
-    if visits_history is None:
-        visits_history = _perf_load_overview_visits_history(df_all)
+    if visits_history is None or visits_history.empty:
+        try:
+            visits_in_range = _fetch_visits_in_range(range_start, range_end)
+        except Exception:
+            visits_in_range = pd.DataFrame()
+    else:
+        visits_in_range = visits_history
 
     if credit_key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
-        solo, shared = _perf_overview_assignment_solo_shared_counts(
-            df_res_credit, credit_key=credit_key
+        admin_assign_ids = _perf_admin_assign_ids_for_range(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+            visits_history=visits_in_range,
+        )
+        solo, shared, rsr_solo, rsr_shared = _perf_admin_res_solo_shared_in_range(
+            df_res_credit,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+            assign_ids=admin_assign_ids,
         )
     else:
-        solo, shared = _perf_overview_visit_solo_shared_counts(
-            visits_history,
+        solo, shared = _perf_visit_solo_shared_in_range(
+            visits_in_range,
             credit_key=credit_key,
             df_all=df_res_credit,
+            range_start=range_start,
+            range_end=range_end,
         )
-
-    rsr_solo = rsr_shared = 0
-    if not sales_all.empty and credit_key not in ("", "(unknown)"):
-        for _, row in sales_all.iterrows():
-            if _perf_sales_credited_person(row) != credit_key:
-                continue
-            if get_credit_type(row) == "shared":
-                rsr_shared += 1
-            else:
-                rsr_solo += 1
+        rsr_solo = rsr_shared = 0
+        if not sales_all.empty and credit_key not in ("", "(unknown)"):
+            for _, row in sales_all.iterrows():
+                if _perf_sales_credited_person(row) != credit_key:
+                    continue
+                if not _perf_sales_activity_in_range(
+                    row,
+                    range_start=range_start,
+                    range_end=range_end,
+                ):
+                    continue
+                if get_credit_type(row) == "shared":
+                    rsr_shared += 1
+                else:
+                    rsr_solo += 1
     resort_count = rsr_solo + rsr_shared
 
     overview_unattended = int(
@@ -28261,7 +28973,7 @@ def _render_performance_detail_panel(
     <div style="padding-bottom:11px;border-bottom:0.5px solid #1a2035;margin-bottom:11px">
       <div style="font-size:16px;font-weight:500;color:#e2e8f8">{html.escape(display_name)}</div>
       <span style="font-size:11px;color:#2a3a5a">
-        Full snapshot · {detail['total']} credited · {html.escape(range_label)} for range KPIs</span>
+        {html.escape(range_label)} · {detail['total']} credited in range</span>
     </div>
     """,
         unsafe_allow_html=True,
@@ -28272,12 +28984,12 @@ def _render_performance_detail_panel(
         unsafe_allow_html=True,
     )
     rows = [
-        ("Res solo (snapshot)", detail["solo"], "#8a9ac0"),
-        ("Res shared (snapshot)", detail["shared"], "#8a9ac0"),
-        ("Resort solo (snapshot)", detail.get("rsr_solo", 0), "#a78bfa"),
-        ("Resort shared (snapshot)", detail.get("rsr_shared", 0), "#a78bfa"),
+        ("Res solo (range)", detail["solo"], "#8a9ac0"),
+        ("Res shared (range)", detail["shared"], "#8a9ac0"),
+        ("Resort solo (range)", detail.get("rsr_solo", 0), "#a78bfa"),
+        ("Resort shared (range)", detail.get("rsr_shared", 0), "#a78bfa"),
         (
-            "Unattended (snapshot)",
+            "Unattended (range)",
             detail.get("overview_unattended", 0),
             "#ef4444" if int(detail.get("overview_unattended", 0)) > 0 else "#22c55e",
         ),
@@ -28773,7 +29485,7 @@ def _render_performance_sidebar() -> None:
         unsafe_allow_html=True,
     )
     engineers = get_engineer_handles()
-    options = ["All engineers"] + engineers
+    options = ["All engineers", _PERF_FOCUS_ADMIN_UI] + engineers
     if st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY) not in options:
         st.session_state[_PERF_FOCUS_ASSIGNEE_KEY] = "All engineers"
     st.selectbox(

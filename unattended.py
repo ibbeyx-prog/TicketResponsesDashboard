@@ -26,6 +26,10 @@ UNATTENDED_NUDGE_HOURS = float(os.getenv("UNATTENDED_NUDGE_HOURS", "6"))
 UNATTENDED_POLL_MINUTES = float(os.getenv("UNATTENDED_POLL_MINUTES", "15"))
 ASSIGN_DAY_CUTOFF_HOUR = int(os.getenv("ASSIGN_DAY_CUTOFF_HOUR", "23"))
 ASSIGN_DAY_CUTOFF_MINUTE = int(os.getenv("ASSIGN_DAY_CUTOFF_MINUTE", "59"))
+# Reassign within this window = wrong assignee fixed immediately, not an unattended miss.
+ACCIDENTAL_REASSIGN_GRACE_SECONDS = float(
+    os.getenv("ACCIDENTAL_REASSIGN_GRACE_SECONDS", "120")
+)
 # UTC+5 — match app.py LOCAL_TZ
 OPS_TZ = timezone(timedelta(hours=5))
 
@@ -85,6 +89,23 @@ def should_close_as_unattended(row: dict, *, now: datetime | None = None) -> boo
         responded_at=row.get("responded_at"),
         now=now,
     )
+
+
+def is_accidental_reassign_cycle(
+    *,
+    visit_start: object,
+    visit_end: object = None,
+    outcome: object = None,
+) -> bool:
+    """True when a visit closed as reassigned almost immediately (assignee typo / correction)."""
+    if str(outcome or "").strip() != "reassigned":
+        return False
+    start = _parse_ts(visit_start)
+    end = _parse_ts(visit_end)
+    if not start or not end or end < start:
+        return False
+    grace = max(0.0, ACCIDENTAL_REASSIGN_GRACE_SECONDS)
+    return (end - start).total_seconds() <= grace
 
 
 def visit_cycle_is_unattended(
