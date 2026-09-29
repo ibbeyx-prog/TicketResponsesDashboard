@@ -7596,8 +7596,28 @@ _PERF_ENG_LINE_COLORS: tuple[str, ...] = (
 _PERF_ENGINEER_COLOR_OVERRIDES: dict[str, str] = {
     "@dissiby": "#60a5fa",
     "@fatrixshaquiell": "#fb923c",
-    "@nallu10": "#4ade80",
+    "@nallu10": "#facc15",
+    "@ibeyx": "#c084fc",
 }
+_PERF_TEAM_CHART_ENGINEER_ORDER: tuple[str, ...] = (
+    "@dissiby",
+    "@fatrixshaquiell",
+    "@nallu10",
+    "@ibeyx",
+)
+
+
+def _perf_sort_engineer_labels_for_chart(labels: list[str]) -> list[str]:
+    """Stable roster order for team task lines and legend (others follow alphabetically)."""
+    rank = {
+        _perf_norm_member(h): i for i, h in enumerate(_PERF_TEAM_CHART_ENGINEER_ORDER)
+    }
+
+    def _key(label: str) -> tuple[int, str]:
+        norm = _perf_norm_member(label)
+        return (rank.get(norm, 99), norm.lower())
+
+    return sorted(labels, key=_key)
 
 
 def _perf_roster_engineer_labels() -> list[str]:
@@ -12702,7 +12722,8 @@ def _perf_summary_attach_team_assignment(
     )
 
 
-_PERF_DAILY_ASSIGNMENT_VERSION = "assign_log_v7"
+_PERF_DAILY_ASSIGNMENT_VERSION = "assign_log_v8"
+_PERF_TEAM_COMBO_ENGINEER_LABEL = "All engineers"
 
 
 def _perf_summary_attach_daily_assignment(
@@ -12720,14 +12741,68 @@ def _perf_summary_attach_daily_assignment(
         return
     metrics["_daily_assignment_version"] = _PERF_DAILY_ASSIGNMENT_VERSION
     metrics.pop("daily_focus_combo_df", None)
+    metrics.pop("daily_team_combo_df", None)
     metrics.pop("_chart_scope_ready", None)
     metrics.pop("_chart_scope_focus", None)
+    metrics.pop("_team_combo_loaded", None)
+    metrics.pop("_trend_loaded", None)
     metrics["daily_assignment_df"] = _perf_daily_assignment_tasks_by_engineer_df(
         df_all,
         sales_all,
         range_start=range_start,
         range_end=range_end,
     )
+
+
+def _perf_summary_attach_team_daily_combo(
+    metrics: dict[str, object],
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    """Team (All engineers) — same daily combo chart as Focus assignee, totals per day."""
+    if metrics.get("_team_combo_loaded") and isinstance(
+        metrics.get("daily_team_combo_df"), pd.DataFrame
+    ):
+        return
+    _perf_summary_attach_daily_assignment(
+        metrics,
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    assign_df = metrics.get("daily_assignment_df")
+    daily_assign = assign_df if isinstance(assign_df, pd.DataFrame) else None
+    bundle = _perf_weekly_attended_bundle(
+        df_all,
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+        focus="All",
+    )
+    detail = bundle.get("detail")
+    detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+    metrics["daily_team_combo_df"] = _perf_build_team_daily_combo_df(
+        detail_df,
+        daily_assign,
+        range_start=range_start,
+        range_end=range_end,
+        df_all=df_all,
+        sales_all=sales_all,
+    )
+    combo = metrics["daily_team_combo_df"]
+    if isinstance(combo, pd.DataFrame) and not combo.empty:
+        metrics["trend_df"] = _perf_trend_df_from_focus_combo(combo)
+        metrics["rate_delta"] = _perf_rate_delta_from_trend(
+            metrics["trend_df"],
+            int(metrics.get("resolution_rate") or 0),
+        )
+    metrics["_trend_loaded"] = True
+    metrics["_trend_focus"] = "All"
+    metrics["_team_combo_loaded"] = True
 
 
 def _perf_summary_attach_resort_block(
@@ -13811,7 +13886,7 @@ def _perf_assignment_task_day_counts_memo(
     if credit_to_label is None:
         credit_to_label = _perf_engineer_credit_to_label_map()
     memo_key = (
-        "assign_log_v7",
+        "assign_log_v8",
         range_start.isoformat(),
         range_end.isoformat(),
         _perf_data_signature(df_all),
@@ -13890,6 +13965,8 @@ def _perf_response_gap_fill_skips_late_task(
     last_assign_day: date | None = None,
 ) -> bool:
     """Skip gap-fill when assign/task credit belongs to an earlier day, not today's assign."""
+    if last_assign_day is not None and last_assign_day == response_day:
+        return False
     if last_assign_day is not None and last_assign_day < response_day:
         return True
     days = prior_task_days.get(tn)
@@ -14116,6 +14193,40 @@ def _perf_assignment_task_day_counts(
                 credit_key = _perf_person_credit_key(key)
                 label = credit_to_label.get(credit_key)
                 if not label:
+                    continue
+                _perf_add_assignment_task_day_count(
+                    day_counts,
+                    res_by_label,
+                    rsr_by_label,
+                    logged_ticket_day,
+                    day=day,
+                    tn=tn,
+                    credit_key=credit_key,
+                    label=label,
+                    sales_refs=sales_refs,
+                    tickets_by_day=tickets_by_day,
+                    task_days_by_tn=task_days_by_tn,
+                )
+
+    if not df_all.empty and "last_assigned_at" in df_all.columns:
+        la = _parse_ts(df_all["last_assigned_at"])
+        mask = la.notna() & (la >= range_start) & (la <= range_end)
+        for idx, row in df_all.loc[mask].iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if not tn or tn in sales_refs:
+                continue
+            if str(row.get("status") or "").strip() == STATUS_DAILY_TASK:
+                continue
+            stamp = la.loc[idx]
+            if pd.isna(stamp):
+                continue
+            day = _to_local(pd.Series([stamp])).iloc[0].date()
+            for key in _perf_ticket_credit_assignees(row):
+                credit_key = _perf_person_credit_key(key)
+                label = credit_to_label.get(credit_key)
+                if not label:
+                    continue
+                if logged_ticket_day.get((credit_key, day, tn), 0) > 0:
                     continue
                 _perf_add_assignment_task_day_count(
                     day_counts,
@@ -14713,6 +14824,73 @@ def _perf_build_focus_daily_combo_df(
         day_d = pd.to_datetime(row["day"], utc=True).tz_convert(LOCAL_TZ).date()
         combo.at[idx, "attended"] = int(attended_by_day.get((day_d, label), 0))
         combo.at[idx, "field_resolved"] = int(resolved_by_engineer.get((day_d, label), 0))
+    combo["rate"] = combo.apply(
+        lambda r: int(round(100 * int(r["field_resolved"]) / int(r["attended"])))
+        if int(r["attended"]) > 0
+        else 0,
+        axis=1,
+    )
+    return combo
+
+
+def _perf_build_team_daily_combo_df(
+    detail_df: pd.DataFrame,
+    daily_assignment_df: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    df_all: pd.DataFrame | None = None,
+    sales_all: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Team totals per UTC+5 day — same metrics as the focus combo chart."""
+    from collections import defaultdict
+
+    credit_to_label = _perf_engineer_credit_to_label_map()
+    attended_by_day: dict[date, int] = {}
+    resolved_by_day: dict[date, int] = {}
+    if df_all is not None and not df_all.empty:
+        attended_cycle = _perf_daily_assignment_log_attended_by_engineer_day(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+            credit_to_label=credit_to_label,
+        )
+        resolved_cycle = _perf_daily_assignment_log_field_resolved_by_engineer_day(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+            credit_to_label=credit_to_label,
+            detail_df=detail_df,
+        )
+        attended_by_day = _perf_sum_assignment_cycle_counts_by_day(attended_cycle)
+        resolved_by_day = _perf_sum_assignment_cycle_counts_by_day(resolved_cycle)
+
+    tasks_by_day: dict[date, int] = defaultdict(int)
+    if isinstance(daily_assignment_df, pd.DataFrame) and not daily_assignment_df.empty:
+        for _, row in daily_assignment_df.iterrows():
+            day_d = pd.to_datetime(row["day"], utc=True).tz_convert(LOCAL_TZ).date()
+            tasks_by_day[day_d] += int(row.get("tasks") or 0)
+
+    d0 = range_start.tz_convert(LOCAL_TZ).date()
+    d1 = range_end.tz_convert(LOCAL_TZ).date()
+    if d1 < d0:
+        d0, d1 = d1, d0
+    rows: list[dict[str, object]] = []
+    day = d0
+    while day <= d1:
+        rows.append(
+            {
+                "day": pd.Timestamp(datetime.combine(day, time.min), tz=LOCAL_TZ),
+                "Engineer": _PERF_TEAM_COMBO_ENGINEER_LABEL,
+                "tasks": int(tasks_by_day.get(day, 0)),
+                "attended": int(attended_by_day.get(day, 0)),
+                "field_resolved": int(resolved_by_day.get(day, 0)),
+            }
+        )
+        day += timedelta(days=1)
+    combo = pd.DataFrame(rows)
     combo["rate"] = combo.apply(
         lambda r: int(round(100 * int(r["field_resolved"]) / int(r["attended"])))
         if int(r["attended"]) > 0
@@ -15497,6 +15675,16 @@ def _weekly_altair_theme(chart: alt.Chart) -> alt.Chart:
     )
 
 
+def _weekly_altair_resolved_point_def(*, size: int = 45) -> alt.OverlayMarkDef:
+    """Line point markers for resolved series — fixed green (not engineer task colors)."""
+    return alt.OverlayMarkDef(
+        filled=True,
+        size=size,
+        color=_WEEKLY_RESOLVED_COLOR,
+        stroke=_WEEKLY_RESOLVED_COLOR,
+    )
+
+
 def _weekly_altair_focus_daily_combo_chart(
     plot_df: pd.DataFrame,
     *,
@@ -15530,13 +15718,99 @@ def _weekly_altair_focus_daily_combo_chart(
             .mark_line(
                 color=_WEEKLY_RESOLVED_COLOR,
                 strokeWidth=2,
-                point={"filled": True, "size": 45},
+                point=_weekly_altair_resolved_point_def(size=45),
             )
             .encode(x=x_enc, y=y_left, tooltip=tooltips)
         )
         layered = (
-            alt.layer(tasks_line, resolved_area, resolved_line)
-            .resolve_scale(y="shared")
+            alt.layer(resolved_area, resolved_line, tasks_line)
+            .resolve_scale(y="shared", color="independent")
+            .properties(height=300)
+        )
+    return _weekly_altair_theme(layered)
+
+
+def _weekly_altair_team_daily_combo_chart(
+    tasks_df: pd.DataFrame,
+    resolved_df: pd.DataFrame,
+) -> alt.LayerChart:
+    """Team combo — one task line per engineer + team resolved after visit (shared Count axis)."""
+    y_count = alt.Y("tasks:Q", title="Count", axis=alt.Axis(tickMinStep=1))
+    y_resolved = alt.Y("field_resolved:Q", title="Count", axis=alt.Axis(tickMinStep=1))
+    x_enc = alt.X(
+        "day:T",
+        title="Day",
+        axis=alt.Axis(format="%d %b", labelAngle=-35),
+    )
+    task_layer: alt.Chart | None = None
+    engineers: list[str] = []
+    if not tasks_df.empty:
+        engineers = _perf_sort_engineer_labels_for_chart(
+            tasks_df["Engineer"].astype(str).unique().tolist()
+        )
+        color_map = _perf_engineer_color_map(engineers)
+        work = _perf_daily_assignment_tooltip_columns(tasks_df)
+        work = _perf_daily_assignment_line_segments(work)
+        task_layer = (
+            alt.Chart(work)
+            .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5)
+            .encode(
+                x=x_enc,
+                y=y_count,
+                color=alt.Color(
+                    "Engineer:N",
+                    scale=alt.Scale(
+                        domain=engineers,
+                        range=[color_map[e] for e in engineers],
+                    ),
+                    legend=None,
+                ),
+                detail=alt.Detail("line_segment:N"),
+                tooltip=[
+                    alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+                    alt.Tooltip("tooltip_engineers:N", title="Engineer"),
+                    alt.Tooltip("tooltip_tasks:N", title="Tasks"),
+                ],
+            )
+        )
+    res = resolved_df.copy()
+    with alt.theme.enable("none"):
+        resolved_area = (
+            alt.Chart(res)
+            .mark_area(color=_WEEKLY_RESOLVED_COLOR, opacity=0.28)
+            .encode(
+                x=x_enc,
+                y=y_resolved,
+                tooltip=[
+                    alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+                    alt.Tooltip("field_resolved:Q", title="Resolved after visit (team)"),
+                    alt.Tooltip("attended:Q", title="Attended (team assign cycles)"),
+                ],
+            )
+        )
+        resolved_line = (
+            alt.Chart(res)
+            .mark_line(
+                color=_WEEKLY_RESOLVED_COLOR,
+                strokeWidth=2,
+                point=_weekly_altair_resolved_point_def(size=45),
+            )
+            .encode(
+                x=x_enc,
+                y=y_resolved,
+                tooltip=[
+                    alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+                    alt.Tooltip("field_resolved:Q", title="Resolved after visit (team)"),
+                    alt.Tooltip("attended:Q", title="Attended (team assign cycles)"),
+                ],
+            )
+        )
+        layers: list[alt.Chart] = [resolved_area, resolved_line]
+        if task_layer is not None:
+            layers.append(task_layer)
+        layered = (
+            alt.layer(*layers)
+            .resolve_scale(y="shared", color="independent")
             .properties(height=300)
         )
     return _weekly_altair_theme(layered)
@@ -15861,26 +16135,39 @@ def _render_perf_summary_closure_donut(metrics: dict[str, object]) -> None:
     st.altair_chart(donut, width="stretch")
 
 
-def _render_perf_summary_focus_daily_combined_chart(
+def _render_perf_summary_daily_combo_chart(
     metrics: dict[str, object],
     *,
     period_label: str = "",
     range_start: pd.Timestamp | None = None,
     range_end: pd.Timestamp | None = None,
+    focus: str = "All",
 ) -> None:
-    """Focused engineer — assignment tasks (line) + resolved after visit (line + fill) on one chart."""
-    focus = str(metrics.get("summary_focus") or metrics.get("_summary_focus") or "").strip()
-    if focus in ("", "All", "All engineers"):
-        return
-    if range_start is None or range_end is None:
-        return
-    plot_df = metrics.get("daily_focus_combo_df")
+    """Assignment tasks + resolved after visit on one chart (team totals or one engineer)."""
+    effective = str(
+        focus
+        if focus not in ("", "All")
+        else metrics.get("summary_focus") or metrics.get("_summary_focus") or "All"
+    ).strip()
+    team_view = effective in ("", "All", "All engineers")
+    if team_view:
+        plot_df = metrics.get("daily_team_combo_df")
+        tasks_df = metrics.get("daily_assignment_df")
+        heading_suffix = f" — {_PERF_TEAM_COMBO_ENGINEER_LABEL}"
+    else:
+        plot_df = metrics.get("daily_focus_combo_df")
+        heading_suffix = _perf_focus_heading_suffix(effective)
+        if not isinstance(plot_df, pd.DataFrame) or plot_df.empty:
+            return
+        engineers = sorted(
+            plot_df["Engineer"].astype(str).unique().tolist(), key=str.lower
+        )
+        task_color = _perf_engineer_color_map(engineers)[engineers[0]]
     if not isinstance(plot_df, pd.DataFrame):
         return
-    focus_suffix = _perf_focus_heading_suffix(focus)
     st.markdown(
         '<div class="weekly-panel">'
-        f"<h4>Daily assignment &amp; field resolution{html.escape(focus_suffix)}</h4>"
+        f"<h4>Daily assignment &amp; field resolution{html.escape(heading_suffix)}</h4>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -15891,35 +16178,89 @@ def _render_perf_summary_focus_daily_combined_chart(
         "**Resolved after visit** — same assign day when that cycle had a response and the case closed "
         "field / resort / admin-after-visit · same **Count** axis"
     )
+    if team_view:
+        cap += (
+            " · **Assignment tasks** — one line per engineer · "
+            "**Resolved after visit** — team total by assign day"
+        )
     st.caption(cap)
-    if plot_df.empty or (
-        int(plot_df["tasks"].sum()) == 0 and int(plot_df["field_resolved"].sum()) == 0
-    ):
+    tasks_sum = 0
+    if isinstance(tasks_df, pd.DataFrame) and not tasks_df.empty:
+        tasks_sum = int(tasks_df["tasks"].sum())
+    resolved_sum = 0
+    if isinstance(plot_df, pd.DataFrame) and not plot_df.empty:
+        resolved_sum = int(plot_df["field_resolved"].sum())
+    if tasks_sum == 0 and resolved_sum == 0:
         st.caption("No assignment tasks or field resolution activity in this range.")
         return
-    plot_df = plot_df.copy()
-    plot_df["Engineer"] = plot_df["Engineer"].astype(str).map(_perf_norm_member)
-    engineers = sorted(plot_df["Engineer"].unique().tolist(), key=str.lower)
-    task_color = _perf_engineer_color_map(engineers)[engineers[0]]
-    st.markdown(
-        f'<div class="weekly-assign-legend perf-daily-tasks-legend" style="margin-bottom:8px">'
-        f'<span><i style="background:{html.escape(task_color)}"></i>Assignment tasks</span>'
-        f'<span><i style="background:{html.escape(_WEEKLY_RESOLVED_COLOR)}"></i>'
-        f"Resolved after visit</span></div>",
-        unsafe_allow_html=True,
-    )
-    tooltips = [
-        alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
-        alt.Tooltip("tasks:Q", title="Assignment tasks"),
-        alt.Tooltip("attended:Q", title="Attended (visit cycles that day)"),
-        alt.Tooltip("field_resolved:Q", title="Resolved after visit"),
-    ]
-    chart = _weekly_altair_focus_daily_combo_chart(
-        plot_df,
-        task_color=task_color,
-        tooltips=tooltips,
-    )
+    if team_view:
+        if not isinstance(tasks_df, pd.DataFrame):
+            tasks_df = pd.DataFrame(columns=["day", "Engineer", "tasks"])
+        if not isinstance(plot_df, pd.DataFrame):
+            plot_df = pd.DataFrame(columns=["day", "field_resolved", "attended"])
+        tasks_plot = tasks_df.copy()
+        if not tasks_plot.empty:
+            tasks_plot["Engineer"] = tasks_plot["Engineer"].astype(str).map(_perf_norm_member)
+        engineers = (
+            _perf_sort_engineer_labels_for_chart(
+                tasks_plot["Engineer"].astype(str).unique().tolist()
+            )
+            if not tasks_plot.empty
+            else []
+        )
+        if engineers:
+            st.markdown(_perf_engineer_line_legend_html(engineers), unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="weekly-assign-legend perf-daily-tasks-legend" style="margin-bottom:8px">'
+            f'<span><i style="background:{html.escape(_WEEKLY_RESOLVED_COLOR)}"></i>'
+            f"Resolved after visit (team)</span></div>",
+            unsafe_allow_html=True,
+        )
+        chart = _weekly_altair_team_daily_combo_chart(tasks_plot, plot_df)
+    else:
+        plot_df = plot_df.copy()
+        plot_df["Engineer"] = plot_df["Engineer"].astype(str).map(_perf_norm_member)
+        st.markdown(
+            f'<div class="weekly-assign-legend perf-daily-tasks-legend" style="margin-bottom:8px">'
+            f'<span><i style="background:{html.escape(task_color)}"></i>Assignment tasks</span>'
+            f'<span><i style="background:{html.escape(_WEEKLY_RESOLVED_COLOR)}"></i>'
+            f"Resolved after visit</span></div>",
+            unsafe_allow_html=True,
+        )
+        tooltips = [
+            alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+            alt.Tooltip("tasks:Q", title="Assignment tasks"),
+            alt.Tooltip("attended:Q", title="Attended (visit cycles that day)"),
+            alt.Tooltip("field_resolved:Q", title="Resolved after visit"),
+        ]
+        chart = _weekly_altair_focus_daily_combo_chart(
+            plot_df,
+            task_color=task_color,
+            tooltips=tooltips,
+        )
     st.altair_chart(chart, width="stretch")
+
+
+def _render_perf_summary_focus_daily_combined_chart(
+    metrics: dict[str, object],
+    *,
+    period_label: str = "",
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
+) -> None:
+    """Focused engineer — same combined daily chart as team view."""
+    focus = str(metrics.get("summary_focus") or metrics.get("_summary_focus") or "").strip()
+    if focus in ("", "All", "All engineers"):
+        return
+    if range_start is None or range_end is None:
+        return
+    _render_perf_summary_daily_combo_chart(
+        metrics,
+        period_label=period_label,
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+    )
 
 
 def _render_perf_summary_resolution_trend(
@@ -15931,6 +16272,10 @@ def _render_perf_summary_resolution_trend(
     range_end: pd.Timestamp | None = None,
 ) -> None:
     effective = focus if focus not in ("", "All") else str(metrics.get("summary_focus") or "")
+    if effective in ("", "All", "All engineers") and isinstance(
+        metrics.get("daily_team_combo_df"), pd.DataFrame
+    ):
+        return
     if effective not in ("", "All", "All engineers") and isinstance(
         metrics.get("daily_focus_combo_df"), pd.DataFrame
     ):
@@ -16144,6 +16489,14 @@ def _render_perf_summary_overview_tab(
                 range_end=range_end,
                 focus=effective_focus,
             )
+        elif effective_focus in ("", "All", "All engineers"):
+            _perf_summary_attach_team_daily_combo(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
         elif not metrics.get("_trend_loaded"):
             _perf_summary_attach_trend_metrics(
                 metrics,
@@ -16191,23 +16544,16 @@ def _render_perf_summary_overview_tab(
                 range_start=range_start,
                 range_end=range_end,
             )
-        _render_perf_summary_daily_assignment_chart(
+        _render_perf_summary_daily_combo_chart(
             metrics,
             period_label=period_label,
             range_start=range_start,
             range_end=range_end,
+            focus="All",
         )
     donut_col, _ = st.columns([1, 1])
     with donut_col:
         _render_perf_summary_closure_donut(metrics)
-    if not show_engineer:
-        _render_perf_summary_resolution_trend(
-            metrics,
-            period_label=period_label,
-            focus=effective_focus,
-            range_start=range_start,
-            range_end=range_end,
-        )
 
 
 def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
