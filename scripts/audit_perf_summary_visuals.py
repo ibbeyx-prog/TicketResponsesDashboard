@@ -97,6 +97,7 @@ def _audit_engineer_combo(focus: str, rs: pd.Timestamp, re: pd.Timestamp) -> boo
         range_end=re,
         df_all=df_all,
         sales_all=sales,
+        assigned_ids=assigned_ids,
     )
     exec_m = a._perf_weekly_executive_metrics(scoped)
     tasks_sum = int(combo["tasks"].sum())
@@ -113,18 +114,36 @@ def _audit_engineer_combo(focus: str, rs: pd.Timestamp, re: pd.Timestamp) -> boo
     expect_attended = sum(
         n
         for (day, eng), n in a._perf_daily_assignment_log_attended_by_engineer_day(
-            df_all, sales, range_start=rs, range_end=re, credit_to_label=credit
+            df_all,
+            sales,
+            range_start=rs,
+            range_end=re,
+            credit_to_label=credit,
+            limit_ticket_ids=assigned_ids,
         ).items()
         if eng == label
     )
-    expect_resolved = sum(a._perf_daily_field_resolved_activity_by_day(scoped).values())
+    credit = a._perf_engineer_credit_to_label_map()
+    resolved_cycle = a._perf_daily_assignment_log_field_resolved_by_engineer_day(
+        df_all,
+        sales,
+        range_start=rs,
+        range_end=re,
+        credit_to_label=credit,
+        detail_df=scoped,
+        limit_ticket_ids=assigned_ids,
+    )
+    label = a._perf_engineer_chart_label(focus)
+    expect_resolved = sum(
+        n for (day, eng), n in resolved_cycle.items() if eng == label
+    )
     attended_combo = int(combo["attended"].sum())
     resolved_combo = int(combo["field_resolved"].sum())
     if attended_combo != expect_attended:
         _fail(f"{focus} combo attended sum {attended_combo} != visit-cycle {expect_attended}")
         return False
     if resolved_combo != expect_resolved:
-        _fail(f"{focus} combo resolved sum {resolved_combo} != activity-day {expect_resolved}")
+        _fail(f"{focus} combo resolved sum {resolved_combo} != assign-day {expect_resolved}")
         return False
     total_kpi = int(exec_m.get("total") or 0)
     resolved_kpi = int(exec_m.get("resolved") or 0)

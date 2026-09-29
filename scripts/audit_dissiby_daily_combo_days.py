@@ -50,6 +50,7 @@ def main() -> None:
         range_end=RE,
         df_all=df_all,
         sales_all=sales,
+        assigned_ids=assigned_ids,
     )
     label = a._perf_engineer_chart_label(FOCUS)
 
