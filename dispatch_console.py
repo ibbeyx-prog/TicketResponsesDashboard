@@ -3012,7 +3012,7 @@ def format_utc5(dt: object, *, tz: timezone) -> str:
         ts = pd.Timestamp(dt)
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
-        return ts.tz_convert(tz).strftime("%Y-%m-%d %H:%M UTC+5")
+        return ts.tz_convert(tz).strftime("%d %b %Y · %H:%M")
     except Exception:
         return str(dt)
 
@@ -3028,7 +3028,7 @@ def render_topbar(
     """Legacy single-row header (prefer unified shell in app.py)."""
     op = html.escape(operator_id or "—")
     if now_label is None:
-        now_label = datetime.now(_UI_TZ_UTC5).strftime("%a %d %b · %H:%M UTC+5")
+        now_label = datetime.now(_UI_TZ_UTC5).strftime("%d %b %Y · %H:%M")
     role = "identity unverified" if is_legacy else ("admin" if is_admin else "operator")
     st.markdown(
         f"""

@@ -9476,6 +9476,34 @@ def _local_date_end(d: date) -> pd.Timestamp:
     return pd.Timestamp(datetime.combine(d, time.max), tz=LOCAL_TZ).tz_convert("UTC")
 
 
+_OPS_DATETIME_DOT_FMT = "%d %b %Y · %H:%M"
+
+
+def _format_ops_datetime_dot(stamp: datetime) -> str:
+    """Ops-local clock label (no timezone suffix — range caption carries UTC+5)."""
+    if stamp.tzinfo is None:
+        local = stamp.replace(tzinfo=LOCAL_TZ)
+    else:
+        local = stamp.astimezone(LOCAL_TZ)
+    return local.strftime(_OPS_DATETIME_DOT_FMT)
+
+
+def _format_today_assign_cutoff_dot(stamp: datetime | None = None) -> str:
+    """Today's assign-day cutoff (default 23:59) in ops local time."""
+    local = stamp if stamp is not None else datetime.now(LOCAL_TZ)
+    if local.tzinfo is None:
+        local = local.replace(tzinfo=LOCAL_TZ)
+    else:
+        local = local.astimezone(LOCAL_TZ)
+    cutoff_t = assign_day_cutoff_time()
+    cutoff_dt = datetime.combine(local.date(), cutoff_t, tzinfo=LOCAL_TZ)
+    return cutoff_dt.strftime(_OPS_DATETIME_DOT_FMT)
+
+
+def _assign_day_cutoff_hm_label() -> str:
+    return assign_day_cutoff_time().strftime("%H:%M")
+
+
 def _sync_search_date_widgets(start: pd.Timestamp, end: pd.Timestamp) -> None:
     st.session_state[_DASH_SEARCH_FROM_DATE_KEY] = start.tz_convert(LOCAL_TZ).date()
     st.session_state[_DASH_SEARCH_TO_DATE_KEY] = end.tz_convert(LOCAL_TZ).date()
@@ -9604,12 +9632,33 @@ def _perf_focus_assignee_to_credit_key(focus_ui: str) -> str:
 def _perf_focus_for_filter() -> str:
     """Map sidebar Focus assignee to ``_perf_filter_by_person`` person arg."""
     focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
-    key = _perf_focus_assignee_to_credit_key(focus)
-    if key == "All":
+    return _perf_summary_attended_filter_arg(focus)
+
+
+def _perf_summary_attended_filter_arg(focus_ui: str) -> str:
+    """Focus value for attended bundles, trends, and closure charts (``All`` = team)."""
+    s = str(focus_ui or "").strip()
+    if s in ("", "All", "All engineers"):
         return "All"
-    if key == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+    credit = _perf_focus_assignee_to_credit_key(s)
+    if credit == _SC_SALES_OVERVIEW_ADMIN_LABEL:
         return _SC_SALES_OVERVIEW_ADMIN_LABEL
-    return _perf_norm_member(focus)
+    return _perf_norm_member(s)
+
+
+def _perf_summary_effective_focus(
+    metrics: dict[str, object],
+    fallback: str = "All",
+) -> str:
+    """Resolve Focus assignee from Summary metrics or the active view."""
+    for key in ("summary_focus", "_summary_focus"):
+        raw = str(metrics.get(key) or "").strip()
+        if raw and raw not in ("All", "All engineers"):
+            return raw
+    fb = str(fallback or "").strip()
+    if fb and fb not in ("All", "All engineers"):
+        return fb
+    return "All"
 
 
 def _perf_focus_heading_suffix(focus: str) -> str:
@@ -10319,8 +10368,8 @@ def _render_dispatch_app_shell() -> None:
     is_legacy = _is_legacy_session()
     chip = _get_operator_chip_data(op_display, is_admin, is_legacy)
     now = datetime.now(LOCAL_TZ)
-    now_date = now.strftime("%d %b %Y")
-    now_time = now.strftime("%H:%M")
+    now_clock = _format_ops_datetime_dot(now)
+    cutoff_clock = _format_today_assign_cutoff_dot(now)
 
     with st.container(key="disp_header_shell"):
         c_brand, c_nav, c_util = st.columns(
@@ -10345,7 +10394,7 @@ def _render_dispatch_app_shell() -> None:
             with st.container(key="disp_header_util"):
                 _render_dispatch_header_utilities(chip=chip)
 
-    _render_dispatch_context_strip(now_date=now_date, now_time=now_time)
+    _render_dispatch_context_strip(now_clock=now_clock, cutoff_clock=cutoff_clock)
 
 
 def _render_dispatch_header_utilities(*, chip: dict[str, str]) -> None:
@@ -10450,8 +10499,12 @@ def _context_strip_range_trigger() -> str:
     return f"{preset} ▾"
 
 
-def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
-    """Operational context: time range picker, clock, and open backlog hint."""
+def _render_dispatch_context_strip(
+    *,
+    now_clock: str,
+    cutoff_clock: str,
+) -> None:
+    """Operational context: time range picker, clocks, and open backlog hint."""
     _init_dash_date_range_state()
     range_cap = _format_dash_range_caption()
     open_count = int(st.session_state.get("_dash_prev_open_count", 0) or 0)
@@ -10485,7 +10538,13 @@ def _render_dispatch_context_strip(*, now_date: str, now_time: str) -> None:
                     parts.append(f"<span>{html.escape(range_cap)}</span>")
                 parts.append('<span class="disp-context-sep" aria-hidden="true"></span>')
                 parts.append(
-                    f"<span>{html.escape(now_date)} · {html.escape(now_time)}</span>"
+                    f'<span title="Current time ({html.escape(LOCAL_TZ_LABEL)})">'
+                    f"{html.escape(now_clock)}</span>"
+                )
+                parts.append('<span class="disp-context-sep" aria-hidden="true"></span>')
+                parts.append(
+                    f'<span title="Assign-day cutoff ({html.escape(LOCAL_TZ_LABEL)})">'
+                    f'Cutoff {html.escape(cutoff_clock)}</span>'
                 )
                 st.markdown(
                     f'<div class="disp-context-meta">{"".join(parts)}</div>',
@@ -10600,14 +10659,11 @@ def _perf_handled_outcome_ts(df: pd.DataFrame, *, status: str) -> pd.Series:
         if "updated_at" in df.columns
         else pd.Series(pd.NaT, index=df.index)
     )
-    r_col = (
-        _parse_ts(df["responded_at"])
-        if "responded_at" in df.columns
-        else pd.Series(pd.NaT, index=df.index)
-    )
     target = status.strip().casefold()
     if target == STATUS_RESOLVED.casefold():
-        return pd.concat([r_col, u_col], axis=1).max(axis=1, skipna=True)
+        field_visit = _perf_field_response_ts_since_assign(df)
+        has_field = _perf_has_field_response_since_assign_series(df)
+        return field_visit.where(has_field & field_visit.notna(), u_col)
     if target == STATUS_UNDER_INVESTIGATION.casefold():
         if "follow_up_at" in df.columns:
             fu = _parse_ts(df["follow_up_at"])
@@ -11464,18 +11520,63 @@ def _perf_week_offset_for_date(any_date: date) -> int:
     return (pick_start - this_start).days // 7
 
 
-def _perf_weekly_attended_ts(df: pd.DataFrame) -> pd.Series:
-    """When a row entered its attended status — used for Weekly Sun–Sat windows."""
-    u = (
-        _parse_ts(df["updated_at"])
-        if "updated_at" in df.columns
-        else pd.Series(pd.NaT, index=df.index)
-    )
+def _perf_field_response_ts_since_assign(df: pd.DataFrame) -> pd.Series:
+    """``responded_at`` when it is on or after ``last_assigned_at`` (current assign cycle)."""
+    if df.empty:
+        return pd.Series(dtype="datetime64[ns, UTC]")
     r = (
         _parse_ts(df["responded_at"])
         if "responded_at" in df.columns
         else pd.Series(pd.NaT, index=df.index)
     )
+    la = (
+        _parse_ts(df["last_assigned_at"])
+        if "last_assigned_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    valid = r.notna() & (la.isna() | (r >= la))
+    return r.where(valid)
+
+
+def _perf_has_field_response_since_assign_series(df: pd.DataFrame) -> pd.Series:
+    """Vectorized: field reply on the current assignment (after latest ``last_assigned_at``)."""
+    if df.empty:
+        return pd.Series(dtype=bool)
+    field_ts = _perf_field_response_ts_since_assign(df)
+    out = field_ts.notna()
+    if out.all():
+        return out
+    la = (
+        _parse_ts(df["last_assigned_at"])
+        if "last_assigned_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    ra = (
+        _parse_ts(df["responded_at"])
+        if "responded_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    since_assign = la.isna() | (ra.notna() & (ra >= la))
+    row_has = df.apply(_ticket_row_has_field_response, axis=1)
+    return out | (row_has & since_assign)
+
+
+def _perf_weekly_attended_ts(df: pd.DataFrame) -> pd.Series:
+    """When a row entered its attended status — Summary / attended range windows (UTC+5).
+
+    - **Needs Review (Open)** with a field reply → field visit time (``responded_at`` on/after
+      ``last_assigned_at``), not when admin later changes status.
+    - **Resolved** after a field visit (no new visit) → same field visit time, not admin close time.
+    - **Resolved** with no field response → admin close (``updated_at``).
+    - **Reassign** resets assign scope via ``last_assigned_at`` / visit ``visit_start`` elsewhere.
+    """
+    u = (
+        _parse_ts(df["updated_at"])
+        if "updated_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    field_visit = _perf_field_response_ts_since_assign(df)
+    has_field = _perf_has_field_response_since_assign_series(df)
     fu = (
         _parse_ts(df["follow_up_at"])
         if "follow_up_at" in df.columns
@@ -11504,8 +11605,11 @@ def _perf_weekly_attended_ts(df: pd.DataFrame) -> pd.Series:
     open_status = st_col.isin(open_keys)
 
     ts = u.copy()
-    ts = ts.where(~resolved, pd.concat([r, u], axis=1).max(axis=1, skipna=True))
-    ts = ts.where(~open_status, pd.concat([r, u], axis=1).max(axis=1, skipna=True))
+    field_attended = (resolved | open_status) & has_field
+    ts = ts.where(
+        ~field_attended,
+        field_visit.where(field_visit.notna(), u),
+    )
     ts = ts.where(~inv, fu.where(fu.notna(), u))
     ts = ts.where(~on_hold, u)
     return ts
@@ -11680,6 +11784,43 @@ def _perf_filter_attended_detail_by_focus(
     focus_key = _perf_norm_member(focus)
     mask = detail["Attended by"].astype(str).map(_perf_norm_member).eq(focus_key)
     return detail.loc[mask].copy()
+
+
+def _perf_focus_assigned_id_set(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    focus: str,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
+) -> frozenset[str]:
+    """Ticket/case IDs assigned to ``focus`` in the sidebar range (unique assigned scope)."""
+    if focus in ("", "All"):
+        return frozenset()
+    assign = _perf_engineer_range_assignment_metrics(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+        visits_history=visits_history,
+    )
+    raw = assign.get("_assigned_ids")
+    return raw if isinstance(raw, frozenset) else frozenset()
+
+
+def _perf_filter_detail_to_assigned_ids(
+    detail: pd.DataFrame,
+    assigned_ids: frozenset[str],
+) -> pd.DataFrame:
+    """Keep attended detail rows whose ID was assigned to the engineer in range."""
+    if detail.empty or "ID" not in detail.columns:
+        return detail
+    if not assigned_ids:
+        return detail.iloc[0:0].copy()
+    ids = detail["ID"].astype(str).str.strip()
+    return detail.loc[ids.isin(assigned_ids)].copy()
 
 
 def _perf_build_weekly_attended_tables(
@@ -12346,6 +12487,104 @@ def _perf_build_breakdown_drilldown_df(
     return pd.DataFrame(rows)
 
 
+def _perf_summary_sync_focus_scope(
+    metrics: dict[str, object],
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    focus: str,
+) -> None:
+    """When Focus assignee is set, align KPI charts with that engineer's attended cases."""
+    attended_focus = _perf_summary_attended_filter_arg(focus)
+    if attended_focus == "All":
+        return
+    if not isinstance(metrics.get("daily_assignment_df"), pd.DataFrame):
+        _perf_summary_attach_daily_assignment(
+            metrics,
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    scope_key = str(metrics.get("_chart_scope_focus") or "")
+    if (
+        scope_key == attended_focus
+        and metrics.get("_chart_scope_ready")
+        and isinstance(metrics.get("daily_focus_combo_df"), pd.DataFrame)
+    ):
+        return
+    visits = _perf_load_overview_visits_history(df_all)
+    assigned_ids = _perf_focus_assigned_id_set(
+        df_all,
+        sales_all,
+        focus=focus,
+        range_start=range_start,
+        range_end=range_end,
+        visits_history=visits,
+    )
+    bundle = _perf_weekly_attended_bundle(
+        df_all,
+        sales_all if sales_all is not None else pd.DataFrame(),
+        range_start=range_start,
+        range_end=range_end,
+        focus=attended_focus,
+    )
+    detail = bundle.get("detail")
+    detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+    detail_df = _perf_filter_detail_to_assigned_ids(detail_df, assigned_ids)
+    chart_metrics = _perf_weekly_executive_metrics(detail_df)
+    metrics["_focus_assigned_ids"] = assigned_ids
+    assign_df = metrics.get("daily_assignment_df")
+    daily_assign = assign_df if isinstance(assign_df, pd.DataFrame) else None
+    metrics["daily_focus_combo_df"] = _perf_build_focus_daily_combo_df(
+        detail_df,
+        daily_assign,
+        focus,
+        range_start=range_start,
+        range_end=range_end,
+        df_all=df_all,
+        sales_all=sales_all,
+    )
+    for key in (
+        "total",
+        "resolved",
+        "investigation",
+        "admin_desk",
+        "attended_field_resolved",
+        "attended_admin_after_visit",
+        "attended_resort_resolved",
+        "attended_resolved_after_visit",
+        "attended_investigation",
+        "attended_admin_desk",
+        "resolution_rate",
+        "top_inv_category",
+        "top_resolved_category",
+        "outcome_df",
+        "category_df",
+        "priority_df",
+        "detail_df",
+    ):
+        if key in chart_metrics:
+            metrics[key] = chart_metrics[key]
+    total = int(metrics.get("total") or 0)
+    investigation = int(metrics.get("investigation") or 0)
+    metrics["investigation_pct"] = int(round(100 * investigation / total)) if total else 0
+    metrics.pop("_trend_loaded", None)
+    metrics.pop("_trend_focus", None)
+    _perf_summary_attach_trend_metrics(
+        metrics,
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        focus=attended_focus,
+    )
+    metrics["_chart_scope_focus"] = attended_focus
+    metrics["_chart_scope_ready"] = True
+
+
 def _perf_summary_attach_trend_metrics(
     metrics: dict[str, object],
     df_all: pd.DataFrame,
@@ -12356,14 +12595,15 @@ def _perf_summary_attach_trend_metrics(
     focus: str = "All",
 ) -> None:
     """Lazy-load field resolution trend buckets inside the header time range."""
-    if metrics.get("_trend_loaded"):
+    attended_focus = _perf_summary_attended_filter_arg(focus)
+    if metrics.get("_trend_loaded") and metrics.get("_trend_focus") == attended_focus:
         return
     tickets_sig = _perf_data_signature(df_all)
     sales_sig = _perf_data_signature(sales_all)
     trend_df = _perf_range_resolution_trend_cached(
         range_start_iso=range_start.isoformat(),
         range_end_iso=range_end.isoformat(),
-        focus=focus,
+        focus=attended_focus,
         tickets_sig=tickets_sig,
         sales_sig=sales_sig,
     )
@@ -12373,6 +12613,7 @@ def _perf_summary_attach_trend_metrics(
         int(metrics.get("resolution_rate") or 0),
     )
     metrics["_trend_loaded"] = True
+    metrics["_trend_focus"] = attended_focus
 
 
 def _perf_summary_attach_team_assignment(
@@ -12399,6 +12640,9 @@ def _perf_summary_attach_team_assignment(
     )
 
 
+_PERF_DAILY_ASSIGNMENT_VERSION = "assign_log_v4"
+
+
 def _perf_summary_attach_daily_assignment(
     metrics: dict[str, object],
     df_all: pd.DataFrame,
@@ -12407,8 +12651,15 @@ def _perf_summary_attach_daily_assignment(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
 ) -> None:
-    if isinstance(metrics.get("daily_assignment_df"), pd.DataFrame):
+    if (
+        metrics.get("_daily_assignment_version") == _PERF_DAILY_ASSIGNMENT_VERSION
+        and isinstance(metrics.get("daily_assignment_df"), pd.DataFrame)
+    ):
         return
+    metrics["_daily_assignment_version"] = _PERF_DAILY_ASSIGNMENT_VERSION
+    metrics.pop("daily_focus_combo_df", None)
+    metrics.pop("_chart_scope_ready", None)
+    metrics.pop("_chart_scope_focus", None)
     metrics["daily_assignment_df"] = _perf_daily_assignment_tasks_by_engineer_df(
         df_all,
         sales_all,
@@ -12445,46 +12696,55 @@ def _perf_summary_attach_focus_engineer_block(
     range_end: pd.Timestamp,
     focus: str,
 ) -> None:
-    if focus in ("", "All") or "assigned_in_range" in metrics:
+    if focus in ("", "All"):
         return
-    with _dash_perf_span("perf.summary_focus_block"):
-        visits = _perf_load_overview_visits_history(df_all)
-        detail = bundle.get("detail")
-        detail_for_tracks = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
-        attended_res, attended_rsr = _perf_attended_track_counts(detail_for_tracks)
-        metrics.update(
-            _perf_summary_focus_engineer_metrics_with_reconciliation(
+    if "assigned_in_range" not in metrics:
+        with _dash_perf_span("perf.summary_focus_block"):
+            visits = _perf_load_overview_visits_history(df_all)
+            detail = bundle.get("detail")
+            detail_for_tracks = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
+            attended_res, attended_rsr = _perf_attended_track_counts(detail_for_tracks)
+            metrics.update(
+                _perf_summary_focus_engineer_metrics_with_reconciliation(
+                    df_all,
+                    sales_all,
+                    focus=focus,
+                    range_start=range_start,
+                    range_end=range_end,
+                    attended_yours_total=int(metrics.get("total") or 0),
+                    visits_history=visits,
+                )
+            )
+            _perf_summary_attach_team_assignment(
+                metrics,
                 df_all,
                 sales_all,
-                focus=focus,
                 range_start=range_start,
                 range_end=range_end,
-                attended_yours_total=int(metrics.get("total") or 0),
-                visits_history=visits,
             )
-        )
-        _perf_summary_attach_team_assignment(
-            metrics,
-            df_all,
-            sales_all,
-            range_start=range_start,
-            range_end=range_end,
-        )
-        metrics.update(_perf_summary_derived_metrics(metrics))
-        metrics["attended_residential"] = attended_res
-        metrics["attended_resort"] = attended_rsr
-        metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
-            df_all,
-            focus=focus,
-            visits=visits,
-            range_start=range_start,
-            range_end=range_end,
-        )
-        metrics["unattended_flagged_rows"] = _perf_flagged_unattended_ticket_rows(
-            df_all,
-            focus=focus,
-        )
-        metrics["summary_focus"] = focus
+            metrics.update(_perf_summary_derived_metrics(metrics))
+            metrics["attended_residential"] = attended_res
+            metrics["attended_resort"] = attended_rsr
+            metrics["unattended_assignment_rows"] = _perf_unattended_assignment_rows(
+                df_all,
+                focus=focus,
+                visits=visits,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            metrics["unattended_flagged_rows"] = _perf_flagged_unattended_ticket_rows(
+                df_all,
+                focus=focus,
+            )
+    metrics["summary_focus"] = focus
+    _perf_summary_sync_focus_scope(
+        metrics,
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+    )
 
 
 def _perf_weekly_summary_metrics(
@@ -12872,7 +13132,7 @@ def _perf_engineer_range_assignment_metrics(
         if assignment_cycles_by_label is not None:
             res_by_label, rsr_by_label = assignment_cycles_by_label
         else:
-            _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
+            _, res_by_label, rsr_by_label, _ = _perf_assignment_task_day_counts_memo(
                 df_all,
                 sales_all,
                 range_start=range_start,
@@ -12983,7 +13243,7 @@ def _perf_team_assignment_summary_df(
         range_end=range_end,
     )
     credit_to_label = _perf_team_assignment_credit_to_label_map()
-    _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
+    _, res_by_label, rsr_by_label, _ = _perf_assignment_task_day_counts_memo(
         df_all,
         sales_all,
         range_start=range_start,
@@ -13350,7 +13610,7 @@ def _perf_admin_assign_ids_for_range(
         _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
     )
     credit_to_label = _perf_team_assignment_credit_to_label_map()
-    _, res_by_label, rsr_by_label = _perf_assignment_task_day_counts_memo(
+    _, res_by_label, rsr_by_label, _ = _perf_assignment_task_day_counts_memo(
         df_all,
         sales_all,
         range_start=range_start,
@@ -13447,7 +13707,29 @@ def _perf_team_attended_assigned_count(
         range_start=range_start,
         range_end=range_end,
     )
-    return len(assigned_ids & attended_credited)
+    hit_ids = assigned_ids & attended_credited
+    if not hit_ids:
+        return 0
+    ticket_lookup: dict[str, pd.Series] = {}
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                ticket_lookup[tn] = row
+    sales_lookup: dict[str, pd.Series] = {}
+    if sales_all is not None and not sales_all.empty and "case_ref" in sales_all.columns:
+        for _, row in sales_all.iterrows():
+            cref = str(row.get("case_ref") or "").strip()
+            if cref:
+                sales_lookup[cref] = row
+    eligible = 0
+    for tid in hit_ids:
+        row = ticket_lookup.get(tid)
+        if row is None:
+            row = sales_lookup.get(tid)
+        if row is None or _perf_ticket_team_attended_credit_eligible(row):
+            eligible += 1
+    return eligible
 
 
 def _perf_assignment_task_day_counts_memo(
@@ -13457,11 +13739,17 @@ def _perf_assignment_task_day_counts_memo(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
     credit_to_label: dict[str, str] | None = None,
-) -> tuple[dict[tuple[date, str], int], dict[str, int], dict[str, int]]:
+) -> tuple[
+    dict[tuple[date, str], int],
+    dict[str, int],
+    dict[str, int],
+    dict[tuple[date, str], set[str]],
+]:
     """One assignment-log + gap-fill pass per range (reused across engineers/charts)."""
     if credit_to_label is None:
         credit_to_label = _perf_engineer_credit_to_label_map()
     memo_key = (
+        "assign_log_v4",
         range_start.isoformat(),
         range_end.isoformat(),
         _perf_data_signature(df_all),
@@ -13516,6 +13804,30 @@ def _fetch_field_response_logs_in_range_cached(
     )
 
 
+def _perf_response_gap_fill_skips_late_task(
+    tn: str,
+    response_day: date,
+    prior_task_days: dict[str, set[date]],
+) -> bool:
+    """Skip gap-fill on response day when an assign task was already credited earlier."""
+    days = prior_task_days.get(tn)
+    if not days:
+        return False
+    if response_day in days:
+        return False
+    return any(d < response_day for d in days)
+
+
+def _perf_ticket_team_attended_credit_eligible(row: object) -> bool:
+    """Team table: late reply after auto-unattended does not erase the missed assign day."""
+    data = _ticket_row_as_dict(row)
+    marked = _parse_ts(data.get("marked_unattended_at"))
+    resp = _parse_ts(data.get("responded_at"))
+    if pd.notna(marked) and pd.notna(resp) and resp > marked:
+        return False
+    return True
+
+
 def _perf_add_assignment_task_day_count(
     day_counts: dict[tuple[date, str], int],
     res_by_label: dict[str, int],
@@ -13527,9 +13839,16 @@ def _perf_add_assignment_task_day_count(
     credit_key: str,
     label: str,
     sales_refs: set[str],
+    from_assignment_log: bool = False,
+    tickets_by_day: dict[tuple[date, str], set[str]] | None = None,
+    task_days_by_tn: dict[str, set[date]] | None = None,
 ) -> None:
-    """One task for engineer ``credit_key`` on ``day`` for ticket/case ``tn``."""
-    if tn and logged_ticket_day.get((credit_key, day, tn), 0) > 0:
+    """Credit one assignment task to ``credit_key`` on ``day`` (ticket/case ``tn`` if known)."""
+    if (
+        not from_assignment_log
+        and tn
+        and logged_ticket_day.get((credit_key, day, tn), 0) > 0
+    ):
         return
     day_counts[(day, label)] += 1
     if tn in sales_refs:
@@ -13537,7 +13856,13 @@ def _perf_add_assignment_task_day_count(
     else:
         res_by_label[label] += 1
     if tn:
-        logged_ticket_day[(credit_key, day, tn)] = 1
+        logged_ticket_day[(credit_key, day, tn)] = (
+            logged_ticket_day.get((credit_key, day, tn), 0) + 1
+        )
+        if tickets_by_day is not None:
+            tickets_by_day.setdefault((day, label), set()).add(tn)
+    if tn and task_days_by_tn is not None:
+        task_days_by_tn.setdefault(tn, set()).add(day)
 
 
 def _perf_assignment_task_day_counts(
@@ -13547,10 +13872,15 @@ def _perf_assignment_task_day_counts(
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
     credit_to_label: dict[str, str],
-) -> tuple[dict[tuple[date, str], int], dict[str, int], dict[str, int]]:
+) -> tuple[
+    dict[tuple[date, str], int],
+    dict[str, int],
+    dict[str, int],
+    dict[tuple[date, str], set[str]],
+]:
     """Per-day task counts from assignment logs + gap fill (Daily Task + field response).
 
-    Returns ``(day_counts, res_cycles_by_label, rsr_cycles_by_label)`` for the range.
+    Returns ``(day_counts, res_cycles_by_label, rsr_cycles_by_label, tickets_by_day)``.
     """
     from collections import defaultdict
 
@@ -13573,7 +13903,9 @@ def _perf_assignment_task_day_counts(
     day_counts: dict[tuple[date, str], int] = defaultdict(int)
     res_by_label: dict[str, int] = defaultdict(int)
     rsr_by_label: dict[str, int] = defaultdict(int)
+    tickets_by_day: dict[tuple[date, str], set[str]] = defaultdict(set)
     logged_ticket_day: dict[tuple[str, date, str], int] = defaultdict(int)
+    task_days_by_tn: dict[str, set[date]] = {}
 
     logs = _fetch_assignment_task_logs_in_range_cached(
         range_start.isoformat(),
@@ -13582,8 +13914,6 @@ def _perf_assignment_task_day_counts(
     if not logs.empty and "timestamp" in logs.columns:
         ts = _parse_ts(logs["timestamp"])
         in_range = ts.notna() & (ts >= range_start) & (ts <= range_end)
-        # Last ``Assignment`` per ticket per local day wins (skip brief reassign-away).
-        last_by_day_ticket: dict[tuple[date, str], tuple[pd.Timestamp, tuple[str, ...]]] = {}
         for idx, row in logs.loc[in_range].iterrows():
             stamp = ts.loc[idx]
             if pd.isna(stamp):
@@ -13599,13 +13929,6 @@ def _perf_assignment_task_day_counts(
             )
             if not keys:
                 continue
-            slot = (day, tn) if tn else (day, f"__no_ticket_{idx}")
-            prev = last_by_day_ticket.get(slot)
-            if prev is None or stamp > prev[0]:
-                last_by_day_ticket[slot] = (stamp, keys)
-        for (day, tn), (_, keys) in last_by_day_ticket.items():
-            if tn.startswith("__no_ticket_"):
-                tn = ""
             for key in keys:
                 label = credit_to_label.get(key)
                 if not label:
@@ -13620,6 +13943,9 @@ def _perf_assignment_task_day_counts(
                     credit_key=key,
                     label=label,
                     sales_refs=sales_refs,
+                    from_assignment_log=True,
+                    tickets_by_day=tickets_by_day,
+                    task_days_by_tn=task_days_by_tn,
                 )
 
     if not df_all.empty and "last_assigned_at" in df_all.columns:
@@ -13650,6 +13976,8 @@ def _perf_assignment_task_day_counts(
                     credit_key=credit_key,
                     label=label,
                     sales_refs=sales_refs,
+                    tickets_by_day=tickets_by_day,
+                    task_days_by_tn=task_days_by_tn,
                 )
 
     if sales_all is not None and not sales_all.empty and "last_assigned_at" in sales_all.columns:
@@ -13676,6 +14004,8 @@ def _perf_assignment_task_day_counts(
                     credit_key=handle,
                     label=label,
                     sales_refs=sales_refs,
+                    tickets_by_day=tickets_by_day,
+                    task_days_by_tn=task_days_by_tn,
                 )
 
     response_logs = _fetch_field_response_logs_in_range_cached(
@@ -13697,6 +14027,8 @@ def _perf_assignment_task_day_counts(
             tn = str(row.get("ticket_number") or "").strip()
             if not tn:
                 continue
+            if _perf_response_gap_fill_skips_late_task(tn, day, task_days_by_tn):
+                continue
             if tn in sales_refs:
                 case_row = sales_rows.get(tn)
                 if case_row is None:
@@ -13714,6 +14046,7 @@ def _perf_assignment_task_day_counts(
                         credit_key=handle,
                         label=label,
                         sales_refs=sales_refs,
+                        tickets_by_day=tickets_by_day,
                     )
                 continue
             if tn not in active_tickets:
@@ -13736,9 +14069,10 @@ def _perf_assignment_task_day_counts(
                     credit_key=credit_key,
                     label=label,
                     sales_refs=sales_refs,
+                    tickets_by_day=tickets_by_day,
                 )
 
-    return day_counts, res_by_label, rsr_by_label
+    return day_counts, res_by_label, rsr_by_label, dict(tickets_by_day)
 
 
 def _perf_ticket_last_assigned_local_day(
@@ -13808,7 +14142,7 @@ def _perf_daily_assignment_tasks_by_engineer_df(
     if not credit_to_label:
         return pd.DataFrame(columns=["day", "Engineer", "tasks"])
 
-    day_counts, _, _ = _perf_assignment_task_day_counts_memo(
+    day_counts, _, _, _ = _perf_assignment_task_day_counts_memo(
         df_all,
         sales_all,
         range_start=range_start,
@@ -13819,10 +14153,303 @@ def _perf_daily_assignment_tasks_by_engineer_df(
     if not day_counts:
         return pd.DataFrame(columns=["day", "Engineer", "tasks"])
     rows = [
-        {"day": pd.Timestamp(day), "Engineer": eng, "tasks": int(n)}
+        {
+            "day": pd.Timestamp(datetime.combine(day, time.min), tz=LOCAL_TZ),
+            "Engineer": eng,
+            "tasks": int(n),
+        }
         for (day, eng), n in day_counts.items()
     ]
     return pd.DataFrame(rows).sort_values(["day", "Engineer"])
+
+
+def _perf_engineer_chart_label(focus: str) -> str:
+    """Display label for daily charts (matches ``daily_assignment_df`` Engineer column)."""
+    credit = _perf_focus_assignee_to_credit_key(focus)
+    label_map = _perf_engineer_credit_to_label_map()
+    if credit in label_map:
+        return label_map[credit]
+    if credit == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        return _perf_team_assignment_table_label(_SC_SALES_OVERVIEW_ADMIN_LABEL)
+    return _perf_norm_member(focus)
+
+
+def _perf_daily_calendar_timestamps(
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> list[pd.Timestamp]:
+    """UTC+5 midnight timestamps for each day in the sidebar range (inclusive)."""
+    d0 = range_start.tz_convert(LOCAL_TZ).date()
+    d1 = range_end.tz_convert(LOCAL_TZ).date()
+    if d1 < d0:
+        d0, d1 = d1, d0
+    out: list[pd.Timestamp] = []
+    d = d0
+    while d <= d1:
+        out.append(pd.Timestamp(datetime.combine(d, time.min), tz=LOCAL_TZ))
+        d += timedelta(days=1)
+    return out
+
+
+def _perf_fill_focus_engineer_daily_grid(
+    sparse_df: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    engineer_label: str,
+    value_col: str,
+) -> pd.DataFrame:
+    """One row per calendar day in range — zeros where there is no activity (mirrors paired charts)."""
+    grid = _perf_daily_calendar_timestamps(range_start, range_end)
+    out = pd.DataFrame({"day": grid, "Engineer": engineer_label, value_col: 0})
+    if sparse_df is None or sparse_df.empty or value_col not in sparse_df.columns:
+        return out
+    work = sparse_df.copy()
+    work["_day"] = pd.to_datetime(work["day"], utc=True).dt.tz_convert(LOCAL_TZ).dt.normalize()
+    agg = work.groupby("_day", as_index=False)[value_col].sum()
+    out["_day"] = pd.to_datetime(out["day"], utc=True).dt.tz_convert(LOCAL_TZ).dt.normalize()
+    merged = out.merge(agg, on="_day", how="left", suffixes=("", "_v"))
+    merged[value_col] = merged[f"{value_col}_v"].fillna(0).astype(int)
+    return merged.drop(columns=["_day", f"{value_col}_v"], errors="ignore")
+
+
+def _perf_activity_local_day(row: object) -> date | None:
+    if isinstance(row, pd.Series):
+        act = str(row.get("Activity (local)") or "").strip()
+    elif isinstance(row, dict):
+        act = str(row.get("Activity (local)") or "").strip()
+    else:
+        return None
+    if len(act) < 10:
+        return None
+    try:
+        return date.fromisoformat(act[:10])
+    except ValueError:
+        return None
+
+
+def _perf_field_response_ts_from_row(row: object) -> pd.Timestamp:
+    """Field reply timestamp from a CSM ticket or sales case row."""
+    if row is None:
+        return pd.NaT
+    series = row if isinstance(row, pd.Series) else pd.Series(row)
+    if not _ticket_row_has_field_response(series):
+        return pd.NaT
+    resp = _parse_ts(series.get("responded_at"))
+    if pd.notna(resp):
+        return resp
+    return _parse_ts(series.get("updated_at"))
+
+
+def _perf_attended_rows_for_refs(
+    refs: set[str],
+    *,
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    sales_refs: set[str],
+    response_logs: pd.DataFrame | None,
+) -> dict[str, pd.Series]:
+    """Resolve ticket / sales rows (with sales field-reply enrichment) for attended cycles."""
+    rows: dict[str, pd.Series] = {}
+    if not refs:
+        return rows
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn in refs:
+                rows[tn] = row
+    if sales_all is not None and not sales_all.empty and "case_ref" in sales_all.columns:
+        sales_hits = sales_all[
+            sales_all["case_ref"].astype(str).str.strip().isin(refs)
+        ].copy()
+        if not sales_hits.empty:
+            enriched = _perf_enrich_sales_cases_field_activity(
+                sales_hits, logs_df=response_logs
+            )
+            for _, row in enriched.iterrows():
+                ref = str(row.get("case_ref") or "").strip()
+                if ref:
+                    rows[ref] = row
+    for ref in refs:
+        if ref in rows:
+            continue
+        if ref in sales_refs:
+            raw = _fetch_sales_case_row_by_ref(ref)
+        else:
+            raw = _fetch_ticket_row(ref)
+        if raw:
+            rows[ref] = pd.Series(raw)
+    return rows
+
+
+def _perf_daily_assignment_log_attended_by_engineer_day(
+    df_all: pd.DataFrame,
+    sales_all: pd.DataFrame | None,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    credit_to_label: dict[str, str],
+) -> dict[tuple[date, str], int]:
+    """Field response per assign/reassign cycle (Assignment log window → next Assignment), by assign day."""
+    from collections import defaultdict
+
+    sales_refs = _perf_sales_case_ref_set(sales_all)
+    active_tickets: set[str] = set()
+    if not df_all.empty and "ticket_number" in df_all.columns:
+        for _, row in df_all.iterrows():
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                active_tickets.add(tn)
+
+    events: list[tuple[pd.Timestamp, date, str, str]] = []
+    logs = _fetch_assignment_task_logs_in_range_cached(
+        range_start.isoformat(),
+        range_end.isoformat(),
+    )
+    if not logs.empty and "timestamp" in logs.columns:
+        ts = _parse_ts(logs["timestamp"])
+        in_range = ts.notna() & (ts >= range_start) & (ts <= range_end)
+        for idx, row in logs.loc[in_range].iterrows():
+            stamp = ts.loc[idx]
+            if pd.isna(stamp):
+                continue
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn and tn not in sales_refs and tn not in active_tickets:
+                continue
+            if not tn:
+                continue
+            day_d = _to_local(pd.Series([stamp])).iloc[0].date()
+            keys = _perf_credit_keys_from_assignee_names(
+                [str(row.get("member_username") or "")]
+            )
+            for key in keys:
+                lab = credit_to_label.get(key)
+                if lab:
+                    events.append((stamp, day_d, lab, tn))
+
+    resp_by_ticket: dict[str, list[pd.Timestamp]] = defaultdict(list)
+    rlogs = _fetch_field_response_logs_in_range_cached(
+        range_start.isoformat(),
+        range_end.isoformat(),
+    )
+    if not rlogs.empty and "timestamp" in rlogs.columns:
+        rts = _parse_ts(rlogs["timestamp"])
+        in_range = rts.notna() & (rts >= range_start) & (rts <= range_end)
+        for idx, row in rlogs.loc[in_range].iterrows():
+            stamp = rts.loc[idx]
+            if pd.isna(stamp):
+                continue
+            action = str(row.get("action_type") or "").strip()
+            note = str(row.get("note") or "").strip()
+            photo = str(row.get("photo_url") or "").strip()
+            if action != "Response" and not note and not photo.startswith("http"):
+                continue
+            tn = str(row.get("ticket_number") or "").strip()
+            if tn:
+                resp_by_ticket[tn].append(stamp)
+    event_tns = {tn for _, _, _, tn in events}
+    ticket_rows = _perf_attended_rows_for_refs(
+        event_tns,
+        df_all=df_all,
+        sales_all=sales_all,
+        sales_refs=sales_refs,
+        response_logs=rlogs,
+    )
+    for tn, row in ticket_rows.items():
+        resp = _perf_field_response_ts_from_row(row)
+        if pd.notna(resp):
+            resp_by_ticket[tn].append(resp)
+    for tn in resp_by_ticket:
+        resp_by_ticket[tn] = sorted(set(resp_by_ticket[tn]))
+
+    counts: dict[tuple[date, str], int] = defaultdict(int)
+    by_pair: dict[tuple[str, str], list[tuple[pd.Timestamp, date]]] = defaultdict(list)
+    for stamp, day_d, lab, tn in events:
+        by_pair[(lab, tn)].append((stamp, day_d))
+    max_ts = pd.Timestamp.max.tz_localize("UTC")
+    for (lab, tn), evs in by_pair.items():
+        evs.sort(key=lambda x: x[0])
+        resps = resp_by_ticket.get(tn, [])
+        row = ticket_rows.get(tn)
+        for i, (start, day_d) in enumerate(evs):
+            end = evs[i + 1][0] if i + 1 < len(evs) else max_ts
+            in_logs = any(start <= r < end for r in resps)
+            in_row = False
+            if row is not None:
+                resp = _perf_field_response_ts_from_row(row)
+                in_row = pd.notna(resp) and start <= resp < end
+            if in_logs or in_row:
+                counts[(day_d, lab)] += 1
+    return dict(counts)
+
+
+def _perf_daily_field_resolved_activity_by_day(
+    detail_df: pd.DataFrame,
+) -> dict[date, int]:
+    """Resolved-after-visit by last field-attended day (``Activity (local)`` / attended ts)."""
+    from collections import defaultdict
+
+    counts: dict[date, int] = defaultdict(int)
+    if detail_df.empty or "ID" not in detail_df.columns:
+        return {}
+    id_first = detail_df.drop_duplicates(subset=["ID"], keep="first")
+    outcomes = _perf_detail_outcome_series(id_first)
+    for idx, row in id_first.iterrows():
+        if outcomes.loc[idx] not in _PERF_FIELD_RESOLVED_OUTCOMES:
+            continue
+        day_d = _perf_activity_local_day(row)
+        if day_d is not None:
+            counts[day_d] += 1
+    return dict(counts)
+
+
+def _perf_build_focus_daily_combo_df(
+    detail_df: pd.DataFrame,
+    daily_assignment_df: pd.DataFrame | None,
+    focus: str,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    df_all: pd.DataFrame | None = None,
+    sales_all: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Daily combo: assign tasks vs visit-cycle attended vs resolved (last field day)."""
+    label = _perf_engineer_chart_label(focus)
+    credit_to_label = _perf_engineer_credit_to_label_map()
+    attended_by_day: dict[tuple[date, str], int] = {}
+    if df_all is not None and not df_all.empty:
+        attended_by_day = _perf_daily_assignment_log_attended_by_engineer_day(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+            credit_to_label=credit_to_label,
+        )
+    resolved_by_day = _perf_daily_field_resolved_activity_by_day(detail_df)
+
+    assign_sparse = pd.DataFrame(columns=["day", "Engineer", "tasks"])
+    if isinstance(daily_assignment_df, pd.DataFrame) and not daily_assignment_df.empty:
+        assign_sparse = _perf_filter_daily_assignment_df(daily_assignment_df, focus)
+    combo = _perf_fill_focus_engineer_daily_grid(
+        assign_sparse,
+        range_start=range_start,
+        range_end=range_end,
+        engineer_label=label,
+        value_col="tasks",
+    )
+    combo["field_resolved"] = 0
+    combo["attended"] = 0
+    for idx, row in combo.iterrows():
+        day_d = pd.to_datetime(row["day"], utc=True).tz_convert(LOCAL_TZ).date()
+        combo.at[idx, "attended"] = int(attended_by_day.get((day_d, label), 0))
+        combo.at[idx, "field_resolved"] = int(resolved_by_day.get(day_d, 0))
+    combo["rate"] = combo.apply(
+        lambda r: int(round(100 * int(r["field_resolved"]) / int(r["attended"])))
+        if int(r["attended"]) > 0
+        else 0,
+        axis=1,
+    )
+    return combo
 
 
 def _perf_filter_daily_assignment_df(
@@ -13832,6 +14459,10 @@ def _perf_filter_daily_assignment_df(
     """When Summary focus is one engineer, show only their daily task line."""
     if plot_df.empty or focus in ("", "All", "All engineers"):
         return plot_df
+    credit = _perf_focus_assignee_to_credit_key(focus)
+    if credit == _SC_SALES_OVERVIEW_ADMIN_LABEL:
+        admin_label = _perf_team_assignment_table_label(_SC_SALES_OVERVIEW_ADMIN_LABEL)
+        return plot_df.loc[plot_df["Engineer"].astype(str).eq(admin_label)].copy()
     focus_key = _perf_person_credit_key(focus)
     if focus_key in ("", "(unknown)"):
         return plot_df.iloc[0:0]
@@ -14077,7 +14708,11 @@ def _render_perf_summary_engineer_derived_row(metrics: dict[str, object]) -> Non
         ("Team share (range)", f"{team_share}%", "Your unique ÷ team unique tickets"),
         ("Response rate", f"{resp_rate}%", "Attended from assigned ÷ unique"),
         ("Revisit rate", f"{revisit_rate}%", f"{revisit_n} tickets with 2+ tasks"),
-        ("Same-day response", f"{same_day}%", "Residential · before 23:59 UTC+5"),
+        (
+            "Same-day response",
+            f"{same_day}%",
+            f"Residential · before {_assign_day_cutoff_hm_label()} assign day",
+        ),
         ("Handed off", str(handed), f"Still open {still_open}" if still_open else "Other engineer credited"),
     ]
     parts: list[str] = []
@@ -14483,7 +15118,12 @@ def _render_perf_summary_engineer_overview(
     """Layered individual Summary — primary KPIs, attended outcomes, team table."""
     _render_perf_summary_engineer_primary_kpis(metrics, period_label=period_label)
     _render_perf_summary_attended_outcomes(metrics)
-    _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
+    _render_perf_summary_focus_daily_combined_chart(
+        metrics,
+        period_label=period_label,
+        range_start=range_start,
+        range_end=range_end,
+    )
     with st.expander(
         "Team assignment comparison",
         expanded=False,
@@ -14585,6 +15225,51 @@ def _weekly_altair_theme(chart: alt.Chart) -> alt.Chart:
         .configure_axis(labelColor="#8a9ac0", titleColor="#e2e8f8", gridColor="#1a2035")
         .configure_legend(labelColor="#8a9ac0", titleColor="#e2e8f8")
     )
+
+
+def _weekly_altair_focus_daily_combo_chart(
+    plot_df: pd.DataFrame,
+    *,
+    task_color: str,
+    tooltips: list[alt.Tooltip],
+) -> alt.LayerChart:
+    """Daily combo — assignment tasks + resolved after visit on one shared left axis."""
+    y_left = alt.Y("value:Q", title="Count", axis=alt.Axis(tickMinStep=1))
+    x_enc = alt.X(
+        "day:T",
+        title="Day",
+        axis=alt.Axis(format="%d %b", labelAngle=-35),
+    )
+    tasks_df = plot_df.assign(series="tasks", value=plot_df["tasks"].astype(int))
+    resolved_df = plot_df.assign(
+        series="resolved", value=plot_df["field_resolved"].astype(int)
+    )
+    with alt.theme.enable("none"):
+        tasks_line = (
+            alt.Chart(tasks_df)
+            .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5, color=task_color)
+            .encode(x=x_enc, y=y_left, tooltip=tooltips)
+        )
+        resolved_area = (
+            alt.Chart(resolved_df)
+            .mark_area(color=_WEEKLY_RESOLVED_COLOR, opacity=0.28)
+            .encode(x=x_enc, y=y_left, tooltip=tooltips)
+        )
+        resolved_line = (
+            alt.Chart(resolved_df)
+            .mark_line(
+                color=_WEEKLY_RESOLVED_COLOR,
+                strokeWidth=2,
+                point={"filled": True, "size": 45},
+            )
+            .encode(x=x_enc, y=y_left, tooltip=tooltips)
+        )
+        layered = (
+            alt.layer(tasks_line, resolved_area, resolved_line)
+            .resolve_scale(y="shared")
+            .properties(height=300)
+        )
+    return _weekly_altair_theme(layered)
 
 
 def _perf_weekly_outcome_group(status: str) -> str:
@@ -14762,7 +15447,18 @@ def _perf_range_resolution_trend(
     d1 = range_end.tz_convert(LOCAL_TZ).date()
     buckets = _perf_resolution_trend_buckets(d0, d1)
     if not buckets:
-        return pd.DataFrame(columns=["week", "rate", "total", "sort"])
+        return pd.DataFrame(columns=["week", "rate", "total", "field_resolved", "sort"])
+    assigned_ids: frozenset[str] | None = None
+    if focus not in ("", "All"):
+        visits = _perf_load_overview_visits_history(df_all)
+        assigned_ids = _perf_focus_assigned_id_set(
+            df_all,
+            sales_all,
+            focus=focus,
+            range_start=range_start,
+            range_end=range_end,
+            visits_history=visits,
+        )
     rows: list[dict[str, object]] = []
     for sort_i, (b0, b1, label) in enumerate(buckets):
         rs = _local_date_start(b0)
@@ -14780,7 +15476,9 @@ def _perf_range_resolution_trend(
         )
         detail = bundle.get("detail")
         detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
-        rate, total, _field_n = _perf_field_resolution_rate(detail_df)
+        if assigned_ids is not None:
+            detail_df = _perf_filter_detail_to_assigned_ids(detail_df, assigned_ids)
+        rate, total, field_n = _perf_field_resolution_rate(detail_df)
         if total == 0:
             rate = 0
         rows.append(
@@ -14788,6 +15486,7 @@ def _perf_range_resolution_trend(
                 "week": label,
                 "rate": rate,
                 "total": total,
+                "field_resolved": field_n,
                 "sort": sort_i,
             }
         )
@@ -14863,7 +15562,11 @@ def _render_weekly_kpi_cards(metrics: dict[str, object]) -> None:
 
 
 def _render_perf_summary_closure_donut(metrics: dict[str, object]) -> None:
-    st.markdown('<div class="weekly-panel"><h4>Closure breakdown</h4></div>', unsafe_allow_html=True)
+    focus_suffix = _perf_focus_heading_suffix(str(metrics.get("summary_focus") or ""))
+    st.markdown(
+        f'<div class="weekly-panel"><h4>Closure breakdown{html.escape(focus_suffix)}</h4></div>',
+        unsafe_allow_html=True,
+    )
     outcome_df = metrics.get("outcome_df")
     if not isinstance(outcome_df, pd.DataFrame) or outcome_df.empty:
         st.caption("No closure data for this range.")
@@ -14889,14 +15592,92 @@ def _render_perf_summary_closure_donut(metrics: dict[str, object]) -> None:
     st.altair_chart(donut, width="stretch")
 
 
+def _render_perf_summary_focus_daily_combined_chart(
+    metrics: dict[str, object],
+    *,
+    period_label: str = "",
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
+) -> None:
+    """Focused engineer — assignment tasks (line) + resolved after visit (line + fill) on one chart."""
+    focus = str(metrics.get("summary_focus") or metrics.get("_summary_focus") or "").strip()
+    if focus in ("", "All", "All engineers"):
+        return
+    if range_start is None or range_end is None:
+        return
+    plot_df = metrics.get("daily_focus_combo_df")
+    if not isinstance(plot_df, pd.DataFrame):
+        return
+    focus_suffix = _perf_focus_heading_suffix(focus)
+    st.markdown(
+        '<div class="weekly-panel">'
+        f"<h4>Daily assignment &amp; field resolution{html.escape(focus_suffix)}</h4>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    cap = f"{period_label} ({LOCAL_TZ_LABEL}) · " if period_label else f"{LOCAL_TZ_LABEL} · "
+    cap += (
+        "**Assignment tasks** — assign/reassign that day · "
+        "**Attended** — visit cycles starting that day with a field response (each reassign counts again) · "
+        "**Resolved after visit** — cases credited that day by **last field visit** (not admin close time) · "
+        "same **Count** axis"
+    )
+    st.caption(cap)
+    if plot_df.empty or (
+        int(plot_df["tasks"].sum()) == 0 and int(plot_df["field_resolved"].sum()) == 0
+    ):
+        st.caption("No assignment tasks or field resolution activity in this range.")
+        return
+    plot_df = plot_df.copy()
+    plot_df["Engineer"] = plot_df["Engineer"].astype(str).map(_perf_norm_member)
+    engineers = sorted(plot_df["Engineer"].unique().tolist(), key=str.lower)
+    task_color = _perf_engineer_color_map(engineers)[engineers[0]]
+    st.markdown(
+        f'<div class="weekly-assign-legend perf-daily-tasks-legend" style="margin-bottom:8px">'
+        f'<span><i style="background:{html.escape(task_color)}"></i>Assignment tasks</span>'
+        f'<span><i style="background:{html.escape(_WEEKLY_RESOLVED_COLOR)}"></i>'
+        f"Resolved after visit</span></div>",
+        unsafe_allow_html=True,
+    )
+    tooltips = [
+        alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+        alt.Tooltip("tasks:Q", title="Assignment tasks"),
+        alt.Tooltip("attended:Q", title="Attended (visit cycles that day)"),
+        alt.Tooltip("field_resolved:Q", title="Resolved after visit"),
+    ]
+    chart = _weekly_altair_focus_daily_combo_chart(
+        plot_df,
+        task_color=task_color,
+        tooltips=tooltips,
+    )
+    st.altair_chart(chart, width="stretch")
+
+
 def _render_perf_summary_resolution_trend(
     metrics: dict[str, object],
     *,
     period_label: str = "",
+    focus: str = "All",
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> None:
-    st.markdown('<div class="weekly-panel"><h4>Field resolution trend</h4></div>', unsafe_allow_html=True)
-    if period_label:
-        st.caption(f"Within report period · {period_label} ({LOCAL_TZ_LABEL})")
+    effective = focus if focus not in ("", "All") else str(metrics.get("summary_focus") or "")
+    if effective not in ("", "All", "All engineers") and isinstance(
+        metrics.get("daily_focus_combo_df"), pd.DataFrame
+    ):
+        return
+    focus_suffix = _perf_focus_heading_suffix(effective)
+    st.markdown(
+        f'<div class="weekly-panel"><h4>Field resolution trend{html.escape(focus_suffix)}</h4></div>',
+        unsafe_allow_html=True,
+    )
+    cap = f"Within report period · {period_label} ({LOCAL_TZ_LABEL})" if period_label else LOCAL_TZ_LABEL
+    if focus_suffix:
+        cap += (
+            " · field resolution uses **your assignments** attended in each day "
+            "(same scope as “You attended” on the assignment bar)"
+        )
+    st.caption(cap)
     trend_df = metrics.get("trend_df")
     if not isinstance(trend_df, pd.DataFrame) or trend_df.empty:
         st.caption("No attended cases in this range for a trend.")
@@ -14919,7 +15700,8 @@ def _render_perf_summary_resolution_trend(
             tooltip=[
                 alt.Tooltip("week:N", title="Period"),
                 alt.Tooltip("rate:Q", title="Field resolution %"),
-                alt.Tooltip("total:Q", title="Tickets"),
+                alt.Tooltip("total:Q", title="Attended (your assignments)"),
+                alt.Tooltip("field_resolved:Q", title="Resolved after visit"),
             ],
         )
         .properties(height=300)
@@ -14971,6 +15753,8 @@ def _render_perf_summary_daily_assignment_chart(
     metrics: dict[str, object],
     *,
     period_label: str = "",
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
 ) -> None:
     st.markdown(
         '<p class="weekly-section-label" style="margin-top:14px">Daily assignment tasks</p>',
@@ -14984,8 +15768,18 @@ def _render_perf_summary_daily_assignment_chart(
         metrics.get("summary_focus") or metrics.get("_summary_focus") or ""
     ).strip()
     plot_df = _perf_filter_daily_assignment_df(plot_df, focus)
-    if plot_df.empty:
-        if focus not in ("", "All", "All engineers"):
+    focus_one = focus not in ("", "All", "All engineers")
+    if focus_one and range_start is not None and range_end is not None:
+        eng_label = _perf_engineer_chart_label(focus)
+        plot_df = _perf_fill_focus_engineer_daily_grid(
+            plot_df,
+            range_start=range_start,
+            range_end=range_end,
+            engineer_label=eng_label,
+            value_col="tasks",
+        )
+    elif plot_df.empty:
+        if focus_one:
             st.caption(
                 f"No assignment tasks in this range for "
                 f"{_perf_focus_heading_suffix(focus).lstrip(' —') or focus}."
@@ -14993,10 +15787,15 @@ def _render_perf_summary_daily_assignment_chart(
         else:
             st.caption("No assignment tasks in this range.")
         return
+    if not focus_one and int(plot_df["tasks"].sum()) == 0:
+        st.caption("No assignment tasks in this range.")
+        return
     cap_parts = [
         LOCAL_TZ_LABEL,
-        "Tasks = unique ticket per engineer per day (Assignment log, Daily Task gap fill, field response on assigned ticket)",
+        "Tasks = assign + reassign events per engineer per day (Assignment logs, Daily Task gap fill, field response on assigned ticket)",
     ]
+    if focus_one:
+        cap_parts.append("Full date range shown (zero task days included)")
     if period_label:
         cap_parts.insert(0, period_label)
     st.caption(" · ".join(cap_parts))
@@ -15050,21 +15849,38 @@ def _render_perf_summary_overview_tab(
     focus: str = "All",
 ) -> None:
     """Overview — KPIs, closure donut, resolution trend."""
+    effective_focus = _perf_summary_effective_focus(metrics, focus)
     if (
         df_all is not None
         and sales_all is not None
         and range_start is not None
         and range_end is not None
-        and not metrics.get("_trend_loaded")
     ):
-        _perf_summary_attach_trend_metrics(
-            metrics,
-            df_all,
-            sales_all,
-            range_start=range_start,
-            range_end=range_end,
-            focus=focus,
-        )
+        if effective_focus not in ("", "All"):
+            _perf_summary_attach_daily_assignment(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            _perf_summary_sync_focus_scope(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                focus=effective_focus,
+            )
+        elif not metrics.get("_trend_loaded"):
+            _perf_summary_attach_trend_metrics(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                focus="All",
+            )
     show_engineer = "assigned_in_range" in metrics
     if show_engineer:
         _render_perf_summary_engineer_overview(
@@ -15103,11 +15919,23 @@ def _render_perf_summary_overview_tab(
                 range_start=range_start,
                 range_end=range_end,
             )
-        _render_perf_summary_daily_assignment_chart(metrics, period_label=period_label)
+        _render_perf_summary_daily_assignment_chart(
+            metrics,
+            period_label=period_label,
+            range_start=range_start,
+            range_end=range_end,
+        )
     donut_col, _ = st.columns([1, 1])
     with donut_col:
         _render_perf_summary_closure_donut(metrics)
-    _render_perf_summary_resolution_trend(metrics, period_label=period_label)
+    if not show_engineer:
+        _render_perf_summary_resolution_trend(
+            metrics,
+            period_label=period_label,
+            focus=effective_focus,
+            range_start=range_start,
+            range_end=range_end,
+        )
 
 
 def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
@@ -15406,7 +16234,10 @@ def _render_perf_summary_unattended_section(metrics: dict[str, object]) -> None:
         st.metric(
             "Unattended assignments (in range)",
             assignments,
-            help="One case per assign day after 23:59 UTC+5 cutoff — assignee only; nudges excluded.",
+            help=(
+                f"One case per assign day after {_assign_day_cutoff_hm_label()} cutoff "
+                f"({LOCAL_TZ_LABEL}) — assignee only; nudges excluded."
+            ),
         )
     with u3:
         st.metric(
@@ -15424,7 +16255,8 @@ def _render_perf_summary_unattended_tab(metrics: dict[str, object]) -> None:
         unsafe_allow_html=True,
     )
     st.caption(
-        "One case per assign day after **23:59 UTC+5** cutoff with no field response — assignee only. "
+        f"One case per assign day after **{_assign_day_cutoff_hm_label()}** cutoff "
+        f"({LOCAL_TZ_LABEL}) with no field response — assignee only. "
         "Telegram nudges do not count. Reassign on a new day counts again."
     )
     _render_perf_summary_unattended_section(metrics)
@@ -29384,7 +30216,8 @@ def _render_perf_unattended_tab(
         unsafe_allow_html=True,
     )
     st.caption(
-        "One case per assignment with no field response after assign-day cutoff (23:59 UTC+5) — assignee only. "
+        f"One case per assignment with no field response after assign-day cutoff "
+        f"({_assign_day_cutoff_hm_label()}, {LOCAL_TZ_LABEL}) — assignee only. "
         "Telegram nudges do not count. "
         "Same ticket reassigned next day counts again for the new assignee. "
         f"Uses header **time range** ({_format_perf_range_caption() or 'selected range'})."
