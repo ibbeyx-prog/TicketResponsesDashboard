@@ -12640,7 +12640,7 @@ def _perf_summary_attach_team_assignment(
     )
 
 
-_PERF_DAILY_ASSIGNMENT_VERSION = "assign_log_v4"
+_PERF_DAILY_ASSIGNMENT_VERSION = "assign_log_v6"
 
 
 def _perf_summary_attach_daily_assignment(
@@ -13749,7 +13749,7 @@ def _perf_assignment_task_day_counts_memo(
     if credit_to_label is None:
         credit_to_label = _perf_engineer_credit_to_label_map()
     memo_key = (
-        "assign_log_v4",
+        "assign_log_v6",
         range_start.isoformat(),
         range_end.isoformat(),
         _perf_data_signature(df_all),
@@ -13826,6 +13826,62 @@ def _perf_ticket_team_attended_credit_eligible(row: object) -> bool:
     if pd.notna(marked) and pd.notna(resp) and resp > marked:
         return False
     return True
+
+
+def _perf_response_log_credit_keys(
+    log_row: object,
+    ticket_row: pd.Series | None,
+) -> list[str]:
+    """Prefer the engineer on the Response log over current ticket assignees."""
+    if isinstance(log_row, pd.Series):
+        member = str(log_row.get("member_username") or "")
+    elif isinstance(log_row, dict):
+        member = str(log_row.get("member_username") or "")
+    else:
+        member = ""
+    log_keys = _perf_credit_keys_from_assignee_names([member])
+    if log_keys:
+        return log_keys
+    if ticket_row is None:
+        return []
+    return [
+        _perf_person_credit_key(k) for k in _perf_ticket_credit_assignees(ticket_row)
+    ]
+
+
+def _perf_assignment_log_is_accidental_reassign(
+    ticket_number: str,
+    assign_stamp: pd.Timestamp,
+    credit_key: str,
+    prepared_visits: pd.DataFrame,
+) -> bool:
+    """Skip mistaken assign→reassign cycles (same rule as Overview unattended)."""
+    tn = str(ticket_number or "").strip()
+    if not tn or prepared_visits.empty or pd.isna(assign_stamp):
+        return False
+    if "ticket_number" not in prepared_visits.columns:
+        return False
+    sub = prepared_visits.loc[
+        prepared_visits["ticket_number"].astype(str).str.strip().eq(tn)
+    ]
+    for _, visit in sub.iterrows():
+        if _perf_person_credit_key(_perf_norm_member(visit.get("assignee"))) != credit_key:
+            continue
+        if not is_accidental_reassign_cycle(
+            visit_start=visit.get("visit_start"),
+            visit_end=visit.get("visit_end"),
+            outcome=visit.get("outcome"),
+        ):
+            continue
+        start = _parse_ts(visit.get("visit_start"))
+        end = _parse_ts(visit.get("visit_end"))
+        if pd.isna(start):
+            continue
+        if pd.notna(end) and start <= assign_stamp <= end:
+            return True
+        if abs((assign_stamp - start).total_seconds()) <= 120:
+            return True
+    return False
 
 
 def _perf_add_assignment_task_day_count(
@@ -13906,6 +13962,10 @@ def _perf_assignment_task_day_counts(
     tickets_by_day: dict[tuple[date, str], set[str]] = defaultdict(set)
     logged_ticket_day: dict[tuple[str, date, str], int] = defaultdict(int)
     task_days_by_tn: dict[str, set[date]] = {}
+    visits_hist = _perf_load_overview_visits_history(df_all)
+    prepared_visits = (
+        _perf_prepare_visits_df(visits_hist) if not visits_hist.empty else pd.DataFrame()
+    )
 
     logs = _fetch_assignment_task_logs_in_range_cached(
         range_start.isoformat(),
@@ -13932,6 +13992,10 @@ def _perf_assignment_task_day_counts(
             for key in keys:
                 label = credit_to_label.get(key)
                 if not label:
+                    continue
+                if _perf_assignment_log_is_accidental_reassign(
+                    tn, stamp, key, prepared_visits
+                ):
                     continue
                 _perf_add_assignment_task_day_count(
                     day_counts,
@@ -14033,7 +14097,10 @@ def _perf_assignment_task_day_counts(
                 case_row = sales_rows.get(tn)
                 if case_row is None:
                     continue
-                for handle, label in credit_to_label.items():
+                for credit_key in _perf_response_log_credit_keys(row, case_row):
+                    label = credit_to_label.get(credit_key)
+                    if not label:
+                        continue
                     if not _perf_row_credited_to_person(case_row, label):
                         continue
                     _perf_add_assignment_task_day_count(
@@ -14043,7 +14110,7 @@ def _perf_assignment_task_day_counts(
                         logged_ticket_day,
                         day=day,
                         tn=tn,
-                        credit_key=handle,
+                        credit_key=credit_key,
                         label=label,
                         sales_refs=sales_refs,
                         tickets_by_day=tickets_by_day,
@@ -14054,8 +14121,7 @@ def _perf_assignment_task_day_counts(
             ticket_row = ticket_rows.get(tn)
             if ticket_row is None:
                 continue
-            for key in _perf_ticket_credit_assignees(ticket_row):
-                credit_key = _perf_person_credit_key(key)
+            for credit_key in _perf_response_log_credit_keys(row, ticket_row):
                 label = credit_to_label.get(credit_key)
                 if not label:
                     continue
@@ -14302,6 +14368,10 @@ def _perf_daily_assignment_log_attended_by_engineer_day(
                 active_tickets.add(tn)
 
     events: list[tuple[pd.Timestamp, date, str, str]] = []
+    visits_hist = _perf_load_overview_visits_history(df_all)
+    prepared_visits = (
+        _perf_prepare_visits_df(visits_hist) if not visits_hist.empty else pd.DataFrame()
+    )
     logs = _fetch_assignment_task_logs_in_range_cached(
         range_start.isoformat(),
         range_end.isoformat(),
@@ -14323,6 +14393,10 @@ def _perf_daily_assignment_log_attended_by_engineer_day(
                 [str(row.get("member_username") or "")]
             )
             for key in keys:
+                if _perf_assignment_log_is_accidental_reassign(
+                    tn, stamp, key, prepared_visits
+                ):
+                    continue
                 lab = credit_to_label.get(key)
                 if lab:
                     events.append((stamp, day_d, lab, tn))
