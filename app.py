@@ -1919,7 +1919,6 @@ _PERF_FOCUS_REV_KEY = "_perf_focus_rev"
 _PERF_RANGE_FROM_KEY = "_perf_range_from_utc"
 _PERF_RANGE_TO_KEY = "_perf_range_to_utc"
 _PERF_VIEW_OPTIONS: tuple[str, ...] = (
-    "Overview",
     "Summary",
     "Case info",
     "Handled",
@@ -1927,7 +1926,6 @@ _PERF_VIEW_OPTIONS: tuple[str, ...] = (
 )
 _PERF_VIEW_OPTIONS_FOCUSED: tuple[str, ...] = (
     "Summary",
-    "Overview",
     "Case info",
     "Handled",
 )
@@ -9143,7 +9141,7 @@ def _render_perf_visit_staff_matrix(
         '<span class="perf-matrix-legend-item"><i style="color:#22c55e">✓</i> Responded</span>',
         '<span class="perf-matrix-legend-item"><i style="color:#60a5fa">↪</i> Reassigned</span>',
         '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">A</i> Assigned</span>',
-        '<span class="perf-matrix-legend-item"><i style="color:#ef4444">U</i> Unattended</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#ef4444">U</i> Unatt (cycle)</span>',
         '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">■</i> Shared ticket</span>',
     ]
 
@@ -9361,7 +9359,7 @@ def _render_perf_matrix_html_from_payload(payload: dict[str, object]) -> None:
         '<span class="perf-matrix-legend-item"><i style="color:#22c55e">✓</i> Responded</span>',
         '<span class="perf-matrix-legend-item"><i style="color:#60a5fa">↪</i> Reassigned</span>',
         '<span class="perf-matrix-legend-item"><i style="color:#3b82f6">A</i> Assigned</span>',
-        '<span class="perf-matrix-legend-item"><i style="color:#ef4444">U</i> Unattended</span>',
+        '<span class="perf-matrix-legend-item"><i style="color:#ef4444">U</i> Unatt (cycle)</span>',
     ]
     matrix_html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
@@ -9678,11 +9676,10 @@ def _init_perf_session_state() -> None:
     if _PERF_RANGE_PRESET_KEY not in st.session_state:
         st.session_state[_PERF_RANGE_PRESET_KEY] = "This week"
     if _PERF_ACTIVE_VIEW_KEY not in st.session_state:
-        st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Overview"
-    # Rename legacy "Weekly" nav label → "Summary"
-    if st.session_state.get(_PERF_ACTIVE_VIEW_KEY) == "Weekly":
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
-    if st.session_state.get(_PERF_ACTIVE_VIEW_KEY) == "Report":
+    # Legacy Performance nav labels → Summary
+    _legacy_perf_views = {"Weekly", "Report", "Overview", "Unattended"}
+    if st.session_state.get(_PERF_ACTIVE_VIEW_KEY) in _legacy_perf_views:
         st.session_state[_PERF_ACTIVE_VIEW_KEY] = "Summary"
     if _PERF_SELECTED_ENGINEER_KEY not in st.session_state:
         st.session_state[_PERF_SELECTED_ENGINEER_KEY] = None
@@ -9764,9 +9761,9 @@ def _sync_perf_view_for_focus() -> None:
     """Ensure the active view exists for the current Focus assignee (avoids radio crash)."""
     focus = _perf_focus_for_filter()
     views = list(_perf_sidebar_view_options(focus))
-    cur = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
-    if cur == "Unattended":
-        cur = "Summary" if focus not in ("", "All") else "Overview"
+    cur = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Summary"))
+    if cur in ("Overview", "Unattended", "Weekly", "Report"):
+        cur = "Summary"
     if cur not in views:
         cur = views[0]
     st.session_state[_PERF_ACTIVE_VIEW_KEY] = cur
@@ -15215,7 +15212,7 @@ def _render_perf_summary_team_assignment_table(
     team_unique = int(metrics.get("team_unique_in_range") or 0)
     range_label = _format_perf_range_caption() or "sidebar date range"
     st.caption(
-        f"All columns use **{range_label}** (same scope as Performance Overview bars). "
+        f"All columns use **{range_label}** (same scope as Summary assign-day metrics). "
         "**Unique tickets** = distinct IDs assigned to that engineer; "
         "**Residential** + **Resort** = the same split of unique. "
         "**Attended (assigned)** + **Still open (assigned)** = unique. "
@@ -15508,7 +15505,7 @@ def _render_perf_summary_workload_row(metrics: dict[str, object]) -> None:
     closed_other = int(metrics.get("closed_by_others") or 0)
     cards = [
         ("Assignment cycles", str(cycles), "Each assign + reassign in range"),
-        ("Unattended cycles", str(unattended), "Assign days without response · Overview / team table"),
+        ("Unattended cycles", str(unattended), "Assign days without response · Summary team table"),
         ("Handed off", str(closed_other), "Other engineer credited at attended"),
     ]
     parts: list[str] = []
@@ -25480,34 +25477,11 @@ def _render_sales_cases_dashboard() -> None:
             _render_sales_right_rail()
 
 
-def _dispatch_unattended_in_sidebar_range(
-    df_all: pd.DataFrame,
-    *,
-    range_start: pd.Timestamp,
-    range_end: pd.Timestamp,
-    visits_history: pd.DataFrame | None = None,
-) -> int:
-    """Assign-day unattended cases in header range — same total as Performance UNATTENDED."""
-    if df_all.empty:
-        return 0
-    unatt_map = _perf_overview_unattended_counts_by_credit(
-        df_all,
-        focus="All",
-        visits=visits_history,
-        range_start=range_start,
-        range_end=range_end,
-    )
-    return sum(int(v) for v in unatt_map.values())
-
-
 def _dispatch_today_metrics(
     df_all: pd.DataFrame,
     *,
     df_in_view: pd.DataFrame,
     sales_df: pd.DataFrame | None = None,
-    range_start: pd.Timestamp | None = None,
-    range_end: pd.Timestamp | None = None,
-    visits_history: pd.DataFrame | None = None,
 ) -> tuple[int, int, int, int]:
     today = datetime.now(OPS_TZ).date()
     start = _local_date_start(today)
@@ -25530,13 +25504,8 @@ def _dispatch_today_metrics(
             responded_today += int(((rp_s >= start) & (rp_s <= end)).sum())
     masks = _ticket_queue_count_masks(df_in_view)
     daily_task_count = int(masks["pending"].sum())
-    if range_start is not None and range_end is not None:
-        unattended_count = _dispatch_unattended_in_sidebar_range(
-            df_all,
-            range_start=range_start,
-            range_end=range_end,
-            visits_history=visits_history,
-        )
+    if not df_all.empty:
+        unattended_count = int(_ticket_marked_unattended_mask(df_all).sum())
     else:
         unattended_count = int(masks["unattended"].sum())
     return assigned_today, responded_today, daily_task_count, unattended_count
@@ -28377,20 +28346,8 @@ def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
     resort_counts = resort_bundle.get("counts") or {q: 0 for q in QUEUE_ORDER}
     if not isinstance(resort_counts, dict):
         resort_counts = {q: 0 for q in QUEUE_ORDER}
-    visits_history = (
-        _perf_load_overview_visits_history(df_all)
-        if not df_all.empty and "ticket_number" in df_all.columns
-        else pd.DataFrame()
-    )
     assigned_today, responded_today, daily_task_count, unattended_count = (
-        _dispatch_today_metrics(
-            df_all,
-            df_in_view=df,
-            sales_df=sales_df,
-            range_start=range_start,
-            range_end=range_end,
-            visits_history=visits_history,
-        )
+        _dispatch_today_metrics(df_all, df_in_view=df, sales_df=sales_df)
     )
     aq_key = active_queue_key()
     if aq_key not in st.session_state:
@@ -28590,7 +28547,7 @@ def _render_dispatch_board_sidebar(ctx: dict[str, object]) -> str:
                 ("Assigned", ctx["assigned_today"], "#3b82f6"),
                 ("Responded", ctx["responded_today"], "#22c55e"),
                 ("Daily task", ctx["daily_task_count"], "#3b82f6"),
-                ("Unattended", ctx["unattended_count"], "#ef4444"),
+                ("Flagged", ctx["unattended_count"], "#ef4444"),
             )
         )
         st.markdown(
@@ -28941,69 +28898,86 @@ def _count_resort_total(*, sales_all: pd.DataFrame | None = None) -> int:
         return 0
 
 
-def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
+def _render_performance_metric_strip(
+    *,
+    counts: dict[str, int],
+    range_caption: str | None = None,
+    focus_scope: str | None = None,
+) -> None:
     """Two rows of four metric cards for the Performance main column."""
+    st.markdown(
+        '<p style="font-size:11px;font-weight:600;color:#4a5a7a;letter-spacing:.06em;'
+        'text-transform:uppercase;margin:0 0 8px">Queue snapshot</p>',
+        unsafe_allow_html=True,
+    )
+    if focus_scope:
+        st.markdown(
+            f'<p style="font-size:11px;color:#8a9ac0;margin:-4px 0 8px">'
+            f"{html.escape(focus_scope)}</p>",
+            unsafe_allow_html=True,
+        )
     row1 = st.columns(4)
     row2 = st.columns(4)
-    flagged_snapshot = int(counts.get("flagged_backlog") or 0)
+    flagged_val = int(counts["unattended"])
+    flagged_color = "#ef4444" if flagged_val > 0 else "#8a9ac0"
     metrics_row1 = [
-        ("RESIDENTIAL", counts["total"], "#8a9ac0"),
-        ("DAILY TASK", counts["daily_task"], "#8a9ac0"),
-        ("REVIEW", counts["review"], "#8a9ac0"),
-        ("ON HOLD", counts["on_hold"], "#8a9ac0"),
+        ("RESIDENTIAL", counts["total"], "#8a9ac0", ""),
+        ("DAILY TASK", counts["daily_task"], "#8a9ac0", ""),
+        ("REVIEW", counts["review"], "#8a9ac0", ""),
+        ("ON HOLD", counts["on_hold"], "#8a9ac0", ""),
     ]
     metrics_row2 = [
-        ("RESOLVED", counts["resolved"], "#8a9ac0"),
-        ("INVESTIGATION", counts["investigation"], "#8a9ac0"),
-        (
-            "UNATTENDED",
-            counts["unattended"],
-            "#ef4444" if counts["unattended"] > 0 else "#8a9ac0",
-        ),
-        ("RESORT", counts["resort"], "#a78bfa"),
+        ("RESOLVED", counts["resolved"], "#8a9ac0", ""),
+        ("INVESTIGATION", counts["investigation"], "#8a9ac0", ""),
+        ("FLAGGED", flagged_val, flagged_color, "marked in queue"),
+        ("RESORT", counts["resort"], "#a78bfa", ""),
     ]
-    for col, (label, val, color) in zip(row1, metrics_row1):
-        with col:
-            st.markdown(
-                f"""
+
+    def _metric_card(val: int | str, label: str, color: str, sublabel: str) -> str:
+        sub = (
+            f'<div style="font-size:9px;color:#4a5a7a;margin-top:1px">'
+            f"{html.escape(sublabel)}</div>"
+            if sublabel
+            else ""
+        )
+        return f"""
             <div style="background:#0d1220;border:0.5px solid #1a2035;
               border-radius:5px;padding:8px 9px">
               <div style="font-size:22px;font-weight:600;color:{color};
                 font-variant-numeric:tabular-nums">{val}</div>
-              <div style="font-size:11px;color:#2a3a5a;margin-top:2px">{label}</div>
+              <div style="font-size:11px;color:#2a3a5a;margin-top:2px">{html.escape(label)}</div>
+              {sub}
             </div>
-            """,
-                unsafe_allow_html=True,
-            )
-    for col, (label, val, color) in zip(row2, metrics_row2):
+            """
+
+    for col, (label, val, color, sub) in zip(row1, metrics_row1):
         with col:
-            st.markdown(
-                f"""
-            <div style="background:#0d1220;border:0.5px solid #1a2035;
-              border-radius:5px;padding:8px 9px">
-              <div style="font-size:22px;font-weight:600;color:{color};
-                font-variant-numeric:tabular-nums">{val}</div>
-              <div style="font-size:11px;color:#2a3a5a;margin-top:2px">{label}</div>
-            </div>
-            """,
-                unsafe_allow_html=True,
-            )
+            st.markdown(_metric_card(val, label, color, sub), unsafe_allow_html=True)
+    for col, (label, val, color, sub) in zip(row2, metrics_row2):
+        with col:
+            st.markdown(_metric_card(val, label, color, sub), unsafe_allow_html=True)
+
     combined = int(counts.get("combined", counts["total"] + counts["resort"]))
-    if flagged_snapshot or int(counts.get("unattended") or 0) != flagged_snapshot:
-        st.caption(
-            f"**Queue snapshot** — combined backlog **{combined}** "
-            f"(Residential {counts['total']} + Resort {counts['resort']}). "
-            f"**UNATTENDED** = assign-day misses in the header range (same as engineer "
-            f"**Unatt** bars; sum of rows may exceed unique tickets on shared assigns). "
-            f"**Flagged backlog (now):** {flagged_snapshot} ticket(s) with "
-            f"`marked_unattended_at`."
+    range_bit = ""
+    if range_caption:
+        range_bit = (
+            f' <strong>Unatt</strong> bars use assign-day misses in '
+            f"<strong>{html.escape(range_caption)}</strong> "
+            f"(row sum may exceed unique tickets on shared assigns)."
         )
-    else:
-        st.caption(
-            f"**Queue snapshot** — combined backlog **{combined}** "
-            f"(Residential {counts['total']} + Resort {counts['resort']}). "
-            "**UNATTENDED** = tickets with `marked_unattended_at` (queue snapshot)."
-        )
+    st.markdown(
+        f"""
+    <div style="background:#0a0f18;border:0.5px solid #1a2035;border-radius:6px;
+      padding:8px 10px;margin-top:8px;font-size:11px;color:#6a7a9a;line-height:1.45">
+      Combined backlog <strong style="color:#8a9ac0">{combined}</strong>
+      (Residential {counts['total']} + Resort {counts['resort']}).
+      Cards ignore the header date range.
+      <strong style="color:#ef4444">FLAGGED</strong> =
+      tickets with <code style="color:#8a9ac0">marked_unattended_at</code>.{range_bit}
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 def _perf_overview_df_for_solo_shared(df_all: pd.DataFrame) -> pd.DataFrame:
@@ -29956,13 +29930,12 @@ def _render_combined_overview_legend() -> None:
       <span><span style="width:8px;height:8px;border-radius:2px;
         background:{CHART_COLORS['resort_shared']};display:inline-block;margin-right:4px"></span>Rsr shared</span>
       <span><span style="width:8px;height:8px;border-radius:2px;
-        background:#ef4444;display:inline-block;margin-right:4px"></span>Unattended</span>
+        background:#ef4444;display:inline-block;margin-right:4px"></span>Unatt (range)</span>
     </div>
     <p style="font-size:11px;color:#4a5a7a;margin:0 0 8px;line-height:1.4">
-      <strong>Residential</strong> = visit fair credit in sidebar range (unattended excluded) ·
-      <strong>Resort</strong> = resort case credit in sidebar range ·
-      <strong>Admin</strong> = no field engineer (residential or resort) ·
-      <strong>Unattended</strong> = missed assign-day cycles (UTC+5 assign day in sidebar range; assignee only).</p>
+      <strong>Res solo/shared</strong> · <strong>Rsr solo/shared</strong> ·
+      <strong>Admin</strong> = credit rules in header range.
+      Red segment = assign-day miss (UTC+5), assignee only — not the <strong>FLAGGED</strong> card.</p>
     """,
         unsafe_allow_html=True,
     )
@@ -30222,10 +30195,16 @@ def _render_perf_overview_tab(
         return
 
     focus_suffix = html.escape(_perf_focus_heading_suffix(focus))
+    range_label = _format_perf_range_caption() or "sidebar range"
+    total_unatt_cases = sum(int(v) for v in unattended_map.values())
     st.markdown(
-        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;'
-        f'margin:6px 0 8px">Solo vs shared — Residential + Resort '
-        f"({_format_perf_range_caption() or 'sidebar range'}){focus_suffix}</p>",
+        f'<p style="font-size:15px;font-weight:500;color:#e2e8f8;margin:6px 0 4px">'
+        f"Solo vs shared — Residential + Resort{focus_suffix}</p>"
+        f'<p style="font-size:11px;color:#4a5a7a;margin:0 0 8px">'
+        f'<span style="display:inline-block;background:#131927;border:0.5px solid #1a2035;'
+        f"border-radius:4px;padding:2px 8px;margin-right:8px\">Unatt bars · "
+        f"{html.escape(range_label)}</span>"
+        f'<span style="color:#8a9ac0">Unatt total {total_unatt_cases}</span></p>',
         unsafe_allow_html=True,
     )
     _render_combined_overview_legend()
@@ -30235,17 +30214,6 @@ def _render_perf_overview_tab(
         res_map=res_map,
         rsr_map=rsr_map,
         unattended_map=unattended_map,
-    )
-
-    total_unatt_cases = sum(int(v) for v in unattended_map.values())
-    flagged_backlog = (
-        int(_ticket_marked_unattended_mask(df_all).sum()) if not df_all.empty else 0
-    )
-    range_label = _format_perf_range_caption() or "sidebar range"
-    st.caption(
-        f"**Unattended ({range_label}, assign day UTC+5):** {total_unatt_cases} case(s) — "
-        f"matches the **UNATTENDED** card and the sum of **Unatt** on each engineer row. "
-        f"**Flagged backlog (now):** {flagged_backlog} ticket(s) still marked unattended in queue."
     )
 
     st.markdown(
@@ -30422,6 +30390,11 @@ def _get_engineer_performance_detail(
                 }
             )
 
+    flagged_backlog = 0
+    if not df_all.empty and credit_key not in ("", "(unknown)"):
+        flagged_rows = df_all.loc[_ticket_marked_unattended_mask(df_all)]
+        flagged_backlog = len(_perf_filter_by_person(flagged_rows, credit_key))
+
     return {
         "total": solo + shared + resort_count + overview_unattended,
         "solo": solo,
@@ -30430,6 +30403,7 @@ def _get_engineer_performance_detail(
         "rsr_solo": rsr_solo,
         "rsr_shared": rsr_shared,
         "overview_unattended": overview_unattended,
+        "flagged_backlog": flagged_backlog,
         "resolved": resolved,
         "unattended": unattended,
         "avg_response": avg_response,
@@ -30505,16 +30479,16 @@ def _render_performance_detail_panel(
         ("Resort solo (range)", detail.get("rsr_solo", 0), "#a78bfa"),
         ("Resort shared (range)", detail.get("rsr_shared", 0), "#a78bfa"),
         (
-            "Unattended (range)",
+            "Unatt cases (range)",
             detail.get("overview_unattended", 0),
             "#ef4444" if int(detail.get("overview_unattended", 0)) > 0 else "#22c55e",
         ),
         ("Resolved (in range)", detail["resolved"], "#8a9ac0"),
         ("Avg response (in range)", detail["avg_response"], "#8a9ac0"),
         (
-            "Unattended marked (in range)",
-            detail["unattended"],
-            "#ef4444" if int(detail["unattended"]) > 0 else "#22c55e",
+            "Flagged tickets (snapshot)",
+            detail.get("flagged_backlog", 0),
+            "#ef4444" if int(detail.get("flagged_backlog", 0)) > 0 else "#22c55e",
         ),
     ]
     for label, val, color in rows:
@@ -30969,7 +30943,7 @@ def _render_perf_unattended_tab(
         )
         if focus not in ("", "All"):
             st.caption(
-                "Flagged backlog counts appear on **Overview** and **Summary** (team table / KPIs)."
+                "Flagged backlog counts appear on **Summary** (queue snapshot cards / team table)."
             )
 
 
@@ -31032,7 +31006,9 @@ def _render_performance_sidebar() -> None:
         f'<div style="font-size:11px;color:#8a9ac0;line-height:1.45;margin-bottom:14px">'
         f"Range: <strong>{preset_label}</strong>{cap_html}<br>"
         f"Change it with the <strong>{html.escape(_context_strip_range_trigger())}</strong> "
-        f"control in the bar above.</div>",
+        f"control in the bar above.<br>"
+        f'<span style="color:#4a5a7a">Snapshot cards ignore this range; '
+        f"<strong>Unatt</strong> bars, Summary, and Handled use it.</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -31193,7 +31169,7 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
         _sync_dash_range_from_ui(str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week")))
         range_start, range_end = _get_dash_range()
         focus = _perf_focus_for_filter()
-        view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+        view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Summary"))
         try:
             with _dash_perf_span("perf.fetch_tickets"):
                 df_all = _fetch_tickets_cached()
@@ -31225,7 +31201,7 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
                 pass
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
         visits_history = pd.DataFrame()
-        if field_has_data and view == "Overview":
+        if field_has_data and view == "Summary":
             with _dash_perf_span("perf.load_visits_history", view=view):
                 visits_history = _perf_load_overview_visits_history(df_all)
         return {
@@ -31248,7 +31224,7 @@ def _perf_context_cache_key(lookback_days: int) -> tuple[object, ...]:
     _init_perf_session_state()
     _init_dash_date_range_state()
     focus = str(st.session_state.get(_PERF_FOCUS_ASSIGNEE_KEY, "All engineers"))
-    view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Overview"))
+    view = str(st.session_state.get(_PERF_ACTIVE_VIEW_KEY, "Summary"))
     preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
     range_start, range_end = _get_dash_range()
     return (
@@ -31291,39 +31267,28 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
     visits_f = ctx["visits_f"]
     visits_history = ctx.get("visits_history", pd.DataFrame())
 
+    focus_scope = None
+    if focus not in ("", "All", "All engineers"):
+        focus_scope = f"Snapshot counts for {focus}"
+
     with _dash_perf_span("perf.render_view", view=view, focus=focus):
-        if view == "Overview":
-            strip_counts = dict(counts)
-            strip_counts["flagged_backlog"] = int(strip_counts.get("unattended") or 0)
-            unattended_map = _perf_overview_unattended_counts_by_credit(
-                df_all,
-                focus=focus,
-                visits=visits_history,
-                range_start=range_start,
-                range_end=range_end,
+        if view == "Summary":
+            _render_performance_metric_strip(
+                counts=counts,
+                range_caption=_format_perf_range_caption() or "header range",
+                focus_scope=focus_scope,
             )
-            strip_counts["unattended"] = sum(int(v) for v in unattended_map.values())
-            _render_performance_metric_strip(counts=strip_counts)
             st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
         elif view == "On hold":
-            _render_performance_metric_strip(counts=counts)
+            _render_performance_metric_strip(counts=counts, focus_scope=focus_scope)
             st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
-        elif view != "Summary":
+        elif view not in ("Summary", "On hold"):
             st.caption(
-                "Queue snapshot cards apply to **Overview** and **On hold** only. "
+                "Queue snapshot cards apply to **Summary** and **On hold** only. "
                 "This view uses the header **time range**."
             )
             st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
-        if view == "Overview":
-            _render_perf_overview_tab(
-                df_all,
-                sales_all,
-                focus=focus,
-                range_start=range_start,
-                range_end=range_end,
-                visits_history=visits_history,
-            )
-        elif view == "Summary":
+        if view == "Summary":
             _render_perf_weekly_tab(
                 df_all,
                 sales_all,
