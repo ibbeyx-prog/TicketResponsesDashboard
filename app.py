@@ -25480,11 +25480,34 @@ def _render_sales_cases_dashboard() -> None:
             _render_sales_right_rail()
 
 
+def _dispatch_unattended_in_sidebar_range(
+    df_all: pd.DataFrame,
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
+) -> int:
+    """Assign-day unattended cases in header range — same total as Performance UNATTENDED."""
+    if df_all.empty:
+        return 0
+    unatt_map = _perf_overview_unattended_counts_by_credit(
+        df_all,
+        focus="All",
+        visits=visits_history,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    return sum(int(v) for v in unatt_map.values())
+
+
 def _dispatch_today_metrics(
     df_all: pd.DataFrame,
     *,
     df_in_view: pd.DataFrame,
     sales_df: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
+    visits_history: pd.DataFrame | None = None,
 ) -> tuple[int, int, int, int]:
     today = datetime.now(OPS_TZ).date()
     start = _local_date_start(today)
@@ -25507,7 +25530,15 @@ def _dispatch_today_metrics(
             responded_today += int(((rp_s >= start) & (rp_s <= end)).sum())
     masks = _ticket_queue_count_masks(df_in_view)
     daily_task_count = int(masks["pending"].sum())
-    unattended_count = int(masks["unattended"].sum())
+    if range_start is not None and range_end is not None:
+        unattended_count = _dispatch_unattended_in_sidebar_range(
+            df_all,
+            range_start=range_start,
+            range_end=range_end,
+            visits_history=visits_history,
+        )
+    else:
+        unattended_count = int(masks["unattended"].sum())
     return assigned_today, responded_today, daily_task_count, unattended_count
 
 
@@ -28301,12 +28332,12 @@ def _dispatch_run_action(
 def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
     """Ticket-board context: queues, resort bundle, sidebar metrics."""
     del lookback_days
+    range_start, range_end = _get_dash_range()
     df_all = _fetch_tickets_cached()
     if df_all.empty or "status" not in df_all.columns:
         df = pd.DataFrame({"status": pd.Series(dtype=str)})
         masks = _ticket_queue_count_masks(df)
     else:
-        range_start, range_end = _get_dash_range()
         df, _ = _dashboard_tickets_in_view(
             df_all, range_start=range_start, range_end=range_end
         )
@@ -28346,8 +28377,20 @@ def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
     resort_counts = resort_bundle.get("counts") or {q: 0 for q in QUEUE_ORDER}
     if not isinstance(resort_counts, dict):
         resort_counts = {q: 0 for q in QUEUE_ORDER}
+    visits_history = (
+        _perf_load_overview_visits_history(df_all)
+        if not df_all.empty and "ticket_number" in df_all.columns
+        else pd.DataFrame()
+    )
     assigned_today, responded_today, daily_task_count, unattended_count = (
-        _dispatch_today_metrics(df_all, df_in_view=df, sales_df=sales_df)
+        _dispatch_today_metrics(
+            df_all,
+            df_in_view=df,
+            sales_df=sales_df,
+            range_start=range_start,
+            range_end=range_end,
+            visits_history=visits_history,
+        )
     )
     aq_key = active_queue_key()
     if aq_key not in st.session_state:
@@ -28374,14 +28417,27 @@ def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
     }
 
 
+def _dispatch_context_cache_key(lookback_days: int) -> tuple[object, ...]:
+    range_start, range_end = _get_dash_range()
+    preset = str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+    return (
+        lookback_days,
+        preset,
+        range_start.isoformat(),
+        range_end.isoformat(),
+    )
+
+
 def _load_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
     """Ticket-board context — one build per full rerun, reused by board + detail fragments."""
+    cache_key = _dispatch_context_cache_key(lookback_days)
     cached = st.session_state.get(_DISPATCH_CTX_SESSION_KEY)
-    if isinstance(cached, dict) and cached.get("_lookback_days") == lookback_days:
+    if isinstance(cached, dict) and cached.get("_cache_key") == cache_key:
         return cached
     ctx = _build_dispatch_ticket_context(lookback_days)
     st.session_state[_DISPATCH_CTX_SESSION_KEY] = {
         **ctx,
+        "_cache_key": cache_key,
         "_lookback_days": lookback_days,
     }
     return st.session_state[_DISPATCH_CTX_SESSION_KEY]
@@ -28889,6 +28945,7 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
     """Two rows of four metric cards for the Performance main column."""
     row1 = st.columns(4)
     row2 = st.columns(4)
+    flagged_snapshot = int(counts.get("flagged_backlog") or 0)
     metrics_row1 = [
         ("RESIDENTIAL", counts["total"], "#8a9ac0"),
         ("DAILY TASK", counts["daily_task"], "#8a9ac0"),
@@ -28899,7 +28956,7 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
         ("RESOLVED", counts["resolved"], "#8a9ac0"),
         ("INVESTIGATION", counts["investigation"], "#8a9ac0"),
         (
-            "FLAGGED",
+            "UNATTENDED",
             counts["unattended"],
             "#ef4444" if counts["unattended"] > 0 else "#8a9ac0",
         ),
@@ -28932,12 +28989,21 @@ def _render_performance_metric_strip(*, counts: dict[str, int]) -> None:
                 unsafe_allow_html=True,
             )
     combined = int(counts.get("combined", counts["total"] + counts["resort"]))
-    st.caption(
-        f"**Queue snapshot** — combined backlog **{combined}** "
-        f"(Residential {counts['total']} + Resort {counts['resort']}). "
-        "**FLAGGED** = tickets with `marked_unattended_at` (not assignment cases). "
-        "Overview / Summary credit rows are **per engineer** and may overlap on shared tickets."
-    )
+    if flagged_snapshot or int(counts.get("unattended") or 0) != flagged_snapshot:
+        st.caption(
+            f"**Queue snapshot** — combined backlog **{combined}** "
+            f"(Residential {counts['total']} + Resort {counts['resort']}). "
+            f"**UNATTENDED** = assign-day misses in the header range (same as engineer "
+            f"**Unatt** bars; sum of rows may exceed unique tickets on shared assigns). "
+            f"**Flagged backlog (now):** {flagged_snapshot} ticket(s) with "
+            f"`marked_unattended_at`."
+        )
+    else:
+        st.caption(
+            f"**Queue snapshot** — combined backlog **{combined}** "
+            f"(Residential {counts['total']} + Resort {counts['resort']}). "
+            "**UNATTENDED** = tickets with `marked_unattended_at` (queue snapshot)."
+        )
 
 
 def _perf_overview_df_for_solo_shared(df_all: pd.DataFrame) -> pd.DataFrame:
@@ -30177,9 +30243,9 @@ def _render_perf_overview_tab(
     )
     range_label = _format_perf_range_caption() or "sidebar range"
     st.caption(
-        f"**Unatt assignments ({range_label}, by assign day UTC+5):** {total_unatt_cases} case(s) · "
-        f"**Flagged backlog (snapshot):** {flagged_backlog} ticket(s). "
-        "Counts assign-day misses (same calendar rule as Daily Tasks), not raw visit timestamp alone."
+        f"**Unattended ({range_label}, assign day UTC+5):** {total_unatt_cases} case(s) — "
+        f"matches the **UNATTENDED** card and the sum of **Unatt** on each engineer row. "
+        f"**Flagged backlog (now):** {flagged_backlog} ticket(s) still marked unattended in queue."
     )
 
     st.markdown(
@@ -31227,7 +31293,17 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
 
     with _dash_perf_span("perf.render_view", view=view, focus=focus):
         if view == "Overview":
-            _render_performance_metric_strip(counts=counts)
+            strip_counts = dict(counts)
+            strip_counts["flagged_backlog"] = int(strip_counts.get("unattended") or 0)
+            unattended_map = _perf_overview_unattended_counts_by_credit(
+                df_all,
+                focus=focus,
+                visits=visits_history,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            strip_counts["unattended"] = sum(int(v) for v in unattended_map.values())
+            _render_performance_metric_strip(counts=strip_counts)
             st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
         elif view == "On hold":
             _render_performance_metric_strip(counts=counts)
