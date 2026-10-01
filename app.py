@@ -534,7 +534,7 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v19"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v20"
 _DASH_THEME_CSS_CACHE_KEY = "_dash_theme_css_text_cache"
 _DASH_THEME_STYLE_ID = "disp-dashboard-theme"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
@@ -610,6 +610,9 @@ def apply_theme(*, login: bool = False) -> None:
     st.session_state[theme_key] = True
     css_text = f"""
     /* ── Base (typography: Streamlit theme / Source Sans preload) ── */
+    .stApp {{
+      font-family: "Source Sans", sans-serif;
+    }}
     [data-testid="stAppViewContainer"] {{ background: #0a0f1a; }}
     [data-testid="stSidebar"]          {{ background: #0f1629; border-right: 1px solid #243047; }}
     [data-testid="block-container"],
@@ -2322,6 +2325,7 @@ _LOGIN_PAGE_STYLES_KEY = "_login_page_styles_applied"
 _DASH_SUPABASE_WARMED_KEY = "_dash_supabase_warmed_login"
 _DASH_POST_LOGIN_BOOTSTRAP_KEY = "_dash_post_login_bootstrap"
 _DASH_DEFER_MAINTENANCE_KEY = "_dash_defer_maintenance"
+_DASH_DEFER_MISMATCH_KEY = "_dash_defer_mismatch_once"
 _MIN_DASHBOARD_PASSWORD_LEN = 8
 _MAX_OPERATOR_ID_LEN = 64
 _MAX_DASHBOARD_USERNAME_LEN = 48
@@ -2464,8 +2468,31 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_AUTH_USERNAME_KEY] = username
     st.session_state[_OPERATOR_ID_KEY] = operator_id
     st.session_state[_DASH_POST_LOGIN_BOOTSTRAP_KEY] = True
+    st.session_state[_DASH_DEFER_MISMATCH_KEY] = True
     st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
+    st.session_state.pop(_DISPATCH_CTX_SESSION_KEY, None)
+
+
+def _warm_dashboard_data_cache_after_login() -> None:
+    """Prefetch queue data during login so the first Ticket paint hits warm caches."""
+    with _dash_perf_span("login.prefetch_dashboard"):
+        try:
+            _fetch_tickets_cached()
+        except Exception:
+            pass
+        try:
+            _fetch_sales_cases_cached()
+        except Exception:
+            pass
+        try:
+            _cached_field_engineer_usernames()
+        except Exception:
+            pass
+        try:
+            _try_fetch_task_categories()
+        except Exception:
+            pass
 
 
 def _warm_supabase_for_login() -> None:
@@ -3111,6 +3138,8 @@ def _handle_per_user_login(username: str, password: str, remember: bool) -> None
     else:
         _login_remember_clear()
     _log_dashboard_auth_event("LoginSuccess", member_username=op, note=f"username={uname}")
+    with st.spinner("Preparing dashboard…"):
+        _warm_dashboard_data_cache_after_login()
     st.rerun()
 
 
@@ -3133,6 +3162,7 @@ def _handle_legacy_login(operator_id: str, shared_password: str, *, legacy_passw
         st.session_state["is_legacy_session"] = True
         _log_legacy_login_attendance(op)
         _log_dashboard_auth_event("LoginSuccess", member_username=op, note="legacy")
+        _warm_dashboard_data_cache_after_login()
     st.rerun()
 
 
@@ -3604,7 +3634,6 @@ _TICKETS_DASHBOARD_SELECT: tuple[str, ...] = (
     "task_category",
     "outcome_category",
     "additional_info",
-    "field_response",
     "field_responded_by",
     "photo_url",
     "responded_at",
@@ -3658,6 +3687,7 @@ def _invalidate_dashboard_data_cache(
     clearables = []
     if tickets:
         clearables.append(_fetch_tickets_cached)
+        clearables.append(_fetch_ticket_row_cached)
         _cached_latest_admin_comment.clear()
     if sales_cases:
         clearables.append(_fetch_sales_cases_cached)
@@ -3869,6 +3899,27 @@ def _fetch_ticket_row(ticket_number: str) -> dict | None:
             _note_supabase_unreachable(exc)
             return None
         raise
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _fetch_ticket_row_cached(ticket_number: str) -> dict | None:
+    """Single-ticket row (includes field_response) for Case info / modals."""
+    return _fetch_ticket_row(ticket_number)
+
+
+def _dispatch_ticket_detail_row(ticket: dict[str, object] | None) -> dict[str, object] | None:
+    """Merge full ticket columns when the list snapshot omitted heavy fields."""
+    if not ticket:
+        return None
+    tn = str(ticket.get("ticket_number") or "").strip()
+    if not tn:
+        return ticket
+    if str(ticket.get("field_response") or "").strip():
+        return ticket
+    full = _fetch_ticket_row_cached(tn)
+    if not full:
+        return ticket
+    return {**ticket, **full}
 
 
 def _ticket_row_has_field_response(row: object) -> bool:
@@ -12930,6 +12981,8 @@ def _perf_summary_attach_team_assignment(
     *,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
+    visits_range: pd.DataFrame | None = None,
 ) -> None:
     if isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
         return
@@ -12938,6 +12991,8 @@ def _perf_summary_attach_team_assignment(
         sales_all,
         range_start=range_start,
         range_end=range_end,
+        visits_history=visits_history,
+        visits_range=visits_range,
     )
     metrics["team_assignment_df"] = team_df
     metrics["team_unique_in_range"] = int(
@@ -12986,6 +13041,7 @@ def _perf_summary_attach_team_daily_combo(
     *,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    attended_bundle: dict[str, object] | None = None,
 ) -> None:
     """Team (All engineers) — same daily combo chart as Focus assignee, totals per day."""
     if metrics.get("_team_combo_loaded") and isinstance(
@@ -13001,13 +13057,16 @@ def _perf_summary_attach_team_daily_combo(
     )
     assign_df = metrics.get("daily_assignment_df")
     daily_assign = assign_df if isinstance(assign_df, pd.DataFrame) else None
-    bundle = _perf_weekly_attended_bundle(
-        df_all,
-        sales_all if sales_all is not None else pd.DataFrame(),
-        range_start=range_start,
-        range_end=range_end,
-        focus="All",
-    )
+    if attended_bundle is not None:
+        bundle = attended_bundle
+    else:
+        bundle = _perf_weekly_attended_bundle(
+            df_all,
+            sales_all if sales_all is not None else pd.DataFrame(),
+            range_start=range_start,
+            range_end=range_end,
+            focus="All",
+        )
     detail = bundle.get("detail")
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
     metrics["daily_team_combo_df"] = _perf_build_team_daily_combo_df(
@@ -13594,9 +13653,15 @@ def _perf_team_assignment_summary_df(
     *,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_history: pd.DataFrame | None = None,
+    visits_range: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """All engineers — unique tickets vs assign/reassign tasks in the period."""
-    visits = _perf_load_overview_visits_history(df_all)
+    visits = (
+        visits_history
+        if visits_history is not None
+        else _perf_load_overview_visits_history(df_all)
+    )
     unatt_map = _perf_overview_unattended_counts_by_credit(
         df_all,
         focus="All",
@@ -13620,9 +13685,14 @@ def _perf_team_assignment_summary_df(
             tn = str(row.get("ticket_number") or "").strip()
             if tn:
                 ticket_rows[tn] = row
-    visits_range = _fetch_visits_in_range(range_start, range_end)
+    if visits_range is not None:
+        visits_range_df = visits_range
+    else:
+        visits_range_df = _fetch_visits_in_range(range_start, range_end)
     prepared_visits = (
-        _perf_prepare_visits_df(visits_range) if not visits_range.empty else pd.DataFrame()
+        _perf_prepare_visits_df(visits_range_df)
+        if not visits_range_df.empty
+        else pd.DataFrame()
     )
     visit_stats_by_credit = _perf_batch_visit_range_stats_by_credit(
         prepared_visits,
@@ -15412,8 +15482,16 @@ def _render_perf_summary_team_assignment_table(
     sales_all: pd.DataFrame | None = None,
     range_start: pd.Timestamp | None = None,
     range_end: pd.Timestamp | None = None,
+    visits_range: pd.DataFrame | None = None,
 ) -> None:
     """Side-by-side unique tickets vs tasks for every engineer in the period."""
+    if not isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
+        if not st.session_state.get(_PERF_SUMMARY_TEAM_EXP_KEY, False):
+            st.caption(
+                "Expand this section to load the full team comparison "
+                "(defers a heavy visit-history query until you need it)."
+            )
+            return
     if not isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
         if (
             df_all is None
@@ -15430,6 +15508,7 @@ def _render_perf_summary_team_assignment_table(
                 sales_all,
                 range_start=range_start,
                 range_end=range_end,
+                visits_range=visits_range,
             )
     team_df = metrics.get("team_assignment_df")
     if not isinstance(team_df, pd.DataFrame) or team_df.empty:
@@ -15926,6 +16005,46 @@ def _perf_altair_has_combo_days(frame: pd.DataFrame) -> bool:
     return bool(days.notna().any())
 
 
+def _perf_altair_sanitize_day_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows with unparseable ``day`` so Vega never sees an empty time extent."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    if "day" not in frame.columns:
+        return frame.copy()
+    out = frame.copy()
+    parsed = pd.to_datetime(out["day"], errors="coerce", utc=True)
+    out = out.loc[parsed.notna()].copy()
+    if out.empty:
+        return pd.DataFrame(columns=frame.columns.tolist())
+    out["day"] = parsed.loc[parsed.notna()].values
+    return out
+
+
+def _perf_altair_combo_x_domain(*frames: pd.DataFrame) -> list[pd.Timestamp] | None:
+    mins: list[pd.Timestamp] = []
+    maxs: list[pd.Timestamp] = []
+    for frame in frames:
+        if frame is None or frame.empty or "day" not in frame.columns:
+            continue
+        days = pd.to_datetime(frame["day"], errors="coerce", utc=True)
+        days = days[days.notna()]
+        if days.empty:
+            continue
+        mins.append(days.min())
+        maxs.append(days.max())
+    if not mins:
+        return None
+    return [min(mins), max(maxs)]
+
+
+def _perf_altair_x_scale(*frames: pd.DataFrame) -> alt.Scale:
+    domain = _perf_altair_combo_x_domain(*frames)
+    if domain is None:
+        t = pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")
+        domain = [t, t]
+    return alt.Scale(domain=domain, nice=False)
+
+
 def _weekly_altair_resolved_point_def(*, size: int = 45) -> alt.OverlayMarkDef:
     """Line point markers for resolved series — fixed green (not engineer task colors)."""
     return alt.OverlayMarkDef(
@@ -15943,10 +16062,13 @@ def _weekly_altair_focus_daily_combo_chart(
     tooltips: list[alt.Tooltip],
 ) -> alt.LayerChart:
     """Daily combo — assignment tasks + resolved after visit on one shared left axis."""
+    plot_df = _perf_altair_sanitize_day_frame(
+        plot_df if isinstance(plot_df, pd.DataFrame) else pd.DataFrame()
+    )
     if not _perf_altair_has_combo_days(plot_df):
         stub = pd.DataFrame(
             {
-                "day": [pd.Timestamp.now(tz=LOCAL_TZ)],
+                "day": [pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")],
                 "tasks": [0],
                 "field_resolved": [0],
                 "attended": [0],
@@ -15970,7 +16092,7 @@ def _weekly_altair_focus_daily_combo_chart(
         "day:T",
         title="Day",
         axis=alt.Axis(format="%d %b", labelAngle=-35),
-        scale=alt.Scale(nice=False),
+        scale=_perf_altair_x_scale(plot_df),
     )
     tasks_df = plot_df.assign(series="tasks", value=plot_df["tasks"].astype(int))
     resolved_df = plot_df.assign(
@@ -16009,8 +16131,12 @@ def _weekly_altair_team_daily_combo_chart(
     resolved_df: pd.DataFrame,
 ) -> alt.LayerChart:
     """Team combo — one task line per engineer + team resolved after visit (shared Count axis)."""
-    tasks_plot = tasks_df.copy() if isinstance(tasks_df, pd.DataFrame) else pd.DataFrame()
-    res = resolved_df.copy() if isinstance(resolved_df, pd.DataFrame) else pd.DataFrame()
+    tasks_plot = _perf_altair_sanitize_day_frame(
+        tasks_df.copy() if isinstance(tasks_df, pd.DataFrame) else pd.DataFrame()
+    )
+    res = _perf_altair_sanitize_day_frame(
+        resolved_df.copy() if isinstance(resolved_df, pd.DataFrame) else pd.DataFrame()
+    )
     if _perf_altair_has_combo_days(tasks_plot):
         tasks_plot["day"] = pd.to_datetime(tasks_plot["day"], utc=True)
         tasks_plot["tasks"] = (
@@ -16040,7 +16166,7 @@ def _weekly_altair_team_daily_combo_chart(
         "day:T",
         title="Day",
         axis=alt.Axis(format="%d %b", labelAngle=-35),
-        scale=alt.Scale(nice=False),
+        scale=_perf_altair_x_scale(tasks_plot, res),
     )
     task_layer: alt.Chart | None = None
     engineers: list[str] = []
@@ -16111,12 +16237,14 @@ def _weekly_altair_team_daily_combo_chart(
         if task_layer is not None:
             layers.append(task_layer)
         if not layers:
-            stub = pd.DataFrame({"day": [pd.Timestamp.now(tz=LOCAL_TZ)], "value": [0]})
+            stub = pd.DataFrame(
+                {"day": [pd.Timestamp.now(tz=LOCAL_TZ).tz_convert("UTC")], "value": [0]}
+            )
             layered = (
                 alt.Chart(stub)
                 .mark_point(opacity=0)
                 .encode(
-                    x=alt.X("day:T", scale=alt.Scale(nice=False)),
+                    x=alt.X("day:T", scale=_perf_altair_x_scale(stub)),
                     y=alt.Y("value:Q", scale=alt.Scale(domain=[0, 1], nice=False)),
                 )
                 .properties(height=300)
@@ -16466,6 +16594,8 @@ def _render_perf_summary_daily_combo_chart(
         else metrics.get("summary_focus") or metrics.get("_summary_focus") or "All"
     ).strip()
     team_view = effective in ("", "All", "All engineers")
+    plot_df: object = None
+    tasks_df: object = None
     if team_view:
         plot_df = metrics.get("daily_team_combo_df")
         tasks_df = metrics.get("daily_assignment_df")
@@ -16501,8 +16631,13 @@ def _render_perf_summary_daily_combo_chart(
         )
     st.caption(cap)
     tasks_sum = 0
-    if isinstance(tasks_df, pd.DataFrame) and not tasks_df.empty:
-        tasks_sum = int(tasks_df["tasks"].sum())
+    if team_view:
+        if isinstance(tasks_df, pd.DataFrame) and not tasks_df.empty:
+            tasks_sum = int(tasks_df["tasks"].sum())
+    elif isinstance(plot_df, pd.DataFrame) and not plot_df.empty and "tasks" in plot_df.columns:
+        tasks_sum = int(
+            pd.to_numeric(plot_df["tasks"], errors="coerce").fillna(0).sum()
+        )
     resolved_sum = 0
     if isinstance(plot_df, pd.DataFrame) and not plot_df.empty:
         resolved_sum = int(plot_df["field_resolved"].sum())
@@ -16514,7 +16649,13 @@ def _render_perf_summary_daily_combo_chart(
             tasks_df = pd.DataFrame(columns=["day", "Engineer", "tasks"])
         if not isinstance(plot_df, pd.DataFrame):
             plot_df = pd.DataFrame(columns=["day", "field_resolved", "attended"])
-        tasks_plot = tasks_df.copy()
+        tasks_plot = _perf_altair_sanitize_day_frame(tasks_df.copy())
+        plot_df = _perf_altair_sanitize_day_frame(plot_df.copy())
+        if not _perf_altair_has_combo_days(tasks_plot) and not _perf_altair_has_combo_days(
+            plot_df
+        ):
+            st.caption("No assignment tasks or field resolution activity in this range.")
+            return
         if not tasks_plot.empty:
             tasks_plot["Engineer"] = tasks_plot["Engineer"].astype(str).map(_perf_norm_member)
         engineers = (
@@ -16534,7 +16675,10 @@ def _render_perf_summary_daily_combo_chart(
         )
         chart = _weekly_altair_team_daily_combo_chart(tasks_plot, plot_df)
     else:
-        plot_df = plot_df.copy()
+        plot_df = _perf_altair_sanitize_day_frame(plot_df.copy())
+        if not _perf_altair_has_combo_days(plot_df):
+            st.caption("No assignment tasks or field resolution activity in this range.")
+            return
         plot_df["Engineer"] = plot_df["Engineer"].astype(str).map(_perf_norm_member)
         st.markdown(
             f'<div class="weekly-assign-legend perf-daily-tasks-legend" style="margin-bottom:8px">'
@@ -16616,7 +16760,10 @@ def _render_perf_summary_resolution_trend(
     if not isinstance(trend_df, pd.DataFrame) or not _perf_altair_has_combo_days(trend_df):
         st.caption("No attended cases in this range for a trend.")
         return
-    trend_df = trend_df.copy()
+    trend_df = _perf_altair_sanitize_day_frame(trend_df.copy())
+    if not _perf_altair_has_combo_days(trend_df):
+        st.caption("No attended cases in this range for a trend.")
+        return
     trend_df["day"] = pd.to_datetime(trend_df["day"], utc=True)
     trend_df["field_resolved"] = (
         pd.to_numeric(trend_df["field_resolved"], errors="coerce").fillna(0).astype(int)
@@ -16631,7 +16778,7 @@ def _render_perf_summary_resolution_trend(
                 title="Day",
                 sort=alt.EncodingSortField(field="sort", order="ascending"),
                 axis=alt.Axis(format="%d %b", labelAngle=-35, labelOverlap=False),
-                scale=alt.Scale(nice=False),
+                scale=_perf_altair_x_scale(trend_df),
             ),
             y=alt.Y(
                 "field_resolved:Q",
@@ -16747,6 +16894,7 @@ def _render_perf_summary_daily_assignment_chart(
     st.markdown(_perf_engineer_line_legend_html(engineers), unsafe_allow_html=True)
     plot_df = _perf_daily_assignment_tooltip_columns(plot_df)
     plot_df = _perf_daily_assignment_line_segments(plot_df)
+    plot_df = _perf_altair_sanitize_day_frame(plot_df)
     if not _perf_altair_has_combo_days(plot_df):
         st.caption("No assignment tasks in this range.")
         return
@@ -16761,7 +16909,7 @@ def _render_perf_summary_daily_assignment_chart(
                 "day:T",
                 title="Day",
                 axis=alt.Axis(format="%d %b", labelAngle=-35),
-                scale=alt.Scale(nice=False),
+                scale=_perf_altair_x_scale(plot_df),
             ),
             y=alt.Y(
                 "tasks:Q",
@@ -16800,6 +16948,8 @@ def _render_perf_summary_overview_tab(
     period: str = "Weekly",
     week_offset: int = 0,
     focus: str = "All",
+    attended_bundle: dict[str, object] | None = None,
+    visits_range: pd.DataFrame | None = None,
 ) -> None:
     """Overview — KPIs, closure donut, resolution trend."""
     effective_focus = _perf_summary_effective_focus(metrics, focus)
@@ -16832,6 +16982,7 @@ def _render_perf_summary_overview_tab(
                 sales_all,
                 range_start=range_start,
                 range_end=range_end,
+                attended_bundle=attended_bundle,
             )
         elif not metrics.get("_trend_loaded"):
             _perf_summary_attach_trend_metrics(
@@ -16855,19 +17006,6 @@ def _render_perf_summary_overview_tab(
     else:
         st.markdown('<p class="weekly-section-label">At a glance</p>', unsafe_allow_html=True)
         _render_weekly_kpi_cards(metrics)
-        if (
-            df_all is not None
-            and sales_all is not None
-            and range_start is not None
-            and range_end is not None
-        ):
-            _perf_summary_attach_team_assignment(
-                metrics,
-                df_all,
-                sales_all,
-                range_start=range_start,
-                range_end=range_end,
-            )
         with st.expander(
             "Team assignment comparison",
             expanded=False,
@@ -16879,6 +17017,7 @@ def _render_perf_summary_overview_tab(
                 sales_all=sales_all,
                 range_start=range_start,
                 range_end=range_end,
+                visits_range=visits_range,
             )
         _render_perf_summary_daily_combo_chart(
             metrics,
@@ -17497,6 +17636,7 @@ def _render_perf_weekly_executive_dashboard(
     focus: str = "All",
     range_start: pd.Timestamp | None = None,
     range_end: pd.Timestamp | None = None,
+    visits_range: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     """Executive summary — one section at a time (avoids rendering all tabs each rerun)."""
     if metrics is None:
@@ -17556,6 +17696,8 @@ def _render_perf_weekly_executive_dashboard(
                 period=period,
                 week_offset=week_offset,
                 focus=focus,
+                attended_bundle=bundle,
+                visits_range=visits_range,
             )
     elif selected == "Breakdown":
         with _dash_perf_span("perf.summary_section", section="Breakdown"):
@@ -17700,6 +17842,7 @@ def _render_perf_weekly_attended_report(
     sidebar_range_end: pd.Timestamp | None = None,
     this_week_bundle: dict[str, object] | None = None,
     focus: str = "All",
+    visits_range: pd.DataFrame | None = None,
 ) -> None:
     """Executive attended report for the header time range."""
     if sidebar_range_start is None or sidebar_range_end is None:
@@ -17812,6 +17955,7 @@ def _render_perf_weekly_attended_report(
         focus=focus,
         range_start=range_start,
         range_end=range_end,
+        visits_range=visits_range,
     )
 
 
@@ -26998,7 +27142,7 @@ def _render_dispatch_case_info_panel(
                 unsafe_allow_html=True,
             )
             return
-        t = ticket
+        t = _dispatch_ticket_detail_row(ticket) or ticket
         case_type = str(t.get("case_type") or CASE_TYPE_RESIDENTIAL)
         type_bg = "#0d1e3a" if case_type == CASE_TYPE_RESIDENTIAL else "#1a1030"
         type_fg = "#5b7fb5" if case_type == CASE_TYPE_RESIDENTIAL else "#a78bfa"
@@ -28584,8 +28728,14 @@ def _dispatch_run_action(
 def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
     """Ticket-board context: queues, resort bundle, sidebar metrics."""
     del lookback_days
+    with _dash_perf_span("dispatch.build_context.total"):
+        return _build_dispatch_ticket_context_inner()
+
+
+def _build_dispatch_ticket_context_inner() -> dict[str, object]:
     range_start, range_end = _get_dash_range()
-    df_all = _fetch_tickets_cached()
+    with _dash_perf_span("dispatch.fetch_tickets"):
+        df_all = _fetch_tickets_cached()
     if df_all.empty or "status" not in df_all.columns:
         df = pd.DataFrame({"status": pd.Series(dtype=str)})
         masks = _ticket_queue_count_masks(df)
@@ -28615,17 +28765,17 @@ def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
         total_completed=int(masks["completed"].sum()),
     )
     case_type_filter = _init_case_type_filter()
-    sales_df = (
-        _fetch_sales_cases_cached()
-        if case_type_filter != CASE_TYPE_RESIDENTIAL
-        else None
-    )
+    sales_df = None
+    if case_type_filter != CASE_TYPE_RESIDENTIAL:
+        with _dash_perf_span("dispatch.fetch_sales"):
+            sales_df = _fetch_sales_cases_cached()
     include_resort = case_type_filter != CASE_TYPE_RESIDENTIAL and sales_df is not None
-    resort_bundle = (
-        _get_resort_unified_bundle(sales_df)
-        if include_resort
-        else _empty_resort_unified_bundle()
-    )
+    with _dash_perf_span("dispatch.resort_bundle"):
+        resort_bundle = (
+            _get_resort_unified_bundle(sales_df)
+            if include_resort
+            else _empty_resort_unified_bundle()
+        )
     resort_counts = resort_bundle.get("counts") or {q: 0 for q in QUEUE_ORDER}
     if not isinstance(resort_counts, dict):
         resort_counts = {q: 0 for q in QUEUE_ORDER}
@@ -28635,8 +28785,9 @@ def _build_dispatch_ticket_context(lookback_days: int) -> dict[str, object]:
     aq_key = active_queue_key()
     if aq_key not in st.session_state:
         st.session_state[aq_key] = "Daily Task"
-    fe_names, fe_missing = _try_fetch_field_engineer_usernames()
-    cat_names = get_task_categories() or _try_fetch_task_categories()[0]
+    with _dash_perf_span("dispatch.picklists"):
+        fe_names, fe_missing = _try_fetch_field_engineer_usernames()
+        cat_names = get_task_categories() or _try_fetch_task_categories()[0]
     return {
         "df": df,
         "df_all": df_all,
@@ -28852,7 +29003,6 @@ def _render_dispatch_board_sidebar(ctx: dict[str, object]) -> str:
 
 
 def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
-    df = ctx["df"]
     masks = ctx["masks"]
     aq_key = str(ctx["aq_key"])
     is_admin = bool(ctx["is_admin"])
@@ -28864,25 +29014,12 @@ def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
     selected_queue = _normalize_sidebar_queue(st.session_state.get(aq_key))
     if selected_queue != st.session_state.get(aq_key):
         st.session_state[aq_key] = selected_queue
-    mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
-    queue_df = df[masks[mask_key]].copy() if not df.empty else pd.DataFrame()
-    if selected_queue == "Follow up" and not queue_df.empty:
-        queue_df = _sort_investigation_by_follow_up(queue_df)
     eng_filter = st.session_state.get(_DISP_ENGINEER_FILTER_KEY)
-    if eng_filter and not queue_df.empty:
-        queue_df = queue_df.loc[
-            queue_df.apply(
-                lambda r: _perf_row_credited_to_person(r, str(eng_filter)),
-                axis=1,
-            )
-        ].copy()
-    inv_base_df: pd.DataFrame | None = (
-        queue_df.copy() if selected_queue == "Under Investigation" else None
-    )
+    mask_key = _DISPATCH_QUEUE_MASK.get(selected_queue, "pending")
 
     col_title, col_search = st.columns([3, 1])
     with col_title:
-        n_preview = len(queue_df) if inv_base_df is None else len(inv_base_df)
+        n_preview = int(masks[mask_key].sum())
         qtitle = (
             selected_queue.lower()
             if selected_queue == "Daily Task"
@@ -28915,16 +29052,17 @@ def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
             key="disp_ticket_search",
         )
 
-    if inv_base_df is not None:
+    _render_unified_case_type_filter()
+    with _dash_perf_span("dispatch.compute_view"):
+        view = _compute_dispatch_ticket_view(ctx)
+    selected_queue = str(view["selected_queue"])
+    inv_base_df = view.get("inv_base_df")
+    if inv_base_df is not None and isinstance(inv_base_df, pd.DataFrame):
         _render_investigation_subtabs(inv_base_df)
     elif selected_queue == "Follow up":
         st.caption(
             "Oldest follow-up first — chase these before newer investigation cases."
         )
-
-    _render_unified_case_type_filter()
-    view = _compute_dispatch_ticket_view(ctx)
-    selected_queue = str(view["selected_queue"])
 
     if selected_queue == "Daily Task":
         render_nudge_banner(
@@ -29068,7 +29206,13 @@ def _render_dashboard(
             _render_attendance_tab(lookback_days=lookback_days)
             return
         if main_nav == "Performance":
-            if post_login_paint:
+            cache_key = _perf_context_cache_key(lookback_days)
+            cached_ctx = st.session_state.get(_PERF_CTX_SESSION_KEY)
+            perf_cache_hit = (
+                isinstance(cached_ctx, dict)
+                and cached_ctx.get("_cache_key") == cache_key
+            )
+            if post_login_paint or not perf_cache_hit:
                 with st.spinner("Loading performance…"):
                     _render_field_performance_tab(lookback_days=lookback_days)
             else:
@@ -29100,7 +29244,12 @@ def _render_dashboard(
         elif "status" not in df_all.columns:
             st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
             return
-        elif not df_all.empty and "status" in df_all.columns and not post_login_paint:
+        elif (
+            not df_all.empty
+            and "status" in df_all.columns
+            and not post_login_paint
+            and not st.session_state.pop(_DASH_DEFER_MISMATCH_KEY, False)
+        ):
             mismatches = _fetch_pending_with_response_mismatch()
             if mismatches:
                 shown = ", ".join(mismatches[:5])
@@ -30998,6 +31147,7 @@ def _render_perf_weekly_tab(
     focus: str,
     range_start: pd.Timestamp,
     range_end: pd.Timestamp,
+    visits_range: pd.DataFrame | None = None,
 ) -> None:
     """Executive Summary — same header time range + Focus assignee as other Performance views."""
     _render_perf_weekly_attended_report(
@@ -31006,6 +31156,7 @@ def _render_perf_weekly_tab(
         sidebar_range_start=range_start,
         sidebar_range_end=range_end,
         focus=focus,
+        visits_range=visits_range,
     )
 
 
@@ -31475,7 +31626,7 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
             counts = _get_performance_snapshot_counts(
                 slices=slices, sales_all=sales_all, focus=focus
             )
-        needs_range_visits = view == "Handled"
+        needs_range_visits = view in ("Handled", "Summary")
         visits_all = pd.DataFrame()
         if needs_range_visits:
             try:
@@ -31484,10 +31635,6 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
             except Exception:
                 pass
         visits_f = _perf_filter_visits_by_person(visits_all, focus)
-        visits_history = pd.DataFrame()
-        if field_has_data and view == "Summary":
-            with _dash_perf_span("perf.load_visits_history", view=view):
-                visits_history = _perf_load_overview_visits_history(df_all)
         return {
             "range_start": range_start,
             "range_end": range_end,
@@ -31499,7 +31646,6 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
             "view": view,
             "visits_all": visits_all,
             "visits_f": visits_f,
-            "visits_history": visits_history,
         }
 
 
@@ -31549,8 +31695,6 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
     range_end = ctx["range_end"]
     visits_all = ctx["visits_all"]
     visits_f = ctx["visits_f"]
-    visits_history = ctx.get("visits_history", pd.DataFrame())
-
     focus_scope = None
     if focus not in ("", "All", "All engineers"):
         focus_scope = f"Snapshot counts for {focus}"
@@ -31579,6 +31723,7 @@ def _render_performance_main(ctx: dict[str, object]) -> None:
                 focus=focus,
                 range_start=range_start,
                 range_end=range_end,
+                visits_range=visits_all,
             )
         elif view == "Case info":
             _render_perf_case_info_tab(
@@ -31625,7 +31770,6 @@ def _perf_workspace_fragment(lookback_days: int) -> None:
                         visits_all=ctx["visits_f"],
                         range_start=ctx["range_start"],
                         range_end=ctx["range_end"],
-                        visits_history=ctx.get("visits_history"),
                     )
 
 
