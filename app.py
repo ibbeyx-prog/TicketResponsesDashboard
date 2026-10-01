@@ -2325,7 +2325,8 @@ _LOGIN_PAGE_STYLES_KEY = "_login_page_styles_applied"
 _DASH_SUPABASE_WARMED_KEY = "_dash_supabase_warmed_login"
 _DASH_POST_LOGIN_BOOTSTRAP_KEY = "_dash_post_login_bootstrap"
 _DASH_DEFER_MAINTENANCE_KEY = "_dash_defer_maintenance"
-_DASH_DEFER_MISMATCH_KEY = "_dash_defer_mismatch_once"
+_DASH_MISMATCH_DEFER_RUNS_KEY = "_dash_mismatch_defer_runs"
+_DASH_WARM_PERF_IDLE_KEY = "_dash_warm_perf_idle_pending"
 _MIN_DASHBOARD_PASSWORD_LEN = 8
 _MAX_OPERATOR_ID_LEN = 64
 _MAX_DASHBOARD_USERNAME_LEN = 48
@@ -2468,7 +2469,8 @@ def _complete_auth_session(*, username: str, operator_id: str, session_fp: str) 
     st.session_state[_AUTH_USERNAME_KEY] = username
     st.session_state[_OPERATOR_ID_KEY] = operator_id
     st.session_state[_DASH_POST_LOGIN_BOOTSTRAP_KEY] = True
-    st.session_state[_DASH_DEFER_MISMATCH_KEY] = True
+    st.session_state[_DASH_MISMATCH_DEFER_RUNS_KEY] = 3
+    st.session_state[_DASH_WARM_PERF_IDLE_KEY] = True
     st.session_state[_DASH_MAIN_NAV_KEY] = _DASH_NAV_TICKET
     st.session_state.pop(_PERF_CTX_SESSION_KEY, None)
     st.session_state.pop(_DISPATCH_CTX_SESSION_KEY, None)
@@ -2491,6 +2493,71 @@ def _warm_dashboard_data_cache_after_login() -> None:
             pass
         try:
             _try_fetch_task_categories()
+        except Exception:
+            pass
+        _warm_perf_summary_bundle_for_header_range()
+
+
+def _warm_perf_summary_bundle_for_header_range() -> None:
+    """Precompute Summary attended bundle for the header time range (cache_data)."""
+    with _dash_perf_span("perf.warm_summary_bundle"):
+        try:
+            _init_dash_date_range_state()
+            _sync_dash_range_from_ui(
+                str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+            )
+            range_start, range_end = _get_dash_range()
+            df_all = _fetch_tickets_cached()
+            raw_sales = _fetch_sales_cases_cached()
+            sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
+            _perf_weekly_attended_bundle_cached(
+                range_start.isoformat(),
+                range_end.isoformat(),
+                "All",
+                _perf_data_signature(df_all),
+                _perf_data_signature(sales_all),
+            )
+        except Exception:
+            pass
+
+
+def _warm_perf_context_session(lookback_days: int) -> None:
+    """Session-cache Performance context before the tab paints."""
+    with _dash_perf_span("perf.warm_context"):
+        try:
+            cache_key = _perf_context_cache_key(lookback_days)
+            cached = st.session_state.get(_PERF_CTX_SESSION_KEY)
+            if isinstance(cached, dict) and cached.get("_cache_key") == cache_key:
+                return
+            ctx = _build_perf_context(lookback_days)
+            st.session_state[_PERF_CTX_SESSION_KEY] = {
+                **ctx,
+                "_cache_key": cache_key,
+                "_lookback_days": lookback_days,
+            }
+        except Exception:
+            pass
+
+
+def _warm_perf_nav_cache() -> None:
+    """Prefetch when opening Performance (data + summary bundle + context)."""
+    with _dash_perf_span("perf.nav_prefetch"):
+        try:
+            _fetch_tickets_cached()
+        except Exception:
+            pass
+        try:
+            _fetch_sales_cases_cached()
+        except Exception:
+            pass
+        _warm_perf_summary_bundle_for_header_range()
+        try:
+            _init_dash_date_range_state()
+            _sync_dash_range_from_ui(
+                str(st.session_state.get(_DASH_TIME_PRESET_KEY, "This week"))
+            )
+            lookback_days, _, _ = _dash_date_range_lookback()
+            _warm_perf_context_session(lookback_days)
         except Exception:
             pass
 
@@ -3622,6 +3689,8 @@ _PERF_VISITS_HISTORY_KEY = "_perf_visits_history_cache"
 _PERF_SUMMARY_SECTION_KEY = "_perf_summary_active_section"
 _PERF_TEAM_ASSIGN_EXP_KEY = "perf_team_assign_expander"
 _PERF_SUMMARY_TEAM_EXP_KEY = "perf_summary_team_assign_expander"
+_PERF_TEAM_ASSIGN_CACHE_KEY = "_perf_team_assignment_session_cache"
+_PERF_TEAM_TABLE_ENABLED_KEY = "_perf_team_table_enabled"
 _DASH_QUEUES_STALE_KEY = "_dash_queues_stale_after_activity"
 _PERF_BREAKDOWN_FILTER_CAT_KEY = "_perf_breakdown_filter_cat"
 _PERF_BREAKDOWN_FILTER_CLOSURE_KEY = "_perf_breakdown_filter_closure"
@@ -3688,6 +3757,9 @@ def _invalidate_dashboard_data_cache(
     if tickets:
         clearables.append(_fetch_tickets_cached)
         clearables.append(_fetch_ticket_row_cached)
+        clearables.append(_perf_weekly_attended_bundle_cached)
+        clearables.append(_perf_team_assignment_summary_cached)
+        clearables.append(_perf_daily_assignment_tasks_cached)
         _cached_latest_admin_comment.clear()
     if sales_cases:
         clearables.append(_fetch_sales_cases_cached)
@@ -12107,6 +12179,30 @@ def _perf_weekly_attended_bundle(
     }
 
 
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_weekly_attended_bundle_cached(
+    range_start_iso: str,
+    range_end_iso: str,
+    focus: str,
+    tickets_sig: str,
+    sales_sig: str,
+) -> dict[str, object]:
+    """Attended bundle for Summary — keyed by range, focus, and data signatures."""
+    del tickets_sig, sales_sig
+    df_all = _fetch_tickets_cached()
+    raw_sales = _fetch_sales_cases_cached()
+    sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    return _perf_weekly_attended_bundle(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+        focus=focus,
+    )
+
+
 def _perf_resolve_display_category(row: pd.Series, *, track: str) -> str:
     """Outcome category when set; otherwise assignment / sales category."""
     if track == "CSM":
@@ -12585,6 +12681,49 @@ def _perf_range_resolution_trend_cached(
 
 def _perf_clear_summary_cache() -> None:
     st.session_state.pop(_PERF_SUMMARY_CACHE_KEY, None)
+    st.session_state.pop(_PERF_TEAM_ASSIGN_CACHE_KEY, None)
+    st.session_state.pop(_PERF_TEAM_TABLE_ENABLED_KEY, None)
+
+
+def _perf_team_assign_session_cache_key(
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> tuple[str, str]:
+    return (range_start.isoformat(), range_end.isoformat())
+
+
+def _perf_restore_team_assignment_from_session(
+    metrics: dict[str, object],
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    if isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
+        return
+    cached = st.session_state.get(_PERF_TEAM_ASSIGN_CACHE_KEY)
+    key = _perf_team_assign_session_cache_key(range_start, range_end)
+    if not isinstance(cached, dict) or cached.get("_key") != key:
+        return
+    team_df = cached.get("team_assignment_df")
+    if isinstance(team_df, pd.DataFrame):
+        metrics["team_assignment_df"] = team_df
+        metrics["team_unique_in_range"] = int(cached.get("team_unique_in_range") or 0)
+
+
+def _perf_persist_team_assignment_to_session(
+    metrics: dict[str, object],
+    *,
+    range_start: pd.Timestamp,
+    range_end: pd.Timestamp,
+) -> None:
+    team_df = metrics.get("team_assignment_df")
+    if not isinstance(team_df, pd.DataFrame):
+        return
+    st.session_state[_PERF_TEAM_ASSIGN_CACHE_KEY] = {
+        "_key": _perf_team_assign_session_cache_key(range_start, range_end),
+        "team_assignment_df": team_df,
+        "team_unique_in_range": int(metrics.get("team_unique_in_range") or 0),
+    }
 
 
 def _perf_summary_report_cache_key(
@@ -12986,19 +13125,35 @@ def _perf_summary_attach_team_assignment(
 ) -> None:
     if isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
         return
-    team_df = _perf_team_assignment_summary_df(
-        df_all,
-        sales_all,
+    if visits_history is not None or visits_range is not None:
+        team_df = _perf_team_assignment_summary_df(
+            df_all,
+            sales_all,
+            range_start=range_start,
+            range_end=range_end,
+            visits_history=visits_history,
+            visits_range=visits_range,
+        )
+        team_unique = int(
+            team_df.attrs.get("team_unique_in_range", 0)
+            if isinstance(team_df, pd.DataFrame)
+            else 0
+        )
+    else:
+        team_df, team_unique = _perf_team_assignment_summary_cached(
+            range_start.isoformat(),
+            range_end.isoformat(),
+            _perf_data_signature(df_all),
+            _perf_data_signature(
+                sales_all if sales_all is not None else pd.DataFrame()
+            ),
+        )
+    metrics["team_assignment_df"] = team_df
+    metrics["team_unique_in_range"] = team_unique
+    _perf_persist_team_assignment_to_session(
+        metrics,
         range_start=range_start,
         range_end=range_end,
-        visits_history=visits_history,
-        visits_range=visits_range,
-    )
-    metrics["team_assignment_df"] = team_df
-    metrics["team_unique_in_range"] = int(
-        team_df.attrs.get("team_unique_in_range", 0)
-        if isinstance(team_df, pd.DataFrame)
-        else 0
     )
 
 
@@ -13026,11 +13181,11 @@ def _perf_summary_attach_daily_assignment(
     metrics.pop("_chart_scope_focus", None)
     metrics.pop("_team_combo_loaded", None)
     metrics.pop("_trend_loaded", None)
-    metrics["daily_assignment_df"] = _perf_daily_assignment_tasks_by_engineer_df(
-        df_all,
-        sales_all,
-        range_start=range_start,
-        range_end=range_end,
+    metrics["daily_assignment_df"] = _perf_daily_assignment_tasks_cached(
+        range_start.isoformat(),
+        range_end.isoformat(),
+        _perf_data_signature(df_all),
+        _perf_data_signature(sales_all),
     )
 
 
@@ -13060,12 +13215,14 @@ def _perf_summary_attach_team_daily_combo(
     if attended_bundle is not None:
         bundle = attended_bundle
     else:
-        bundle = _perf_weekly_attended_bundle(
-            df_all,
-            sales_all if sales_all is not None else pd.DataFrame(),
-            range_start=range_start,
-            range_end=range_end,
-            focus="All",
+        bundle = _perf_weekly_attended_bundle_cached(
+            range_start.isoformat(),
+            range_end.isoformat(),
+            "All",
+            _perf_data_signature(df_all),
+            _perf_data_signature(
+                sales_all if sales_all is not None else pd.DataFrame()
+            ),
         )
     detail = bundle.get("detail")
     detail_df = detail if isinstance(detail, pd.DataFrame) else pd.DataFrame()
@@ -13837,7 +13994,37 @@ def _perf_team_assignment_summary_df(
         ["Tasks", "Unique tickets"], ascending=[False, False]
     )
     admin = out.loc[out["Engineer"].astype(str) == admin_label]
-    return pd.concat([field, admin], ignore_index=True)
+    merged = pd.concat([field, admin], ignore_index=True)
+    merged.attrs["team_unique_in_range"] = len(team_union)
+    return merged
+
+
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_team_assignment_summary_cached(
+    range_start_iso: str,
+    range_end_iso: str,
+    tickets_sig: str,
+    sales_sig: str,
+) -> tuple[pd.DataFrame, int]:
+    """Team comparison table — heavy visit snapshot; cached by range + data signatures."""
+    del tickets_sig, sales_sig
+    df_all = _fetch_tickets_cached()
+    raw_sales = _fetch_sales_cases_cached()
+    sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    team_df = _perf_team_assignment_summary_df(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    team_unique = int(
+        team_df.attrs.get("team_unique_in_range", 0)
+        if isinstance(team_df, pd.DataFrame)
+        else 0
+    )
+    return team_df, team_unique
 
 
 # Field task cycles only — ``Assignment`` is written with ``member_username`` = assignee.
@@ -14733,6 +14920,27 @@ def _perf_daily_assignment_tasks_by_engineer_df(
     return pd.DataFrame(rows).sort_values(["day", "Engineer"])
 
 
+@st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
+def _perf_daily_assignment_tasks_cached(
+    range_start_iso: str,
+    range_end_iso: str,
+    tickets_sig: str,
+    sales_sig: str,
+) -> pd.DataFrame:
+    del tickets_sig, sales_sig
+    df_all = _fetch_tickets_cached()
+    raw_sales = _fetch_sales_cases_cached()
+    sales_all = raw_sales if raw_sales is not None else pd.DataFrame()
+    range_start = pd.to_datetime(range_start_iso, utc=True)
+    range_end = pd.to_datetime(range_end_iso, utc=True)
+    return _perf_daily_assignment_tasks_by_engineer_df(
+        df_all,
+        sales_all,
+        range_start=range_start,
+        range_end=range_end,
+    )
+
+
 def _perf_engineer_chart_label(focus: str) -> str:
     """Display label for daily charts (matches ``daily_assignment_df`` Engineer column)."""
     credit = _perf_focus_assignee_to_credit_key(focus)
@@ -15485,31 +15693,33 @@ def _render_perf_summary_team_assignment_table(
     visits_range: pd.DataFrame | None = None,
 ) -> None:
     """Side-by-side unique tickets vs tasks for every engineer in the period."""
+    if (
+        df_all is None
+        or range_start is None
+        or range_end is None
+        or sales_all is None
+    ):
+        st.caption("Team assignment comparison is unavailable for this view.")
+        return
+    _perf_restore_team_assignment_from_session(
+        metrics,
+        range_start=range_start,
+        range_end=range_end,
+    )
     if not isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
-        if not st.session_state.get(_PERF_SUMMARY_TEAM_EXP_KEY, False):
-            st.caption(
-                "Expand this section to load the full team comparison "
-                "(defers a heavy visit-history query until you need it)."
-            )
-            return
-    if not isinstance(metrics.get("team_assignment_df"), pd.DataFrame):
-        if (
-            df_all is None
-            or range_start is None
-            or range_end is None
-            or sales_all is None
-        ):
-            st.caption("Team assignment comparison is unavailable for this view.")
-            return
         with _dash_perf_span("perf.team_assignment_summary"):
-            _perf_summary_attach_team_assignment(
-                metrics,
-                df_all,
-                sales_all,
-                range_start=range_start,
-                range_end=range_end,
-                visits_range=visits_range,
-            )
+            try:
+                _perf_summary_attach_team_assignment(
+                    metrics,
+                    df_all,
+                    sales_all,
+                    range_start=range_start,
+                    range_end=range_end,
+                    visits_range=visits_range,
+                )
+            except Exception as exc:
+                st.error(f"Could not load team assignment comparison: {exc}")
+                return
     team_df = metrics.get("team_assignment_df")
     if not isinstance(team_df, pd.DataFrame) or team_df.empty:
         st.caption("No assignment activity for any engineer in this period.")
@@ -16937,6 +17147,49 @@ def _render_perf_summary_daily_assignment_chart(
     st.altair_chart(chart, width="stretch")
 
 
+@st.fragment
+def _perf_summary_overview_charts_fragment(
+    metrics: dict[str, object],
+    *,
+    period_label: str = "",
+    df_all: pd.DataFrame | None = None,
+    sales_all: pd.DataFrame | None = None,
+    range_start: pd.Timestamp | None = None,
+    range_end: pd.Timestamp | None = None,
+    focus: str = "All",
+    attended_bundle: dict[str, object] | None = None,
+) -> None:
+    """Daily combo + closure donut — partial rerun without rebuilding KPI rows."""
+    if (
+        df_all is None
+        or sales_all is None
+        or range_start is None
+        or range_end is None
+    ):
+        return
+    effective_focus = _perf_summary_effective_focus(metrics, focus)
+    with _dash_perf_span("perf.overview_charts_fragment"):
+        if effective_focus in ("", "All", "All engineers"):
+            _perf_summary_attach_team_daily_combo(
+                metrics,
+                df_all,
+                sales_all,
+                range_start=range_start,
+                range_end=range_end,
+                attended_bundle=attended_bundle,
+            )
+            _render_perf_summary_daily_combo_chart(
+                metrics,
+                period_label=period_label,
+                range_start=range_start,
+                range_end=range_end,
+                focus="All",
+            )
+        donut_col, _ = st.columns([1, 1])
+        with donut_col:
+            _render_perf_summary_closure_donut(metrics)
+
+
 def _render_perf_summary_overview_tab(
     metrics: dict[str, object],
     *,
@@ -16975,15 +17228,6 @@ def _render_perf_summary_overview_tab(
                 range_end=range_end,
                 focus=effective_focus,
             )
-        elif effective_focus in ("", "All", "All engineers"):
-            _perf_summary_attach_team_daily_combo(
-                metrics,
-                df_all,
-                sales_all,
-                range_start=range_start,
-                range_end=range_end,
-                attended_bundle=attended_bundle,
-            )
         elif not metrics.get("_trend_loaded"):
             _perf_summary_attach_trend_metrics(
                 metrics,
@@ -17008,27 +17252,50 @@ def _render_perf_summary_overview_tab(
         _render_weekly_kpi_cards(metrics)
         with st.expander(
             "Team assignment comparison",
-            expanded=False,
+            expanded=bool(st.session_state.get(_PERF_SUMMARY_TEAM_EXP_KEY, False)),
             key=_PERF_SUMMARY_TEAM_EXP_KEY,
         ):
-            _render_perf_summary_team_assignment_table(
+            _perf_restore_team_assignment_from_session(
                 metrics,
-                df_all=df_all,
-                sales_all=sales_all,
                 range_start=range_start,
                 range_end=range_end,
-                visits_range=visits_range,
             )
-        _render_perf_summary_daily_combo_chart(
+            team_ready = isinstance(metrics.get("team_assignment_df"), pd.DataFrame)
+            team_enabled = bool(st.session_state.get(_PERF_TEAM_TABLE_ENABLED_KEY, False))
+            if team_ready or team_enabled:
+                if not team_enabled:
+                    st.session_state[_PERF_TEAM_TABLE_ENABLED_KEY] = True
+                with st.spinner("Loading team comparison…"):
+                    _render_perf_summary_team_assignment_table(
+                        metrics,
+                        df_all=df_all,
+                        sales_all=sales_all,
+                        range_start=range_start,
+                        range_end=range_end,
+                        visits_range=visits_range,
+                    )
+            else:
+                st.caption(
+                    "Optional. Loads visit history for all snapshot tickets — "
+                    "can take several seconds the first time."
+                )
+                if st.button(
+                    "Load team comparison",
+                    key="perf_team_table_load_btn",
+                    type="secondary",
+                ):
+                    st.session_state[_PERF_TEAM_TABLE_ENABLED_KEY] = True
+                    st.rerun()
+        _perf_summary_overview_charts_fragment(
             metrics,
             period_label=period_label,
+            df_all=df_all,
+            sales_all=sales_all,
             range_start=range_start,
             range_end=range_end,
-            focus="All",
+            focus=focus,
+            attended_bundle=attended_bundle,
         )
-    donut_col, _ = st.columns([1, 1])
-    with donut_col:
-        _render_perf_summary_closure_donut(metrics)
 
 
 def _render_perf_summary_breakdown_tab(metrics: dict[str, object]) -> None:
@@ -17806,12 +18073,12 @@ def _perf_load_summary_report_package(
     ):
         bundle = this_week_bundle
     else:
-        bundle = _perf_weekly_attended_bundle(
-            df_all,
-            sales_all,
-            range_start=range_start,
-            range_end=range_end,
-            focus=focus,
+        bundle = _perf_weekly_attended_bundle_cached(
+            range_start.isoformat(),
+            range_end.isoformat(),
+            focus,
+            _perf_data_signature(df_all),
+            _perf_data_signature(sales_all),
         )
     metrics = _perf_weekly_summary_metrics(
         df_all,
@@ -24121,6 +24388,8 @@ def _render_main_navigation() -> str:
             ):
                 if not is_active:
                     st.session_state[_DASH_MAIN_NAV_KEY] = opt
+                    if opt == "Performance":
+                        _warm_perf_nav_cache()
                     _reset_lookup_state()
                     st.rerun()
     return current
@@ -29151,6 +29420,43 @@ def _render_dispatch_detail_column(ctx: dict[str, object]) -> None:
         )
 
 
+def _consume_ticket_mismatch_defer_run() -> bool:
+    """Return True while early dashboard runs should skip the mismatch probe."""
+    remaining = int(st.session_state.get(_DASH_MISMATCH_DEFER_RUNS_KEY) or 0)
+    if remaining <= 0:
+        return False
+    st.session_state[_DASH_MISMATCH_DEFER_RUNS_KEY] = remaining - 1
+    return True
+
+
+def _report_ticket_snapshot_messages(
+    df_all: pd.DataFrame,
+    *,
+    skip_mismatch_probe: bool,
+) -> bool:
+    """Empty/status/mismatch banners for the Ticket board. False = stop rendering."""
+    if df_all.empty:
+        st.warning(
+            "No ticket rows returned (empty ``tickets_active`` or connection issue). "
+            "Queue counts are zero — **Performance** and **Log** still use attendance history."
+        )
+        return True
+    if "status" not in df_all.columns:
+        st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
+        return False
+    if not skip_mismatch_probe:
+        mismatches = _fetch_pending_with_response_mismatch()
+        if mismatches:
+            shown = ", ".join(mismatches[:5])
+            st.error(
+                f"**{len(mismatches)}** ticket(s) look stuck in **Daily Task** after a field reply "
+                f"(e.g. {shown}). Use **Record response** on Daily Task, or check Railway bot logs "
+                "and `supabase/migrations/20260516_tickets_active_anon_policies.sql`. "
+                "Tickets **reassigned** for another visit are not listed here."
+            )
+    return True
+
+
 def _render_dispatch_csm_dashboard(
     *,
     lookback_days: int,
@@ -29219,9 +29525,10 @@ def _render_dashboard(
                 _render_field_performance_tab(lookback_days=lookback_days)
             return
 
+        skip_mismatch = post_login_paint or _consume_ticket_mismatch_defer_run()
         try:
-            with _dash_perf_span("dashboard.fetch_tickets"):
-                df_all = _fetch_tickets_cached()
+            with _dash_perf_span("dashboard.dispatch_csm"):
+                ctx = _load_dispatch_ticket_context(lookback_days)
         except _TableMissingError as missing:
             _render_missing_table_help(missing.table)
             return
@@ -29235,37 +29542,20 @@ def _render_dashboard(
                 "`tickets_active`."
             )
             return
-
-        if df_all.empty:
-            st.warning(
-                "No ticket rows returned (empty ``tickets_active`` or connection issue). "
-                "Queue counts are zero — **Performance** and **Log** still use attendance history."
-            )
-        elif "status" not in df_all.columns:
-            st.error(f"The `{TICKETS_TABLE}` table has no `status` column.")
-            return
-        elif (
-            not df_all.empty
-            and "status" in df_all.columns
-            and not post_login_paint
-            and not st.session_state.pop(_DASH_DEFER_MISMATCH_KEY, False)
+        df_all = ctx.get("df_all")
+        if not isinstance(df_all, pd.DataFrame):
+            df_all = pd.DataFrame()
+        if not _report_ticket_snapshot_messages(
+            df_all, skip_mismatch_probe=skip_mismatch
         ):
-            mismatches = _fetch_pending_with_response_mismatch()
-            if mismatches:
-                shown = ", ".join(mismatches[:5])
-                st.error(
-                    f"**{len(mismatches)}** ticket(s) look stuck in **Daily Task** after a field reply "
-                    f"(e.g. {shown}). Use **Record response** on Daily Task, or check Railway bot logs "
-                    "and `supabase/migrations/20260516_tickets_active_anon_policies.sql`. "
-                    "Tickets **reassigned** for another visit are not listed here."
-                )
-
-        with _dash_perf_span("dashboard.dispatch_csm"):
-            if post_login_paint:
-                with st.spinner("Loading queues…"):
-                    _render_dispatch_csm_dashboard(lookback_days=lookback_days)
-            else:
+            return
+        if post_login_paint:
+            with st.spinner("Loading queues…"):
                 _render_dispatch_csm_dashboard(lookback_days=lookback_days)
+        else:
+            _render_dispatch_csm_dashboard(lookback_days=lookback_days)
+        if not post_login_paint and st.session_state.pop(_DASH_WARM_PERF_IDLE_KEY, False):
+            _warm_perf_summary_bundle_for_header_range()
 
 
 def _get_performance_snapshot_counts(
@@ -31626,7 +31916,7 @@ def _build_perf_context(lookback_days: int) -> dict[str, object]:
             counts = _get_performance_snapshot_counts(
                 slices=slices, sales_all=sales_all, focus=focus
             )
-        needs_range_visits = view in ("Handled", "Summary")
+        needs_range_visits = view == "Handled"
         visits_all = pd.DataFrame()
         if needs_range_visits:
             try:
