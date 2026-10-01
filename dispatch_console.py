@@ -24,17 +24,19 @@ def embed_inline_html(
     height: int | str = "content",
     width: int | str = "stretch",
 ) -> None:
-    """Embed inline HTML/JS via ``st.iframe`` srcdoc."""
+    """Embed inline HTML/JS via ``st.html`` (not iframed — avoids Feature-Policy console noise)."""
     snippet = src.strip()
-    iframe_height: int | str = "content" if height in (0, "content") else int(height)
-    if iframe_height == "content" and snippet.lower().startswith(("<script", "<style")):
+    if not snippet:
+        return
+    needs_js = "<script" in snippet.lower()
+    if isinstance(height, int) and height > 0:
         snippet = (
-            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<style>html,body{margin:0;padding:0;height:0;overflow:hidden;}"
-            "</style></head><body>"
-            f"{snippet}</body></html>"
+            f'<div class="disp-html-embed" style="min-height:{int(height)}px">'
+            f"{snippet}</div>"
         )
-    st.iframe(snippet, height=iframe_height, width=width)
+    elif height in (0, "content") and snippet.lower().startswith(("<script", "<style")):
+        snippet = f'<div class="disp-html-embed disp-html-embed--inline">{snippet}</div>'
+    st.html(snippet, width=width, unsafe_allow_javascript=needs_js)
 
 # Shared design tokens (CSS variables for embedded HTML components).
 _DISPATCH_VARS = f"""
@@ -1451,7 +1453,6 @@ div.st-key-disp_assign_panel [data-testid="stVerticalBlockBorderWrapper"] {{
   align-items: center;
   height: var(--disp-header-h);
   gap: 10px;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }}
 .disp-brand::before {{
   content: "";
@@ -2842,24 +2843,11 @@ div[data-baseweb="popover"] ul[role="listbox"] li > div {
 
 
 def inject_dispatch_row_popover_compact_css() -> None:
-    """Inject compact row-action menu styles into the parent document head."""
-    css_json = json.dumps(_DISPATCH_ROW_MENU_COMPACT_CSS.strip())
-    embed_inline_html(
-        f"""
-        <script>
-        (function () {{
-          const doc = window.parent.document;
-          const css = {css_json};
-          let style = doc.getElementById("disp-row-popover-compact-css");
-          if (!style) {{
-            style = doc.createElement("style");
-            style.id = "disp-row-popover-compact-css";
-            doc.head.appendChild(style);
-          }}
-          style.textContent = css;
-        }})();
-        </script>
-        """,
+    """Inject compact row-action menu styles (once per session — see ``apply_theme``)."""
+    st.markdown(
+        f"<style id=\"disp-row-popover-compact-css\">\n"
+        f"{_DISPATCH_ROW_MENU_COMPACT_CSS.strip()}\n</style>",
+        unsafe_allow_html=True,
     )
 
 
@@ -3364,6 +3352,7 @@ def _render_table_row_actions(
     row_id: str,
     row_actions_fn: Callable[[dict[str, Any], str], None] | None,
     case_type_session_key: str | None = None,
+    on_select: Callable[[], None] | None = None,
 ) -> None:
     """Select (●) + menu (⋮) in one horizontal action strip."""
     with st.container(
@@ -3385,6 +3374,8 @@ def _render_table_row_actions(
                     st.session_state["selected_sales_case"] = select_value
                 else:
                     st.session_state["selected_sales_case"] = None
+            if on_select:
+                on_select()
             st.rerun()
         if row_actions_fn:
             row_actions_fn(row_data, row_id)
@@ -3730,6 +3721,7 @@ def render_ticket_table_fast(
     row_actions_fn: Callable[[dict[str, Any], str], None] | None = None,
     show_case_type: bool = False,
     case_type_session_key: str | None = None,
+    on_select: Callable[[], None] | None = None,
 ) -> None:
     """Ticket grid — same column ratios as the full table, without per-row card containers."""
     if not tickets:
@@ -3837,6 +3829,7 @@ def render_ticket_table_fast(
                     row_id=tnum,
                     row_actions_fn=row_actions_fn,
                     case_type_session_key=case_type_session_key,
+                    on_select=on_select,
                 )
 
 
@@ -4046,6 +4039,7 @@ def render_sales_case_table(
     selected: str | None,
     selected_key: str,
     row_actions_fn: Callable[[dict[str, Any], str], None] | None = None,
+    on_select: Callable[[], None] | None = None,
 ) -> None:
     """Sales case rows — same column-header pattern as render_ticket_table()."""
     if not cases:
@@ -4152,4 +4146,5 @@ def render_sales_case_table(
                         row_data=c,
                         row_id=row_id,
                         row_actions_fn=row_actions_fn,
+                        on_select=on_select,
                     )

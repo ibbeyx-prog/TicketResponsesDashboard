@@ -534,54 +534,88 @@ PERF_OVERVIEW_CSS = """
 """
 
 
-_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v17"
+_DASH_THEME_APPLIED_KEY = "_dash_theme_css_applied_v19"
+_DASH_THEME_CSS_CACHE_KEY = "_dash_theme_css_text_cache"
+_DASH_THEME_STYLE_ID = "disp-dashboard-theme"
 _LOGIN_THEME_APPLIED_KEY = "_login_theme_css_applied"
+_LOGIN_THEME_STYLE_ID = "disp-login-theme"
 
 
-def _inject_css_into_head(element_id: str, css_text: str) -> None:
-    """Inject CSS into the parent document head (fragment-safe, inject once)."""
-    css_json = json.dumps(css_text.strip())
-    id_json = json.dumps(element_id)
-    _iframe_html(
-        f"""
-        <script>
-        (function () {{
-          const doc = window.parent.document;
-          if (doc.getElementById({id_json})) return;
-          const style = doc.createElement("style");
-          style.id = {id_json};
-          style.textContent = {css_json};
-          doc.head.appendChild(style);
-        }})();
-        </script>
-        """,
+def _ensure_theme_css_in_dom(style_id: str, css_text: str | None) -> None:
+    """Inject CSS once per browser document (session state may survive a hard refresh)."""
+    sid = json.dumps(style_id)
+    if css_text is not None:
+        css_js = json.dumps(css_text.strip())
+        body = f"""
+(function() {{
+  var id = {sid};
+  if (document.getElementById(id)) return;
+  var css = {css_js};
+  try {{ sessionStorage.setItem(id, css); }} catch (e) {{}}
+  var el = document.createElement("style");
+  el.id = id;
+  el.textContent = css;
+  document.head.appendChild(el);
+}})();
+"""
+    else:
+        body = f"""
+(function() {{
+  var id = {sid};
+  if (document.getElementById(id)) return;
+  var css = null;
+  try {{ css = sessionStorage.getItem(id); }} catch (e) {{}}
+  if (!css) return;
+  var el = document.createElement("style");
+  el.id = id;
+  el.textContent = css;
+  document.head.appendChild(el);
+}})();
+"""
+    st.html(
+        f'<div class="disp-theme-css-inject" style="display:none" aria-hidden="true">'
+        f"<script>{body}</script></div>",
+        width="content",
+        unsafe_allow_javascript=True,
     )
 
 
 def apply_theme(*, login: bool = False) -> None:
     """Global typography + colour system for the dispatch dashboard."""
     if login:
+        login_css = DISPATCH_LOGIN_CSS.strip()
+        if login_css.startswith("<style>"):
+            login_css = login_css[len("<style>") :]
+        if login_css.endswith("</style>"):
+            login_css = login_css[: -len("</style>")]
+        login_css = login_css.strip()
         if st.session_state.get(_LOGIN_THEME_APPLIED_KEY):
+            _ensure_theme_css_in_dom(_LOGIN_THEME_STYLE_ID, None)
             return
         st.session_state[_LOGIN_THEME_APPLIED_KEY] = True
-        st.markdown(DISPATCH_LOGIN_CSS, unsafe_allow_html=True)
+        _ensure_theme_css_in_dom(_LOGIN_THEME_STYLE_ID, login_css)
         return
     if not st.session_state.get("_disp_row_popover_compact_injected"):
         inject_dispatch_row_popover_compact_css()
         st.session_state["_disp_row_popover_compact_injected"] = True
     theme_key = _DASH_THEME_APPLIED_KEY
-    if st.session_state.get(theme_key):
+    theme_already = st.session_state.get(theme_key)
+    if theme_already:
+        cached_css = st.session_state.get(_DASH_THEME_CSS_CACHE_KEY)
+        _ensure_theme_css_in_dom(
+            _DASH_THEME_STYLE_ID,
+            str(cached_css) if cached_css else None,
+        )
         return
     st.session_state[theme_key] = True
     css_text = f"""
-    /* ── Base ── */
+    /* ── Base (typography: Streamlit theme / Source Sans preload) ── */
     [data-testid="stAppViewContainer"] {{ background: #0a0f1a; }}
     [data-testid="stSidebar"]          {{ background: #0f1629; border-right: 1px solid #243047; }}
     [data-testid="block-container"],
     [data-testid="stMainBlockContainer"]    {{ padding: 0 !important; max-width: 100% !important; width: 100% !important; }}
 
     html, body, [class*="css"] {{
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       font-size:14px;
       font-weight: 400;
       color: #9aa8c4;
@@ -589,7 +623,6 @@ def apply_theme(*, login: bool = False) -> None:
 
     /* ── Headings — only two heading sizes used ── */
     h1, h2, h3 {{
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
       font-weight: 600 !important;
       color: #f0f4fc !important;
       letter-spacing: 0 !important;
@@ -676,7 +709,6 @@ def apply_theme(*, login: bool = False) -> None:
       background: rgba(255, 255, 255, 0.05) !important;
     }}
     .stButton > button {{
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
       font-size:13px !important;
       font-weight: 400 !important;
       background: transparent;
@@ -735,7 +767,6 @@ def apply_theme(*, login: bool = False) -> None:
     .stSelectbox > div > div,
     .stTextArea > div > textarea,
     .stNumberInput > div > div > input {{
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
       font-size:13px !important;
       font-weight: 400 !important;
       color: #8a9ac0 !important;
@@ -1029,7 +1060,8 @@ def apply_theme(*, login: bool = False) -> None:
       .weekly-derived-row {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     }}
     """
-    _inject_css_into_head("disp-dashboard-theme", css_text)
+    st.session_state[_DASH_THEME_CSS_CACHE_KEY] = css_text
+    _ensure_theme_css_in_dom(_DASH_THEME_STYLE_ID, css_text)
 
 
 _DISPATCH_QUEUE_MASK: dict[str, str] = {
@@ -1072,7 +1104,6 @@ _ASSIGN_SALES_CAT_KEY = "assign_sales_category"
 _ASSIGN_CLEAR_KEY = "_assign_entry_clear"
 _ASSIGN_DISPATCH_TELEGRAM = "telegram"
 _ASSIGN_DISPATCH_SILENT = "silent"
-_ASSIGN_ENGINEER_WORKLOAD_TTL_SEC = 60
 
 STATUS_UNDER_INVESTIGATION = "Under Investigation"
 STATUS_ON_HOLD = "On Hold"
@@ -2354,7 +2385,7 @@ def _login_remember_bootstrap() -> None:
         <script>
         (function () {
           const KEY = "fto_remember_v1";
-          const loc = window.parent.location;
+          const loc = window.location;
           const params = new URLSearchParams(loc.search);
           if (params.get("_lr") === "1") return;
           const token = localStorage.getItem(KEY);
@@ -2362,7 +2393,7 @@ def _login_remember_bootstrap() -> None:
           const u = new URL(loc.href);
           u.searchParams.set("_lr", "1");
           u.searchParams.set("_lt", token);
-          window.parent.location.replace(u.toString());
+          window.location.replace(u.toString());
         })();
         </script>
         """,
@@ -8833,6 +8864,193 @@ def _dispatch_case_activity_sections_html(
     return "".join(parts)
 
 
+_FIELD_RESPONSE_ACTIVITY_KINDS: frozenset[str] = frozenset(
+    {"field", "visit", "response"}
+)
+
+
+def _normalize_case_info_text(val: object) -> str:
+    return " ".join(_clean_display_value(val).split()).casefold()
+
+
+def _primary_field_response_text(
+    row: dict,
+    activity: dict[str, object] | None = None,
+    *,
+    derived_text: str | None = None,
+) -> str:
+    """Ticket row field reply, else derived/activity note (before showing site photo)."""
+    text = str(row.get("field_response") or "").strip()
+    if text:
+        return text
+    if derived_text:
+        text = str(derived_text).strip()
+        if text:
+            return text
+    if activity:
+        for item in activity.get("comments") or []:
+            if str(item.get("kind") or "") not in _FIELD_RESPONSE_ACTIVITY_KINDS:
+                continue
+            note = str(item.get("text") or "").strip()
+            if note:
+                return note
+    return ""
+
+
+def _field_response_block_html(text: str) -> str:
+    return (
+        f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
+        f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
+        f"{html.escape(text)}</div>"
+    )
+
+
+def _case_info_gallery_scope_token(scope: str) -> str:
+    return re.sub(r"[^\w.-]", "_", str(scope or "case"))[:96]
+
+
+def _collect_case_info_gallery_photos(
+    row: dict,
+    activity: dict[str, object] | None,
+) -> list[dict[str, str]]:
+    """Pinned ticket photo first, then other case photos (deduped, stable order)."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def append(url_raw: object, *, author: object = "", at: object = "") -> None:
+        url = _displayable_photo_url(url_raw)
+        if not url or url in seen:
+            return
+        seen.add(url)
+        out.append(
+            {
+                "url": url,
+                "author": _clean_display_value(author, default="—") or "—",
+                "at": _clean_display_value(at),
+            }
+        )
+
+    append(
+        row.get("photo_url"),
+        author=row.get("field_responded_by") or row.get("assigned_to"),
+        at=row.get("responded_at") or row.get("updated_at"),
+    )
+    if activity:
+        for item in activity.get("photos") or []:
+            append(
+                item.get("url"),
+                author=item.get("author"),
+                at=item.get("at"),
+            )
+    return out
+
+
+def _render_case_info_photo_gallery(scope: str, photos: list[dict[str, str]]) -> None:
+    """Field-response photos below comment — prev/next when multiple."""
+    if not photos:
+        return
+    scope_tok = _case_info_gallery_scope_token(scope)
+    idx_key = f"_case_info_photo_idx_{scope_tok}"
+    scope_track_key = "_case_info_photo_scope"
+    if st.session_state.get(scope_track_key) != scope_tok:
+        st.session_state[scope_track_key] = scope_tok
+        st.session_state.pop(idx_key, None)
+
+    total = len(photos)
+    idx = int(st.session_state.get(idx_key, 0) or 0)
+    if idx < 0 or idx >= total:
+        idx = 0
+        st.session_state[idx_key] = 0
+
+    title = "Site photos" if total > 1 else "Site photo"
+    st.markdown(
+        t_section_label(title, spacing=".06em", margin="margin:10px 0 5px"),
+        unsafe_allow_html=True,
+    )
+
+    if total > 1:
+        prev_col, mid_col, next_col = st.columns([1, 2, 1], gap="small")
+        with prev_col:
+            if st.button(
+                "← Previous",
+                key=f"case_photo_prev_{scope_tok}",
+                disabled=idx <= 0,
+                width="stretch",
+            ):
+                st.session_state[idx_key] = max(0, idx - 1)
+                st.rerun()
+        with mid_col:
+            st.markdown(
+                f'<p style="text-align:center;font-size:12px;color:#4a5a7a;'
+                f'margin:6px 0 0">Photo {idx + 1} of {total}</p>',
+                unsafe_allow_html=True,
+            )
+        with next_col:
+            if st.button(
+                "Next →",
+                key=f"case_photo_next_{scope_tok}",
+                disabled=idx >= total - 1,
+                width="stretch",
+            ):
+                st.session_state[idx_key] = min(total - 1, idx + 1)
+                st.rerun()
+
+    current = photos[idx]
+    meta_bits: list[str] = []
+    author = str(current.get("author") or "").strip()
+    when = str(current.get("at") or "").strip()
+    if author:
+        meta_bits.append(html.escape(author))
+    if when:
+        meta_bits.append(html.escape(when))
+    if meta_bits:
+        st.markdown(
+            f'<p style="font-size:11px;color:#2a3a5a;margin:0 0 6px">'
+            f'{" · ".join(meta_bits)}</p>',
+            unsafe_allow_html=True,
+        )
+    st.image(str(current.get("url") or ""), width="stretch")
+    if total > 1:
+        st.markdown(
+            f'<p style="font-size:11px;color:#2a3a5a;margin:6px 0 0">'
+            f'<a href="{html.escape(str(current.get("url") or ""))}" target="_blank" '
+            f'rel="noopener" style="color:#3b82f6;text-decoration:none">'
+            f"Open full size ↗</a></p>",
+            unsafe_allow_html=True,
+        )
+
+
+def _filter_case_activity_for_primary_display(
+    activity: dict[str, object],
+    *,
+    skip_comment_text: str | None,
+    skip_photo_url: str | None = None,
+    skip_photo_urls: tuple[str, ...] | list[str] | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    comments = list(activity.get("comments") or [])
+    photos = list(activity.get("photos") or [])
+    skip_t = _normalize_case_info_text(skip_comment_text or "")
+    if skip_t:
+        comments = [
+            c
+            for c in comments
+            if _normalize_case_info_text(c.get("text")) != skip_t
+        ]
+    skip_set: set[str] = set()
+    for raw in skip_photo_urls or ():
+        u = _clean_display_value(raw)
+        if u.startswith("http"):
+            skip_set.add(u)
+    single = _clean_display_value(skip_photo_url)
+    if single.startswith("http"):
+        skip_set.add(single)
+    if skip_set:
+        photos = [
+            p for p in photos if _clean_display_value(p.get("url")) not in skip_set
+        ]
+    return comments, photos
+
+
 @st.cache_data(ttl=_DASH_DATA_CACHE_TTL_SEC, show_spinner=False)
 def _get_dispatch_ticket_case_activity(ticket_number: str) -> dict[str, object]:
     """All responses, comments, and photos for one ticket (same sources as Case Info matrix)."""
@@ -8849,11 +9067,21 @@ def _get_dispatch_ticket_case_activity(ticket_number: str) -> dict[str, object]:
     return info.get(tn, {"comments": [], "photos": []})
 
 
-def _render_dispatch_case_activity_panel(ticket_number: str) -> None:
+def _render_dispatch_case_activity_panel(
+    ticket_number: str,
+    *,
+    skip_comment_text: str | None = None,
+    skip_photo_url: str | None = None,
+    skip_photo_urls: tuple[str, ...] | list[str] | None = None,
+) -> None:
     """Comments + photos — same layout as Multi-Staff Case Info matrix panel."""
     activity = _get_dispatch_ticket_case_activity(ticket_number)
-    comments = list(activity.get("comments") or [])
-    photos = list(activity.get("photos") or [])
+    comments, photos = _filter_case_activity_for_primary_display(
+        activity,
+        skip_comment_text=skip_comment_text,
+        skip_photo_url=skip_photo_url,
+        skip_photo_urls=skip_photo_urls,
+    )
 
     if not comments and not photos:
         st.markdown(
@@ -13497,7 +13725,7 @@ def _perf_team_assignment_summary_df(
                 "Tasks": tasks,
                 "Task load": round(tasks / unique, 2) if unique else 0.0,
                 "Revisit tickets": int(assign.get("revisit_tickets") or 0),
-                "Unattended cases": unattended_cases,
+                "Unatt (range)": unattended_cases,
                 "Attended (assigned)": attended,
                 "Still open (assigned)": still_open,
                 "Residential": res_n,
@@ -13512,7 +13740,7 @@ def _perf_team_assignment_summary_df(
                 "Tasks",
                 "Task load",
                 "Revisit tickets",
-                "Unattended cases",
+                "Unatt (range)",
                 "Attended (assigned)",
                 "Still open (assigned)",
                 "Residential",
@@ -15119,7 +15347,7 @@ def _render_perf_summary_context_bar(
             _chip("Assigned", str(assigned) if assigned else "—"),
             _chip("Attended (yours)", str(total)),
             _chip("Handed off", str(closed_other) if closed_other else "—"),
-            _chip("Unattended", str(unattended) if unattended else "—"),
+            _chip("Unatt (range)", str(unattended) if unattended else "—"),
             _chip("Field resolution", f"{rate}%"),
         ]
     st.markdown(
@@ -15212,13 +15440,13 @@ def _render_perf_summary_team_assignment_table(
     team_unique = int(metrics.get("team_unique_in_range") or 0)
     range_label = _format_perf_range_caption() or "sidebar date range"
     st.caption(
-        f"All columns use **{range_label}** (same scope as Summary assign-day metrics). "
+        f"All columns use **{range_label}**. "
+        "**Unatt (range)** = assign-day misses (UTC+5 assign day in header range). "
         "**Unique tickets** = distinct IDs assigned to that engineer; "
-        "**Residential** + **Resort** = the same split of unique. "
         "**Attended (assigned)** + **Still open (assigned)** = unique. "
-        f"Team distinct assigned in range: **{team_unique}** (no double-count across engineers). "
-        "**🔒 Admin** — field **ticket_number** + resort **case_ref** (one ticket ID per case); "
-        "always shown (pinned under the focused engineer when Focus is one person)."
+        f"Team distinct assigned in range: **{team_unique}**. "
+        "Live flagged backlog: **FLAGGED** snapshot card above. "
+        "**🔒 Admin** — field **ticket_number** + resort **case_ref**."
     )
     view = team_df.copy()
     if not focus_all and "Engineer" in view.columns:
@@ -15672,6 +15900,32 @@ def _weekly_altair_theme(chart: alt.Chart) -> alt.Chart:
     )
 
 
+def _perf_altair_combo_y_domain(
+    *frames: pd.DataFrame,
+    value_cols: tuple[str, ...] = ("tasks", "field_resolved", "value"),
+) -> list[int]:
+    """Stable [0, max] Y domain — avoids Vega ``Infinite extent`` on empty layers."""
+    hi = 1
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        for col in value_cols:
+            if col not in frame.columns:
+                continue
+            series = pd.to_numeric(frame[col], errors="coerce").fillna(0)
+            if series.empty:
+                continue
+            hi = max(hi, int(series.max()))
+    return [0, hi]
+
+
+def _perf_altair_has_combo_days(frame: pd.DataFrame) -> bool:
+    if frame is None or frame.empty or "day" not in frame.columns:
+        return False
+    days = pd.to_datetime(frame["day"], errors="coerce", utc=True)
+    return bool(days.notna().any())
+
+
 def _weekly_altair_resolved_point_def(*, size: int = 45) -> alt.OverlayMarkDef:
     """Line point markers for resolved series — fixed green (not engineer task colors)."""
     return alt.OverlayMarkDef(
@@ -15689,11 +15943,34 @@ def _weekly_altair_focus_daily_combo_chart(
     tooltips: list[alt.Tooltip],
 ) -> alt.LayerChart:
     """Daily combo — assignment tasks + resolved after visit on one shared left axis."""
-    y_left = alt.Y("value:Q", title="Count", axis=alt.Axis(tickMinStep=1))
+    if not _perf_altair_has_combo_days(plot_df):
+        stub = pd.DataFrame(
+            {
+                "day": [pd.Timestamp.now(tz=LOCAL_TZ)],
+                "tasks": [0],
+                "field_resolved": [0],
+                "attended": [0],
+            }
+        )
+        plot_df = stub
+    plot_df = plot_df.copy()
+    plot_df["day"] = pd.to_datetime(plot_df["day"], utc=True)
+    plot_df["tasks"] = pd.to_numeric(plot_df["tasks"], errors="coerce").fillna(0).astype(int)
+    plot_df["field_resolved"] = (
+        pd.to_numeric(plot_df["field_resolved"], errors="coerce").fillna(0).astype(int)
+    )
+    y_domain = _perf_altair_combo_y_domain(plot_df)
+    y_left = alt.Y(
+        "value:Q",
+        title="Count",
+        axis=alt.Axis(tickMinStep=1),
+        scale=alt.Scale(domain=y_domain, nice=False),
+    )
     x_enc = alt.X(
         "day:T",
         title="Day",
         axis=alt.Axis(format="%d %b", labelAngle=-35),
+        scale=alt.Scale(nice=False),
     )
     tasks_df = plot_df.assign(series="tasks", value=plot_df["tasks"].astype(int))
     resolved_df = plot_df.assign(
@@ -15732,84 +16009,126 @@ def _weekly_altair_team_daily_combo_chart(
     resolved_df: pd.DataFrame,
 ) -> alt.LayerChart:
     """Team combo — one task line per engineer + team resolved after visit (shared Count axis)."""
-    y_count = alt.Y("tasks:Q", title="Count", axis=alt.Axis(tickMinStep=1))
-    y_resolved = alt.Y("field_resolved:Q", title="Count", axis=alt.Axis(tickMinStep=1))
+    tasks_plot = tasks_df.copy() if isinstance(tasks_df, pd.DataFrame) else pd.DataFrame()
+    res = resolved_df.copy() if isinstance(resolved_df, pd.DataFrame) else pd.DataFrame()
+    if _perf_altair_has_combo_days(tasks_plot):
+        tasks_plot["day"] = pd.to_datetime(tasks_plot["day"], utc=True)
+        tasks_plot["tasks"] = (
+            pd.to_numeric(tasks_plot["tasks"], errors="coerce").fillna(0).astype(int)
+        )
+    else:
+        tasks_plot = pd.DataFrame(columns=["day", "Engineer", "tasks"])
+    if _perf_altair_has_combo_days(res):
+        res["day"] = pd.to_datetime(res["day"], utc=True)
+        res["field_resolved"] = (
+            pd.to_numeric(res["field_resolved"], errors="coerce").fillna(0).astype(int)
+        )
+        if "attended" in res.columns:
+            res["attended"] = (
+                pd.to_numeric(res["attended"], errors="coerce").fillna(0).astype(int)
+            )
+    else:
+        res = pd.DataFrame(columns=["day", "field_resolved", "attended"])
+
+    y_domain = _perf_altair_combo_y_domain(tasks_plot, res)
+    y_scale = alt.Scale(domain=y_domain, nice=False)
+    y_count = alt.Y("tasks:Q", title="Count", axis=alt.Axis(tickMinStep=1), scale=y_scale)
+    y_resolved = alt.Y(
+        "field_resolved:Q", title="Count", axis=alt.Axis(tickMinStep=1), scale=y_scale
+    )
     x_enc = alt.X(
         "day:T",
         title="Day",
         axis=alt.Axis(format="%d %b", labelAngle=-35),
+        scale=alt.Scale(nice=False),
     )
     task_layer: alt.Chart | None = None
     engineers: list[str] = []
-    if not tasks_df.empty:
+    if not tasks_plot.empty:
         engineers = _perf_sort_engineer_labels_for_chart(
-            tasks_df["Engineer"].astype(str).unique().tolist()
+            tasks_plot["Engineer"].astype(str).unique().tolist()
         )
         color_map = _perf_engineer_color_map(engineers)
-        work = _perf_daily_assignment_tooltip_columns(tasks_df)
+        work = _perf_daily_assignment_tooltip_columns(tasks_plot)
         work = _perf_daily_assignment_line_segments(work)
-        task_layer = (
-            alt.Chart(work)
-            .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5)
-            .encode(
-                x=x_enc,
-                y=y_count,
-                color=alt.Color(
-                    "Engineer:N",
-                    scale=alt.Scale(
-                        domain=engineers,
-                        range=[color_map[e] for e in engineers],
+        if _perf_altair_has_combo_days(work):
+            task_layer = (
+                alt.Chart(work)
+                .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5)
+                .encode(
+                    x=x_enc,
+                    y=y_count,
+                    color=alt.Color(
+                        "Engineer:N",
+                        scale=alt.Scale(
+                            domain=engineers,
+                            range=[color_map[e] for e in engineers],
+                        ),
+                        legend=None,
                     ),
-                    legend=None,
-                ),
-                detail=alt.Detail("line_segment:N"),
-                tooltip=[
-                    alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
-                    alt.Tooltip("tooltip_engineers:N", title="Engineer"),
-                    alt.Tooltip("tooltip_tasks:N", title="Tasks"),
-                ],
+                    detail=alt.Detail("line_segment:N"),
+                    tooltip=[
+                        alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+                        alt.Tooltip("tooltip_engineers:N", title="Engineer"),
+                        alt.Tooltip("tooltip_tasks:N", title="Tasks"),
+                    ],
+                )
             )
-        )
-    res = resolved_df.copy()
     with alt.theme.enable("none"):
-        resolved_area = (
-            alt.Chart(res)
-            .mark_area(color=_WEEKLY_RESOLVED_COLOR, opacity=0.28)
-            .encode(
-                x=x_enc,
-                y=y_resolved,
-                tooltip=[
-                    alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
-                    alt.Tooltip("field_resolved:Q", title="Resolved after visit (team)"),
-                    alt.Tooltip("attended:Q", title="Attended (team assign cycles)"),
-                ],
+        layers: list[alt.Chart] = []
+        if _perf_altair_has_combo_days(res):
+            resolved_area = (
+                alt.Chart(res)
+                .mark_area(color=_WEEKLY_RESOLVED_COLOR, opacity=0.28)
+                .encode(
+                    x=x_enc,
+                    y=y_resolved,
+                    tooltip=[
+                        alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+                        alt.Tooltip("field_resolved:Q", title="Resolved after visit (team)"),
+                        alt.Tooltip("attended:Q", title="Attended (team assign cycles)"),
+                    ],
+                )
             )
-        )
-        resolved_line = (
-            alt.Chart(res)
-            .mark_line(
-                color=_WEEKLY_RESOLVED_COLOR,
-                strokeWidth=2,
-                point=_weekly_altair_resolved_point_def(size=45),
+            resolved_line = (
+                alt.Chart(res)
+                .mark_line(
+                    color=_WEEKLY_RESOLVED_COLOR,
+                    strokeWidth=2,
+                    point=_weekly_altair_resolved_point_def(size=45),
+                )
+                .encode(
+                    x=x_enc,
+                    y=y_resolved,
+                    tooltip=[
+                        alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
+                        alt.Tooltip("field_resolved:Q", title="Resolved after visit (team)"),
+                        alt.Tooltip("attended:Q", title="Attended (team assign cycles)"),
+                    ],
+                )
             )
-            .encode(
-                x=x_enc,
-                y=y_resolved,
-                tooltip=[
-                    alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
-                    alt.Tooltip("field_resolved:Q", title="Resolved after visit (team)"),
-                    alt.Tooltip("attended:Q", title="Attended (team assign cycles)"),
-                ],
-            )
-        )
-        layers: list[alt.Chart] = [resolved_area, resolved_line]
+            layers.extend([resolved_area, resolved_line])
         if task_layer is not None:
             layers.append(task_layer)
-        layered = (
-            alt.layer(*layers)
-            .resolve_scale(y="shared", color="independent")
-            .properties(height=300)
-        )
+        if not layers:
+            stub = pd.DataFrame({"day": [pd.Timestamp.now(tz=LOCAL_TZ)], "value": [0]})
+            layered = (
+                alt.Chart(stub)
+                .mark_point(opacity=0)
+                .encode(
+                    x=alt.X("day:T", scale=alt.Scale(nice=False)),
+                    y=alt.Y("value:Q", scale=alt.Scale(domain=[0, 1], nice=False)),
+                )
+                .properties(height=300)
+            )
+        elif len(layers) == 1:
+            layered = layers[0].properties(height=300)
+        else:
+            layered = (
+                alt.layer(*layers)
+                .resolve_scale(y="shared", color="independent")
+                .properties(height=300)
+            )
     return _weekly_altair_theme(layered)
 
 
@@ -16294,9 +16613,15 @@ def _render_perf_summary_resolution_trend(
         cap_parts.insert(0, period_label)
     st.caption(" · ".join(cap_parts))
     trend_df = metrics.get("trend_df")
-    if not isinstance(trend_df, pd.DataFrame) or trend_df.empty:
+    if not isinstance(trend_df, pd.DataFrame) or not _perf_altair_has_combo_days(trend_df):
         st.caption("No attended cases in this range for a trend.")
         return
+    trend_df = trend_df.copy()
+    trend_df["day"] = pd.to_datetime(trend_df["day"], utc=True)
+    trend_df["field_resolved"] = (
+        pd.to_numeric(trend_df["field_resolved"], errors="coerce").fillna(0).astype(int)
+    )
+    y_domain = _perf_altair_combo_y_domain(trend_df)
     trend = _weekly_altair_theme(
         alt.Chart(trend_df)
         .mark_area(color=_WEEKLY_RESOLVED_COLOR, opacity=0.28, line={"color": _WEEKLY_RESOLVED_COLOR})
@@ -16306,10 +16631,12 @@ def _render_perf_summary_resolution_trend(
                 title="Day",
                 sort=alt.EncodingSortField(field="sort", order="ascending"),
                 axis=alt.Axis(format="%d %b", labelAngle=-35, labelOverlap=False),
+                scale=alt.Scale(nice=False),
             ),
             y=alt.Y(
                 "field_resolved:Q",
                 title="Count",
+                scale=alt.Scale(domain=y_domain, nice=False),
             ),
             tooltip=[
                 alt.Tooltip("day:T", title="Day", format="%d %b %Y"),
@@ -16420,6 +16747,12 @@ def _render_perf_summary_daily_assignment_chart(
     st.markdown(_perf_engineer_line_legend_html(engineers), unsafe_allow_html=True)
     plot_df = _perf_daily_assignment_tooltip_columns(plot_df)
     plot_df = _perf_daily_assignment_line_segments(plot_df)
+    if not _perf_altair_has_combo_days(plot_df):
+        st.caption("No assignment tasks in this range.")
+        return
+    plot_df["day"] = pd.to_datetime(plot_df["day"], utc=True)
+    plot_df["tasks"] = pd.to_numeric(plot_df["tasks"], errors="coerce").fillna(0).astype(int)
+    y_domain = _perf_altair_combo_y_domain(plot_df)
     chart = _weekly_altair_theme(
         alt.Chart(plot_df)
         .mark_line(point={"filled": True, "size": 55}, strokeWidth=2.5)
@@ -16428,8 +16761,14 @@ def _render_perf_summary_daily_assignment_chart(
                 "day:T",
                 title="Day",
                 axis=alt.Axis(format="%d %b", labelAngle=-35),
+                scale=alt.Scale(nice=False),
             ),
-            y=alt.Y("tasks:Q", title="Tasks", axis=alt.Axis(tickMinStep=1)),
+            y=alt.Y(
+                "tasks:Q",
+                title="Tasks",
+                axis=alt.Axis(tickMinStep=1),
+                scale=alt.Scale(domain=y_domain, nice=False),
+            ),
             color=alt.Color(
                 "Engineer:N",
                 scale=alt.Scale(
@@ -21250,6 +21589,7 @@ def main() -> None:
     )
 
     _check_password()
+    apply_theme()
 
     run_id = _dash_perf_bump_run()
     main_nav = _normalize_dash_main_nav(
@@ -21281,7 +21621,6 @@ def main() -> None:
         return
 
     _init_dash_date_range_state()
-    apply_theme()
 
     auto, interval_minutes = _dash_refresh_settings()
     run_every = timedelta(minutes=interval_minutes) if auto else None
@@ -21318,7 +21657,7 @@ _BON_THEME_CSS = """
         --bon-oak: #D7B491;
         --bon-text: #e8e6e3;
         --bon-muted: #a39e97;
-        --bon-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --bon-font: inherit;
         --bon-box-border: rgba(215, 180, 145, 0.45);
         --bon-box-radius: 8px;
         --bon-topbar-h: 3.5rem;
@@ -21402,6 +21741,13 @@ _BON_THEME_CSS = """
     }
     [data-testid="stMain"] iframe {
         overscroll-behavior: contain !important;
+    }
+    .disp-html-embed--inline {
+        height: 0 !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        line-height: 0 !important;
     }
     [data-testid="stAppViewContainer"] section.main {
         padding-top: 0 !important;
@@ -22734,21 +23080,10 @@ def _bon_theme_css_text() -> str:
 
 
 def _inject_bon_theme_styles_once() -> None:
-    """Inject the large theme stylesheet once into the parent document head."""
-    css_json = json.dumps(_bon_theme_css_text())
-    _iframe_html(
-        f"""
-        <script>
-        (function () {{
-          const doc = window.parent.document;
-          if (doc.getElementById("bon-theme-css")) return;
-          const style = doc.createElement("style");
-          style.id = "bon-theme-css";
-          style.textContent = {css_json};
-          doc.head.appendChild(style);
-        }})();
-        </script>
-        """,
+    """Inject the large BON theme stylesheet once."""
+    st.markdown(
+        f'<style id="bon-theme-css">\n{_bon_theme_css_text()}\n</style>',
+        unsafe_allow_html=True,
     )
 
 
@@ -22806,8 +23141,8 @@ def _inject_bon_dashboard_scripts() -> None:
         """
         <script>
         (function () {
-          const win = window.parent;
-          const doc = win.document;
+          const win = window;
+          const doc = document;
 
           function scrollRoot(el) {
             if (!el) return null;
@@ -23376,6 +23711,7 @@ def _apply_pending_dashboard_nav() -> None:
         st.session_state[_DISP_SELECTED_KEY] = str(pending_ticket)
         st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESIDENTIAL
         st.session_state["_disp_preserve_lookup_selection"] = True
+        _dispatch_open_case_info_on_select()
     if pending_engineer is not None:
         st.session_state[_DISP_ENGINEER_FILTER_KEY] = _perf_norm_member(pending_engineer)
     if pending_case_type:
@@ -23388,6 +23724,7 @@ def _apply_pending_dashboard_nav() -> None:
         st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
         st.session_state[_DISP_CASE_TYPE_FILTER_KEY] = _CASE_TYPE_FILTER_ALL
         st.session_state["_disp_preserve_lookup_selection"] = True
+        _dispatch_open_case_info_on_select()
 
 
 _TICKET_QUEUE_TABLE_COLS: tuple[str, ...] = (
@@ -25209,17 +25546,6 @@ def _render_sales_detail_panel() -> None:
             )
         )
 
-    field_response = str(case.get("field_response") or "").strip()
-    if field_response:
-        detail_parts.append(
-            _case_detail_block(
-                "Field response",
-                f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
-                f'background:#0d1220;border:0.5px solid #1a2035;border-radius:5px;padding:8px">'
-                f"{html.escape(field_response)}</div>",
-            )
-        )
-
     detail_parts.append(
         _case_detail_block(
             "Attended by",
@@ -25229,15 +25555,32 @@ def _render_sales_detail_panel() -> None:
     )
     st.markdown("".join(detail_parts), unsafe_allow_html=True)
 
-    photo_url = _displayable_photo_url(case.get("photo_url"))
-    if photo_url:
+    cref = str(case.get("case_ref") or "")
+    activity = _get_dispatch_ticket_case_activity(cref) if cref else None
+    field_response = _primary_field_response_text(
+        case,
+        activity,
+        derived_text=_sales_row_derived_field_response(case),
+    )
+    gallery_photos = _collect_case_info_gallery_photos(case, activity)
+    gallery_urls = tuple(p.get("url", "") for p in gallery_photos)
+
+    if field_response:
         st.markdown(
-            t_section_label("Site photo", spacing=".06em", margin="margin:0 0 5px"),
+            _case_detail_block(
+                "Field response",
+                _field_response_block_html(field_response),
+            ),
             unsafe_allow_html=True,
         )
-        st.image(photo_url, width="stretch")
 
-    _render_dispatch_case_activity_panel(str(case.get("case_ref") or ""))
+    _render_dispatch_case_activity_panel(
+        cref,
+        skip_comment_text=field_response or None,
+        skip_photo_urls=gallery_urls,
+    )
+    if gallery_photos:
+        _render_case_info_photo_gallery(cref, gallery_photos)
 
     _render_resort_reopen_actions(case)
     _render_attendance_timeline(str(case.get("case_ref") or ""))
@@ -25963,17 +26306,26 @@ def _dispatch_effective_action_status(ticket: dict, *, queue_name: str) -> str:
     return raw
 
 
+def _dispatch_open_case_info_on_select() -> None:
+    """Selecting a case from any queue opens the Case info rail tab."""
+    st.session_state[_DISP_DETAIL_TAB_KEY] = "info"
+
+
 def _dispatch_prepare_row_selection(ticket_number: str) -> None:
     tn = str(ticket_number)
     st.session_state[_DISP_SELECTED_KEY] = tn
     for prefix in ("disp_row", "disp_row_close", "disp_row_resolve"):
         st.session_state[_ticket_selection_session_key(prefix)] = [tn]
+    _dispatch_open_case_info_on_select()
 
 
 def _sales_prepare_row_selection(case_ref: str) -> None:
     cref = str(case_ref).strip()
     st.session_state[_SALES_SELECTED_KEY] = cref
     st.session_state[_sc_case_selection_session_key("sales_row")] = [cref]
+    st.session_state[_DISP_SELECTED_KEY] = cref
+    st.session_state[_DISP_SELECTED_CASE_TYPE_KEY] = CASE_TYPE_RESORT
+    _dispatch_open_case_info_on_select()
 
 
 def _sales_row_modal_df(queue_df: pd.DataFrame, case_ref: str) -> pd.DataFrame:
@@ -26696,30 +27048,53 @@ def _render_dispatch_case_info_panel(
                     'display:block">Auto-closed — no field response before cutoff</span>',
                 )
             )
+        if detail_parts:
+            st.markdown("".join(detail_parts), unsafe_allow_html=True)
+
+        tn = str(t.get("ticket_number") or "")
+        activity = _get_dispatch_ticket_case_activity(tn) if load_heavy and tn else None
+        field_resp = _primary_field_response_text(t, activity)
+        gallery_photos = (
+            _collect_case_info_gallery_photos(t, activity) if load_heavy else []
+        )
+        gallery_urls = tuple(p.get("url", "") for p in gallery_photos)
+
+        if field_resp:
+            st.markdown(
+                _case_detail_block("Field response", _field_response_block_html(field_resp)),
+                unsafe_allow_html=True,
+            )
+
+        if not load_heavy:
+            st.caption("Open **Case info** to load photos, activity, and timeline.")
+            return
+
         if t.get("additional_info"):
-            detail_parts.append(
+            st.markdown(
                 _case_detail_block(
                     "Notes",
                     f'<div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;'
                     f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
                     f"{html.escape(str(t.get('additional_info') or ''))}"
                     f"</div>",
-                )
+                ),
+                unsafe_allow_html=True,
             )
         if (
             str(t.get("status") or "").strip() == STATUS_RESOLVED
             and str(t.get("additional_info") or "").strip()
         ):
-            detail_parts.append(
+            st.markdown(
                 _case_detail_block(
                     "Admin comment",
                     f'<div style="font-size:13px;font-weight:400;color:#e2e8f8;line-height:1.5;'
                     f'background:#231a06;border:0.5px solid #3d2a0a;border-radius:4px;padding:7px">'
                     f"{html.escape(str(t.get('additional_info') or ''))}"
                     f"</div>",
-                )
+                ),
+                unsafe_allow_html=True,
             )
-        admin_comment = _latest_admin_comment_for_ticket(str(t.get("ticket_number") or ""))
+        admin_comment = _latest_admin_comment_for_ticket(tn)
         if admin_comment:
             admin_author = html.escape(admin_comment.get("author") or "—")
             admin_when = html.escape(admin_comment.get("at") or "")
@@ -26728,7 +27103,7 @@ def _render_dispatch_case_info_panel(
                 f'<p style="font-size:11px;color:#2a3a5a;margin:4px 0 0">'
                 f"{admin_author}{(' · ' + admin_when) if admin_when else ''}</p>"
             )
-            detail_parts.append(
+            st.markdown(
                 _case_detail_block(
                     "Last admin comment",
                     f'<div style="font-size:13px;font-weight:400;color:#8a9ac0;line-height:1.5;'
@@ -26736,36 +27111,17 @@ def _render_dispatch_case_info_panel(
                     f'<p style="margin:0;white-space:pre-wrap;word-break:break-word">{admin_text}</p>'
                     f"{when_line}"
                     f"</div>",
-                )
-            )
-        field_resp = str(t.get("field_response") or "").strip()
-        if field_resp:
-            detail_parts.append(
-                _case_detail_block(
-                    "Field response",
-                    f'<div style="font-size:13px;color:#8a9ac0;line-height:1.5;'
-                    f'background:#0d1220;border:0.5px solid #1a2035;border-radius:4px;padding:7px">'
-                    f"{html.escape(field_resp)}</div>",
-                )
-            )
-        if detail_parts:
-            st.markdown("".join(detail_parts), unsafe_allow_html=True)
-        if not load_heavy:
-            st.caption("Open **Case info** to load photos, activity, and timeline.")
-            return
-        photo_url = _displayable_photo_url(t.get("photo_url"))
-        if photo_url:
-            st.markdown(
-                t_section_label(
-                    "Site photo",
-                    spacing=".06em",
-                    margin="margin:10px 0 5px",
                 ),
                 unsafe_allow_html=True,
             )
-            st.image(photo_url, width="stretch")
 
-        _render_dispatch_case_activity_panel(str(t.get("ticket_number") or ""))
+        _render_dispatch_case_activity_panel(
+            tn,
+            skip_comment_text=field_resp or None,
+            skip_photo_urls=gallery_urls,
+        )
+        if gallery_photos:
+            _render_case_info_photo_gallery(tn, gallery_photos)
         _render_residential_reopen_actions(t)
         _render_attendance_timeline(str(t.get("ticket_number") or ""))
 
@@ -26788,6 +27144,9 @@ def _render_dispatch_right_rail(
             match = queue_df.loc[queue_df["ticket_number"].astype(str) == str(picked)]
             if not match.empty:
                 ticket = _dispatch_row_dict(match.iloc[0])
+
+    if picked:
+        _dispatch_open_case_info_on_select()
 
     detail_tab = str(st.session_state.get(_DISP_DETAIL_TAB_KEY) or "assign")
     if detail_tab not in ("assign", "info"):
@@ -26895,71 +27254,6 @@ def _on_assign_id_change() -> None:
     else:
         st.session_state[_ASSIGN_ID_STATUS_KEY] = "valid"
         st.session_state[_ASSIGN_DUP_OWNER_KEY] = None
-
-
-@st.cache_data(ttl=_ASSIGN_ENGINEER_WORKLOAD_TTL_SEC, show_spinner=False)
-def _get_engineer_workload() -> dict[str, dict[str, int]]:
-    """Advisory open + unattended counts per @handle (60s TTL, separate from board cache)."""
-    client = _get_supabase_client()
-    try:
-        engineers = (
-            client.table(FIELD_ENGINEERS_TABLE)
-            .select("username")
-            .eq("is_active", True)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        return {}
-
-    workload: dict[str, dict[str, int]] = {}
-    for e in engineers:
-        stem = _canonical_username_stem(str(e.get("username") or ""))
-        if stem:
-            workload[f"@{stem}"] = {"open": 0, "unattended": 0}
-    if not workload:
-        return workload
-
-    def _bump(handle: object, key: str) -> None:
-        h = str(handle or "").strip()
-        if not h:
-            return
-        norm = f"@{_canonical_username_stem(h)}"
-        if norm in workload:
-            workload[norm][key] += 1
-
-    try:
-        open_rows = (
-            client.table(TICKETS_TABLE)
-            .select("assigned_to, assigned_to_2, status")
-            .neq("status", STATUS_RESOLVED)
-            .execute()
-            .data
-            or []
-        )
-        for row in open_rows:
-            _bump(row.get("assigned_to"), "open")
-            _bump(row.get("assigned_to_2"), "open")
-    except Exception:
-        pass
-
-    try:
-        unattended_rows = (
-            client.table(TICKETS_TABLE)
-            .select("assigned_to, assigned_to_2")
-            .not_.is_("marked_unattended_at", "null")
-            .execute()
-            .data
-            or []
-        )
-        for row in unattended_rows:
-            _bump(row.get("assigned_to"), "unattended")
-            _bump(row.get("assigned_to_2"), "unattended")
-    except Exception:
-        pass
-
-    return workload
 
 
 def _build_assign_impact_lines(
@@ -27344,12 +27638,8 @@ def _handle_ticket_assign_entry_submit(
 
 
 def _render_assign_engineer_picker(engineers: list[str]) -> None:
-    """Toggleable engineer rows with inline open / unattended workload."""
+    """Toggleable engineer rows (max two selected)."""
     selected = list(st.session_state.get(_ASSIGN_SELECTED_ENGS_KEY) or [])
-    try:
-        workload = _get_engineer_workload()
-    except Exception:
-        workload = {}
 
     hdr, mgr = st.columns([5, 1], gap="small")
     with hdr:
@@ -27371,17 +27661,10 @@ def _render_assign_engineer_picker(engineers: list[str]) -> None:
 
     st.markdown('<div class="assign-eng-picker">', unsafe_allow_html=True)
     for handle in engineers:
-        wl = workload.get(handle) or workload.get(
-            f"@{_canonical_username_stem(handle)}"
-        ) or {"open": 0, "unattended": 0}
-        open_n = int(wl.get("open") or 0)
-        unatt_n = int(wl.get("unattended") or 0)
         is_on = handle in selected
-        mark = "●" if is_on else "○"
-        label = f"{mark} {handle}   · {open_n} open · {unatt_n} unattended"
         hkey = hashlib.sha256(handle.encode("utf-8")).hexdigest()[:12]
         if st.button(
-            label,
+            handle,
             key=f"assign_eng_pick_{hkey}",
             width="stretch",
             type="primary" if is_on else "secondary",
@@ -28661,6 +28944,7 @@ def _render_dispatch_board_main(ctx: dict[str, object]) -> None:
             selected_key=_DISP_SELECTED_KEY,
             show_case_type=True,
             case_type_session_key=_DISP_SELECTED_CASE_TYPE_KEY,
+            on_select=_dispatch_open_case_info_on_select,
             row_actions_fn=lambda t, rk: _render_unified_row_actions(
                 t, rk, is_admin=is_admin, queue_name=selected_queue
             ),

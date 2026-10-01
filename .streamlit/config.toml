@@ -1,9 +1,10 @@
 [theme]
 primaryColor = "#3b82f6"
-backgroundColor = "#0b0f18"
-secondaryBackgroundColor = "#080b14"
-textColor = "#e2e8f8"
+backgroundColor = "#0a0f1a"
+secondaryBackgroundColor = "#0f1629"
+textColor = "#9aa8c4"
 font = "sans serif"
+baseFontSize = 14
 
 [server]
 # Public URL: https://netops.dhiraagu.com.mv/coverage-eye/
